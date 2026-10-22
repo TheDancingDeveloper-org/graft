@@ -1,0 +1,31 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "at": "ceb9d51a431efa31e031494ec857b6e71b3fc89b7df21172c5365879f263cec50",
+  "entries": [
+    {
+      "id": "501f415d16e2820151302b1335e9344a01f5faacb2d7077224533cbf45d0e504",
+      "kind": "file",
+      "path": "README.md"
+    },
+    {
+      "id": "3ff9cfd2ece7ac52dfc0196ffd0b7d81169a28569f9723a55c61ca515b153061",
+      "kind": "tree",
+      "path": "assets"
+    },
+    {
+      "id": "4de5d3dd9a226458166cf0978df68e4e5f7dc25c8c46eda1a6d1fd910b4a370e",
+      "kind": "tree",
+      "path": "docs"
+    },
+    {
+      "id": "24434e117d1db5b31cda318134e261d7eeb498269833185ff2d8476ab48a9dc5",
+      "kind": "tree",
+      "path": "src"
+    }
+  ],
+  "next": null,
+  "path": null
+}

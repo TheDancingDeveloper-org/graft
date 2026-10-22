@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft clone --json",
+  "type": "object",
+  "required": [
+    "repo",
+    "line",
+    "base",
+    "dir",
+    "files",
+    "fetch"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string"
+    },
+    "line": {
+      "type": "string"
+    },
+    "base": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "dir": {
+      "type": "string"
+    },
+    "files": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "fetch": {
+      "type": "object",
+      "required": [
+        "trees",
+        "blobs",
+        "bytes",
+        "requests",
+        "cached"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "trees": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cached": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

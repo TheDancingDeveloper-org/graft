@@ -1,0 +1,837 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft api <op> (JSON out, one shape per operation)",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/resolve_ref"
+    },
+    {
+      "$ref": "#/$defs/list_refs"
+    },
+    {
+      "$ref": "#/$defs/get_changesets"
+    },
+    {
+      "$ref": "#/$defs/stat"
+    },
+    {
+      "$ref": "#/$defs/list_tree"
+    },
+    {
+      "$ref": "#/$defs/read_file"
+    },
+    {
+      "$ref": "#/$defs/log"
+    },
+    {
+      "$ref": "#/$defs/is_ancestor"
+    },
+    {
+      "$ref": "#/$defs/merge_base"
+    },
+    {
+      "$ref": "#/$defs/diff"
+    },
+    {
+      "$ref": "#/$defs/blame"
+    },
+    {
+      "$ref": "#/$defs/watch"
+    }
+  ],
+  "$defs": {
+    "resolve_ref": {
+      "type": "object",
+      "required": [
+        "name",
+        "target",
+        "version",
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "enum": [
+            "line",
+            "tag",
+            "tool"
+          ]
+        }
+      }
+    },
+    "list_refs": {
+      "type": "object",
+      "required": [
+        "refs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "target",
+              "version",
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string",
+                "pattern": "^[a-z][0-9a-f]{64}$",
+                "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "enum": [
+                  "line",
+                  "tag",
+                  "tool"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "get_changesets": {
+      "type": "object",
+      "required": [
+        "found",
+        "missing",
+        "collected"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "found": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "parents",
+              "root",
+              "author",
+              "authored_at",
+              "message",
+              "metadata",
+              "changes",
+              "lsn",
+              "state",
+              "superseded_by"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][0-9a-f]{64}$",
+                "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+              },
+              "parents": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][0-9a-f]{64}$",
+                  "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+                }
+              },
+              "root": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "An object id, as 64 lowercase hex digits."
+              },
+              "author": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "email",
+                  "kind"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "human",
+                      "agent",
+                      "bot",
+                      "ci"
+                    ]
+                  }
+                }
+              },
+              "authored_at": {
+                "type": "object",
+                "required": [
+                  "ms",
+                  "offset_min"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "ms": {
+                    "type": "integer"
+                  },
+                  "offset_min": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "message": {
+                "type": "string"
+              },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "changes": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "path",
+                        "op",
+                        "kind",
+                        "id"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "op": {
+                          "const": "put"
+                        },
+                        "kind": {
+                          "enum": [
+                            "file",
+                            "exec",
+                            "symlink",
+                            "tree",
+                            "submodule"
+                          ]
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$",
+                          "description": "An object id, as 64 lowercase hex digits."
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "path",
+                        "op"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "op": {
+                          "const": "delete"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "lsn": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "state": {
+                "enum": [
+                  "draft",
+                  "landed",
+                  "superseded",
+                  "abandoned"
+                ]
+              },
+              "superseded_by": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-z][0-9a-f]{64}$",
+                    "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][0-9a-f]{64}$",
+            "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+          }
+        },
+        "collected": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][0-9a-f]{64}$",
+            "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+          }
+        }
+      }
+    },
+    "stat": {
+      "type": "object",
+      "required": [
+        "path",
+        "kind",
+        "id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "exec",
+            "symlink",
+            "tree",
+            "submodule"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "An object id, as 64 lowercase hex digits."
+        }
+      }
+    },
+    "list_tree": {
+      "type": "object",
+      "required": [
+        "entries",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "file",
+                  "exec",
+                  "symlink",
+                  "tree",
+                  "submodule"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "An object id, as 64 lowercase hex digits."
+              }
+            }
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "read_file": {
+      "type": "object",
+      "required": [
+        "at",
+        "path",
+        "kind",
+        "id",
+        "size",
+        "encoding",
+        "content"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "exec",
+            "symlink",
+            "tree",
+            "submodule"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "An object id, as 64 lowercase hex digits."
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "encoding": {
+          "enum": [
+            "utf8",
+            "base64"
+          ]
+        },
+        "content": {
+          "type": "string"
+        }
+      }
+    },
+    "log": {
+      "type": "object",
+      "required": [
+        "changesets",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "changesets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "author",
+              "authored_at",
+              "subject",
+              "line_pos"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][0-9a-f]{64}$",
+                "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+              },
+              "author": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "email",
+                  "kind"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "human",
+                      "agent",
+                      "bot",
+                      "ci"
+                    ]
+                  }
+                }
+              },
+              "authored_at": {
+                "type": "object",
+                "required": [
+                  "ms",
+                  "offset_min"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "ms": {
+                    "type": "integer"
+                  },
+                  "offset_min": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "subject": {
+                "type": "string"
+              },
+              "line_pos": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "is_ancestor": {
+      "type": "object",
+      "required": [
+        "a",
+        "b",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "a": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "b": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "result": {
+          "type": "boolean"
+        }
+      }
+    },
+    "merge_base": {
+      "type": "object",
+      "required": [
+        "a",
+        "b",
+        "merge_base"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "a": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "b": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "merge_base": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z][0-9a-f]{64}$",
+              "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "diff": {
+      "type": "object",
+      "required": [
+        "from",
+        "to",
+        "files",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "path",
+                  "op",
+                  "kind",
+                  "id",
+                  "patch",
+                  "truncated"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "op": {
+                    "const": "put"
+                  },
+                  "kind": {
+                    "enum": [
+                      "file",
+                      "exec",
+                      "symlink",
+                      "tree",
+                      "submodule"
+                    ]
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "An object id, as 64 lowercase hex digits."
+                  },
+                  "patch": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "truncated": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "path",
+                  "op",
+                  "patch",
+                  "truncated"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "op": {
+                    "const": "delete"
+                  },
+                  "patch": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "truncated": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "blame": {
+      "type": "object",
+      "required": [
+        "at",
+        "path",
+        "ranges"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "path": {
+          "type": "string"
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "start",
+              "end",
+              "origin"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "start": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "end": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "origin": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "author",
+                  "authored_at",
+                  "subject",
+                  "line_pos"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z][0-9a-f]{64}$",
+                    "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+                  },
+                  "author": {
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "email",
+                      "kind"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "email": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "human",
+                          "agent",
+                          "bot",
+                          "ci"
+                        ]
+                      }
+                    }
+                  },
+                  "authored_at": {
+                    "type": "object",
+                    "required": [
+                      "ms",
+                      "offset_min"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "ms": {
+                        "type": "integer"
+                      },
+                      "offset_min": {
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "subject": {
+                    "type": "string"
+                  },
+                  "line_pos": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "watch": {
+      "type": "object",
+      "required": [
+        "entries",
+        "next_lsn"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "lsn",
+              "kind",
+              "body"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "lsn": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "next_lsn": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "entries": [
+    {
+      "id": "dbee0aa9385a013f88df7cc2fc248ff42cb0483de682577af611066460986160",
+      "kind": "file",
+      "path": "src/lib.rs"
+    }
+  ],
+  "next": null
+}

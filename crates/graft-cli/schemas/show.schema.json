@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft show --json",
+  "type": "object",
+  "required": [
+    "id",
+    "parents",
+    "root",
+    "author",
+    "authored_at",
+    "message",
+    "metadata",
+    "lsn",
+    "state",
+    "superseded_by",
+    "files",
+    "files_next"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "parents": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][0-9a-f]{64}$",
+        "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+      }
+    },
+    "root": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "An object id, as 64 lowercase hex digits."
+    },
+    "author": {
+      "type": "object",
+      "required": [
+        "name",
+        "email",
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "human",
+            "agent",
+            "bot",
+            "ci"
+          ]
+        }
+      }
+    },
+    "authored_at": {
+      "type": "object",
+      "required": [
+        "ms",
+        "offset_min"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ms": {
+          "type": "integer"
+        },
+        "offset_min": {
+          "type": "integer"
+        }
+      }
+    },
+    "message": {
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "lsn": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state": {
+      "enum": [
+        "draft",
+        "landed",
+        "superseded",
+        "abandoned"
+      ]
+    },
+    "superseded_by": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "path",
+              "op",
+              "kind",
+              "id",
+              "patch",
+              "truncated"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "op": {
+                "const": "put"
+              },
+              "kind": {
+                "enum": [
+                  "file",
+                  "exec",
+                  "symlink",
+                  "tree",
+                  "submodule"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "An object id, as 64 lowercase hex digits."
+              },
+              "patch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "path",
+              "op",
+              "patch",
+              "truncated"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "op": {
+                "const": "delete"
+              },
+              "patch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "files_next": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

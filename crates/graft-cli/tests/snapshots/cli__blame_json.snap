@@ -1,0 +1,28 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "at": "ceb9d51a431efa31e031494ec857b6e71b3fc89b7df21172c5365879f263cec50",
+  "path": "src/lib.rs",
+  "ranges": [
+    {
+      "end": 2,
+      "origin": {
+        "author": {
+          "email": "test@example.com",
+          "kind": "human",
+          "name": "test"
+        },
+        "authored_at": {
+          "ms": 1,
+          "offset_min": 0
+        },
+        "id": "c94756c9bdf549c6e4841e4b243848d1156fbead59970bb4be1efc61866b30d93",
+        "line_pos": null,
+        "subject": "main 2"
+      },
+      "start": 1
+    }
+  ]
+}

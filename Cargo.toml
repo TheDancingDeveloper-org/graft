@@ -23,9 +23,11 @@ todo = "allow"
 # (docs/plan.md, "Crate ownership and parallelism"). External dependencies are
 # added by the work item that first needs them.
 [workspace.dependencies]
+assert_cmd = "2.2"
 axum = "0.8"
 base64 = "0.22"
 blake3 = "1.8"
+clap = { version = "4.6", features = ["derive"] }
 ed25519-dalek = "2.2"
 flate2 = "1.1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -48,9 +50,12 @@ graft-telemetry = { path = "crates/graft-telemetry" }
 graft-testkit = { path = "crates/graft-testkit" }
 hyper-util = { version = "0.1", features = ["tokio"] }
 imara-diff = "0.2"
+insta = { version = "1.49", features = ["json"] }
+jsonschema = { version = "0.58", default-features = false }
 opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
+predicates = "3.1"
 prometheus = { version = "0.14", default-features = false }
 proptest = "1.7"
 prost = "0.14"

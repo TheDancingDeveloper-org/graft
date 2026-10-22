@@ -1,0 +1,6 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: text(out.get_output())
+---
+put file docs/guide.md
+put file src/lib.rs

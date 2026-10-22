@@ -1,0 +1,10 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "error": {
+    "kind": "usage",
+    "message": "no repository: pass --repo, or run inside a working copy"
+  }
+}

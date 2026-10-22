@@ -1,0 +1,7 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: text(out.get_output())
+---
+ceb9d51a431ef  main 3  (test)
+c94756c9bdf54  main 2  (test)
+cdb48eb55c33d  main 1  (test)

@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft diff --json",
+  "oneOf": [
+    {
+      "description": "The working copy against its base: paths and statuses only.",
+      "type": "object",
+      "required": [
+        "from",
+        "to",
+        "files"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "to": {
+          "type": "null"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "status"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "added",
+                  "modified",
+                  "deleted"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$ref": "#/$defs/changesets"
+    }
+  ],
+  "$defs": {
+    "changesets": {
+      "type": "object",
+      "required": [
+        "from",
+        "to",
+        "files",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "path",
+                  "op",
+                  "kind",
+                  "id",
+                  "patch",
+                  "truncated"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "op": {
+                    "const": "put"
+                  },
+                  "kind": {
+                    "enum": [
+                      "file",
+                      "exec",
+                      "symlink",
+                      "tree",
+                      "submodule"
+                    ]
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "An object id, as 64 lowercase hex digits."
+                  },
+                  "patch": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "truncated": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "path",
+                  "op",
+                  "patch",
+                  "truncated"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "op": {
+                    "const": "delete"
+                  },
+                  "patch": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "truncated": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

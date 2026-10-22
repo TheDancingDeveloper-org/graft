@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft blame --json",
+  "type": "object",
+  "required": [
+    "at",
+    "path",
+    "ranges"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "at": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "path": {
+      "type": "string"
+    },
+    "ranges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "start",
+          "end",
+          "origin"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "origin": {
+            "type": "object",
+            "required": [
+              "id",
+              "author",
+              "authored_at",
+              "subject",
+              "line_pos"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][0-9a-f]{64}$",
+                "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+              },
+              "author": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "email",
+                  "kind"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "human",
+                      "agent",
+                      "bot",
+                      "ci"
+                    ]
+                  }
+                }
+              },
+              "authored_at": {
+                "type": "object",
+                "required": [
+                  "ms",
+                  "offset_min"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "ms": {
+                    "type": "integer"
+                  },
+                  "offset_min": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "subject": {
+                "type": "string"
+              },
+              "line_pos": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
