@@ -97,7 +97,7 @@ fn rule_utf8_only() {
 #[test]
 fn paths_are_case_sensitive_and_sort_by_bytes() {
     assert_ne!(path("A"), path("a"));
-    let mut v = vec![path("a/b"), path("a.txt"), path("B"), path("a")];
+    let mut v = [path("a/b"), path("a.txt"), path("B"), path("a")];
     v.sort();
     let s: Vec<_> = v.iter().map(RepoPath::as_str).collect();
     assert_eq!(s, ["B", "a", "a.txt", "a/b"]);
