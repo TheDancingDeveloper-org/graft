@@ -18,16 +18,19 @@ Already decided by the operator (2026-10-22):
   no code is copied.
 - **Visibility and licence (D2):** public, `AGPL-3.0-only`.
 - **Source home (D15):** GitHub, `TheDancingDeveloper-org/graft` (public).
+- **D3, D4, D5, D7** (operator, 2026-10-22): SQLite + filesystem; gRPC plus a
+  read-only JSON facade; the gzip frame at rest; BLAKE3. Each was the
+  recommendation below.
 
 | # | Decision | Recommendation | Blocks |
 | --- | --- | --- | --- |
 | D1 | Name | Keep `graft` while private; decide before any publish | Phase 4 (publish), not before |
 | D2 | Licence and visibility | **Decided:** public, AGPL-3.0-only | — |
-| D3 | Storage backend | SQLite + filesystem through phase 3, Litestream for off-box WAL | Phase 1 (G1.5, G1.6) |
-| D4 | Wire protocol | gRPC (tonic, prost) plus a read-only JSON facade | Phase 1 (G1.3, G1.10) |
-| D5 | At-rest codec | Store the gzip wire frame (zero transcode); benchmark zstd in the pilot | Phase 1 (G1.5) |
+| D3 | Storage backend | **Decided:** SQLite + filesystem through phase 3, Litestream for off-box WAL | — |
+| D4 | Wire protocol | **Decided:** gRPC (tonic, prost) plus a read-only JSON facade | — |
+| D5 | At-rest codec | **Decided:** store the gzip wire frame (zero transcode); benchmark zstd in the pilot | — |
 | D6 | Landing gate on `main` | `attested` (pre-land CI on the draft) plus post-land CI and auto-revert | Phase 3 |
-| D7 | Hash function | BLAKE3 | Phase 1 (G1.1) — frozen by golden vectors |
+| D7 | Hash function | **Decided:** BLAKE3 | — |
 | D8 | GitHub mirror identity | A GitHub App with ruleset bypass on `main` | Phase 2 (PR bridge), Phase 3 (export) |
 | D9 | GitHub change notification | Poll every 15 s in phase 1; add webhooks in phase 2 if lag matters | Phase 1 (G1.12) |
 | D10 | Agent token issuance | Vogt mints per-session graft tokens | Phase 2 |
@@ -91,6 +94,8 @@ crate is `publish = false`, so nothing can be published by accident.
 
 ## D3. Storage backend
 
+**Decided (operator, 2026-10-22): the recommendation below.**
+
 | Option | For | Against |
 | --- | --- | --- |
 | **SQLite (WAL) + filesystem objects** (**Recommended**) | No extra service, very fast on NVMe, simple backups, and it fits Node B. Durable from day one | Single writer per server. A single server process |
@@ -107,6 +112,8 @@ answer that before G1.15.
 
 ## D4. Wire protocol
 
+**Decided (operator, 2026-10-22): the recommendation below.**
+
 | Option | For | Against |
 | --- | --- | --- |
 | **gRPC (tonic + prost)** (**Recommended**) | Streaming (`GetObjects`, `Watch`), deadlines, built-in gzip, Unix sockets, code generation for other languages (Vogt is Python) | Needs codegen. It can use pure-Rust `protox`, so `protoc` is not required on every builder. Harder to `curl` |
@@ -120,6 +127,8 @@ the server for scripts and dashboards. MCP has its own transport (stdio or
 streamable HTTP) and is not affected.
 
 ## D5. At-rest codec
+
+**Decided (operator, 2026-10-22): the recommendation below.**
 
 Transport is gzip (decided). The question is whether storage uses the same
 codec.
@@ -170,6 +179,8 @@ changes the delivery process (the merge queue rule), so it needs the operator's
 explicit agreement before phase 3.
 
 ## D7. Hash function
+
+**Decided (operator, 2026-10-22): the recommendation below.**
 
 - **BLAKE3** (**Recommended**). The fastest on large inputs and on many cores,
   with built-in key derivation for domain separation and a verified-streaming
