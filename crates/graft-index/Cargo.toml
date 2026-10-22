@@ -13,7 +13,9 @@ workspace = true
 
 [dependencies]
 graft-model.workspace = true
+graft-proto.workspace = true
 graft-store.workspace = true
+imara-diff.workspace = true
 
 [dev-dependencies]
 graft-store = { workspace = true, features = ["testkit"] }

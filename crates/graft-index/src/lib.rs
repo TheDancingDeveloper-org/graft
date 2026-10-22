@@ -7,7 +7,10 @@
 use graft_model::{Changeset, ChangesetId, RepoPath};
 use graft_store::{MetaStore, ObjectStore, RepoId, StoreResult, Write};
 
+mod ancestry;
+mod blame;
 mod derive;
+mod history;
 pub mod kinds;
 mod line;
 
@@ -77,17 +80,24 @@ pub fn changeset_key(id: ChangesetId) -> Vec<u8> {
 }
 
 /// A history query (the engine maps `graft_proto::types::Log` onto it).
+///
+/// To page, ask again with `from` set to the last result's first parent
+/// (any result), or keep `from` and set `after_pos` to the last result's
+/// line position (a result on the line).
 #[derive(Clone, Debug)]
 pub struct LogQuery {
     /// Newest changeset.
     pub from: ChangesetId,
-    /// Exclusive stop.
+    /// Exclusive stop: neither it nor, once the walk is on its line,
+    /// anything at or below its position there is returned.
     pub until: Option<ChangesetId>,
-    /// Path or directory filters.
+    /// Path or directory filters (any may match); empty means every
+    /// changeset.
     pub paths: Vec<RepoPath>,
-    /// Maximum results.
+    /// Maximum results, clamped to `1..=MAX_PAGE`.
     pub limit: u32,
-    /// Resume after this line position.
+    /// Resume after this line position: skip the stretch of drafts above
+    /// the line and return only line positions below it.
     pub after_pos: Option<u64>,
 }
 
@@ -178,40 +188,5 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
             rows.extend(line_path_rows(line, pos, id, cs));
         }
         Ok(rows)
-    }
-
-    /// First-parent history, newest first.
-    pub async fn log(&self, _repo: RepoId, _q: LogQuery) -> StoreResult<Vec<ChangesetId>> {
-        todo!("G1.10")
-    }
-
-    /// Whether `a` is an ancestor of `b` (all parents).
-    pub async fn is_ancestor(
-        &self,
-        _repo: RepoId,
-        _a: ChangesetId,
-        _b: ChangesetId,
-    ) -> StoreResult<bool> {
-        todo!("G1.10")
-    }
-
-    /// A merge base of `a` and `b`.
-    pub async fn merge_base(
-        &self,
-        _repo: RepoId,
-        _a: ChangesetId,
-        _b: ChangesetId,
-    ) -> StoreResult<Option<ChangesetId>> {
-        todo!("G1.10")
-    }
-
-    /// Line blame of `path` at `at` (lazy, cached).
-    pub async fn blame(
-        &self,
-        _repo: RepoId,
-        _at: ChangesetId,
-        _path: &RepoPath,
-    ) -> StoreResult<Vec<BlameRun>> {
-        todo!("G1.10")
     }
 }

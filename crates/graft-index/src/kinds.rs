@@ -7,10 +7,13 @@
 //! - [`Generation`]: `u64` big-endian.
 //! - [`SkipList`]: `u64 depth ‖ u8 n ‖ n × changeset id(32)`, entry `k` the
 //!   first-parent ancestor at distance `2^k`.
+//! - [`Blame`]: `u32 n ‖ n × (u32 end ‖ origin id(32))`, runs in line order;
+//!   each run starts where the one before it ends (the first at 0) and is
+//!   not empty. Keyed by [`blame_key`].
 
-use graft_model::{Changeset, ChangesetId, ObjectId};
+use graft_model::{Changeset, ChangesetId, ObjectId, RepoPath};
 
-use crate::{DerivedKind, Mode, ParentDerived, ParentScope, ValueKind};
+use crate::{BlameRun, DerivedKind, Mode, ParentDerived, ParentScope, ValueKind};
 
 macro_rules! kind {
     ($(#[$doc:meta])* $name:ident, $str:literal, $parents:expr, $mode:expr) => {
@@ -103,6 +106,53 @@ impl ValueKind for SkipList {
     }
 }
 
+/// The derived-table key of a blame value: the changeset's 32 id bytes,
+/// then the path's bytes.
+pub fn blame_key(id: ChangesetId, path: &RepoPath) -> Vec<u8> {
+    let mut key = id.0.0.to_vec();
+    key.extend_from_slice(path.as_str().as_bytes());
+    key
+}
+
+impl ValueKind for Blame {
+    type Value = Vec<BlameRun>;
+
+    fn encode(value: &Vec<BlameRun>) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + 36 * value.len());
+        // Runs are lines of a blob (at most 64 MiB), so `n` fits.
+        out.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        for run in value {
+            out.extend_from_slice(&run.end.to_be_bytes());
+            out.extend_from_slice(&run.origin.0.0);
+        }
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Vec<BlameRun>> {
+        let (n, rest) = bytes.split_first_chunk::<4>()?;
+        let (runs, tail) = rest.as_chunks::<36>();
+        if runs.len() != u32::from_be_bytes(*n) as usize || !tail.is_empty() {
+            return None;
+        }
+        let mut start = 0;
+        let mut out = Vec::with_capacity(runs.len());
+        for run in runs {
+            let (end, origin) = run.split_first_chunk::<4>()?;
+            let end = u32::from_be_bytes(*end);
+            if end <= start {
+                return None;
+            }
+            out.push(BlameRun {
+                start,
+                end,
+                origin: ChangesetId(ObjectId(origin.try_into().ok()?)),
+            });
+            start = end;
+        }
+        Some(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +191,54 @@ mod tests {
         bytes.push(0);
         assert!(SkipList::decode(&bytes).is_none());
         assert!(SkipList::decode(&[0; 7]).is_none());
+    }
+
+    #[test]
+    fn blame_golden_vector() {
+        let runs = vec![
+            BlameRun {
+                start: 0,
+                end: 2,
+                origin: id(0xaa),
+            },
+            BlameRun {
+                start: 2,
+                end: 0x0105,
+                origin: id(0xbb),
+            },
+        ];
+        let mut want = vec![0, 0, 0, 2, 0, 0, 0, 2];
+        want.extend_from_slice(&[0xaa; 32]);
+        want.extend_from_slice(&[0, 0, 1, 5]);
+        want.extend_from_slice(&[0xbb; 32]);
+        assert_eq!(Blame::encode(&runs), want);
+        assert_eq!(Blame::decode(&want), Some(runs));
+        assert_eq!(Blame::decode(&[0, 0, 0, 0]), Some(Vec::new()));
+    }
+
+    #[test]
+    fn blame_rejects_bad_runs() {
+        let one = |end: u32| {
+            let mut b = vec![0, 0, 0, 1];
+            b.extend_from_slice(&end.to_be_bytes());
+            b.extend_from_slice(&[1; 32]);
+            b
+        };
+        assert!(Blame::decode(&one(1)).is_some());
+        // An empty run.
+        assert!(Blame::decode(&one(0)).is_none());
+        // A count that disagrees with the body.
+        let mut bad = one(1);
+        bad[3] = 2;
+        assert!(Blame::decode(&bad).is_none());
+        assert!(Blame::decode(&one(1)[..39]).is_none());
+        assert!(Blame::decode(&[0, 0]).is_none());
+    }
+
+    #[test]
+    fn blame_key_is_id_then_path() {
+        let key = blame_key(id(3), &RepoPath::new("a/b.rs").unwrap());
+        assert_eq!(&key[..32], &[3; 32]);
+        assert_eq!(&key[32..], b"a/b.rs");
     }
 }

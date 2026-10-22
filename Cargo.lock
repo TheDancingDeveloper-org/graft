@@ -1545,7 +1545,9 @@ name = "graft-index"
 version = "0.0.0"
 dependencies = [
  "graft-model",
+ "graft-proto",
  "graft-store",
+ "imara-diff",
  "proptest",
 ]
 
