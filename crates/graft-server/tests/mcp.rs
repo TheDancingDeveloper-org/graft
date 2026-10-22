@@ -217,3 +217,22 @@ async fn mcp_takes_the_bearer_token_and_the_engine_scopes() {
     assert_eq!(refused["kind"], "rejected");
     assert_eq!(refused["policy"], "unimplemented");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_refuses_an_oversized_body_from_an_authenticated_caller() {
+    let site = Site::new("server-mcp-cap", "");
+    let writer = site.mint(&["repo:r:write"]);
+    let server = site.start();
+
+    // Over the 4 MiB `/mcp` body cap, from a valid session: rmcp's limit
+    // answers 413 before any tool runs. This pins the cap through the
+    // server's mount, not only in graft-mcp's own tests.
+    let session = Session::open(server.addr, &writer);
+    let padding = "x".repeat(4 * 1024 * 1024 + 1);
+    let body = json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "graft_read", "arguments": {"pad": padding}}
+    });
+    let (status, _, _) = post(server.addr, Some(&session.id), Some(&writer), &body);
+    assert_eq!(status, 413);
+}

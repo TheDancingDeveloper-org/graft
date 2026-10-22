@@ -574,12 +574,15 @@ fn lease(requested: Option<u64>) -> Result<u64, ToolError> {
 }
 
 /// A staged path: the path rules, and never inside `.graft`.
+///
+/// Windows drops trailing dots and spaces from a name, so `.graft.` and
+/// `.graft ` name the reserved directory there. They are refused here too.
 fn staged_path(s: &str) -> Result<RepoPath, ToolError> {
     let path = parse_path(s)?;
-    if path
-        .components()
-        .any(|c| c.eq_ignore_ascii_case(RESERVED_DIR))
-    {
+    if path.components().any(|c| {
+        c.trim_end_matches(['.', ' '])
+            .eq_ignore_ascii_case(RESERVED_DIR)
+    }) {
         return Err(ToolError::Api(ApiError::InvalidPath {
             path: clip(s, FIELD_MAX_BYTES).0.to_owned(),
             reason: "reserved".into(),
@@ -665,15 +668,19 @@ pub(crate) fn stage(files: &[FileChange]) -> Result<(Vec<Change>, Vec<Frame>), T
     Ok((changes, frames))
 }
 
+/// Decodes exactly two ASCII hex digits per byte. `from_str_radix` would also
+/// accept a sign, so each digit is checked on its own.
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
-    s.as_bytes()
+    bytes
         .chunks(2)
         .map(|pair| {
-            let digits = std::str::from_utf8(pair).ok()?;
-            u8::from_str_radix(digits, 16).ok()
+            let hi = (pair[0] as char).to_digit(16)?;
+            let lo = (pair[1] as char).to_digit(16)?;
+            Some((hi * 16 + lo) as u8)
         })
         .collect()
 }
@@ -769,6 +776,10 @@ mod tests {
             "a//b",
             ".graft/config",
             "src/.GRAFT/x",
+            ".graft./config",
+            ".graft /config",
+            ".GRAFT./x",
+            "src/.graft . /x",
         ] {
             let e = stage(&[put(bad, "x")]).expect_err(bad);
             let kind = err_kind(e);
@@ -807,6 +818,15 @@ mod tests {
         let mut odd = put("bin", "abc");
         odd.encoding = Some(Encoding::Hex);
         assert!(stage(&[odd]).is_err());
+    }
+
+    #[test]
+    fn hex_refuses_signs_and_non_hex_digits() {
+        for bad in ["+f", "f+", "-1", "0x", "g0", "é0"] {
+            let mut file = put("bin", bad);
+            file.encoding = Some(Encoding::Hex);
+            assert!(stage(&[file]).is_err(), "{bad} must not decode");
+        }
     }
 
     #[test]

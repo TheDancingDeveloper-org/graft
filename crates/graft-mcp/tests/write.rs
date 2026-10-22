@@ -775,6 +775,10 @@ async fn traversal_and_graft_paths_are_refused() {
         ".graft/config",
         "nested/.graft/state",
         ".Graft/x",
+        ".graft./config",
+        ".graft /config",
+        ".GRAFT./x",
+        "nested/.graft . /state",
         "a\u{0}b",
     ] {
         let refused = agent
