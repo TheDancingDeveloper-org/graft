@@ -2021,6 +2021,7 @@ dependencies = [
  "graft-model",
  "graft-proto",
  "graft-store",
+ "imara-diff",
  "rusqlite",
  "serde_json",
  "tokio",

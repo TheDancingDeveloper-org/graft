@@ -19,6 +19,29 @@
 //! coarsely: the trimmed middle is blamed on the newer version, as if it
 //! rewrote it. The choice depends only on the two contents, so the answer
 //! is deterministic. Between versions blame yields to the executor.
+//!
+//! # Ties between identical lines
+//!
+//! A diff matches a line to one of its identical copies, and which copy
+//! it picks is a tie. Each choice is a valid edit script, so two correct
+//! blames of the same file can name different commits for a line whose
+//! content repeats (a `}`, a blank line, a `[[package]]` header in a lock
+//! file). Graft's rule is histogram diff ([`carry`]); git blame uses its
+//! default Myers diff. Graft does not try to reproduce git's choice.
+//!
+//! Both answers are right in the sense that matters: each is what a
+//! whole-file first-parent blame gives when it uses one valid diff
+//! throughout. That is the rule for an equivalent attribution, and the
+//! harness's agreement check applies it (`TieCheck` in `graft-testkit`).
+//! A line's origin there is valid only if one of these blames names it:
+//! git blame with Myers diff, git blame with histogram diff, or graft's
+//! own rule (histogram with line postprocessing) replayed along the file's
+//! first-parent versions. Content alone proves nothing. A line moved,
+//! reordered, or deleted and re-added is added by the later commit's
+//! diff, so the earlier commit that also wrote that content is not an
+//! origin. A line that arrives from a merge's second parent belongs to the
+//! merge, whose first-parent diff adds it. A coarse attribution (see
+//! above) is not a tie and still counts as a disagreement.
 
 use std::collections::HashMap;
 use std::future::Future;

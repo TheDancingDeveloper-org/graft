@@ -20,6 +20,7 @@ futures-util.workspace = true
 graft-model.workspace = true
 graft-proto.workspace = true
 graft-store.workspace = true
+imara-diff.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
