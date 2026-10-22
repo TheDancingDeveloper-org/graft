@@ -19,8 +19,7 @@
 //! | `GET /v1/repos/{repo}/log?from=&until=&path=&limit=&page_token=` | `Log` |
 //! | `GET /v1/repos/{repo}/blame/{at}?path=` | `Blame` |
 //!
-//! `log` and `blame` answer 501 until the engine wires `graft-index`
-//! (G1.10).
+//! `log` pages by `page_token`: pass the previous answer's `next`.
 
 use std::sync::Arc;
 

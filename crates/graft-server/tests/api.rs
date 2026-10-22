@@ -230,13 +230,44 @@ async fn health_metrics_and_the_json_facade() {
     assert_eq!(journal["entries"][0]["kind"], "ChangesetCreated");
     assert_eq!(journal["entries"][0]["body"]["id"], first.to_string());
 
-    // Not built until G1.10: 501, not a crash.
-    let log = server.get("/v1/repos/r/log?from=main", Some(&token));
-    assert_eq!(log.status, 501, "{}", log.text());
-    assert_eq!(log.json()["error"]["kind"], "unimplemented");
+    // Log, paged by token.
+    let log = server.get("/v1/repos/r/log?from=main&limit=2", Some(&token));
+    assert_eq!(log.status, 200, "{}", log.text());
+    let log = log.json();
+    let subjects: Vec<&str> = log["changesets"]
+        .as_array()
+        .expect("changesets")
+        .iter()
+        .map(|c| c["subject"].as_str().expect("subject"))
+        .collect();
+    assert_eq!(subjects, ["step 2", "step 1"]);
+    let next = log["next"].as_str().expect("a next page");
+    assert_eq!(next, first.to_string());
+    let rest = server
+        .get(
+            &format!("/v1/repos/r/log?from=main&limit=2&page_token={next}"),
+            Some(&token),
+        )
+        .json();
+    assert_eq!(rest["changesets"][0]["subject"], "step 0");
+    assert!(rest["next"].is_null());
+
+    // Blame covers the file with origins from its history.
     let blame = server.get(&format!("/v1/repos/r/blame/main?path={path}"), Some(&token));
-    assert_eq!(blame.status, 501);
-    let e = c
+    assert_eq!(blame.status, 200, "{}", blame.text());
+    let ids: Vec<String> = created.iter().map(|c| c.id.to_string()).collect();
+    let ranges = blame.json()["ranges"].as_array().expect("ranges").clone();
+    assert!(!ranges.is_empty());
+    assert!(
+        ranges
+            .iter()
+            .all(|r| ids.contains(&r["origin"]["id"].as_str().expect("id").to_owned()))
+    );
+    let missing_file = server.get("/v1/repos/r/blame/main?path=no/such/file", Some(&token));
+    assert_eq!(missing_file.status, 404, "{}", missing_file.text());
+
+    // The same over gRPC, with ancestry.
+    let history = c
         .repo
         .log(pb::LogRequest {
             repo: "r".into(),
@@ -246,9 +277,41 @@ async fn health_metrics_and_the_json_facade() {
             page: None,
         })
         .await
+        .expect("log")
+        .into_inner();
+    assert_eq!(history.changesets.len(), created.len());
+    let pair = pb::Pair {
+        repo: "r".into(),
+        a: first.0.0.to_vec(),
+        b: tip.0.0.to_vec(),
+    };
+    assert!(
+        c.repo
+            .is_ancestor(pair.clone())
+            .await
+            .expect("ancestry")
+            .into_inner()
+            .value
+    );
+    let base = c
+        .repo
+        .merge_base(pair)
+        .await
+        .expect("merge base")
+        .into_inner();
+    assert_eq!(base.id, Some(first.0.0.to_vec()));
+
+    // An operation the engine has not built yet answers Unimplemented, not
+    // a crash, and the server still serves afterwards.
+    let e = c
+        .workspaces
+        .get_workspace(pb::WorkspaceRef {
+            repo: "r".into(),
+            name: "w".into(),
+        })
+        .await
         .expect_err("unimplemented");
     assert_eq!(e.code(), tonic::Code::Unimplemented);
-    // ...and the server still serves afterwards.
     assert_eq!(server.get("/healthz", None).status, 200);
 
     let bad = server.get("/v1/repos/r/file/main?path=../x", Some(&token));
