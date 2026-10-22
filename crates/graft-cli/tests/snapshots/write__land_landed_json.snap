@@ -1,0 +1,13 @@
+---
+source: crates/graft-cli/tests/write.rs
+expression: value
+---
+{
+  "changed": 0,
+  "landed": "c6b4a5fe4253ac6454bf97aae4d23f8ed03316b4829387b35d96e639c099b682f",
+  "line": "main",
+  "outcome": "landed",
+  "pr_url": null,
+  "rebased": false,
+  "recovered": null
+}

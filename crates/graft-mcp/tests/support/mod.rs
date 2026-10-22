@@ -11,6 +11,8 @@
 
 #![allow(dead_code, unreachable_pub)]
 
+pub mod http;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 

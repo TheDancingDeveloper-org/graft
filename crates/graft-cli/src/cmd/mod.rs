@@ -4,11 +4,16 @@
 pub(crate) mod blame;
 pub(crate) mod cat;
 pub(crate) mod clone;
+pub(crate) mod commit;
 pub(crate) mod diff;
+pub(crate) mod land;
 pub(crate) mod log;
 pub(crate) mod ls;
 pub(crate) mod lsp;
 pub(crate) mod show;
 pub(crate) mod sparse;
+pub(crate) mod stack;
 pub(crate) mod status;
+pub(crate) mod sync;
 pub(crate) mod version;
+pub(crate) mod workspace;

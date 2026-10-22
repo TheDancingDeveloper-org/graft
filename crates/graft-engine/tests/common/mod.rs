@@ -55,6 +55,8 @@ type Frames = BTreeMap<(RepoId, ObjectId), Vec<u8>>;
 pub struct Faulty {
     pub frames: Arc<Mutex<Frames>>,
     pub fail: Arc<AtomicBool>,
+    /// How many `get` calls it has answered.
+    pub gets: Arc<AtomicU64>,
 }
 
 impl Faulty {
@@ -84,6 +86,7 @@ impl ObjectStore for Faulty {
     }
     async fn get(&self, repo: RepoId, id: ObjectId) -> StoreResult<Option<Vec<u8>>> {
         self.check()?;
+        self.gets.fetch_add(1, Ordering::SeqCst);
         Ok(self.map().get(&(repo, id)).cloned())
     }
     async fn has(&self, repo: RepoId, ids: &[ObjectId]) -> StoreResult<Vec<ObjectId>> {

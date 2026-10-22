@@ -14,19 +14,21 @@ async fn the_handshake_and_tool_list_match_the_design() {
     let tools = client.list_all_tools().await.expect("tools/list");
 
     let served: BTreeSet<String> = tools.iter().map(|t| t.name.to_string()).collect();
-    let read_only: BTreeSet<String> = TOOLS
+    // Every design tool but `graft_revert`, which comes with `Revert` (G3.7).
+    let designed: BTreeSet<String> = TOOLS
         .iter()
-        .filter(|t| t.read_only)
         .map(|t| t.name.to_owned())
+        .filter(|name| name != "graft_revert")
         .collect();
-    assert_eq!(served, read_only, "exactly the read tools are served");
+    assert_eq!(served, designed, "the read and write tools are served");
 
     for tool in &tools {
         let annotations = tool.annotations.as_ref().expect("annotations");
+        let spec = TOOLS.iter().find(|t| t.name == tool.name).unwrap();
         assert_eq!(
             annotations.read_only_hint,
-            Some(true),
-            "{} is read-only",
+            Some(spec.read_only),
+            "{} read-only hint",
             tool.name
         );
 

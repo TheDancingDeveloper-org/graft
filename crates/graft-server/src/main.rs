@@ -1,9 +1,9 @@
 //! `graft-server`: the authoritative graft server (`docs/design.md` §5.1).
 //!
 //! `serve` runs the gRPC services over the SQLite and filesystem stores,
-//! with bearer-token auth, `/metrics`, `/healthz`, `/readyz` and the
-//! read-only JSON facade on the same listener. `admin` holds the operator
-//! commands. The config file is `--config <file>`, else
+//! with bearer-token auth, `/metrics`, `/healthz`, `/readyz`, the read-only
+//! JSON facade and the MCP endpoint `/mcp` on the same listener. `admin`
+//! holds the operator commands. The config file is `--config <file>`, else
 //! `$GRAFT_SERVER_CONFIG`, else `/etc/graft/server.toml`.
 
 mod admin;
@@ -11,10 +11,12 @@ mod admission;
 mod app;
 mod backup;
 mod config;
+mod denylist;
 mod fsck;
 mod grpc;
 mod http;
 mod keys;
+mod mcp;
 mod mint;
 mod serve;
 mod watch;
@@ -29,6 +31,7 @@ const USAGE: &str = "usage: graft-server [--config <file>] <serve|admin> [args]
   admin token mint --subject <s> --scope <scope>... [--ttl <secs>]
         [--kind human|agent|ci|service] [--session <ses_…>] [--work-item <WI-…>]
                                  mint a token (printed to stdout)
+  admin token revoke             revoke the token read from stdin (server running)
   admin repo create <name>       create a repository
   admin fsck <repo>              verify every referenced object (server stopped)
   admin backup <dir> [--objects] snapshot metadata (and copy objects)

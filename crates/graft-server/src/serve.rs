@@ -24,9 +24,10 @@ use tonic::codegen::tokio_stream::wrappers::TcpListenerStream;
 use crate::admission::Admission;
 use crate::app::{App, PutBudget};
 use crate::config::ServerConfig;
+use crate::denylist::Denylist;
 use crate::grpc::{self, Services};
 use crate::watch::Watches;
-use crate::{http, keys};
+use crate::{http, keys, mcp};
 
 /// Runs the server until a shutdown signal.
 pub(crate) fn serve(config: ServerConfig) -> Result<(), String> {
@@ -88,6 +89,7 @@ async fn run(
         volumes.push(dir.to_path_buf());
     }
     let admission = Admission::new(volumes, config.min_free_fraction, config.min_free_bytes);
+    let denylist = Denylist::open(&config.meta_db)?;
     let app = Arc::new(App::new(
         engine,
         signing,
@@ -99,6 +101,7 @@ async fn run(
             std::time::Duration::from_millis(config.put_wait_ms),
             std::time::Duration::from_millis(config.put_idle_ms),
         ),
+        denylist,
     ));
 
     let listener = bind(&config.listen).await?;
@@ -115,7 +118,8 @@ async fn run(
 
     let router = grpc::stamp_version(Services::new(app.clone()).routes().into_axum_router())
         .merge(http::ops_router(app.clone()))
-        .merge(http::facade_router(app.clone()));
+        .merge(http::facade_router(app.clone()))
+        .merge(mcp::router(app.clone()));
     let mut servers = tokio::task::JoinSet::new();
     servers.spawn(
         tonic::transport::Server::builder()

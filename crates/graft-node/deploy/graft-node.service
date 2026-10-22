@@ -1,0 +1,58 @@
+# graft-node: the per-host graft cache daemon (docs/design.md §5.1, D13).
+#
+# Install the binary at /usr/local/bin/graft-node and the config at
+# /etc/graft/node.toml (see node.toml beside this file). Sessions reach the
+# daemon through /run/graft/node.sock, mode 0660, group graft: add every
+# user whose sessions use graft to that group. Each call still needs its own
+# graft token; the node verifies it with the server's public key.
+#
+#   useradd --system --home-dir /var/cache/graft --shell /usr/sbin/nologin graft
+#   install -m 0644 graft-node.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now graft-node
+
+[Unit]
+Description=graft node cache daemon
+Documentation=https://github.com/TheDancingDeveloper-org/graft/blob/main/docs/design.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=graft
+Group=graft
+ExecStart=/usr/local/bin/graft-node --config /etc/graft/node.toml
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+
+# /run/graft (the socket) is traversable by the graft group only;
+# /var/cache/graft (the cache) is the daemon's alone.
+RuntimeDirectory=graft
+RuntimeDirectoryMode=0750
+CacheDirectory=graft
+CacheDirectoryMode=0700
+UMask=0077
+LimitNOFILE=8192
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

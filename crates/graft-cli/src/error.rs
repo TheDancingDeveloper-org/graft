@@ -124,6 +124,28 @@ impl From<ClientError> for Failure {
                 ),
             ),
             ClientError::State(what) => Failure::new(Exit::Failure, "state", what),
+            ClientError::NothingToCommit => {
+                Failure::new(Exit::Failure, "nothing_to_commit", "nothing to commit")
+            }
+            ClientError::NoDraft => Failure::new(
+                Exit::Failure,
+                "no_draft",
+                "the workspace has no draft: commit first",
+            ),
+            ClientError::Unstable(path) => Failure::new(
+                Exit::Failure,
+                "unstable",
+                format!("{path} kept changing while it was read; try again"),
+            ),
+            e @ ClientError::Diverged { .. } => {
+                Failure::new(Exit::Conflict, "diverged", e.to_string())
+            }
+            e @ ClientError::StillQueued { .. } => {
+                Failure::new(Exit::Contended, "queued", e.to_string())
+            }
+            e @ ClientError::LandedDirty { .. } => {
+                Failure::new(Exit::Conflict, "landed_dirty", e.to_string())
+            }
             ClientError::Io(e) => e.into(),
             ClientError::Store(e) => {
                 Failure::new(Exit::Failure, "store", format!("object cache: {e:?}"))

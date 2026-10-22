@@ -105,13 +105,41 @@ impl Site {
             .expect("run admin")
     }
 
+    /// Runs `graft-server admin <args>` with `stdin` on its standard input
+    /// (how a token reaches `admin token revoke`, never through argv).
+    pub fn admin_stdin(&self, args: &[&str], stdin: &str) -> Output {
+        let mut child = Command::new(bin())
+            .arg("--config")
+            .arg(&self.config)
+            .arg("admin")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run admin");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(stdin.as_bytes())
+            .expect("write stdin");
+        child.wait_with_output().expect("wait admin")
+    }
+
     /// Mints a token with `scopes` on the host.
     pub fn mint(&self, scopes: &[&str]) -> String {
         self.mint_as("tester", scopes, 3600)
     }
 
-    /// Mints a token for `subject` with `scopes`, valid for `ttl_s`.
+    /// Mints an agent token for `subject` with `scopes`, valid for `ttl_s`.
     pub fn mint_as(&self, subject: &str, scopes: &[&str], ttl_s: u64) -> String {
+        self.mint_kind(subject, "agent", scopes, ttl_s)
+    }
+
+    /// Mints a token of `kind` (`human`, `agent`, `ci` or `service`) for
+    /// `subject` with `scopes`, valid for `ttl_s`.
+    pub fn mint_kind(&self, subject: &str, kind: &str, scopes: &[&str], ttl_s: u64) -> String {
         let ttl = ttl_s.to_string();
         let mut args = vec![
             "token",
@@ -119,7 +147,7 @@ impl Site {
             "--subject",
             subject,
             "--kind",
-            "agent",
+            kind,
             "--ttl",
             &ttl,
         ];
@@ -300,6 +328,26 @@ impl Clients {
     }
 
     /// Uploads blobs in batches.
+    /// Creates or moves the line `name` to `tip`, from nothing.
+    pub async fn set_line(
+        &mut self,
+        repo: &str,
+        name: &str,
+        tip: ChangesetId,
+    ) -> Result<(), ApiError> {
+        self.repo
+            .update_ref(pb::UpdateRefRequest::from(graft_proto::types::UpdateRef {
+                repo: repo.into(),
+                name: name.into(),
+                expected: None,
+                new: tip,
+                kind: graft_proto::types::RefKind::Line,
+            }))
+            .await
+            .map(|_| ())
+            .map_err(api)
+    }
+
     pub async fn put_blobs(&mut self, repo: &str, blobs: &[Vec<u8>]) -> Result<(), ApiError> {
         for batch in blobs.chunks(512) {
             let messages: Vec<pb::PutObjectsRequest> = batch

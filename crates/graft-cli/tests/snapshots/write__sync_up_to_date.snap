@@ -1,0 +1,5 @@
+---
+source: crates/graft-cli/tests/write.rs
+expression: text(&out)
+---
+main is up to date at ccf89d2059865

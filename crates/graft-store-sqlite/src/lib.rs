@@ -8,6 +8,7 @@
 //! versioned and migrated on open ([`migrations`]).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -71,6 +72,7 @@ pub struct SqliteMetaStore {
     writer: Option<SyncSender<WriteJob>>,
     readers: Option<SyncSender<ReadJob>>,
     threads: Vec<JoinHandle<()>>,
+    sealed: Arc<AtomicU64>,
 }
 
 /// Opens a connection with the store's pragmas.
@@ -112,8 +114,10 @@ impl SqliteMetaStore {
 
         let mut threads = Vec::new();
         let (write_tx, write_rx) = mpsc::sync_channel(config.writer_queue.max(1));
+        let sealed = Arc::new(AtomicU64::new(0));
+        let writer_sealed = sealed.clone();
         threads.push(spawn("graft-sqlite-writer", move || {
-            writer::run(write_conn, write_rx)
+            writer::run(write_conn, write_rx, writer_sealed)
         })?);
         let (read_tx, read_rx) = mpsc::sync_channel(config.reader_queue.max(1));
         let read_rx = Arc::new(Mutex::new(read_rx));
@@ -129,12 +133,21 @@ impl SqliteMetaStore {
             writer: Some(write_tx),
             readers: Some(read_tx),
             threads,
+            sealed,
         })
     }
 
     /// The configuration in use.
     pub fn config(&self) -> &SqliteConfig {
         &self.config
+    }
+
+    /// How many write batches the writer has taken off its queue so far. A
+    /// hook for tests: once the count moves, the first job is in the writer's
+    /// hands and the queue behind it is empty.
+    #[doc(hidden)]
+    pub fn writer_batches_taken(&self) -> u64 {
+        self.sealed.load(Ordering::Acquire)
     }
 
     fn stopped() -> StoreError {

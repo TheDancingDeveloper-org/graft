@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 
-use graft_model::{ChangesetId, ObjectId, ObjectKind};
+use graft_model::{Changeset, ChangesetId, ObjectId, ObjectKind};
 use graft_proto::types::{OpenWorkspace, Page, SetHead, WorkspaceRef, WorkspaceView};
 use graft_proto::{ApiError, CallContext};
 use graft_store::{
@@ -42,7 +42,7 @@ pub(crate) fn holder(name: &str) -> String {
 }
 
 /// Whether `record` is a draft held by workspace `name`.
-fn held_by(record: &ChangesetRecord, name: &str) -> bool {
+pub(crate) fn held_by(record: &ChangesetRecord, name: &str) -> bool {
     record.state == RecordState::Draft
         && record.holder.as_deref().and_then(|h| h.strip_prefix("ws:")) == Some(name)
 }
@@ -184,7 +184,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         ws.lease_until_ms < self.clock.now().ms
     }
 
-    async fn load_workspace(&self, repo: RepoId, name: &str) -> Result<WorkspaceRecord, ApiError> {
+    pub(crate) async fn load_workspace(
+        &self,
+        repo: RepoId,
+        name: &str,
+    ) -> Result<WorkspaceRecord, ApiError> {
         self.meta
             .workspace(repo, name)
             .await
@@ -254,6 +258,22 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         head: Option<ChangesetId>,
         writes: &mut Vec<Write>,
     ) -> Result<Vec<(ChangesetId, ChangesetRecord)>, ApiError> {
+        let stack = self.stack_content(repo, base, head, writes).await?;
+        Ok(stack
+            .into_iter()
+            .map(|(id, _, record)| (id, record))
+            .collect())
+    }
+
+    /// The stack of `head` over `base`, top first, with each changeset and
+    /// its record.
+    pub(crate) async fn stack_content(
+        &self,
+        repo: RepoId,
+        base: ChangesetId,
+        head: Option<ChangesetId>,
+        writes: &mut Vec<Write>,
+    ) -> Result<Vec<(ChangesetId, Changeset, ChangesetRecord)>, ApiError> {
         let Some(head) = head else {
             return Ok(Vec::new());
         };
@@ -264,7 +284,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             let id = cur.ok_or_else(|| errors::invalid(None, "not-on-base"))?;
             let (cs, record) = self.changeset(repo, id).await?;
             cur = cs.first_parent();
-            out.push((id, record));
+            out.push((id, cs, record));
         }
         Ok(out)
     }

@@ -1,0 +1,13 @@
+---
+source: crates/graft-cli/tests/write.rs
+expression: shown
+---
+{
+  "base": "ceb9d51a431efa31e031494ec857b6e71b3fc89b7df21172c5365879f263cec50",
+  "head": null,
+  "lease_until_ms": 0,
+  "line": "main",
+  "name": "w-1",
+  "owner": "test-client",
+  "session": null
+}
