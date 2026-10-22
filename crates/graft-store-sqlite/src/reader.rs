@@ -9,11 +9,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    ChangesetRecord, Lsn, RefRecord, RepoId, StoreError, StoreResult, WorkspaceRecord, page_limit,
+    ChangesetRecord, Lsn, RecordState, RefRecord, RepoId, StoreError, StoreResult, WorkspaceRecord,
+    page_limit,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::codec::{changeset_id, int, ref_kind, sql_err, state, uint};
+use crate::codec::{changeset_id, int, ref_kind, sql_err, state, state_code, uint};
 
 /// A queued read: runs against a reader's connection and answers itself.
 pub(crate) type ReadJob = Box<dyn FnOnce(&Connection) + Send>;
@@ -237,6 +238,57 @@ pub(crate) fn expired_workspaces(
         .map_err(sql_err)?;
     rows.map(|r| r.map_err(sql_err).and_then(workspace_record))
         .collect()
+}
+
+pub(crate) fn list_workspaces(
+    conn: &Connection,
+    repo: RepoId,
+    owner: &str,
+    after: &str,
+    limit: u32,
+) -> StoreResult<Vec<WorkspaceRecord>> {
+    check_repo(conn, repo)?;
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT {WORKSPACE_COLUMNS} FROM workspaces
+             WHERE repo = ?1 AND owner = ?2 AND name > ?3 ORDER BY name LIMIT ?4"
+        ))
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, owner, after, limit], raw_workspace)
+        .map_err(sql_err)?;
+    rows.map(|r| r.map_err(sql_err).and_then(workspace_record))
+        .collect()
+}
+
+pub(crate) fn count_records(
+    conn: &Connection,
+    repo: RepoId,
+    state: RecordState,
+) -> StoreResult<u64> {
+    check_repo(conn, repo)?;
+    let n: i64 = conn
+        .prepare_cached("SELECT count(*) FROM changesets WHERE repo = ?1 AND state = ?2")
+        .and_then(|mut s| s.query_row(params![repo.0, state_code(state)], |r| r.get(0)))
+        .map_err(sql_err)?;
+    uint(n)
+}
+
+pub(crate) fn count_workspaces(
+    conn: &Connection,
+    repo: RepoId,
+    before_ms: Option<i64>,
+) -> StoreResult<u64> {
+    check_repo(conn, repo)?;
+    let n: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM workspaces
+             WHERE repo = ?1 AND (?2 IS NULL OR lease_until < ?2)",
+        )
+        .and_then(|mut s| s.query_row(params![repo.0, before_ms], |r| r.get(0)))
+        .map_err(sql_err)?;
+    uint(n)
 }
 
 pub(crate) fn derived(
