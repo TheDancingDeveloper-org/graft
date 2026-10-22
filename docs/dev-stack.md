@@ -25,17 +25,27 @@ Images are `graft-dev:local`. Named volumes are `graft-dev_*`.
 
 ## Where the daemon must be
 
-The stack bind-mounts files from this checkout (`docker/dev/`, and in dev mode
-`target/debug/`). The Docker daemon resolves those paths on its own
-filesystem, so it must run on the same host as the checkout.
+Bind mounts (`docker/dev/`, and in dev mode `target/debug/`) are resolved on
+the Docker daemon's filesystem. `scripts/dev/lib.sh` computes
+`GRAFT_HOST_ROOT`, the checkout's path on that filesystem, and compose uses it
+for every bind source. Locally it is the checkout itself.
 
-`up.sh` checks this: it compares the daemon's name with `hostname` and stops
-when they differ. On this estate's `vogt-prod` checkout, `/var/run/docker.sock`
-is served by the daemon on `winrarhost` (Node B), so `up.sh` refuses by
-default. `GRAFT_DEV_ALLOW_REMOTE_DAEMON=1` accepts the remote daemon knowingly.
-Against a remote daemon, a missing bind source is created there as an empty
-root-owned directory, and the binaries never load. That is the first thing to
-check when a `dev` container fails with `not a directory`.
+With a remote daemon, `lib.sh` maps the checkout's mount point to the subpath
+`findmnt` reports, then checks the mapping by reading `README.md` through a
+read-only `/` mount on the daemon. The check reads only; it never bind-mounts
+the missing path. A mismatch stops `up.sh` with a message.
+
+**Current finding (not resolved):** on the `vogt-prod` checkout, `findmnt`
+reports `/home/sprooty/Working` as `/dev/nvme0n1p1[/vogt/prod/workspace]`, a
+local disk on vogt-prod. The daemon behind `/var/run/docker.sock` is Node B
+(`winrarhost`), and `/vogt/prod/workspace` does not exist there. So the mapping
+fails and `up.sh` refuses. Earlier bind attempts left empty root-owned
+directories under `/vogt` on Node B. They need removing by someone with access.
+
+Options: a local daemon on vogt-prod, a host that has a local daemon, or
+copying the checkout to Node B and mapping that copy. `docker compose watch`
+can sync binaries over the API, but its config bind mounts still need the
+checkout on the daemon's host, so it doesn't avoid this.
 
 ## Profiles
 
@@ -129,16 +139,17 @@ ps` shows the final state. The obs services use `unless-stopped`.
 
 ## Verification status
 
-Checked on the daemon host (Node B, through the socket above), with
-`GRAFT_DEV_ALLOW_REMOTE_DAEMON=1`:
+Checked before the guard was added, on the daemon host (Node B):
 
 - `docker compose config -q`, and with `--profile dev`, `mirror`,
   `rusttorrent`, `obs` and `tools`: valid.
 - `docker compose build`: succeeds (the image runs as uid 10001 on trixie).
-- `up.sh`: both stubs log their `not implemented yet` line, retry three times
-  and stop (`RestartCount=3`).
-- `up.sh --dev`: the host-binary variants do not start on that daemon (see
-  above), so the dev loop, its glibc behaviour and `crash.sh` are unverified.
+- `up.sh` (with the earlier override): both stubs log their `not implemented
+  yet` line, retry three times and stop (`RestartCount=3`). That run mounted
+  `docker/dev/server.toml` on Node B, which created an empty directory there.
+- `up.sh --dev`: stopped by the mapping guard on that daemon (see above), so
+  the dev loop, its glibc behaviour, `develop.watch` and `crash.sh` are
+  unverified.
   `smoke.sh`, `seed.sh` and `mirror`, `obs` and `tools` are not yet run against
   live binaries.
 
@@ -164,9 +175,8 @@ These need decisions from the crates that own the behaviour:
   `meta_db`, `min_free_fraction`, the node's socket and cache paths). The
   metrics key and port (`metrics = "0.0.0.0:9464"`) are a dev convention.
   G1.12 (server), G2.3 (node) and G1.14 (mirror) decide the real keys.
-- **Dev-mode daemon.** The dev loop needs a Docker daemon on this checkout's
-  host (see above). Decide whether this host gets its own daemon, or the loop
-  moves to a host that has one.
+- **Dev-mode daemon.** The dev loop needs the checkout on the daemon's host
+  (see above): a local daemon here, or a host that has one.
 - **Node upstream.** The node stub has no way to set its upstream server.
   Once the real parser lands, add it to the node command.
 - **Healthcheck.** Add `healthcheck` to `graft-server` once `/healthz` exists.

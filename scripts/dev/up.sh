@@ -7,11 +7,11 @@
 #   --mirror     add graft-mirror following the fixture repository
 #   --rusttorrent add graft-mirror-rusttorrent (needs GitHub access)
 #   --obs        add prometheus and grafana on 127.0.0.1
-# The Docker daemon must run on this host (see the check below).
+# A remote daemon (Node B) is supported: lib.sh maps the checkout path (GRAFT_HOST_ROOT).
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$root"
+# shellcheck source=lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 mode=image
 extra=()
@@ -31,19 +31,6 @@ for arg in "$@"; do
       ;;
   esac
 done
-
-# Bind mounts are resolved on the daemon's filesystem. A daemon on another host
-# (for example a shared Node B reached through /var/run/docker.sock) turns the
-# missing paths into empty root-owned directories and the binaries never load.
-# Compare the daemon's name with this host's; set GRAFT_DEV_ALLOW_REMOTE_DAEMON=1
-# to run against a remote daemon knowingly.
-daemon="$(docker info --format '{{.Name}}' 2>/dev/null || true)"
-if [ -n "$daemon" ] && [ "$daemon" != "$(hostname)" ] && [ "${GRAFT_DEV_ALLOW_REMOTE_DAEMON:-0}" != 1 ]; then
-  echo "up.sh: the Docker daemon is '$daemon' but this host is '$(hostname)'." >&2
-  echo "up.sh: bind mounts (docker/dev, target/debug) would not reach this checkout." >&2
-  echo "up.sh: run a daemon on this host, or set GRAFT_DEV_ALLOW_REMOTE_DAEMON=1 to accept that." >&2
-  exit 1
-fi
 
 if [ "$mode" = dev ]; then
   for bin in graft-server graft-node graft-mirror; do

@@ -6,8 +6,8 @@
 #   --wipe   also remove the graft-dev named volumes (objects, metadata, cache)
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$root"
+# shellcheck source=lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 volumes=()
 for arg in "$@"; do

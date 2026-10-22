@@ -10,6 +10,9 @@
 #   obs         prometheus and grafana scraping /metrics
 #   tools       client, the graft CLI toolbox: docker compose run --rm client graft ...
 #
+# Bind sources use ${GRAFT_HOST_ROOT}, the checkout's path on the Docker daemon's
+# host. scripts/dev/lib.sh sets it; it defaults to "." for a local daemon.
+#
 # Every published port is bound to 127.0.0.1. Host ports default to values that
 # are free on the dev host (7878, 3000 and 9090 are taken by other services
 # there); override with GRAFT_DEV_SERVER_PORT, GRAFT_DEV_PROMETHEUS_PORT and
@@ -39,10 +42,17 @@ services:
     ports:
       - "127.0.0.1:${GRAFT_DEV_SERVER_PORT:-17878}:7878"
     volumes:
-      - ./docker/dev/server.toml:/etc/graft/server.toml:ro
+      - ${GRAFT_HOST_ROOT:-.}/docker/dev/server.toml:/etc/graft/server.toml:ro
       - graft-dev-server-objects:/var/lib/graft/objects
       - graft-dev-server-meta:/var/lib/graft/meta
     # healthcheck: add once the server serves /healthz (docs/dev-stack.md).
+    # Fallback loop that works with a remote daemon: `docker compose watch graft-server`
+    # copies target/debug/graft-server into the container over the API, then restarts it.
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./target/debug/graft-server
+          target: /usr/local/bin/graft-server
 
   graft-node:
     <<: [*build, *retry]
@@ -50,6 +60,11 @@ services:
     volumes:
       - graft-dev-run:/run/graft
       - graft-dev-node-cache:/var/cache/graft
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./target/debug/graft-node
+          target: /usr/local/bin/graft-node
 
   # ---- dev profile: host binaries from target/debug (bind over the image copy)
 
@@ -60,8 +75,8 @@ services:
     ports:
       - "127.0.0.1:${GRAFT_DEV_SERVER_PORT:-17878}:7878"
     volumes:
-      - ./docker/dev/server.toml:/etc/graft/server.toml:ro
-      - ./target/debug/graft-server:/usr/local/bin/graft-server:ro
+      - ${GRAFT_HOST_ROOT:-.}/docker/dev/server.toml:/etc/graft/server.toml:ro
+      - ${GRAFT_HOST_ROOT:-.}/target/debug/graft-server:/usr/local/bin/graft-server:ro
       - graft-dev-server-objects:/var/lib/graft/objects
       - graft-dev-server-meta:/var/lib/graft/meta
     networks:
@@ -75,7 +90,7 @@ services:
     volumes:
       - graft-dev-run:/run/graft
       - graft-dev-node-cache:/var/cache/graft
-      - ./target/debug/graft-node:/usr/local/bin/graft-node:ro
+      - ${GRAFT_HOST_ROOT:-.}/target/debug/graft-node:/usr/local/bin/graft-node:ro
     networks:
       default:
         aliases: [graft-node]
@@ -86,8 +101,8 @@ services:
     entrypoint: ["sh", "/etc/graft-dev/mirror/fixture-entrypoint.sh"]
     command: ["graft-mirror", "follow", "--config", "/etc/graft-dev/mirror/fixture.toml"]
     volumes:
-      - ./docker/dev:/etc/graft-dev:ro
-      - ./target/debug/graft-mirror:/usr/local/bin/graft-mirror:ro
+      - ${GRAFT_HOST_ROOT:-.}/docker/dev:/etc/graft-dev:ro
+      - ${GRAFT_HOST_ROOT:-.}/target/debug/graft-mirror:/usr/local/bin/graft-mirror:ro
       - graft-dev-mirror-fixture:/var/lib/graft/mirror
     networks:
       default:
@@ -101,7 +116,7 @@ services:
     entrypoint: ["sh", "/etc/graft-dev/mirror/fixture-entrypoint.sh"]
     command: ["graft-mirror", "follow", "--config", "/etc/graft-dev/mirror/fixture.toml"]
     volumes:
-      - ./docker/dev:/etc/graft-dev:ro
+      - ${GRAFT_HOST_ROOT:-.}/docker/dev:/etc/graft-dev:ro
       - graft-dev-mirror-fixture:/var/lib/graft/mirror
 
   graft-mirror-rusttorrent:
@@ -109,7 +124,7 @@ services:
     profiles: [rusttorrent]
     command: ["graft-mirror", "follow", "--config", "/etc/graft-dev/mirror/rusttorrent.toml"]
     volumes:
-      - ./docker/dev:/etc/graft-dev:ro
+      - ${GRAFT_HOST_ROOT:-.}/docker/dev:/etc/graft-dev:ro
       - graft-dev-mirror-rusttorrent:/var/lib/graft/mirror
 
   # ---- tools profile -------------------------------------------------------
@@ -135,7 +150,7 @@ services:
     ports:
       - "127.0.0.1:${GRAFT_DEV_PROMETHEUS_PORT:-19090}:9090"
     volumes:
-      - ./docker/dev/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${GRAFT_HOST_ROOT:-.}/docker/dev/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - graft-dev-prometheus:/prometheus
     restart: unless-stopped
 
@@ -149,7 +164,7 @@ services:
     ports:
       - "127.0.0.1:${GRAFT_DEV_GRAFANA_PORT:-13100}:3000"
     volumes:
-      - ./docker/dev/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ${GRAFT_HOST_ROOT:-.}/docker/dev/grafana/provisioning:/etc/grafana/provisioning:ro
       - graft-dev-grafana:/var/lib/grafana
     restart: unless-stopped
 
