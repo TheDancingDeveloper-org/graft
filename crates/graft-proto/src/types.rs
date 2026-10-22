@@ -9,7 +9,7 @@ use graft_model::{
 use crate::frame::Frame;
 
 /// A page request.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Page {
     /// Maximum items.
@@ -21,7 +21,7 @@ pub struct Page {
 // ---- objects --------------------------------------------------------------
 
 /// `GetObjects` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GetObjects {
     /// Repository.
@@ -31,7 +31,7 @@ pub struct GetObjects {
 }
 
 /// `GetObjects` response. Partial results are normal.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Objects {
     /// Found objects, as frames.
@@ -43,7 +43,7 @@ pub struct Objects {
 }
 
 /// `HasObjects` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HasObjects {
     /// Repository.
@@ -53,7 +53,7 @@ pub struct HasObjects {
 }
 
 /// `PutObjects` request (blobs only).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PutObjects {
     /// Repository.
@@ -65,7 +65,7 @@ pub struct PutObjects {
 // ---- changesets -----------------------------------------------------------
 
 /// `CreateChangeset` request ("commit").
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CreateChangeset {
     /// Repository.
@@ -102,7 +102,7 @@ pub enum DraftState {
 }
 
 /// `CreateChangeset` response.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Created {
     /// The new (or existing, on retry) id.
@@ -116,7 +116,7 @@ pub struct Created {
 }
 
 /// `GetChangesets` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GetChangesets {
     /// Repository.
@@ -126,7 +126,7 @@ pub struct GetChangesets {
 }
 
 /// A changeset with its server record.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ChangesetView {
     /// Content.
@@ -140,7 +140,7 @@ pub struct ChangesetView {
 }
 
 /// `GetChangesets` response.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Changesets {
     /// Found.
@@ -165,7 +165,7 @@ pub enum RefKind {
 }
 
 /// A ref's value.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RefView {
     /// Name.
@@ -179,7 +179,7 @@ pub struct RefView {
 }
 
 /// `ResolveRef` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResolveRef {
     /// Repository.
@@ -189,7 +189,7 @@ pub struct ResolveRef {
 }
 
 /// `ListRefs` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ListRefs {
     /// Repository.
@@ -201,7 +201,7 @@ pub struct ListRefs {
 }
 
 /// `UpdateRef` request (admin and tool refs).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UpdateRef {
     /// Repository.
@@ -219,7 +219,7 @@ pub struct UpdateRef {
 // ---- snapshot reads -------------------------------------------------------
 
 /// `Stat`, `ReadFile` request: a path in a changeset's snapshot.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PathAt {
     /// Repository.
@@ -231,7 +231,7 @@ pub struct PathAt {
 }
 
 /// An entry in a snapshot.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EntryView {
     /// Path.
@@ -243,7 +243,7 @@ pub struct EntryView {
 }
 
 /// `ReadFile` response.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FileContent {
     /// Kind.
@@ -255,7 +255,7 @@ pub struct FileContent {
 }
 
 /// `ListTree` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ListTree {
     /// Repository.
@@ -271,7 +271,7 @@ pub struct ListTree {
 }
 
 /// A page of entries.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Entries {
     /// Entries.
@@ -283,7 +283,7 @@ pub struct Entries {
 // ---- history --------------------------------------------------------------
 
 /// `Log` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Log {
     /// Repository.
@@ -299,7 +299,7 @@ pub struct Log {
 }
 
 /// A summary line of history.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ChangesetSummary {
     /// Id.
@@ -315,7 +315,7 @@ pub struct ChangesetSummary {
 }
 
 /// A page of history.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct History {
     /// Newest first.
@@ -325,7 +325,7 @@ pub struct History {
 }
 
 /// `IsAncestor` / `MergeBase` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Pair {
     /// Repository.
@@ -337,7 +337,7 @@ pub struct Pair {
 }
 
 /// Options for unified patches in `Diff`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PatchOptions {
     /// Context lines.
@@ -347,7 +347,7 @@ pub struct PatchOptions {
 }
 
 /// `Diff` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Diff {
     /// Repository.
@@ -365,7 +365,7 @@ pub struct Diff {
 }
 
 /// One file in a diff.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FileDiff {
     /// The change.
@@ -377,7 +377,7 @@ pub struct FileDiff {
 }
 
 /// `Diff` response.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DiffResult {
     /// Files, sorted by path.
@@ -387,7 +387,7 @@ pub struct DiffResult {
 }
 
 /// `Blame` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Blame {
     /// Repository.
@@ -401,7 +401,7 @@ pub struct Blame {
 }
 
 /// A run of lines with one origin.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BlameRange {
     /// First line (0-based).
@@ -413,7 +413,7 @@ pub struct BlameRange {
 }
 
 /// `Blame` response.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BlameResult {
     /// Ranges in order.
@@ -433,7 +433,7 @@ pub enum MergeMode {
 }
 
 /// `Rebase` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Rebase {
     /// Repository.
@@ -447,7 +447,7 @@ pub struct Rebase {
 }
 
 /// `Revert` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Revert {
     /// Repository.
@@ -461,7 +461,7 @@ pub struct Revert {
 }
 
 /// `Land` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Land {
     /// Repository.
@@ -480,7 +480,7 @@ pub struct Land {
 
 /// `Land` success. The failures are `Conflict`, `Contended` and `Rejected`
 /// in [`crate::ApiError`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Landed {
     /// The line now contains the stack.
@@ -504,7 +504,7 @@ pub enum Landed {
 }
 
 /// `Attest` request: CI reports a check result for a changeset.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Attest {
     /// Repository.
@@ -520,7 +520,7 @@ pub struct Attest {
 }
 
 /// `Watch` request: read the journal from an LSN.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Watch {
     /// Repository.
@@ -536,7 +536,7 @@ pub struct Watch {
 }
 
 /// A journal entry as seen by watchers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct JournalEntry {
     /// Position.
@@ -548,7 +548,7 @@ pub struct JournalEntry {
 }
 
 /// A page of journal entries.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct JournalPage {
     /// Entries in LSN order.
@@ -560,7 +560,7 @@ pub struct JournalPage {
 // ---- workspaces -----------------------------------------------------------
 
 /// A workspace (`docs/design.md` §3).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WorkspaceView {
     /// Name.
@@ -580,7 +580,7 @@ pub struct WorkspaceView {
 }
 
 /// `OpenWorkspace` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OpenWorkspace {
     /// Repository.
@@ -596,7 +596,7 @@ pub struct OpenWorkspace {
 }
 
 /// A request naming one workspace.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WorkspaceRef {
     /// Repository.
@@ -606,7 +606,7 @@ pub struct WorkspaceRef {
 }
 
 /// `SetHead` request (CAS).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SetHead {
     /// The workspace.
@@ -618,7 +618,7 @@ pub struct SetHead {
 }
 
 /// `Sync` response.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Synced {
     /// The workspace after the sync.
@@ -628,7 +628,7 @@ pub struct Synced {
 }
 
 /// A stack operation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StackOp {
     /// New order, as draft ids bottom to top.
@@ -649,7 +649,7 @@ pub enum StackOp {
 // ---- admin ----------------------------------------------------------------
 
 /// `ImportChangesets` request (admin): bulk import preserving parents.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ImportChangesets {
     /// Repository.
@@ -659,7 +659,7 @@ pub struct ImportChangesets {
 }
 
 /// `Gc` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Gc {
     /// Repository.
@@ -669,7 +669,7 @@ pub struct Gc {
 }
 
 /// `Gc` report.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GcReport {
     /// Changesets collected (or collectable, in a dry run).
@@ -681,7 +681,7 @@ pub struct GcReport {
 }
 
 /// `MintToken` request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MintToken {
     /// Subject.

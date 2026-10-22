@@ -24,6 +24,7 @@ todo = "allow"
 # added by the work item that first needs them.
 [workspace.dependencies]
 blake3 = "1.8"
+flate2 = "1.1"
 graft-auth = { path = "crates/graft-auth" }
 graft-client = { path = "crates/graft-client" }
 graft-engine = { path = "crates/graft-engine" }
@@ -40,4 +41,9 @@ graft-store-sqlite = { path = "crates/graft-store-sqlite" }
 graft-telemetry = { path = "crates/graft-telemetry" }
 graft-testkit = { path = "crates/graft-testkit" }
 proptest = "1.7"
+prost = "0.14"
+protox = "0.9"
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
