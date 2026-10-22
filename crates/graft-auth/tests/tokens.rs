@@ -188,6 +188,21 @@ fn tampered_and_malformed() {
 }
 
 #[test]
+fn path_prefix_scope_mints_and_verifies() {
+    // A prefixed write scope parses through RepoPath, so this exercises
+    // the path check on the verify side, not just the text form.
+    let key = key();
+    let mut c = agent_claims();
+    c.principal.scopes = vec!["repo:graft:write:crates/graft-auth".into()];
+    let token = mint(&key, &c).unwrap();
+    let got = verify(&key.verifying_key(), &token, NOW, &NoDenylist).unwrap();
+    assert_eq!(
+        got.principal.scopes,
+        vec!["repo:graft:write:crates/graft-auth".to_owned()]
+    );
+}
+
+#[test]
 fn mint_refuses_claims_verify_would_reject() {
     let key = key();
     let mut c = agent_claims();
