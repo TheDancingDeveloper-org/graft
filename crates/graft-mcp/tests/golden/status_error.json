@@ -1,0 +1,5 @@
+{
+  "kind": "needs_working_copy",
+  "message": "graft_status needs a working copy; it is served by `graft mcp` over stdio inside one",
+  "tool": "graft_status"
+}

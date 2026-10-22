@@ -15,9 +15,15 @@ graft follows trunk-based development, with a merge queue.
    stop. Oversight opens the PR.
 3. **Review.** Every PR gets a review, from a different model than the author
    where an agent wrote it. Blockers go back to the author.
-4. **Merge queue.** A clean review is added to the merge queue (rebase). The
-   queue rebases onto the latest `main`, runs the required checks, and merges.
-   Nobody pushes to `main` directly.
+4. **Merge queue.** A clean review is added to the merge queue, which
+   **squashes**: each PR lands as one commit on `main`. The queue runs the
+   required checks on the latest `main`, then merges. Nobody pushes to `main`
+   directly.
+5. **Behind or conflicting with `main`?** Run `git merge origin/main` on your
+   branch, resolve, and push normally. Never rebase a pushed branch or
+   force-push. Resolve the root `Cargo.toml` by keeping every dependency line,
+   sorted. Resolve `Cargo.lock` by taking `main`'s copy and running
+   `cargo update -w`.
 
 **Required checks** (`.github/workflows/ci.yml`, on `pull_request` and
 `merge_group`):

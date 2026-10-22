@@ -54,6 +54,9 @@ cargo nextest run -p <crate> --all-features   # or: cargo test -p <crate>
 ## Finishing
 
 - Add a changelog fragment `changes/<item>.md`.
+- If your branch conflicts with `main`, run `git merge origin/main` and push
+  normally. Never rebase a pushed branch or force-push: the merge queue squashes,
+  so merge commits on a branch are fine.
 - Commit with the identity in your brief, push the branch, and **stop**.
   Don't open the PR, don't poll CI. Oversight opens it, reviews it and lands
   it.
