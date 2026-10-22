@@ -15,6 +15,8 @@
 //! max_watch_lifetime_s = 3600        # longest Watch stream (and token exp)
 //! max_watches_per_principal = 16     # concurrent Watch streams
 //! max_watches = 1024
+//! max_put_call_bytes = 67108864      # PutObjects buffered per call (64 MiB)
+//! put_buffer_bytes = 536870912       # PutObjects buffered by all calls
 //! ```
 //!
 //! Unknown keys are refused, so a typo fails at start-up rather than being
@@ -66,6 +68,11 @@ pub(crate) struct ServerConfig {
     pub(crate) max_watches_per_principal: usize,
     /// Concurrent `Watch` streams in total.
     pub(crate) max_watches: usize,
+    /// Most frame bytes one `PutObjects` call buffers.
+    pub(crate) max_put_call_bytes: u64,
+    /// Frame bytes every `PutObjects` call in flight buffers together; past
+    /// it calls wait (backpressure).
+    pub(crate) put_buffer_bytes: u64,
 }
 
 impl Default for ServerConfig {
@@ -86,6 +93,8 @@ impl Default for ServerConfig {
             max_watch_lifetime_s: 3600,
             max_watches_per_principal: 16,
             max_watches: 1024,
+            max_put_call_bytes: 64 << 20,
+            put_buffer_bytes: 512 << 20,
         }
     }
 }
@@ -129,9 +138,15 @@ impl ServerConfig {
                 self.max_watches_per_principal as u64,
             ),
             ("max_watches", self.max_watches as u64),
+            ("max_put_call_bytes", self.max_put_call_bytes),
         ];
         if let Some((key, _)) = positive.iter().find(|(_, v)| *v == 0) {
             return Err(ConfigError(format!("{key} must be positive")));
+        }
+        if self.put_buffer_bytes < self.max_put_call_bytes {
+            return Err(ConfigError(
+                "put_buffer_bytes must be at least max_put_call_bytes".into(),
+            ));
         }
         Ok(())
     }
@@ -187,6 +202,7 @@ metrics = "0.0.0.0:9464"
         assert!(ServerConfig::parse("min_free_fraction = -0.1").is_err());
         assert!(ServerConfig::parse("max_token_ttl_s = 0").is_err());
         assert!(ServerConfig::parse("max_watches = 0").is_err());
+        assert!(ServerConfig::parse("max_put_call_bytes = 10\nput_buffer_bytes = 5").is_err());
         assert!(ServerConfig::parse("min_free_fraction = 1.0").is_ok());
     }
 }

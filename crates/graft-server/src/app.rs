@@ -64,6 +64,49 @@ impl From<CallError> for tonic::Status {
     }
 }
 
+/// Bytes buffered per budget permit.
+const BUDGET_UNIT: u64 = 1024;
+
+/// The bound on `PutObjects` buffering: a cap per call, and a budget shared
+/// by every call in flight.
+#[derive(Debug)]
+pub(crate) struct PutBudget {
+    /// Most frame bytes one call buffers.
+    pub(crate) call_bytes: u64,
+    shared: Arc<tokio::sync::Semaphore>,
+}
+
+impl PutBudget {
+    /// A per-call cap and a shared budget, both in bytes. The budget is at
+    /// least one call's cap, so a single call can always proceed.
+    pub(crate) fn new(call_bytes: u64, shared_bytes: u64) -> Self {
+        let permits = shared_bytes.max(call_bytes).div_ceil(BUDGET_UNIT);
+        let permits = usize::try_from(permits)
+            .unwrap_or(usize::MAX)
+            .min(tokio::sync::Semaphore::MAX_PERMITS);
+        Self {
+            call_bytes,
+            shared: Arc::new(tokio::sync::Semaphore::new(permits)),
+        }
+    }
+
+    /// Takes `bytes` of the shared budget, waiting while it is spent. The
+    /// share comes back when the permit drops.
+    pub(crate) async fn reserve(&self, bytes: u64) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let units = u32::try_from(bytes.div_ceil(BUDGET_UNIT)).ok()?;
+        if units == 0 {
+            return None;
+        }
+        self.shared.clone().acquire_many_owned(units).await.ok()
+    }
+
+    /// Unused budget, bytes (for tests).
+    #[cfg(test)]
+    pub(crate) fn available(&self) -> u64 {
+        self.shared.available_permits() as u64 * BUDGET_UNIT
+    }
+}
+
 /// The server: engine, keys, admission and telemetry.
 pub(crate) struct App {
     pub(crate) engine: Arc<ServerEngine>,
@@ -73,6 +116,7 @@ pub(crate) struct App {
     pub(crate) telemetry: Arc<Telemetry>,
     pub(crate) max_token_ttl_s: u64,
     pub(crate) watches: Watches,
+    pub(crate) put_budget: PutBudget,
     ready: AtomicBool,
     next_request: AtomicU64,
 }
@@ -86,6 +130,7 @@ impl App {
         telemetry: Arc<Telemetry>,
         max_token_ttl_s: u64,
         watches: Watches,
+        put_budget: PutBudget,
     ) -> Self {
         Self {
             engine,
@@ -95,6 +140,7 @@ impl App {
             telemetry,
             max_token_ttl_s,
             watches,
+            put_budget,
             ready: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
         }
@@ -288,6 +334,23 @@ pub(crate) fn error_name(e: &ApiError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_put_budget_is_shared_and_returned() {
+        let b = PutBudget::new(4096, 8192);
+        let one = b.reserve(4096).await;
+        let two = b.reserve(4000).await;
+        assert_eq!(b.available(), 0);
+        let waiting = tokio::time::timeout(std::time::Duration::from_millis(50), b.reserve(1));
+        assert!(
+            waiting.await.is_err(),
+            "a spent budget makes the caller wait"
+        );
+        drop(one);
+        assert_eq!(b.available(), 4096);
+        drop(two);
+        assert!(b.reserve(0).await.is_none());
+    }
 
     #[test]
     fn bearer_values() {

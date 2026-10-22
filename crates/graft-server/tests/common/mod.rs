@@ -150,6 +150,19 @@ pub struct Server {
 }
 
 impl Server {
+    /// The server's process id.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Resident memory, from `/proc` (Linux), bytes.
+    pub fn rss(&self) -> Option<u64> {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", self.pid())).ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
+        let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb * 1024)
+    }
+
     /// `kill -9`.
     pub fn kill9(mut self) {
         self.child.kill().expect("kill");
@@ -532,6 +545,19 @@ fn dechunk(mut raw: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&raw[..size]);
         raw = &raw[size + 2..];
     }
+}
+
+/// `len` incompressible bytes, different for each `seed`.
+pub fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 56) as u8
+        })
+        .collect()
 }
 
 /// Writes `count` valid blob frames of about `size` bytes straight into an

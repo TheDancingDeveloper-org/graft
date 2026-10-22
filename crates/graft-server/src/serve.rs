@@ -22,7 +22,7 @@ use tokio::sync::watch;
 use tonic::codegen::tokio_stream::wrappers::TcpListenerStream;
 
 use crate::admission::Admission;
-use crate::app::App;
+use crate::app::{App, PutBudget};
 use crate::config::ServerConfig;
 use crate::grpc::Services;
 use crate::watch::Watches;
@@ -95,6 +95,7 @@ async fn run(
         telemetry,
         config.max_token_ttl_s,
         Watches::new(config.watch_limits()),
+        PutBudget::new(config.max_put_call_bytes, config.put_buffer_bytes),
     ));
 
     let listener = bind(&config.listen).await?;

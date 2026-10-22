@@ -2,15 +2,18 @@
 //! convert the message at the boundary, call the engine through
 //! [`App::call`], convert the answer back.
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use graft_model::ChangesetId;
+use graft_auth::Scope;
+use graft_model::{ChangesetId, ObjectId};
 use graft_proto::pb;
 use graft_proto::types::*;
 use graft_proto::{AdminApi as _, ApiError, CallContext, Frame, ObjectApi as _, RepoApi as _};
 use graft_proto::{WireError, WorkspaceApi as _};
+use graft_store::MetaStore as _;
 use tokio::sync::mpsc;
 use tonic::codec::CompressionEncoding;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
@@ -21,7 +24,20 @@ use crate::mint;
 
 /// Frame bytes per `GetObjects` stream message. A single frame larger than
 /// this travels alone.
-const PAGE_BYTES: usize = 4 << 20;
+const PAGE_BYTES: usize = 1 << 20;
+
+/// Ids per engine call inside one `GetObjects` stream: small, so at most a
+/// few frames are read ahead of what the client has taken.
+const GET_BATCH: usize = 4;
+
+/// Pages a `GetObjects` stream holds ahead of the client.
+const GET_CHANNEL: usize = 1;
+
+/// How long a `PutObjects` message waits for buffer budget.
+const PUT_WAIT: Duration = Duration::from_secs(10);
+
+/// The retry hint when it waited too long, ms.
+const PUT_RETRY_MS: u64 = 1_000;
 
 /// The largest message the server decodes: one maximal blob frame plus
 /// framing.
@@ -152,26 +168,83 @@ macro_rules! unary {
 impl pb::object_service_server::ObjectService for Services {
     type GetObjectsStream = ReceiverStream<Result<pb::Objects, Status>>;
 
+    /// Streams the frames in small engine batches through a bounded
+    /// channel, so a slow client holds back the reads (backpressure) instead
+    /// of the server queueing the whole answer. At most `max_ids` distinct
+    /// ids are served (the rest are deferred), and once the frames sent
+    /// reach `max_get_bytes` the remaining ids are deferred too.
     async fn get_objects(
         &self,
         request: Request<pb::GetObjectsRequest>,
     ) -> Result<Response<Self::GetObjectsStream>, Status> {
         let cx = self.cx(&request, "GetObjects")?;
         let req: GetObjects = wire(request.into_inner())?;
-        let repo = req.repo.clone();
-        let objects = self
-            .app
-            .call("GetObjects", &repo, cx, false, move |e, cx| async move {
-                e.get_objects(&cx, req).await
-            })
-            .await
-            .map_err(Status::from)?;
-        let pages = paginate(objects);
-        let (tx, rx) = mpsc::channel(pages.len().max(1));
-        for page in pages {
-            // The channel holds every page, so this never waits.
-            let _ = tx.try_send(Ok(page));
-        }
+        let config = self.app.engine.config();
+        let (max_ids, max_bytes) = (config.max_ids as usize, config.max_get_bytes);
+        let mut seen = HashSet::new();
+        let mut ids: Vec<ObjectId> = req.ids.into_iter().filter(|id| seen.insert(*id)).collect();
+        let mut deferred = ids.split_off(ids.len().min(max_ids));
+        let mut batches: Vec<Vec<ObjectId>> = ids.chunks(GET_BATCH).map(<[_]>::to_vec).collect();
+        batches.reverse();
+        let repo = req.repo;
+
+        // The first batch answers here, so a refusal is the call's status.
+        let first = batches.pop().unwrap_or_default();
+        let first = self.get_batch(&repo, &cx, first).await?;
+        let (tx, rx) = mpsc::channel(GET_CHANNEL);
+        let app = self.app.clone();
+        tokio::spawn(async move {
+            let mut missing = Vec::new();
+            let mut sent = 0u64;
+            let mut next = Some(first);
+            while let Some(objects) = next.take() {
+                missing.extend(objects.missing);
+                deferred.extend(objects.deferred);
+                sent += objects
+                    .found
+                    .iter()
+                    .map(|(_, f)| f.body.len() as u64)
+                    .sum::<u64>();
+                for page in found_pages(objects.found) {
+                    // Waits while the client is slow; ends if it has gone.
+                    if tx.send(Ok(page)).await.is_err() {
+                        return;
+                    }
+                }
+                let Some(batch) = batches.pop() else { break };
+                if sent >= max_bytes {
+                    deferred.extend(batch);
+                    deferred.extend(batches.drain(..).rev().flatten());
+                    break;
+                }
+                let batch_req = GetObjects {
+                    repo: repo.clone(),
+                    ids: batch,
+                };
+                let got = app
+                    .call(
+                        "GetObjects",
+                        &repo,
+                        cx.clone(),
+                        false,
+                        move |e, cx| async move { e.get_objects(&cx, batch_req).await },
+                    )
+                    .await;
+                match got {
+                    Ok(objects) => next = Some(objects),
+                    Err(e) => {
+                        let _ = tx.send(Err(e.into())).await;
+                        return;
+                    }
+                }
+            }
+            let last = Objects {
+                missing,
+                deferred,
+                ..Objects::default()
+            };
+            let _ = tx.send(Ok(last.into())).await;
+        });
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
@@ -190,40 +263,72 @@ impl pb::object_service_server::ObjectService for Services {
         )
     }
 
+    /// Checks the caller's write scope and the repository on the first
+    /// message, before anything is buffered. Then buffers at most
+    /// `max_put_call_bytes` of frames for the call, each message first
+    /// taking its share of the server-wide `put_buffer_bytes` budget: when
+    /// the budget is spent, the call stops reading its stream until others
+    /// finish, so the client is held back by flow control. A message that
+    /// waits longer than `PUT_WAIT` fails the call with `Unavailable`.
     async fn put_objects(
         &self,
         request: Request<Streaming<pb::PutObjectsRequest>>,
     ) -> Result<Response<pb::ObjectIds>, Status> {
         let cx = self.cx(&request, "PutObjects")?;
         let config = self.app.engine.config();
-        let (max_ids, max_bytes) = (config.max_ids as usize, config.max_put_bytes);
+        let max_ids = config.max_ids as usize;
+        let max_bytes = config.max_put_bytes.min(self.app.put_budget.call_bytes);
         let mut stream = request.into_inner();
-        let mut req = PutObjects::default();
+        let Some(first) = stream.message().await? else {
+            return Err(WireError {
+                field: "repo",
+                reason: "required",
+            }
+            .into());
+        };
+        let mut part: PutObjects = wire(first)?;
+        let repo = part.repo.clone();
+        self.check_put(&cx, &repo).await?;
+        let mut req = PutObjects {
+            repo: repo.clone(),
+            blobs: Vec::new(),
+        };
         let mut bytes = 0u64;
-        let mut first = true;
-        while let Some(message) = stream.message().await? {
-            let part: PutObjects = wire(message)?;
-            if first {
-                req.repo = part.repo;
-                first = false;
-            } else if part.repo != req.repo && !part.repo.is_empty() {
+        let mut permits = Vec::new();
+        loop {
+            if !part.repo.is_empty() && part.repo != repo {
                 return Err(WireError {
                     field: "repo",
                     reason: "differs between messages",
                 }
                 .into());
             }
-            bytes += part.blobs.iter().map(|f| f.body.len() as u64).sum::<u64>();
-            req.blobs.extend(part.blobs);
-            // Bound what is buffered; the engine enforces the same limits.
-            if req.blobs.len() > max_ids {
+            let len: u64 = part.blobs.iter().map(|f| f.body.len() as u64).sum();
+            bytes += len;
+            if req.blobs.len() + part.blobs.len() > max_ids {
                 return Err(limit("ids", max_ids as u64));
             }
             if bytes > max_bytes {
                 return Err(limit("put-bytes", max_bytes));
             }
+            // Calls that each hold part of the budget could wait on one
+            // another; a bounded wait turns that into a retry.
+            match tokio::time::timeout(PUT_WAIT, self.app.put_budget.reserve(len)).await {
+                Ok(permit) => permits.push(permit),
+                Err(_) => {
+                    let e = ApiError::Unavailable {
+                        retry_after_ms: PUT_RETRY_MS,
+                    };
+                    self.app.refused("PutObjects", &e);
+                    return Err(e.into());
+                }
+            }
+            req.blobs.extend(part.blobs);
+            match stream.message().await? {
+                Some(m) => part = wire(m)?,
+                None => break,
+            }
         }
-        let repo = req.repo.clone();
         let ids = self
             .app
             .call("PutObjects", &repo, cx, true, move |e, cx| async move {
@@ -231,7 +336,58 @@ impl pb::object_service_server::ObjectService for Services {
             })
             .await
             .map_err(Status::from)?;
+        drop(permits);
         Ok(Response::new(ids.into()))
+    }
+}
+
+impl Services {
+    /// One `GetObjects` engine call.
+    async fn get_batch(
+        &self,
+        repo: &str,
+        cx: &CallContext,
+        ids: Vec<ObjectId>,
+    ) -> Result<Objects, Status> {
+        let req = GetObjects {
+            repo: repo.to_owned(),
+            ids,
+        };
+        self.app
+            .call(
+                "GetObjects",
+                repo,
+                cx.clone(),
+                false,
+                move |e, cx| async move { e.get_objects(&cx, req).await },
+            )
+            .await
+            .map_err(Status::from)
+    }
+
+    /// What the engine will check for `PutObjects`, done before a byte is
+    /// buffered: an unprefixed write scope on the repository (scope first,
+    /// so a caller without one learns nothing), then that it exists.
+    async fn check_put(&self, cx: &CallContext, repo: &str) -> Result<(), Status> {
+        let refuse = |e: ApiError| {
+            self.app.refused("PutObjects", &e);
+            Status::from(e)
+        };
+        let scope = Scope::Write {
+            repo: repo.to_owned(),
+            prefix: None,
+        };
+        graft_auth::authorize(&cx.principal, &scope, None).map_err(|e| refuse(e.into()))?;
+        let (meta, _) = self.app.engine.stores();
+        match meta.repo(repo).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(refuse(ApiError::NotFound {
+                what: format!("repository {repo}"),
+            })),
+            Err(_) => Err(refuse(ApiError::Unavailable {
+                retry_after_ms: 1_000,
+            })),
+        }
     }
 }
 
@@ -243,13 +399,13 @@ fn limit(name: &str, max: u64) -> Status {
     .into()
 }
 
-/// Splits a `GetObjects` answer into stream messages of about
-/// [`PAGE_BYTES`] each; the last carries `missing` and `deferred`.
-fn paginate(objects: Objects) -> Vec<pb::Objects> {
+/// Splits found frames into stream messages of about [`PAGE_BYTES`] each.
+/// A single frame larger than that travels alone.
+fn found_pages(found: Vec<(ObjectId, Frame)>) -> Vec<pb::Objects> {
     let mut pages = Vec::new();
     let mut page = Vec::new();
     let mut bytes = 0usize;
-    for (id, frame) in objects.found {
+    for (id, frame) in found {
         let len = frame.body.len();
         if !page.is_empty() && bytes + len > PAGE_BYTES {
             pages.push(found_page(std::mem::take(&mut page)));
@@ -258,14 +414,28 @@ fn paginate(objects: Objects) -> Vec<pb::Objects> {
         bytes += len;
         page.push((id, frame));
     }
-    let mut last = found_page(page);
-    last.missing = objects.missing.iter().map(|id| id.0.to_vec()).collect();
-    last.deferred = objects.deferred.iter().map(|id| id.0.to_vec()).collect();
-    pages.push(last);
+    if !page.is_empty() {
+        pages.push(found_page(page));
+    }
     pages
 }
 
-fn found_page(found: Vec<(graft_model::ObjectId, Frame)>) -> pb::Objects {
+/// [`found_pages`], then a last page with `missing` and `deferred`.
+#[cfg(test)]
+fn paginate(objects: Objects) -> Vec<pb::Objects> {
+    let mut pages = found_pages(objects.found);
+    pages.push(
+        Objects {
+            missing: objects.missing,
+            deferred: objects.deferred,
+            ..Objects::default()
+        }
+        .into(),
+    );
+    pages
+}
+
+fn found_page(found: Vec<(ObjectId, Frame)>) -> pb::Objects {
     Objects {
         found,
         ..Objects::default()
@@ -831,7 +1001,7 @@ impl pb::admin_service_server::AdminService for Services {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graft_model::{ObjectId, ObjectKind};
+    use graft_model::ObjectKind;
 
     #[test]
     fn pages_split_by_bytes_and_the_last_carries_misses() {
