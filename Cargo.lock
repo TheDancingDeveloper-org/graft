@@ -1957,6 +1957,8 @@ dependencies = [
  "graft-model",
  "graft-proto",
  "graft-store",
+ "rusqlite",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
