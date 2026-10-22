@@ -1040,6 +1040,12 @@ like the server's and can be rebuilt from GitHub.
    stays exact.
 5. Record `(changeset, git sha, raw commit headers: author, committer, dates,
    encoding, gpgsig, extra headers)` in the mirror DB.
+   Every imported changeset also carries the metadata key
+   `mirror.git-commit = <40-hex sha>` ([D19](decisions.md#d19-import-identity)).
+   Git commits that differ only in fields graft does not model, such as the
+   committer line of a rebased copy, therefore stay distinct changesets, and the
+   mapping is always 1:1. The key is graft metadata set only by `graft-git`, and
+   export never writes it into the git commit.
 6. Set the line refs and import tags as `tag` refs.
 
 **The fidelity invariant:** for every imported commit `c`,

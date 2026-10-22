@@ -7,7 +7,12 @@
 use graft_model::{Changeset, ChangesetId, RepoPath};
 use graft_store::{MetaStore, ObjectStore, RepoId, StoreResult, Write};
 
+mod derive;
 pub mod kinds;
+mod line;
+
+pub use derive::{Derived, row};
+pub use line::{line_path_rows, path_prefixes};
 
 /// Which parents a derived kind reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +42,38 @@ pub trait DerivedKind {
     const PARENTS: ParentScope;
     /// Eager or lazy.
     const MODE: Mode;
+}
+
+/// A kind whose values live in the derived table, keyed by
+/// `(NAME, VERSION, key)`. The encoding is a durable format.
+pub trait ValueKind: DerivedKind {
+    /// The decoded value.
+    type Value: Clone;
+    /// The stored bytes.
+    fn encode(value: &Self::Value) -> Vec<u8>;
+    /// The value, or `None` when the bytes are malformed.
+    fn decode(bytes: &[u8]) -> Option<Self::Value>;
+}
+
+/// A per-changeset kind computed from the changeset and its needed parents'
+/// values only: `derive(c) = f(c, [derive(p) for p in needed_parents(c)])`.
+/// The framework walks and caches it ([`Index::derive`]).
+pub trait ParentDerived: ValueKind {
+    /// `f`. `parents` holds one value per needed parent, in parent order.
+    fn derive(cs: &Changeset, parents: &[Self::Value]) -> Self::Value;
+}
+
+/// The parents a kind of this scope reads.
+pub fn needed_parents(scope: ParentScope, cs: &Changeset) -> &[ChangesetId] {
+    match scope {
+        ParentScope::First => &cs.parents[..cs.parents.len().min(1)],
+        ParentScope::All => &cs.parents,
+    }
+}
+
+/// The derived-table key of a per-changeset value: the 32 id bytes.
+pub fn changeset_key(id: ChangesetId) -> Vec<u8> {
+    id.0.0.to_vec()
 }
 
 /// A history query (the engine maps `graft_proto::types::Log` onto it).
@@ -88,19 +125,59 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
         &self.objects
     }
 
-    /// Eager rows for a newly created changeset (generation, skip list).
-    pub async fn on_create(&self, _repo: RepoId, _cs: &Changeset) -> StoreResult<Vec<Write>> {
-        todo!("G1.4")
+    /// Eager rows for a newly created changeset (generation, skip list),
+    /// plus rows for any ancestors whose values were missing (after a
+    /// version bump). Reads are O(parents + log depth) when the parents'
+    /// values are present.
+    pub async fn on_create(&self, repo: RepoId, cs: &Changeset) -> StoreResult<Vec<Write>> {
+        let id = cs.id();
+        let generation = self.derive_new::<kinds::Generation>(repo, id, cs).await?;
+        let skips = self.skip_list_new(repo, id, cs).await?;
+        let mut rows = generation.rows;
+        rows.extend(skips.rows);
+        Ok(rows)
     }
 
     /// Eager rows for changesets landing on `line` (positions, path index).
+    ///
+    /// `landed` is the first-parent chain being added, oldest first: each
+    /// changeset's first parent is the one before it, and the first one's
+    /// first parent is the line's current target (or it is a root, which
+    /// takes position 0). One read: the position of that first parent.
     pub async fn on_land(
         &self,
-        _repo: RepoId,
-        _line: &str,
-        _landed: &[Changeset],
+        repo: RepoId,
+        line: &str,
+        landed: &[Changeset],
     ) -> StoreResult<Vec<Write>> {
-        todo!("G1.4")
+        let Some(first) = landed.first() else {
+            return Ok(Vec::new());
+        };
+        let start = match first.first_parent() {
+            None => 0,
+            Some(parent) => {
+                let pos = self
+                    .meta
+                    .line_pos(repo, line, parent)
+                    .await?
+                    .ok_or_else(|| {
+                        graft_store::StoreError::Invalid(format!("{parent} is not on line {line}"))
+                    })?;
+                pos + 1
+            }
+        };
+        let mut rows = Vec::new();
+        for (pos, cs) in (start..).zip(landed) {
+            debug_assert!(pos == start || cs.first_parent().is_some());
+            let id = cs.id();
+            rows.push(Write::PutLinePos {
+                line: line.to_owned(),
+                changeset: id,
+                pos,
+            });
+            rows.extend(line_path_rows(line, pos, id, cs));
+        }
+        Ok(rows)
     }
 
     /// First-parent history, newest first.
