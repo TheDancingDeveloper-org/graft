@@ -1752,6 +1752,7 @@ dependencies = [
  "graft-store-fs",
  "graft-testkit",
  "hyper-util",
+ "rustix",
  "tempfile",
  "tokio",
  "tokio-stream",

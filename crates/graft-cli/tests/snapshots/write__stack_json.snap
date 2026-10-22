@@ -1,0 +1,41 @@
+---
+source: crates/graft-cli/tests/write.rs
+expression: stack
+---
+{
+  "base": "ceb9d51a431efa31e031494ec857b6e71b3fc89b7df21172c5365879f263cec50",
+  "drafts": [
+    {
+      "author": {
+        "email": "author@example.com",
+        "kind": "agent",
+        "name": "Test Author"
+      },
+      "authored_at": {
+        "ms": 1700000000000,
+        "offset_min": 0
+      },
+      "changes": 1,
+      "id": "c5fdc21b361638190b521b6753b2a9e3ad89d5e5ef455b0a5c56eecb32dba5e7f",
+      "state": "draft",
+      "subject": "first"
+    },
+    {
+      "author": {
+        "email": "author@example.com",
+        "kind": "agent",
+        "name": "Test Author"
+      },
+      "authored_at": {
+        "ms": 1700000000000,
+        "offset_min": 0
+      },
+      "changes": 1,
+      "id": "ce34107755e5c701f36ce14082ac65d91b34307bfcb07ed29cafd62b51da7ff25",
+      "state": "draft",
+      "subject": "second"
+    }
+  ],
+  "head": "ce34107755e5c701f36ce14082ac65d91b34307bfcb07ed29cafd62b51da7ff25",
+  "workspace": "w-1"
+}

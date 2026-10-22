@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft commit --json",
+  "type": "object",
+  "required": [
+    "id",
+    "parent",
+    "workspace",
+    "superseded",
+    "changes",
+    "upload",
+    "recovered"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "parent": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "workspace": {
+      "type": "string"
+    },
+    "superseded": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "With --amend, the draft it replaced."
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "op"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "op": {
+            "enum": [
+              "put",
+              "delete"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "file",
+              "exec",
+              "symlink",
+              "submodule"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "upload": {
+      "type": "object",
+      "required": [
+        "blobs",
+        "uploaded",
+        "bytes",
+        "requests"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "blobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uploaded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requests": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "recovered": {
+      "description": "An interrupted commit the command found first: finished, rolled back, or none.",
+      "enum": [
+        "finished",
+        "rolled_back",
+        null
+      ]
+    }
+  }
+}

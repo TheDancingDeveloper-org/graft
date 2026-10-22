@@ -1,0 +1,5 @@
+---
+source: crates/graft-cli/tests/write.rs
+expression: text(&out)
+---
+committed ce754941221f4 in workspace w-1 (1 changes, 1 of 1 blobs uploaded)

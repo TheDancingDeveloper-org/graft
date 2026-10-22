@@ -12,22 +12,22 @@ expression: value
   },
   {
     "api": "ObjectApi",
-    "command": null,
-    "excluded": "upload check for commit (phase 2)",
+    "command": "commit",
+    "excluded": null,
     "op": "has_objects",
     "raw": false
   },
   {
     "api": "ObjectApi",
-    "command": null,
-    "excluded": "blob upload for commit (phase 2)",
+    "command": "commit",
+    "excluded": null,
     "op": "put_objects",
     "raw": false
   },
   {
     "api": "RepoApi",
-    "command": null,
-    "excluded": "commit creates a draft (phase 2)",
+    "command": "commit",
+    "excluded": null,
     "op": "create_changeset",
     "raw": false
   },
@@ -118,21 +118,21 @@ expression: value
   {
     "api": "RepoApi",
     "command": null,
-    "excluded": "rebase is part of sync and land (phase 2 and 3)",
+    "excluded": "the server rebases inside sync and land",
     "op": "rebase",
     "raw": false
   },
   {
     "api": "RepoApi",
     "command": null,
-    "excluded": "revert command (phase 2)",
+    "excluded": "revert command (phase 3)",
     "op": "revert",
     "raw": false
   },
   {
     "api": "RepoApi",
-    "command": null,
-    "excluded": "land command (phase 2)",
+    "command": "land",
+    "excluded": null,
     "op": "land",
     "raw": false
   },
@@ -152,57 +152,57 @@ expression: value
   },
   {
     "api": "WorkspaceApi",
-    "command": null,
-    "excluded": "workspace command (phase 2)",
+    "command": "workspace",
+    "excluded": null,
     "op": "open_workspace",
     "raw": false
   },
   {
     "api": "WorkspaceApi",
-    "command": null,
-    "excluded": "workspace command (phase 2)",
+    "command": "workspace",
+    "excluded": null,
     "op": "get_workspace",
     "raw": false
   },
   {
     "api": "WorkspaceApi",
-    "command": null,
-    "excluded": "workspace command (phase 2)",
+    "command": "workspace",
+    "excluded": null,
     "op": "list_workspaces",
     "raw": false
   },
   {
     "api": "WorkspaceApi",
-    "command": null,
-    "excluded": "workspace command (phase 2)",
+    "command": "workspace",
+    "excluded": null,
     "op": "renew_lease",
     "raw": false
   },
   {
     "api": "WorkspaceApi",
-    "command": null,
-    "excluded": "commit and stack move the head (phase 2)",
+    "command": "commit",
+    "excluded": null,
     "op": "set_head",
     "raw": false
   },
   {
     "api": "WorkspaceApi",
-    "command": null,
-    "excluded": "sync command (phase 2)",
+    "command": "sync",
+    "excluded": null,
     "op": "sync",
     "raw": false
   },
   {
     "api": "WorkspaceApi",
     "command": null,
-    "excluded": "stack command (phase 2 and 3)",
+    "excluded": "reorder, squash, split and drop are stack commands in phase 3; `graft stack list` reads the stack",
     "op": "stack",
     "raw": false
   },
   {
     "api": "WorkspaceApi",
-    "command": null,
-    "excluded": "workspace command (phase 2)",
+    "command": "workspace",
+    "excluded": null,
     "op": "close_workspace",
     "raw": false
   },

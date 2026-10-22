@@ -1,0 +1,13 @@
+---
+source: crates/graft-cli/tests/write.rs
+expression: value
+---
+{
+  "changed": null,
+  "landed": null,
+  "line": "main",
+  "outcome": "queued",
+  "pr_url": "https://github.example/o/demo/pull/1",
+  "rebased": null,
+  "recovered": null
+}
