@@ -11,6 +11,18 @@ use graft_proto::pb;
 use graft_proto::types::{RefKind, UpdateRef};
 use graft_proto::{ApiError, PROTOCOL_VERSION};
 
+/// The value of `series` (name and labels, exactly as exposed) in a
+/// Prometheus text scrape.
+fn sample(metrics: &str, series: &str) -> f64 {
+    metrics
+        .lines()
+        .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("missing {series}:\n{metrics}"))
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("{series}: {e}"))
+}
+
 fn resolve(name: &str) -> pb::ResolveRefRequest {
     pb::ResolveRefRequest {
         repo: "r".into(),
@@ -341,6 +353,32 @@ async fn health_metrics_and_the_json_facade() {
         metrics.contains("graft_rpc_duration_seconds_count{op=\"CreateChangeset\",outcome=\"ok\",tier=\"server\"}"),
         "{metrics}"
     );
+    // The store's own measurements and the free-space floor, after load:
+    // commits were timed, every write has been answered so the writer queue
+    // is empty, and both volumes report a plausible size.
+    assert!(
+        sample(
+            &metrics,
+            "graft_store_op_seconds_count{op=\"commit\",port=\"meta\"}"
+        ) > 0.0,
+        "{metrics}"
+    );
+    assert_eq!(
+        sample(&metrics, "graft_sqlite_writer_queue_depth"),
+        0.0,
+        "{metrics}"
+    );
+    for volume in ["objects", "meta"] {
+        let free = sample(
+            &metrics,
+            &format!("graft_disk_free_bytes{{volume=\"{volume}\"}}"),
+        );
+        let total = sample(
+            &metrics,
+            &format!("graft_disk_total_bytes{{volume=\"{volume}\"}}"),
+        );
+        assert!(total > 0.0 && free <= total, "{volume}:\n{metrics}");
+    }
     let side = common::http_get(server.metrics.expect("metrics listener"), "/metrics", None);
     assert_eq!(side.status, 200);
     assert!(side.text().contains("graft_rpc_duration_seconds"));

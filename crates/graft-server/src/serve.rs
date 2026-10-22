@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use graft_engine::{Engine, EngineConfig};
 use graft_model::SystemClock;
 use graft_store_fs::{FsMode, FsObjectStore};
-use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
-use graft_telemetry::TelemetryConfig;
+use graft_store_sqlite::{SqliteConfig, SqliteMetaStore, StoreObserver};
+use graft_telemetry::{Telemetry, TelemetryConfig};
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -57,14 +57,36 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), String> {
     result
 }
 
-/// Opens the production stores.
+/// Records the metadata store's measurements in the server's registry.
+#[derive(Debug)]
+struct StoreTelemetry(Arc<Telemetry>);
+
+impl StoreObserver for StoreTelemetry {
+    fn writer_queue_depth(&self, depth: usize) {
+        let depth = i64::try_from(depth).unwrap_or(i64::MAX);
+        self.0.metrics().sqlite_writer_queue_depth.set(depth);
+    }
+
+    fn operation(&self, op: &'static str, elapsed: Duration) {
+        self.0
+            .metrics()
+            .store_op_seconds
+            .with_label_values(&["meta", op])
+            .observe(elapsed.as_secs_f64());
+    }
+}
+
+/// Opens the production stores. `telemetry` receives the metadata store's
+/// measurements, when given.
 pub(crate) fn open_stores(
     config: &ServerConfig,
+    telemetry: Option<Arc<Telemetry>>,
 ) -> Result<(SqliteMetaStore, FsObjectStore), String> {
     if let Some(dir) = config.meta_db.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
-    let meta = SqliteMetaStore::open(SqliteConfig::new(&config.meta_db))
+    let observer = telemetry.map(|t| Arc::new(StoreTelemetry(t)) as Arc<dyn StoreObserver>);
+    let meta = SqliteMetaStore::open_observed(SqliteConfig::new(&config.meta_db), observer)
         .map_err(|e| format!("open {}: {e:?}", config.meta_db.display()))?;
     let objects = FsObjectStore::open(&config.objects_dir, FsMode::Authoritative)
         .map_err(|e| format!("open {}: {e:?}", config.objects_dir.display()))?;
@@ -92,7 +114,7 @@ async fn run(config: ServerConfig) -> Result<(), String> {
         .map_err(|e| format!("telemetry: {e}"))?,
     );
     let started = Instant::now();
-    let (meta, objects) = open_stores(&config)?;
+    let (meta, objects) = open_stores(&config, Some(telemetry.clone()))?;
     let signing =
         keys::load_or_create(&config.key_path()).map_err(|e| format!("signing key: {e}"))?;
     let engine = Arc::new(Engine::new(
@@ -101,13 +123,13 @@ async fn run(config: ServerConfig) -> Result<(), String> {
         Arc::new(SystemClock),
         EngineConfig::default(),
     ));
-    let mut volumes = vec![config.objects_dir.clone()];
+    let mut volumes = vec![("objects", config.objects_dir.clone())];
     if let Some(dir) = config
         .meta_db
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
     {
-        volumes.push(dir.to_path_buf());
+        volumes.push(("meta", dir.to_path_buf()));
     }
     let admission = Admission::new(volumes, config.min_free_fraction, config.min_free_bytes);
     let denylist = Denylist::open(&config.meta_db)?;

@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use graft_proto::ApiError;
+use graft_telemetry::Metrics;
 
 /// How long one free-space reading is trusted.
 const RECHECK: Duration = Duration::from_secs(1);
@@ -26,40 +27,40 @@ pub(crate) struct Space {
     pub(crate) total: u64,
 }
 
-/// The floor and the volumes it watches.
+/// The floor and the volumes it watches, each with its metric label.
 #[derive(Debug)]
 pub(crate) struct Admission {
-    dirs: Vec<PathBuf>,
+    volumes: Vec<(&'static str, PathBuf)>,
     min_fraction: f64,
     min_bytes: u64,
     last: Mutex<Option<(Instant, bool)>>,
 }
 
 impl Admission {
-    /// A floor over the volumes holding `dirs`.
-    pub(crate) fn new(dirs: Vec<PathBuf>, min_fraction: f64, min_bytes: u64) -> Self {
+    /// A floor over the volumes holding each of `volumes`, labelled by name.
+    pub(crate) fn new(
+        volumes: Vec<(&'static str, PathBuf)>,
+        min_fraction: f64,
+        min_bytes: u64,
+    ) -> Self {
         Self {
-            dirs,
+            volumes,
             min_fraction,
             min_bytes,
             last: Mutex::new(None),
         }
     }
 
-    /// `Ok` when writes may proceed.
-    pub(crate) fn check_write(&self) -> Result<(), ApiError> {
-        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
-        let ok = match *last {
-            Some((at, ok)) if at.elapsed() < RECHECK => ok,
-            _ => {
-                let ok = self.dirs.iter().all(|d| match space(d) {
-                    Some(s) => above_floor(s, self.min_fraction, self.min_bytes),
-                    // An unreadable volume is not evidence that it is full.
-                    None => true,
-                });
-                *last = Some((Instant::now(), ok));
-                ok
-            }
+    /// `Ok` when writes may proceed. Reads the volumes at most once a
+    /// second; see [`Admission::sample`].
+    pub(crate) fn check_write(&self, metrics: &Metrics) -> Result<(), ApiError> {
+        let fresh = match *self.last.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some((at, ok)) if at.elapsed() < RECHECK => Some(ok),
+            _ => None,
+        };
+        let ok = match fresh {
+            Some(ok) => ok,
+            None => self.sample(metrics),
         };
         if ok {
             Ok(())
@@ -69,6 +70,42 @@ impl Admission {
             })
         }
     }
+
+    /// Reads every volume's space now, records it in the disk gauges, and
+    /// returns whether every volume is above the floor. This is the one
+    /// place the server reads free space: writes use it through
+    /// [`Admission::check_write`], and `/metrics` calls it on each scrape so
+    /// the gauges are current even when no writes arrive.
+    pub(crate) fn sample(&self, metrics: &Metrics) -> bool {
+        // Every volume is read and recorded, even after one is found below
+        // the floor: the other volume's gauges matter most just then.
+        let ok = self
+            .volumes
+            .iter()
+            .map(|(volume, dir)| match space(dir) {
+                Some(s) => {
+                    metrics
+                        .disk_free_bytes
+                        .with_label_values(&[volume])
+                        .set(saturating_i64(s.free));
+                    metrics
+                        .disk_total_bytes
+                        .with_label_values(&[volume])
+                        .set(saturating_i64(s.total));
+                    above_floor(s, self.min_fraction, self.min_bytes)
+                }
+                // An unreadable volume is not evidence that it is full.
+                None => true,
+            })
+            .fold(true, |all, ok| all & ok);
+        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), ok));
+        ok
+    }
+}
+
+/// A byte count as a gauge value.
+fn saturating_i64(n: u64) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
 }
 
 /// Whether `s` is above the floor.
@@ -126,14 +163,51 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_full_floor_refuses_with_unavailable() {
-        let a = Admission::new(vec![std::env::temp_dir()], 1.0, 0);
+        let (_registry, metrics) = graft_telemetry::registry().unwrap();
+        let volumes = || vec![("test", std::env::temp_dir())];
+        let a = Admission::new(volumes(), 1.0, 0);
         assert_eq!(
-            a.check_write(),
+            a.check_write(&metrics),
             Err(ApiError::Unavailable {
                 retry_after_ms: FULL_RETRY_MS
             })
         );
-        let a = Admission::new(vec![std::env::temp_dir()], 0.0, 0);
-        assert_eq!(a.check_write(), Ok(()));
+        let a = Admission::new(volumes(), 0.0, 0);
+        assert_eq!(a.check_write(&metrics), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sampling_records_free_and_total_bytes_per_volume() {
+        let (registry, metrics) = graft_telemetry::registry().unwrap();
+        let a = Admission::new(vec![("objects", std::env::temp_dir())], 0.0, 0);
+        assert!(a.sample(&metrics));
+        let text = graft_telemetry::encode(&registry);
+        assert!(
+            text.contains("graft_disk_free_bytes{volume=\"objects\"} "),
+            "{text}"
+        );
+        let total = metrics
+            .disk_total_bytes
+            .with_label_values(&["objects"])
+            .get();
+        assert!(total > 0, "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_volume_below_the_floor_does_not_stop_the_others_being_recorded() {
+        let (_registry, metrics) = graft_telemetry::registry().unwrap();
+        // Both volumes are below a floor of 100%, so the first one refuses.
+        let volumes = vec![
+            ("objects", std::env::temp_dir()),
+            ("meta", std::env::temp_dir()),
+        ];
+        let a = Admission::new(volumes, 1.0, 0);
+        assert!(!a.sample(&metrics));
+        for volume in ["objects", "meta"] {
+            let total = metrics.disk_total_bytes.with_label_values(&[volume]).get();
+            assert!(total > 0, "{volume} not recorded");
+        }
     }
 }

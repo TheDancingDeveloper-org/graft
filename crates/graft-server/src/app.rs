@@ -282,7 +282,7 @@ impl App {
         let result = async {
             if write {
                 self.check_not_revoked(&jti).await?;
-                self.admission.check_write()?;
+                self.admission.check_write(self.telemetry.metrics())?;
             }
             let task = tokio::spawn(f(self.engine.clone(), cx).in_current_span());
             match task.await {

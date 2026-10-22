@@ -73,6 +73,7 @@ async fn readyz(State(app): State<Arc<App>>) -> Response {
 }
 
 async fn metrics(State(app): State<Arc<App>>) -> Response {
+    app.admission.sample(app.telemetry.metrics());
     (
         [(
             header::CONTENT_TYPE,
