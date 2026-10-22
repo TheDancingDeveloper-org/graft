@@ -8,6 +8,7 @@
 //! Scopes are checked by the engine, per operation.
 
 use std::future::Future;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -21,6 +22,7 @@ use graft_telemetry::Telemetry;
 use tracing::Instrument as _;
 
 use crate::admission::Admission;
+use crate::denylist::Denylist;
 use crate::watch::Watches;
 
 /// The engine over the production stores.
@@ -118,7 +120,27 @@ impl PutBudget {
     }
 }
 
-/// The server: engine, keys, admission and telemetry.
+/// An authenticated call: the caller's context, and what a later check
+/// needs from its token (its expiry, and its `jti` for the denylist).
+/// Derefs to the [`CallContext`].
+#[derive(Clone, Debug)]
+pub(crate) struct Caller {
+    pub(crate) cx: CallContext,
+    /// Token expiry, seconds since the epoch.
+    pub(crate) exp_s: i64,
+    /// Token id, checked against the denylist on writes.
+    pub(crate) jti: String,
+}
+
+impl Deref for Caller {
+    type Target = CallContext;
+
+    fn deref(&self) -> &CallContext {
+        &self.cx
+    }
+}
+
+/// The server: engine, keys, admission, the denylist and telemetry.
 pub(crate) struct App {
     pub(crate) engine: Arc<ServerEngine>,
     pub(crate) verifying: VerifyingKey,
@@ -128,12 +150,14 @@ pub(crate) struct App {
     pub(crate) max_token_ttl_s: u64,
     pub(crate) watches: Watches,
     pub(crate) put_budget: PutBudget,
+    pub(crate) denylist: Arc<Denylist>,
     ready: AtomicBool,
     next_request: AtomicU64,
 }
 
 impl App {
     /// Builds the server state; it is not ready until [`App::set_ready`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         engine: Arc<ServerEngine>,
         signing: SigningKey,
@@ -142,6 +166,7 @@ impl App {
         max_token_ttl_s: u64,
         watches: Watches,
         put_budget: PutBudget,
+        denylist: Denylist,
     ) -> Self {
         Self {
             engine,
@@ -152,8 +177,26 @@ impl App {
             max_token_ttl_s,
             watches,
             put_budget,
+            denylist: Arc::new(denylist),
             ready: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
+        }
+    }
+
+    /// Refuses a write by a revoked token. A denylist that cannot be read
+    /// refuses too: the server does not know the token is still good.
+    pub(crate) async fn check_not_revoked(&self, jti: &str) -> Result<(), ApiError> {
+        let deny = self.denylist.clone();
+        let jti = jti.to_owned();
+        match tokio::task::spawn_blocking(move || deny.is_revoked(&jti)).await {
+            Ok(Ok(false)) => Ok(()),
+            Ok(Ok(true)) => Err(ApiError::Unauthenticated),
+            _ => {
+                tracing::error!("denylist unreadable; refusing the write");
+                Err(ApiError::Unavailable {
+                    retry_after_ms: 1_000,
+                })
+            }
         }
     }
 
@@ -179,17 +222,7 @@ impl App {
         &self,
         header: impl Fn(&str) -> Option<&'a str>,
         grpc: bool,
-    ) -> Result<CallContext, ApiError> {
-        self.authenticate_until(header, grpc).map(|(cx, _)| cx)
-    }
-
-    /// [`App::authenticate`], also returning the token's expiry (seconds
-    /// since the epoch), for calls that outlive one request.
-    pub(crate) fn authenticate_until<'a>(
-        &self,
-        header: impl Fn(&str) -> Option<&'a str>,
-        grpc: bool,
-    ) -> Result<(CallContext, i64), ApiError> {
+    ) -> Result<Caller, ApiError> {
         if grpc {
             PROTOCOL_VERSION.accept(header(graft_proto::VERSION_HEADER))?;
         }
@@ -206,22 +239,25 @@ impl App {
             Some(id) if is_request_id(id) => id.to_owned(),
             _ => format!("srv-{}", self.next_request.fetch_add(1, Ordering::Relaxed)),
         };
-        let cx = CallContext {
-            principal: claims.principal,
-            request_id,
-            deadline_ms: None,
-        };
-        Ok((cx, claims.exp))
+        Ok(Caller {
+            cx: CallContext {
+                principal: claims.principal,
+                request_id,
+                deadline_ms: None,
+            },
+            exp_s: claims.exp,
+            jti: claims.jti,
+        })
     }
 
     /// Runs one engine call for `op` on its own task, inside a request span,
-    /// recording its latency and outcome. Writes pass the free-space floor
-    /// first.
+    /// recording its latency and outcome. Writes check the token against
+    /// the denylist and pass the free-space floor first.
     pub(crate) async fn call<T, F, Fut>(
         &self,
         op: &'static str,
         repo: &str,
-        cx: CallContext,
+        caller: Caller,
         write: bool,
         f: F,
     ) -> Result<T, CallError>
@@ -234,15 +270,18 @@ impl App {
             "rpc",
             op,
             repo,
-            request_id = %cx.request_id,
-            principal = %cx.principal.subject,
-            session = cx.principal.session.as_deref().unwrap_or(""),
-            work_item = cx.principal.work_item.as_deref().unwrap_or(""),
+            request_id = %caller.request_id,
+            principal = %caller.principal.subject,
+            session = caller.principal.session.as_deref().unwrap_or(""),
+            work_item = caller.principal.work_item.as_deref().unwrap_or(""),
             tier = "server",
         );
         let started = Instant::now();
+        let jti = caller.jti.clone();
+        let cx = caller.cx;
         let result = async {
             if write {
+                self.check_not_revoked(&jti).await?;
                 self.admission.check_write()?;
             }
             let task = tokio::spawn(f(self.engine.clone(), cx).in_current_span());

@@ -24,6 +24,7 @@ use tonic::codegen::tokio_stream::wrappers::TcpListenerStream;
 use crate::admission::Admission;
 use crate::app::{App, PutBudget};
 use crate::config::ServerConfig;
+use crate::denylist::Denylist;
 use crate::grpc::{self, Services};
 use crate::watch::Watches;
 use crate::{http, keys};
@@ -88,6 +89,7 @@ async fn run(
         volumes.push(dir.to_path_buf());
     }
     let admission = Admission::new(volumes, config.min_free_fraction, config.min_free_bytes);
+    let denylist = Denylist::open(&config.meta_db)?;
     let app = Arc::new(App::new(
         engine,
         signing,
@@ -99,6 +101,7 @@ async fn run(
             std::time::Duration::from_millis(config.put_wait_ms),
             std::time::Duration::from_millis(config.put_idle_ms),
         ),
+        denylist,
     ));
 
     let listener = bind(&config.listen).await?;

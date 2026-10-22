@@ -2,9 +2,10 @@
 //! `admin token mint`.
 //!
 //! Over the API a caller can mint only a token no broader than its own: it
-//! must hold every scope it asks for, and the TTL is capped. On the server
-//! host the operator mints any scopes (`admin token mint`), which is how the
-//! first token exists.
+//! must hold every scope it asks for, and it cannot outlive its own token
+//! (the TTL is capped by the server's maximum and by the caller's remaining
+//! life). On the server host the operator mints any scopes (`admin token
+//! mint`), which is how the first token exists.
 
 use graft_auth::{Claims, Scope, SigningKey, Token};
 use graft_model::{Clock as _, SystemClock};
@@ -55,11 +56,14 @@ pub(crate) fn mint(key: &SigningKey, req: MintRequest, now_s: i64) -> Result<Tok
 }
 
 /// The `MintToken` RPC: `caller` must hold every requested scope, and the
-/// TTL is at most `max_ttl_s` (0 asks for the maximum). A token for a Vogt
-/// session is an agent token; otherwise it has the caller's kind.
+/// TTL is at most the server's `max_ttl_s` and the caller's remaining life
+/// (`caller_exp_s`), so the new token never outlives the one that minted it.
+/// 0 asks for that maximum. A token for a Vogt session is an agent token;
+/// otherwise it has the caller's kind.
 pub(crate) fn mint_for(
     key: &SigningKey,
     caller: &Principal,
+    caller_exp_s: i64,
     req: MintToken,
     max_ttl_s: u64,
     now_s: i64,
@@ -72,10 +76,12 @@ pub(crate) fn mint_for(
         };
         graft_auth::authorize(caller, &scope, path)?;
     }
-    if req.ttl_s > max_ttl_s {
+    let remaining = u64::try_from(caller_exp_s.saturating_sub(now_s)).unwrap_or(0);
+    let limit = max_ttl_s.min(remaining);
+    if req.ttl_s > limit {
         return Err(ApiError::LimitExceeded {
             limit: "token-ttl".into(),
-            max: max_ttl_s,
+            max: limit,
         });
     }
     let kind = if req.session.is_some() {
@@ -89,7 +95,7 @@ pub(crate) fn mint_for(
             subject: req.subject,
             kind,
             scopes: req.scopes,
-            ttl_s: if req.ttl_s == 0 { max_ttl_s } else { req.ttl_s },
+            ttl_s: if req.ttl_s == 0 { limit } else { req.ttl_s },
             session: req.session,
             work_item: req.work_item,
         },
@@ -133,7 +139,7 @@ mod tests {
     fn mints_no_broader_than_the_caller() {
         let key = SigningKey::from_seed(&[7; 32]);
         let vogt = caller(&["repo:r:admin"]);
-        let token = mint_for(&key, &vogt, ask(&["repo:r:write:src"], 60), 3600, 1_000)
+        let token = mint_for(&key, &vogt, 1_000 + 3600, ask(&["repo:r:write:src"], 60), 3600, 1_000)
             .expect("narrower scopes mint");
         let claims =
             graft_auth::verify(&key.verifying_key(), &token, 1_000, &NoDenylist).expect("valid");
@@ -143,20 +149,39 @@ mod tests {
 
         let writer = caller(&["repo:r:write:src"]);
         assert!(matches!(
-            mint_for(&key, &writer, ask(&["repo:r:write"], 60), 3600, 0),
+            mint_for(&key, &writer, 4_600, ask(&["repo:r:write"], 60), 3600, 1_000),
             Err(ApiError::PermissionDenied { .. })
         ));
         assert!(matches!(
-            mint_for(&key, &vogt, ask(&["repo:other:read"], 60), 3600, 0),
+            mint_for(&key, &vogt, 4_600, ask(&["repo:other:read"], 60), 3600, 1_000),
             Err(ApiError::PermissionDenied { .. })
         ));
         assert!(matches!(
-            mint_for(&key, &vogt, ask(&["repo:r:read"], 7200), 3600, 0),
+            mint_for(&key, &vogt, 4_600, ask(&["repo:r:read"], 7200), 3600, 1_000),
             Err(ApiError::LimitExceeded { .. })
         ));
         assert!(matches!(
-            mint_for(&key, &vogt, ask(&["nonsense"], 60), 3600, 0),
+            mint_for(&key, &vogt, 4_600, ask(&["nonsense"], 60), 3600, 1_000),
             Err(ApiError::InvalidChange { .. })
         ));
+    }
+
+    #[test]
+    fn a_token_never_outlives_its_caller() {
+        let key = SigningKey::from_seed(&[7; 32]);
+        let vogt = caller(&["repo:r:admin"]);
+        // The caller has 30 s left: a longer TTL is refused, and the default
+        // (0) is capped at what is left.
+        assert!(matches!(
+            mint_for(&key, &vogt, 1_030, ask(&["repo:r:read"], 60), 3600, 1_000),
+            Err(ApiError::LimitExceeded { max: 30, .. })
+        ));
+        let token = mint_for(&key, &vogt, 1_030, ask(&["repo:r:read"], 0), 3600, 1_000)
+            .expect("capped default");
+        let claims =
+            graft_auth::verify(&key.verifying_key(), &token, 1_000, &NoDenylist).expect("valid");
+        assert_eq!(claims.exp, 1_030);
+        // A caller whose token has expired mints nothing.
+        assert!(mint_for(&key, &vogt, 1_000, ask(&["repo:r:read"], 0), 3600, 1_000).is_err());
     }
 }

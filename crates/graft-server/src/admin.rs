@@ -7,8 +7,10 @@
 //! server stopped (as after a restore). `backup` snapshots the metadata
 //! while the server runs.
 
+use std::io::Read as _;
 use std::sync::Arc;
 
+use graft_auth::{NoDenylist, Token};
 use graft_engine::{Engine, EngineConfig};
 use graft_model::{ObjectId, SystemClock};
 use graft_proto::{AdminApi as _, CallContext, Principal, PrincipalKind};
@@ -16,6 +18,7 @@ use graft_store::{ObjectStore, RepoId, StoreError, StoreResult, StoreStats};
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
 
 use crate::config::ServerConfig;
+use crate::denylist::Denylist;
 use crate::mint::{MintRequest, mint, now_s};
 use crate::{backup, fsck, keys, serve};
 
@@ -41,6 +44,7 @@ pub(crate) fn run(config: &ServerConfig, args: &[String]) -> Result<(), Failure>
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["token", "mint", rest @ ..] => token_mint(config, rest),
+        ["token", "revoke"] => token_revoke(config),
         ["repo", "create", name] => repo_create(config, name),
         ["fsck", repo] => fsck(config, repo),
         ["backup", dir, rest @ ..] => backup(config, dir, rest),
@@ -107,6 +111,43 @@ fn token_mint(config: &ServerConfig, args: &[&str]) -> Result<(), Failure> {
     let token = mint(&key, req, now_s()).map_err(|e| Failure::failed(e.to_string()))?;
     // The token goes to stdout only, for the operator to store in Infisical.
     println!("{}", token.expose());
+    Ok(())
+}
+
+/// `token revoke`: reads a token from stdin (never argv) and refuses it
+/// from now on, for writes. Only its `jti` and expiry are stored. The token
+/// must still be live and signed by this server's key, since that is the
+/// only way its `jti` is known.
+fn token_revoke(config: &ServerConfig) -> Result<(), Failure> {
+    let mut text = String::new();
+    std::io::stdin()
+        .take(graft_auth::MAX_TOKEN_LEN as u64 + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| Failure::failed(format!("read stdin: {e}")))?;
+    let key = keys::load_or_create(&config.key_path())
+        .map_err(|e| Failure::failed(format!("signing key: {e}")))?;
+    let now = now_s();
+    let claims = graft_auth::verify(
+        &key.verifying_key(),
+        &Token::from_encoded(text.trim().to_owned()),
+        now,
+        &NoDenylist,
+    )
+    .map_err(|_| {
+        Failure::failed(
+            "not a live token of this server (expired, malformed, or signed by another key)",
+        )
+    })?;
+    if !config.meta_db.exists() {
+        return Err(Failure::failed(format!(
+            "{} does not exist; start the server once first",
+            config.meta_db.display()
+        )));
+    }
+    let deny = Denylist::open(&config.meta_db).map_err(Failure::failed)?;
+    deny.revoke(&claims.jti, claims.exp, now)
+        .map_err(Failure::failed)?;
+    println!("revoked {} until {}", claims.jti, claims.exp);
     Ok(())
 }
 

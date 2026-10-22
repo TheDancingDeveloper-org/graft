@@ -3,9 +3,10 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use common::{Site, api};
+use common::{Clients, Site, api};
 use graft_proto::ApiError;
 use graft_proto::pb;
 
@@ -140,4 +141,77 @@ async fn concurrent_watches_are_limited_per_principal_and_in_total() {
             }
         }
     }
+}
+
+/// Reads `repo` from `from` to the journal's end: the LSNs seen, and the
+/// `next_lsn` the stream ended on.
+async fn read_from(c: &mut Clients, from: u64) -> (Vec<u64>, u64) {
+    let mut s = c
+        .repo
+        .watch(pb::WatchRequest {
+            repo: "r".into(),
+            from_lsn: from,
+            kinds: Vec::new(),
+            limit: 0,
+            wait_ms: 0,
+        })
+        .await
+        .expect("watch")
+        .into_inner();
+    let (mut lsns, mut next) = (Vec::new(), from);
+    while let Some(page) = s.message().await.expect("page") {
+        lsns.extend(page.entries.iter().map(|e| e.lsn));
+        next = page.next_lsn;
+    }
+    (lsns, next)
+}
+
+fn snapshot(n: u8) -> BTreeMap<String, Vec<u8>> {
+    BTreeMap::from([("f".to_string(), vec![n])])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watch_resumes_from_its_lsn_across_a_restart() {
+    let site = Site::new("server-watch-resume", "");
+    let admin = site.mint(&["repo:r:admin"]);
+    let server = site.start();
+    let mut c = server.clients(Some(&admin)).await;
+    c.create_repo("r").await.expect("create");
+    let mut parent = None;
+    for n in 0..3u8 {
+        let before = if n == 0 { BTreeMap::new() } else { snapshot(n - 1) };
+        let created = c
+            .commit("r", parent, &before, &snapshot(n), n as usize)
+            .await
+            .expect("commit");
+        parent = Some(created.id);
+    }
+    let (before, next) = read_from(&mut c, 1).await;
+    assert!(!before.is_empty());
+
+    // Kill the server (no graceful shutdown), then restart on the same data.
+    drop(c);
+    server.kill9();
+    let server = site.start();
+    let mut c = server.clients(Some(&admin)).await;
+    for n in 3..6u8 {
+        let before = snapshot(n - 1);
+        let created = c
+            .commit("r", parent, &before, &snapshot(n), n as usize)
+            .await
+            .expect("commit after restart");
+        parent = Some(created.id);
+    }
+
+    // Resuming at the last `next_lsn` picks up exactly where it stopped.
+    let (after, _) = read_from(&mut c, next).await;
+    assert_eq!(after.first().copied(), Some(next));
+    let seen: Vec<u64> = before.iter().chain(after.iter()).copied().collect();
+    let dense: Vec<u64> = (1..=seen.len() as u64).collect();
+    assert_eq!(seen, dense, "no gaps and no duplicates across the restart");
+
+    // And from the middle, too.
+    let mid = seen[seen.len() / 2];
+    let (tail, _) = read_from(&mut c, mid).await;
+    assert_eq!(tail, seen[(mid as usize - 1)..].to_vec());
 }
