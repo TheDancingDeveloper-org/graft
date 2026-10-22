@@ -1857,8 +1857,13 @@ name = "graft-mcp"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "graft-auth",
+ "graft-engine",
  "graft-model",
  "graft-proto",
+ "graft-store",
+ "graft-testkit",
+ "http",
  "rmcp",
  "schemars",
  "serde",
