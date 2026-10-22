@@ -16,9 +16,11 @@ use graft_client::workcopy::{
 };
 use graft_client::workspace::{DEFAULT_LEASE_MS, stack, with_heartbeat};
 use graft_client::{Endpoint, Error, Remote, Sparse};
-use graft_model::{Author, AuthorKind, BlobId, Change, ChangesetId, RepoPath, Timestamp};
+use graft_model::{
+    Author, AuthorKind, BlobId, Change, ChangesetId, EntryKind, RepoPath, Timestamp,
+};
 use graft_proto::api::WorkspaceApi;
-use graft_proto::types::{DraftState, SetHead, WorkspaceRef};
+use graft_proto::types::{DiffResult, DraftState, FileDiff, SetHead, WorkspaceRef};
 use graft_proto::{ApiError, CallContext};
 use graft_testkit::fake_api::admin_cx;
 use graft_testkit::server::{Rpc, SnapshotRepo, TestServer};
@@ -328,6 +330,44 @@ async fn amend_supersedes_the_old_head() {
         env.commit(&mut wc, &amend(Some("x"))).await,
         Err(Error::NothingToCommit)
     ));
+}
+
+/// A server whose reverse diff never ends: empty pages with a token, or the
+/// same path page after page. The amend must refuse, not spin on requests.
+#[tokio::test]
+async fn an_amend_against_a_reverse_diff_that_never_ends_is_refused() {
+    let env = Env::new(&base_files()).await;
+    let mut wc = env.clone("wc", Sparse::full()).await;
+    write(wc.root(), "src/lib.rs", "fn a() { 1 }\n");
+    env.commit(&mut wc, &opts("first")).await.unwrap();
+    write(wc.root(), "src/lib.rs", "fn a() { 2 }\n");
+
+    let never_ends = [
+        DiffResult {
+            files: Vec::new(),
+            next: Some("more".to_owned()),
+        },
+        DiffResult {
+            files: vec![FileDiff {
+                change: Change::Put {
+                    path: p("src/lib.rs"),
+                    kind: EntryKind::File,
+                    id: BlobId::hash(b"fn a() {}\n").0,
+                },
+                patch: None,
+                truncated: false,
+            }],
+            next: Some("more".to_owned()),
+        },
+    ];
+    for lie in never_ends {
+        env.repo.lie_about_diff(Some(lie));
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(10), env.commit(&mut wc, &amend(None)))
+                .await
+                .expect("the amend kept asking for pages from a diff that never ends");
+        assert!(outcome.is_err(), "{outcome:?}");
+    }
 }
 
 #[tokio::test]

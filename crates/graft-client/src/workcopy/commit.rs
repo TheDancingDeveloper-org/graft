@@ -355,12 +355,21 @@ impl WorkingCopy {
                     },
                 )
                 .await?;
+            // A diff never repeats a path, and an empty page with a token
+            // makes no progress. Refusing both means every page adds a new
+            // path, so the loop runs at most `old.changes.len() + 1` times,
+            // even against a server that keeps handing out tokens.
+            if page.files.is_empty() && page.next.is_some() {
+                return Err(protocol("the reverse diff sent an empty page with a token"));
+            }
             for f in page.files {
                 let (path, value) = match f.change {
                     Change::Put { path, kind, id } => (path, Some((kind, id))),
                     Change::Delete { path } => (path, None),
                 };
-                before.insert(path, value);
+                if before.insert(path, value).is_some() {
+                    return Err(protocol("the reverse diff repeats a path"));
+                }
             }
             if before.len() > old.changes.len() {
                 return Err(protocol("the reverse diff is longer than the changeset"));
