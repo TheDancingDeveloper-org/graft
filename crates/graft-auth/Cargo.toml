@@ -14,3 +14,13 @@ workspace = true
 [dependencies]
 graft-model.workspace = true
 graft-proto.workspace = true
+base64.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+graft-telemetry.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
