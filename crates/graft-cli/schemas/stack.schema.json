@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft stack list --json",
+  "type": "object",
+  "required": [
+    "workspace",
+    "base",
+    "head",
+    "drafts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "workspace": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "base": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "head": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "drafts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "state",
+          "author",
+          "authored_at",
+          "subject",
+          "changes"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][0-9a-f]{64}$",
+            "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+          },
+          "state": {
+            "enum": [
+              "draft",
+              "landed",
+              "superseded",
+              "abandoned"
+            ]
+          },
+          "author": {
+            "type": "object",
+            "required": [
+              "name",
+              "email",
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "human",
+                  "agent",
+                  "bot",
+                  "ci"
+                ]
+              }
+            }
+          },
+          "authored_at": {
+            "type": "object",
+            "required": [
+              "ms",
+              "offset_min"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "ms": {
+                "type": "integer"
+              },
+              "offset_min": {
+                "type": "integer"
+              }
+            }
+          },
+          "subject": {
+            "type": "string"
+          },
+          "changes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

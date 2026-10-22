@@ -26,7 +26,7 @@ pub(crate) fn run(g: &Global, args: &CommitArgs) -> Result<(), Failure> {
     let opts = CommitOptions {
         message: args.message.clone(),
         author,
-        authored_at: now(),
+        authored_at: authored_at()?,
         metadata,
         amend: args.amend,
         limits: CommitLimits::default(),
@@ -136,12 +136,18 @@ fn metadata(pairs: &[String]) -> Result<Metadata, Failure> {
     Ok(out)
 }
 
-/// Now, in UTC.
-fn now() -> Timestamp {
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64);
-    Timestamp { ms, offset_min: 0 }
+/// The authoring time: `GRAFT_AUTHOR_DATE` (ms since the epoch, for
+/// reproducible commits), else now, in UTC.
+fn authored_at() -> Result<Timestamp, Failure> {
+    let ms = match env::var("GRAFT_AUTHOR_DATE") {
+        Ok(text) => text.trim().parse().map_err(|_| {
+            Failure::usage("GRAFT_AUTHOR_DATE must be milliseconds since the epoch")
+        })?,
+        Err(_) => SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64),
+    };
+    Ok(Timestamp { ms, offset_min: 0 })
 }
 
 #[cfg(test)]

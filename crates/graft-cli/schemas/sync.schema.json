@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft sync --json",
+  "type": "object",
+  "required": [
+    "line",
+    "from",
+    "base",
+    "head",
+    "changed",
+    "fetch",
+    "recovered"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "line": {
+      "type": "string"
+    },
+    "from": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "base": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "head": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "changed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "fetch": {
+      "type": "object",
+      "required": [
+        "blobs",
+        "bytes",
+        "requests"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "blobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requests": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "recovered": {
+      "description": "An interrupted commit the command found first: finished, rolled back, or none.",
+      "enum": [
+        "finished",
+        "rolled_back",
+        null
+      ]
+    }
+  }
+}
