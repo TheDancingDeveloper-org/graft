@@ -7,7 +7,7 @@
 //! `read`. This is the engine's minimal reading of the text form until
 //! `graft_auth::authorize` (G1.9) replaces it.
 
-use graft_model::RepoPath;
+use graft_model::{Change, RepoPath};
 use graft_proto::{ApiError, CallContext, Principal};
 
 /// What an operation needs.
@@ -41,6 +41,21 @@ pub(crate) fn require(cx: &CallContext, repo: &str, need: Need<'_>) -> Result<()
         scope: format!("repo:{repo}:{perm}"),
         path,
     })
+}
+
+/// Fails with `PermissionDenied` unless the caller may write every path
+/// `changes` touches (an empty change list needs an unrestricted write).
+pub(crate) fn require_changes(
+    cx: &CallContext,
+    repo: &str,
+    changes: &[Change],
+) -> Result<(), ApiError> {
+    if changes.is_empty() {
+        return require(cx, repo, Need::Write(None));
+    }
+    changes
+        .iter()
+        .try_for_each(|change| require(cx, repo, Need::Write(Some(change.path()))))
 }
 
 /// Whether the caller administers `repo`.

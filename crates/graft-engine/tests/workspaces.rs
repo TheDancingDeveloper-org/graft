@@ -452,6 +452,58 @@ fn only_the_owner_or_an_admin_changes_a_workspace<M: MetaStore>(f: &Fixture<M>) 
     w.close("bobs").expect("admin closes");
 }
 
+fn set_head_checks_path_scopes_of_adopted_changesets<M: MetaStore>(f: &Fixture<M>) {
+    let w = Ws::new(f, "r");
+    let docs = as_subject("docs-writer", &["repo:r:write:docs"]);
+    w.open_as(&docs, "docs", 0).expect("open");
+    let set_head = |new| {
+        block_on(w.e().set_head(
+            &docs,
+            SetHead {
+                workspace: w.wref("docs"),
+                expected: None,
+                new: Some(new),
+            },
+        ))
+    };
+    // An abandoned changeset made by someone with wider scope.
+    let secret = w.repo.commit(vec![w.root], &[("secret/x", b"1")], &[]).id;
+    let before = (
+        w.get("docs").expect("get"),
+        w.record(secret),
+        w.repo.journal(),
+    );
+    assert_eq!(
+        set_head(secret),
+        Err(ApiError::PermissionDenied {
+            scope: "repo:r:write".to_owned(),
+            path: Some("secret/x".to_owned()),
+        })
+    );
+    assert_eq!(
+        (
+            w.get("docs").expect("get"),
+            w.record(secret),
+            w.repo.journal()
+        ),
+        before,
+        "a refused adoption changes nothing"
+    );
+    // One change outside the prefix is enough to refuse.
+    let mixed = w
+        .repo
+        .commit(vec![w.root], &[("docs/a", b"2"), ("src/b", b"3")], &[])
+        .id;
+    assert!(matches!(
+        set_head(mixed),
+        Err(ApiError::PermissionDenied { .. })
+    ));
+    // Within the prefix it is adopted.
+    let fine = w.repo.commit(vec![w.root], &[("docs/a", b"4")], &[]).id;
+    assert_eq!(set_head(fine).expect("adopt").head, Some(fine));
+    assert_eq!(w.state(fine), DraftState::Draft);
+}
+
 fn opens_race_and_one_wins<M: MetaStore + 'static>(f: &Fixture<M>) {
     let w = Ws::new(f, "r");
     let results: Vec<_> = std::thread::scope(|s| {
@@ -724,4 +776,5 @@ on_both_stores!(
     expired_lease_abandons_drafts,
     only_the_owner_or_an_admin_changes_a_workspace,
     opens_race_and_one_wins,
+    set_head_checks_path_scopes_of_adopted_changesets,
 );

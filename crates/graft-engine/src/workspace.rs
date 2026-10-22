@@ -23,7 +23,7 @@ use graft_store::{
     TxnOutcome, WorkspaceRecord, Write,
 };
 
-use crate::access::{Need, is_admin, require};
+use crate::access::{Need, is_admin, require, require_changes};
 use crate::{Engine, errors, journal};
 
 /// The longest workspace name, in bytes.
@@ -486,6 +486,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 }
                 let rule = match record.state {
                     RecordState::Abandoned => {
+                        // Adopting a changeset writes its changes into this
+                        // workspace: the caller needs write on every path it
+                        // changes, as `CreateChangeset` does (design §12.2).
+                        let (cs, _) = self.changeset(repo, id).await?;
+                        require_changes(cx, &wref.repo, &cs.changes)?;
                         transition(
                             id,
                             record,

@@ -25,7 +25,7 @@ use graft_store::{
     StoreError, TxnOutcome, WorkspaceRecord, Write,
 };
 
-use crate::access::{Need, require};
+use crate::access::{Need, require, require_changes};
 use crate::objects::Upload;
 use crate::source::{Trees, empty_tree, model_root};
 use crate::workspace::{
@@ -108,12 +108,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: CreateChangeset,
     ) -> Result<Created, ApiError> {
-        if req.changes.is_empty() {
-            require(cx, &req.repo, Need::Write(None))?;
-        }
-        for change in &req.changes {
-            require(cx, &req.repo, Need::Write(Some(change.path())))?;
-        }
+        require_changes(cx, &req.repo, &req.changes)?;
         let repo = self.repo_id(&req.repo).await?;
         let hold = match &req.workspace {
             None => None,
