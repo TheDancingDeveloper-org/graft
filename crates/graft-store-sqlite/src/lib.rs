@@ -457,8 +457,10 @@ impl MetaStore for SqliteMetaStore {
         after: Option<ChangesetId>,
         limit: u32,
     ) -> StoreResult<Vec<(ChangesetId, ChangesetRecord)>> {
-        self.read(move |c| reader::list_records(c, repo, state, after, limit))
-            .await
+        self.read("list_records", move |c| {
+            reader::list_records(c, repo, state, after, limit)
+        })
+        .await
     }
 
     async fn list_all_workspaces(
@@ -468,8 +470,10 @@ impl MetaStore for SqliteMetaStore {
         limit: u32,
     ) -> StoreResult<Vec<WorkspaceRecord>> {
         let after = after.to_owned();
-        self.read(move |c| reader::list_all_workspaces(c, repo, &after, limit))
-            .await
+        self.read("list_all_workspaces", move |c| {
+            reader::list_all_workspaces(c, repo, &after, limit)
+        })
+        .await
     }
 
     async fn holder_rows(
@@ -479,8 +483,10 @@ impl MetaStore for SqliteMetaStore {
         after: Option<String>,
         limit: u32,
     ) -> StoreResult<Vec<String>> {
-        self.read(move |c| reader::holder_rows(c, repo, object, after, limit))
-            .await
+        self.read("holder_rows", move |c| {
+            reader::holder_rows(c, repo, object, after, limit)
+        })
+        .await
     }
 
     async fn land(
