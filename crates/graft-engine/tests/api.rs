@@ -60,7 +60,8 @@ fn round_trip_reproduces_a_synthetic_repository<M: MetaStore>(f: &Fixture<M>) {
         let created = repo
             .try_commit(parent.into_iter().collect(), changes)
             .expect("commit");
-        assert_eq!(created.state, DraftState::Draft);
+        // Nothing holds a changeset created without a workspace.
+        assert_eq!(created.state, DraftState::Abandoned);
         let moved = repo
             .update_ref("main", parent, created.id, RefKind::Line)
             .expect("fast-forward main");
@@ -238,7 +239,7 @@ fn non_fast_forward_line_moves_are_refused<M: MetaStore>(f: &Fixture<M>) {
             actual: Some(d),
         })
     );
-    assert_eq!(repo.changeset(c).state, DraftState::Draft);
+    assert_eq!(repo.changeset(c).state, DraftState::Abandoned);
     assert_eq!(repo.changeset(d).state, DraftState::Landed);
 }
 
@@ -374,7 +375,7 @@ fn watch_pages_and_filters_the_journal<M: MetaStore>(f: &Fixture<M>) {
     assert_eq!(b.lsn, 2);
     assert_eq!(
         all[0].body,
-        format!("{{\"id\":\"{}\",\"state\":\"draft\"}}", a.id)
+        format!("{{\"id\":\"{}\",\"state\":\"abandoned\"}}", a.id)
     );
     assert!(
         all[2].body.contains(&format!("\"new\":\"{}\"", b.id)),

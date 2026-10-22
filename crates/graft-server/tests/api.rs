@@ -305,9 +305,12 @@ async fn health_metrics_and_the_json_facade() {
     // a crash, and the server still serves afterwards.
     let e = c
         .workspaces
-        .get_workspace(pb::WorkspaceRef {
-            repo: "r".into(),
-            name: "w".into(),
+        .sync(pb::SyncRequest {
+            workspace: Some(pb::WorkspaceRef {
+                repo: "r".into(),
+                name: "w".into(),
+            }),
+            onto: None,
         })
         .await
         .expect_err("unimplemented");

@@ -148,13 +148,17 @@ pub fn memory_with(config: EngineConfig) -> Fixture<MemoryStore> {
 }
 
 pub fn sqlite() -> Fixture<SqliteMetaStore> {
+    sqlite_with(EngineConfig::default())
+}
+
+pub fn sqlite_with(config: EngineConfig) -> Fixture<SqliteMetaStore> {
     let dir = TempDir::new("sqlite");
     let meta = SqliteMetaStore::open(SqliteConfig::new(dir.0.join("meta.sqlite")))
         .expect("open sqlite store");
-    build(Arc::new(meta), EngineConfig::default(), Some(dir))
+    build(Arc::new(meta), config, Some(dir))
 }
 
-fn build<M: MetaStore>(meta: Arc<M>, config: EngineConfig, dir: Option<TempDir>) -> Fixture<M> {
+pub fn build<M: MetaStore>(meta: Arc<M>, config: EngineConfig, dir: Option<TempDir>) -> Fixture<M> {
     let objects = Faulty::default();
     let clock = Arc::new(FakeClock::at(1_000_000));
     let engine = Engine::new(meta, Arc::new(objects.clone()), clock.clone(), config);

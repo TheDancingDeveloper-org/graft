@@ -1,6 +1,6 @@
 //! git interop (`docs/design.md` §11). The only crate that knows git.
 //!
-//! Work items G1.8 (import and fidelity), G2.2 (export).
+//! Work items G1.8 (import and fidelity) and G2.2 (export).
 //!
 //! - [`import::import`] reads a bare repository with `gix`, walks every commit
 //!   reachable from the configured refs oldest first, and sends blobs and
@@ -9,13 +9,21 @@
 //!   the git sha.
 //! - [`export`] holds the deterministic git encoders: blob, tree (by path
 //!   copying from the parent's git tree) and commit shas.
+//! - [`exporter::Exporter`] writes changesets as git commits into a bare
+//!   repository, parents first, and exports whole refs (G2.2).
+//! - [`fidelity::check_changeset`] checks that git sees the changes graft
+//!   recorded, in O(change).
 //! - [`map`] is the mirror map: graft ids ↔ git shas, raw commit headers and
 //!   the raw git trees graft's model cannot express.
 
 use std::fmt;
 
+use graft_model::ChangesetId;
+
 mod diff;
 pub mod export;
+pub mod exporter;
+pub mod fidelity;
 mod git;
 pub mod import;
 pub mod map;
@@ -115,6 +123,20 @@ pub enum GitError {
     Api(graft_proto::ApiError),
     /// The mirror map failed.
     Map(String),
+    /// Writing objects or a ref into the destination repository failed.
+    Write(String),
+    /// The export was configured with something it cannot write.
+    Config(String),
+    /// A native changeset whose metadata git cannot hold in a commit (a
+    /// newline or NUL where a header or trailer goes). Nothing was written
+    /// for it.
+    Unexportable {
+        /// The changeset.
+        changeset: ChangesetId,
+        /// Which field: `author-name`, `author-email`, `committer`,
+        /// `message` or `trailer`.
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for GitError {
@@ -140,6 +162,11 @@ impl fmt::Display for GitError {
             GitError::Invalid { commit, rule } => write!(f, "commit {commit} breaks rule {rule}"),
             GitError::Api(e) => write!(f, "the graft API refused: {e:?}"),
             GitError::Map(what) => write!(f, "mirror map failed: {what}"),
+            GitError::Write(what) => write!(f, "writing to the git repository failed: {what}"),
+            GitError::Config(what) => write!(f, "export configuration: {what}"),
+            GitError::Unexportable { changeset, reason } => {
+                write!(f, "changeset {changeset} cannot be exported: bad {reason}")
+            }
         }
     }
 }

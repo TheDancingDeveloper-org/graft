@@ -7,7 +7,7 @@
 //! `read`. This is the engine's minimal reading of the text form until
 //! `graft_auth::authorize` (G1.9) replaces it.
 
-use graft_model::RepoPath;
+use graft_model::{Change, RepoPath};
 use graft_proto::{ApiError, CallContext, Principal};
 
 /// What an operation needs.
@@ -19,6 +19,9 @@ pub(crate) enum Need<'a> {
     Read,
     /// Write, at a path when the write is path-scoped.
     Write(Option<&'a RepoPath>),
+    /// Hold workspaces: any write scope on the repository, whatever its
+    /// path prefix (the paths are checked per change).
+    Workspace,
     /// Administer the repository.
     Admin,
 }
@@ -31,12 +34,33 @@ pub(crate) fn require(cx: &CallContext, repo: &str, need: Need<'_>) -> Result<()
     let (perm, path) = match need {
         Need::Objects | Need::Read => ("read", None),
         Need::Write(path) => ("write", path.map(|p| p.to_string())),
+        Need::Workspace => ("write", None),
         Need::Admin => ("admin", None),
     };
     Err(ApiError::PermissionDenied {
         scope: format!("repo:{repo}:{perm}"),
         path,
     })
+}
+
+/// Fails with `PermissionDenied` unless the caller may write every path
+/// `changes` touches (an empty change list needs an unrestricted write).
+pub(crate) fn require_changes(
+    cx: &CallContext,
+    repo: &str,
+    changes: &[Change],
+) -> Result<(), ApiError> {
+    if changes.is_empty() {
+        return require(cx, repo, Need::Write(None));
+    }
+    changes
+        .iter()
+        .try_for_each(|change| require(cx, repo, Need::Write(Some(change.path()))))
+}
+
+/// Whether the caller administers `repo`.
+pub(crate) fn is_admin(cx: &CallContext, repo: &str) -> bool {
+    granted(&cx.principal, repo, Need::Admin)
 }
 
 fn granted(principal: &Principal, repo: &str, need: Need<'_>) -> bool {
@@ -56,6 +80,7 @@ fn grants(scope: &str, repo: &str, need: Need<'_>) -> bool {
     match (perm, need) {
         (Some("admin"), _) => true,
         (Some("read" | "land" | "write"), Need::Objects | Need::Read) => true,
+        (Some("write"), Need::Workspace) => true,
         (Some("write"), Need::Write(path)) => match (arg, path) {
             (None, _) => true,
             // A prefix-restricted write scope covers only paths beneath it.
@@ -98,6 +123,16 @@ mod tests {
         ));
         assert!(!grants("repo:r:write:src", "r", Need::Write(None)));
         assert!(!grants("repo:r:write", "r", Need::Admin));
+    }
+
+    #[test]
+    fn any_write_scope_holds_workspaces() {
+        assert!(grants("repo:r:write", "r", Need::Workspace));
+        assert!(grants("repo:r:write:src", "r", Need::Workspace));
+        assert!(grants("repo:r:admin", "r", Need::Workspace));
+        assert!(!grants("repo:r:read", "r", Need::Workspace));
+        assert!(!grants("repo:r:land:main", "r", Need::Workspace));
+        assert!(!grants("repo:s:write", "r", Need::Workspace));
     }
 
     #[test]

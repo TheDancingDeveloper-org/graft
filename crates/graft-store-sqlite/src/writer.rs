@@ -16,7 +16,7 @@ use rusqlite::{Connection, DropBehavior, OptionalExtension, TransactionBehavior,
 
 use crate::codec::{int, ref_kind_code, sql_err, state_code, uint};
 use crate::oneshot;
-use crate::reader::{check_repo, read_ref};
+use crate::reader::{check_repo, read_ref, workspace};
 
 /// The most jobs grouped under one commit.
 pub(crate) const MAX_BATCH: usize = 256;
@@ -130,7 +130,8 @@ fn create_repo(conn: &Connection, name: &str) -> StoreResult<RepoId> {
 }
 
 /// Whether a precondition holds in the state the transaction sees.
-fn holds(conn: &Connection, repo: i64, pre: &Precondition) -> StoreResult<bool> {
+fn holds(conn: &Connection, repo_id: RepoId, pre: &Precondition) -> StoreResult<bool> {
+    let repo = i64::from(repo_id.0);
     match pre {
         Precondition::RefIs { name, expected } => {
             let current = read_ref(conn, repo, name)?.map(|r| (r.target, r.version));
@@ -145,6 +146,20 @@ fn holds(conn: &Connection, repo: i64, pre: &Precondition) -> StoreResult<bool> 
                 None => false,
                 Some(stored) => stored.as_deref() == head.as_ref().map(|h| &h.0.0[..]),
             })
+        }
+        Precondition::WorkspaceIs { name, expected } => {
+            let current = workspace(conn, repo_id, name)?;
+            Ok(current == *expected)
+        }
+        Precondition::RecordStateIs { id, state } => {
+            let row: Option<i64> = conn
+                .prepare_cached("SELECT state FROM changesets WHERE repo = ?1 AND id = ?2")
+                .and_then(|mut s| {
+                    s.query_row(params![repo, &id.0.0[..]], |r| r.get(0))
+                        .optional()
+                })
+                .map_err(sql_err)?;
+            Ok(row == Some(state_code(*state)))
         }
         Precondition::ChangesetAbsent(id) => {
             let present = conn
@@ -162,7 +177,7 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
     let repo = i64::from(repo_id.0);
     check_repo(conn, repo_id)?;
     for (index, pre) in txn.preconditions.iter().enumerate() {
-        if !holds(conn, repo, pre)? {
+        if !holds(conn, repo_id, pre)? {
             return Ok(TxnOutcome::PreconditionFailed(index));
         }
     }

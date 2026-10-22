@@ -141,6 +141,32 @@ impl MetaStore for Counting {
         bump(&self.reads.other);
         self.inner.expired_workspaces(repo, before_ms, limit)
     }
+    fn list_workspaces(
+        &self,
+        repo: RepoId,
+        owner: &str,
+        after: &str,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        bump(&self.reads.other);
+        self.inner.list_workspaces(repo, owner, after, limit)
+    }
+    fn count_records(
+        &self,
+        repo: RepoId,
+        state: graft_store::RecordState,
+    ) -> impl Future<Output = StoreResult<u64>> + Send {
+        bump(&self.reads.other);
+        self.inner.count_records(repo, state)
+    }
+    fn count_workspaces(
+        &self,
+        repo: RepoId,
+        before_ms: Option<i64>,
+    ) -> impl Future<Output = StoreResult<u64>> + Send {
+        bump(&self.reads.other);
+        self.inner.count_workspaces(repo, before_ms)
+    }
     fn derived(
         &self,
         repo: RepoId,

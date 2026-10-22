@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1];
+pub const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -132,6 +132,13 @@ CREATE TABLE tombstones (
     reason TEXT NOT NULL,
     PRIMARY KEY (repo, id)
 ) WITHOUT ROWID;
+";
+
+/// Version 2 (G2.1): `ListWorkspaces` by owner, and orphan gauges that count
+/// one record state without scanning the others.
+const V2: &str = "
+CREATE INDEX workspaces_owner ON workspaces (repo, owner, name);
+CREATE INDEX changesets_state ON changesets (repo, state);
 ";
 
 /// The database's schema version.

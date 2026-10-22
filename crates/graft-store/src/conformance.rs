@@ -39,6 +39,10 @@ where
     case!(journal_lsns_are_monotonic_and_gap_free);
     case!(workspace_head_cas);
     case!(workspace_leases);
+    case!(workspace_record_cas);
+    case!(record_state_precondition);
+    case!(workspaces_list_by_owner);
+    case!(counts_follow_states_and_leases);
     case!(holder_rows_are_a_set);
     case!(land_records_are_idempotent);
     case!(derived_values_are_keyed_by_kind_version_and_key);
@@ -997,4 +1001,208 @@ async fn pagination_is_bounded<O: ObjectStore, M: MetaStore>(_objects: &O, meta:
             .len(),
         3
     );
+}
+
+async fn workspace_record_cas<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "workspace-cas").await;
+    let is = |expected: Option<WorkspaceRecord>| Precondition::WorkspaceIs {
+        name: "ws-a".to_owned(),
+        expected,
+    };
+    let open = ws("ws-a", None, 1000);
+
+    // Absent: an open succeeds once; a second open of the name fails.
+    for want in [
+        TxnOutcome::Committed(vec![1]),
+        TxnOutcome::PreconditionFailed(0),
+    ] {
+        let t = txn(
+            vec![is(None)],
+            vec![
+                Write::PutWorkspace(open.clone()),
+                journal("WorkspaceOpened"),
+            ],
+        );
+        assert_eq!(run_txn(meta, repo, t).await, want);
+    }
+
+    // A stale record (any field) fails and writes nothing.
+    let mut renewed = open.clone();
+    renewed.lease_until_ms = 2000;
+    let mut stale = open.clone();
+    stale.lease_until_ms = 999;
+    let t = txn(
+        vec![is(Some(stale))],
+        vec![
+            Write::PutWorkspace(renewed.clone()),
+            journal("WorkspaceRenewed"),
+        ],
+    );
+    assert_eq!(
+        run_txn(meta, repo, t).await,
+        TxnOutcome::PreconditionFailed(0)
+    );
+    assert_eq!(
+        meta.workspace(repo, "ws-a").await.expect("read"),
+        Some(open.clone())
+    );
+
+    // The current record matches.
+    let t = txn(
+        vec![is(Some(open.clone()))],
+        vec![
+            Write::PutWorkspace(renewed.clone()),
+            journal("WorkspaceRenewed"),
+        ],
+    );
+    assert_eq!(run_txn(meta, repo, t).await, TxnOutcome::Committed(vec![2]));
+
+    // Close by CAS, then the absent expectation holds again.
+    let t = txn(
+        vec![is(Some(renewed))],
+        vec![
+            Write::DeleteWorkspace("ws-a".to_owned()),
+            journal("WorkspaceClosed"),
+        ],
+    );
+    assert_eq!(run_txn(meta, repo, t).await, TxnOutcome::Committed(vec![3]));
+    let t = txn(vec![is(None)], vec![]);
+    assert_eq!(run_txn(meta, repo, t).await, TxnOutcome::Committed(vec![]));
+}
+
+async fn record_state_precondition<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "record-cas").await;
+    let is = |state: RecordState| Precondition::RecordStateIs { id: cs(1), state };
+
+    // An absent changeset matches no state.
+    let t = txn(vec![is(RecordState::Draft)], vec![journal("x")]);
+    assert_eq!(
+        run_txn(meta, repo, t).await,
+        TxnOutcome::PreconditionFailed(0)
+    );
+
+    let t = txn(
+        vec![],
+        vec![
+            Write::PutChangeset {
+                id: cs(1),
+                content: b"c1".to_vec(),
+                record: record(RecordState::Draft),
+            },
+            journal("ChangesetCreated"),
+        ],
+    );
+    assert_eq!(run_txn(meta, repo, t).await, TxnOutcome::Committed(vec![1]));
+
+    let to = |state| Write::SetRecord {
+        id: cs(1),
+        record: record(state),
+    };
+    let t = txn(
+        vec![is(RecordState::Abandoned)],
+        vec![to(RecordState::Landed)],
+    );
+    assert_eq!(
+        run_txn(meta, repo, t).await,
+        TxnOutcome::PreconditionFailed(0)
+    );
+    let t = txn(
+        vec![is(RecordState::Draft)],
+        vec![to(RecordState::Abandoned)],
+    );
+    assert_eq!(run_txn(meta, repo, t).await, TxnOutcome::Committed(vec![]));
+    let (_, rec) = meta
+        .changeset(repo, cs(1))
+        .await
+        .expect("read")
+        .expect("stored");
+    assert_eq!(rec.state, RecordState::Abandoned);
+}
+
+async fn workspaces_list_by_owner<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "ws-list").await;
+    let other = new_repo(meta, "ws-list-other").await;
+    let mut writes = Vec::new();
+    for (name, owner) in [("d", "alice"), ("b", "bob"), ("a", "alice"), ("c", "alice")] {
+        let mut w = ws(name, None, 1000);
+        w.owner = owner.to_owned();
+        writes.push(Write::PutWorkspace(w));
+    }
+    run_txn(meta, repo, txn(vec![], writes)).await;
+    let mut elsewhere = ws("z", None, 1000);
+    elsewhere.owner = "alice".to_owned();
+    run_txn(
+        meta,
+        other,
+        txn(vec![], vec![Write::PutWorkspace(elsewhere)]),
+    )
+    .await;
+
+    let list = |after: &'static str, limit| meta.list_workspaces(repo, "alice", after, limit);
+    assert_eq!(names(list("", 10).await.expect("list")), ["a", "c", "d"]);
+    assert_eq!(names(list("", 2).await.expect("list")), ["a", "c"]);
+    assert_eq!(names(list("c", 2).await.expect("list")), ["d"]);
+    assert!(list("d", 2).await.expect("list").is_empty());
+    assert_eq!(
+        names(
+            meta.list_workspaces(repo, "bob", "", 0)
+                .await
+                .expect("list")
+        ),
+        ["b"],
+        "a zero limit still returns one row"
+    );
+    assert!(
+        meta.list_workspaces(repo, "carol", "", 10)
+            .await
+            .expect("list")
+            .is_empty()
+    );
+}
+
+async fn counts_follow_states_and_leases<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "counts").await;
+    let other = new_repo(meta, "counts-other").await;
+    let mut writes = Vec::new();
+    for (n, state) in [
+        (1, RecordState::Draft),
+        (2, RecordState::Draft),
+        (3, RecordState::Abandoned),
+        (4, RecordState::Landed),
+    ] {
+        writes.push(Write::PutChangeset {
+            id: cs(n),
+            content: vec![n],
+            record: record(state),
+        });
+    }
+    writes.push(Write::PutWorkspace(ws("a", None, 1000)));
+    writes.push(Write::PutWorkspace(ws("b", None, 3000)));
+    run_txn(meta, repo, txn(vec![], writes)).await;
+    run_txn(
+        meta,
+        other,
+        txn(
+            vec![],
+            vec![
+                Write::PutChangeset {
+                    id: cs(9),
+                    content: vec![9],
+                    record: record(RecordState::Draft),
+                },
+                Write::PutWorkspace(ws("c", None, 0)),
+            ],
+        ),
+    )
+    .await;
+
+    let count = |state| meta.count_records(repo, state);
+    assert_eq!(count(RecordState::Draft).await.expect("count"), 2);
+    assert_eq!(count(RecordState::Abandoned).await.expect("count"), 1);
+    assert_eq!(count(RecordState::Superseded).await.expect("count"), 0);
+    let workspaces = |before| meta.count_workspaces(repo, before);
+    assert_eq!(workspaces(None).await.expect("count"), 2);
+    assert_eq!(workspaces(Some(1000)).await.expect("count"), 0);
+    assert_eq!(workspaces(Some(1001)).await.expect("count"), 1);
+    assert_eq!(workspaces(Some(i64::MAX)).await.expect("count"), 2);
 }
