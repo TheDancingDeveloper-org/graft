@@ -99,10 +99,10 @@ pub enum GitError {
     /// imported; none after.
     Fidelity(Vec<GitSha>),
     /// Pairs of commits (first imported, second) that map to the same
-    /// changeset: they differ only in what a changeset does not hold (the
-    /// committer, a signature, the encoding or extra headers), so one export
-    /// cannot reproduce both. Changesets before the first pair were imported;
-    /// none after.
+    /// changeset, so one export cannot reproduce both. The
+    /// `mirror.git-commit` metadata key makes this unreachable; it is kept
+    /// as a guard.
+    /// Changesets before the first pair were imported; none after.
     Indistinct(Vec<(GitSha, GitSha)>),
     /// A commit's changes broke a validity rule while deriving its root.
     Invalid {
