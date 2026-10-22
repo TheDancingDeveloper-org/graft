@@ -1,0 +1,13 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: text(out.get_output())
+---
+changeset c94756c9bdf549c6e4841e4b243848d1156fbead59970bb4be1efc61866b30d93
+parent cdb48eb55c33daad6e99842398cedb4ba6b1a756269c8bb587213df155775f0d9
+author test <test@example.com>
+authored 1 ms since the epoch
+state landed
+
+main 2
+
+put file src/lib.rs

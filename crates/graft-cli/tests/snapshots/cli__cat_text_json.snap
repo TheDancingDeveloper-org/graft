@@ -1,0 +1,13 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "at": "ceb9d51a431efa31e031494ec857b6e71b3fc89b7df21172c5365879f263cec50",
+  "content": "hello\n",
+  "encoding": "utf8",
+  "id": "501f415d16e2820151302b1335e9344a01f5faacb2d7077224533cbf45d0e504",
+  "kind": "file",
+  "path": "README.md",
+  "size": 6
+}

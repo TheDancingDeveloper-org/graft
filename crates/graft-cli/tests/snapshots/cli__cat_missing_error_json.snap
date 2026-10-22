@@ -1,0 +1,10 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "error": {
+    "kind": "not_found",
+    "message": "not found: missing.txt"
+  }
+}

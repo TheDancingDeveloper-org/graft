@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft sparse --json",
+  "type": "object",
+  "required": [
+    "full",
+    "prefixes",
+    "root_files"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "full": {
+      "type": "boolean"
+    },
+    "prefixes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "root_files": {
+      "type": "boolean"
+    }
+  }
+}

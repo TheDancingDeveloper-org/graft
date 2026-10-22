@@ -1,0 +1,12 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "full": false,
+  "prefixes": [
+    "docs",
+    "src"
+  ],
+  "root_files": false
+}

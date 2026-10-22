@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft cat --json",
+  "type": "object",
+  "required": [
+    "at",
+    "path",
+    "kind",
+    "id",
+    "size",
+    "encoding",
+    "content"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "at": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "path": {
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "file",
+        "exec",
+        "symlink",
+        "tree",
+        "submodule"
+      ]
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "An object id, as 64 lowercase hex digits."
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "encoding": {
+      "enum": [
+        "utf8",
+        "base64"
+      ]
+    },
+    "content": {
+      "type": "string"
+    }
+  }
+}

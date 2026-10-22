@@ -1,0 +1,11 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "protocol": {
+    "major": 0,
+    "minor": 1
+  },
+  "version": "0.0.0"
+}
