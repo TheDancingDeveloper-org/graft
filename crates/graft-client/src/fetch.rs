@@ -88,10 +88,13 @@ pub struct FetchOptions {
 }
 
 impl Default for FetchOptions {
+    /// Small batches, several in flight: the server answers each batch's
+    /// objects in turn, so 32 ids with 8 in flight cloned rustTorrent in
+    /// about 150 ms where 256 with 4 took about 260 (WI-2223).
     fn default() -> Self {
         Self {
-            batch: 256,
-            window: 4,
+            batch: 32,
+            window: 8,
             budget: Budget::default(),
         }
     }
