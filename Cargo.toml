@@ -48,6 +48,7 @@ graft-store-fs = { path = "crates/graft-store-fs" }
 graft-store-sqlite = { path = "crates/graft-store-sqlite" }
 graft-telemetry = { path = "crates/graft-telemetry" }
 graft-testkit = { path = "crates/graft-testkit" }
+http = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 imara-diff = "0.2"
 insta = { version = "1.49", features = ["json"] }
