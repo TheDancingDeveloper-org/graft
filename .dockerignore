@@ -1,0 +1,10 @@
+# Keep the build context small and free of local state and secrets.
+.git
+**/target
+.graft/
+.claude/
+.codex/
+.agent-tools/
+**/.env
+**/.env.*
+*.tmp

@@ -1,0 +1,13 @@
+# Scrapes graft /metrics inside the compose network. Service names resolve in
+# both image and dev profiles (dev variants carry the same aliases).
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: graft
+    static_configs:
+      - targets:
+          - graft-server:9464
+          - graft-node:9464
+          - graft-mirror:9464
+          - graft-mirror-rusttorrent:9464
