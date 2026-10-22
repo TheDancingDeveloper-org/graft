@@ -17,6 +17,9 @@ use graft_testkit::fake_api::FakeApi;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// The sha of git's empty tree.
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// A temp directory removed on drop.
 pub struct TempDir(pub PathBuf);
 
@@ -219,6 +222,138 @@ impl Git {
         }
         snapshot
     }
+}
+
+/// Merges, a side branch reached only through a merge, a second root,
+/// symlinks, executables, a submodule, an empty merge, tags, and a file that
+/// turns into a directory.
+pub fn varied_repo() -> Git {
+    let mut git = Git::init("varied");
+    git.write("README.md", b"hello\n");
+    git.write("src/lib.rs", b"pub fn a() {}\n");
+    git.write("bin/run.sh", b"#!/bin/sh\necho run\n");
+    git.chmod_x("bin/run.sh");
+    git.symlink("src/lib.rs", "link");
+    git.commit("initial");
+    git.run(&["tag", "-a", "v0.1", "-m", "first release"]);
+
+    git.run(&["checkout", "-q", "-b", "side"]);
+    git.write("src/side.rs", b"side\n");
+    git.commit("side work");
+    git.write("src/lib.rs", b"pub fn a() {}\npub fn side() {}\n");
+    git.commit("more side work");
+
+    git.run(&["checkout", "-q", "main"]);
+    git.write("docs/guide.md", b"guide\n");
+    git.chmod_x("README.md");
+    git.commit("docs, and README becomes executable");
+    git.tick();
+    git.run(&["merge", "-q", "--no-ff", "side", "-m", "merge side"]);
+
+    // A second root, merged in.
+    git.run(&["checkout", "-q", "--orphan", "other"]);
+    git.run(&["rm", "-rq", "--cached", "."]);
+    git.run(&["clean", "-fdq"]);
+    git.write("other/notes.txt", b"unrelated history\n");
+    git.commit("other root");
+    git.run(&["checkout", "-q", "-f", "main"]);
+    git.tick();
+    git.run(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "--allow-unrelated-histories",
+        "other",
+        "-m",
+        "merge other root",
+    ]);
+
+    // An empty merge: the tree is the first parent's.
+    git.run(&["checkout", "-q", "-b", "discarded"]);
+    git.write("discarded.txt", b"never merged\n");
+    git.commit("discarded work");
+    git.run(&["checkout", "-q", "main"]);
+    git.tick();
+    git.run(&[
+        "merge",
+        "-q",
+        "-s",
+        "ours",
+        "discarded",
+        "-m",
+        "empty merge",
+    ]);
+
+    // A submodule (gitlink) entry, file → directory, symlink retarget.
+    let sub = git.commit_tree(EMPTY_TREE, &[], "submodule target");
+    git.write(
+        ".gitmodules",
+        b"[submodule \"vendor/dep\"]\n\tpath = vendor/dep\n\turl = ../dep\n",
+    );
+    git.run(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{sub},vendor/dep"),
+    ]);
+    git.run(&["rm", "-q", "--cached", "link"]);
+    std::fs::remove_file(git.path().join("link")).unwrap();
+    git.symlink("README.md", "link");
+    std::fs::remove_file(git.path().join("docs/guide.md")).unwrap();
+    git.write("docs/guide.md/index.md", b"now a directory\n");
+    git.commit("submodule, retarget, file to directory");
+    git.run(&["tag", "light"]);
+    git
+}
+
+/// Runs git against the repository at `git_dir` with the fixed identity and
+/// config, and returns stdout; panics on failure.
+pub fn git_in(git_dir: &Path, args: &[&str]) -> Vec<u8> {
+    let out = Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+/// `git ls-tree -r` of a commit in `git_dir`, as graft would hold it.
+pub fn ls_tree_in(git_dir: &Path, commit: &str) -> BTreeMap<String, (EntryKind, ObjectId)> {
+    let out = git_in(git_dir, &["ls-tree", "-r", "-z", "--full-tree", commit]);
+    let mut snapshot = BTreeMap::new();
+    for record in out.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+        let tab = record.iter().position(|&b| b == b'\t').unwrap();
+        let meta = std::str::from_utf8(&record[..tab]).unwrap();
+        let path = String::from_utf8(record[tab + 1..].to_vec()).unwrap();
+        let mut parts = meta.split(' ');
+        let mode = parts.next().unwrap();
+        let _kind = parts.next().unwrap();
+        let sha = parts.next().unwrap();
+        let kind = match mode {
+            "100755" => EntryKind::Exec,
+            "120000" => EntryKind::Symlink,
+            "160000" => EntryKind::Submodule,
+            m if m.starts_with("100") => EntryKind::File,
+            m => panic!("unexpected mode {m}"),
+        };
+        let id = if kind == EntryKind::Submodule {
+            let mut id = [0u8; 32];
+            id[..20].copy_from_slice(&GitSha::from_hex(sha).unwrap().0);
+            ObjectId(id)
+        } else {
+            BlobId::hash(&git_in(git_dir, &["cat-file", "blob", sha])).0
+        };
+        snapshot.insert(path, (kind, id));
+    }
+    snapshot
 }
 
 /// The export's view of a repository, through the git CLI.
