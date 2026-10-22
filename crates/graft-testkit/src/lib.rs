@@ -4,4 +4,5 @@
 //! below (docs/plan.md, "Crate ownership and parallelism").
 
 pub mod clock;
+pub mod crash;
 pub mod synth;
