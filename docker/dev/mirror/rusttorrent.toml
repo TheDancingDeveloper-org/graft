@@ -1,0 +1,10 @@
+# graft-mirror variant that clones the rustTorrent pilot repository (D14).
+# Needs outbound HTTPS to github.com. Key names are provisional (see fixture.toml).
+[source]
+url = "https://github.com/TheDancingDeveloper-org/rustTorrent.git"
+branch = "main"
+
+[graft]
+server = "http://graft-server:7878"
+repo = "rusttorrent"
+line = "main"
