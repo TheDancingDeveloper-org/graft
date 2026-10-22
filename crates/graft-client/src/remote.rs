@@ -250,6 +250,26 @@ fn status_error(s: tonic::Status) -> ApiError {
     }
 }
 
+/// The status of a refused `PutObjects`. tonic refuses a message over the
+/// server's decode limit as `OutOfRange` with no graft error attached; that
+/// is the typed `LimitExceeded`, naming the limit tonic's text gives (or, if
+/// the text has none, the client's own message ceiling).
+fn put_error(s: tonic::Status) -> ApiError {
+    if s.code() == tonic::Code::OutOfRange && ApiError::from_status(&s).is_none() {
+        return ApiError::LimitExceeded {
+            limit: "put-objects-message".to_owned(),
+            max: decode_limit(s.message()).unwrap_or(MAX_MESSAGE_BYTES as u64),
+        };
+    }
+    status_error(s)
+}
+
+/// The byte limit in tonic's decode refusal, "… the limit is: N bytes".
+fn decode_limit(message: &str) -> Option<u64> {
+    let tail = message.split("the limit is: ").nth(1)?;
+    tail.split_whitespace().next()?.parse().ok()
+}
+
 /// A response that does not convert: the peer broke the protocol.
 fn wire_error(e: WireError) -> ApiError {
     ApiError::Rejected {
@@ -354,8 +374,10 @@ impl ObjectApi for Remote {
             cur.blobs.push(bytes);
         }
         msgs.push(cur);
-        let ids = unary!(self, cx, objects, put_objects, tokio_stream::iter(msgs));
-        Vec::<ObjectId>::try_from(ids).map_err(wire_error)
+        let req = self.request(cx, tokio_stream::iter(msgs))?;
+        let resp = self.objects().put_objects(req).await.map_err(put_error)?;
+        self.check_version(resp.metadata())?;
+        Vec::<ObjectId>::try_from(resp.into_inner()).map_err(wire_error)
     }
 }
 
