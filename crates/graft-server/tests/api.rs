@@ -341,6 +341,15 @@ async fn health_metrics_and_the_json_facade() {
         metrics.contains("graft_rpc_duration_seconds_count{op=\"CreateChangeset\",outcome=\"ok\",tier=\"server\"}"),
         "{metrics}"
     );
+    // The store's own measurements and the free-space floor, after load.
+    for series in [
+        "graft_store_op_seconds_count{op=\"commit\",port=\"meta\"}",
+        "graft_sqlite_writer_queue_depth ",
+        "graft_disk_free_bytes{volume=\"objects\"} ",
+        "graft_disk_total_bytes{volume=\"objects\"} ",
+    ] {
+        assert!(metrics.contains(series), "missing {series}:\n{metrics}");
+    }
     let side = common::http_get(server.metrics.expect("metrics listener"), "/metrics", None);
     assert_eq!(side.status, 200);
     assert!(side.text().contains("graft_rpc_duration_seconds"));

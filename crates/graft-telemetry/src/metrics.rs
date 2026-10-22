@@ -48,6 +48,10 @@ pub const WATCH_SUBSCRIBERS: &str = "graft_watch_subscribers";
 pub const WORKSPACES: &str = "graft_workspaces";
 /// Expired leases.
 pub const LEASE_EXPIRED_TOTAL: &str = "graft_lease_expired_total";
+/// Free bytes on a server volume.
+pub const DISK_FREE_BYTES: &str = "graft_disk_free_bytes";
+/// Total bytes on a server volume.
+pub const DISK_TOTAL_BYTES: &str = "graft_disk_total_bytes";
 
 /// Every metric name, for registration tests.
 pub const ALL: &[&str] = &[
@@ -71,6 +75,8 @@ pub const ALL: &[&str] = &[
     WATCH_SUBSCRIBERS,
     WORKSPACES,
     LEASE_EXPIRED_TOTAL,
+    DISK_FREE_BYTES,
+    DISK_TOTAL_BYTES,
 ];
 
 /// What kind of Prometheus metric a name is.
@@ -195,6 +201,18 @@ pub const SPECS: &[MetricSpec] = &[
         &[],
         "Expired workspace leases.",
     ),
+    spec(
+        DISK_FREE_BYTES,
+        G,
+        &["volume"],
+        "Free bytes on a server volume.",
+    ),
+    spec(
+        DISK_TOTAL_BYTES,
+        G,
+        &["volume"],
+        "Total bytes on a server volume.",
+    ),
 ];
 
 fn find(name: &str) -> &'static MetricSpec {
@@ -262,6 +280,10 @@ pub struct Metrics {
     pub workspaces: IntGaugeVec,
     /// [`LEASE_EXPIRED_TOTAL`].
     pub lease_expired_total: IntCounter,
+    /// [`DISK_FREE_BYTES`] `{volume}`.
+    pub disk_free_bytes: IntGaugeVec,
+    /// [`DISK_TOTAL_BYTES`] `{volume}`.
+    pub disk_total_bytes: IntGaugeVec,
 }
 
 impl Metrics {
@@ -307,6 +329,8 @@ impl Metrics {
             watch_subscribers: IntGauge::with_opts(opts(WATCH_SUBSCRIBERS))?,
             workspaces: IntGaugeVec::new(opts(WORKSPACES), l(WORKSPACES))?,
             lease_expired_total: IntCounter::with_opts(opts(LEASE_EXPIRED_TOTAL))?,
+            disk_free_bytes: IntGaugeVec::new(opts(DISK_FREE_BYTES), l(DISK_FREE_BYTES))?,
+            disk_total_bytes: IntGaugeVec::new(opts(DISK_TOTAL_BYTES), l(DISK_TOTAL_BYTES))?,
         };
         for c in m.collectors() {
             registry.register(c)?;
@@ -337,6 +361,8 @@ impl Metrics {
             Box::new(self.watch_subscribers.clone()),
             Box::new(self.workspaces.clone()),
             Box::new(self.lease_expired_total.clone()),
+            Box::new(self.disk_free_bytes.clone()),
+            Box::new(self.disk_total_bytes.clone()),
         ]
     }
 }

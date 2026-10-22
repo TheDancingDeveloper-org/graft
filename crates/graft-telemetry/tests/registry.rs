@@ -27,6 +27,10 @@ const DESIGN: &[(&str, &[&str])] = &[
     ("graft_watch_subscribers", &[]),
     ("graft_workspaces", &["state"]),
     ("graft_lease_expired_total", &[]),
+    // Not yet in design §13: the server's own free-space figures, which the
+    // disk alert reads (design §14, "Disk full").
+    ("graft_disk_free_bytes", &["volume"]),
+    ("graft_disk_total_bytes", &["volume"]),
 ];
 
 #[test]
@@ -98,6 +102,8 @@ fn exposition_uses_documented_names_and_labels() {
     m.watch_subscribers.set(4);
     m.workspaces.with_label_values(&["active"]).set(6);
     m.lease_expired_total.inc();
+    m.disk_free_bytes.with_label_values(&["objects"]).set(10);
+    m.disk_total_bytes.with_label_values(&["objects"]).set(100);
 
     let text = graft_telemetry::encode(&registry);
     for spec in SPECS {

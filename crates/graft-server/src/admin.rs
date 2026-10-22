@@ -174,7 +174,7 @@ fn repo_create(config: &ServerConfig, name: &str) -> Result<(), Failure> {
 }
 
 fn fsck(config: &ServerConfig, repo: &str) -> Result<(), Failure> {
-    let (meta, objects) = serve::open_stores(config)
+    let (meta, objects) = serve::open_stores(config, None)
         .map_err(|e| Failure::failed(format!("{e} (fsck needs the server stopped)")))?;
     let report = runtime()?
         .block_on(fsck::fsck(&meta, &objects, repo))

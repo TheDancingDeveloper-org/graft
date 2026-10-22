@@ -10,12 +10,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 
 use graft_store::{MetaTxn, Precondition, RepoId, StoreError, StoreResult, TxnOutcome, Write};
 use rusqlite::{Connection, DropBehavior, OptionalExtension, TransactionBehavior, params};
 
+use crate::WriterQueue;
 use crate::codec::{int, ref_kind_code, sql_err, state_code, uint};
 use crate::oneshot;
 use crate::reader::{check_repo, read_ref, workspace};
@@ -54,10 +54,10 @@ pub(crate) struct WriteJob {
     pub(crate) reply: oneshot::Sender<StoreResult<Written>>,
 }
 
-/// The writer thread's loop. It ends when every sender is gone. `sealed`
+/// The writer thread's loop. It ends when every sender is gone. `queue`
 /// counts the batches it has finished taking off the queue, before it runs
 /// them.
-pub(crate) fn run(mut conn: Connection, jobs: Receiver<WriteJob>, sealed: Arc<AtomicU64>) {
+pub(crate) fn run(mut conn: Connection, jobs: Receiver<WriteJob>, queue: Arc<WriterQueue>) {
     while let Ok(first) = jobs.recv() {
         let mut batch = vec![first];
         while batch.len() < MAX_BATCH {
@@ -66,7 +66,7 @@ pub(crate) fn run(mut conn: Connection, jobs: Receiver<WriteJob>, sealed: Arc<At
                 Err(_) => break,
             }
         }
-        sealed.fetch_add(1, Ordering::Release);
+        queue.taken(batch.len());
         commit_batch(&mut conn, batch);
     }
 }
