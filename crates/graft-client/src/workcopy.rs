@@ -304,13 +304,16 @@ impl WorkingCopy {
     }
 
     /// Opens the local object cache (`.graft/cache`), bounded to
-    /// `max_bytes`. Frames are verified by the fetch code on read.
+    /// `max_bytes`. Frames are verified by the fetch code on read, and one
+    /// that fails is deleted and fetched again, so puts are not synced: a
+    /// frame torn by a crash costs a refetch, where two fsyncs per object
+    /// made a clone about 20 times slower.
     pub fn open_cache(&self, max_bytes: u64) -> Result<FsObjectStore> {
         let store = FsObjectStore::open(
             self.root.join(GRAFT_DIR).join(CACHE_DIR),
             FsMode::Lru { max_bytes },
         )?;
-        Ok(store.verify_reads(false))
+        Ok(store.verify_reads(false).sync_writes(false))
     }
 
     /// Fetches the base's slice into `cache` and writes it out, replacing
