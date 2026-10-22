@@ -525,20 +525,45 @@ impl pb::repo_service_server::RepoService for Services {
 
     /// Streams journal pages from `from_lsn`. With `wait_ms` 0 the stream
     /// ends once it has caught up; otherwise it follows the journal and ends
-    /// after `wait_ms` with nothing new.
+    /// after `wait_ms` (capped) with nothing new. Bounded as `crate::watch`
+    /// describes: a capped wait, a lifetime of at most the token's expiry,
+    /// the token re-checked before each page, and a concurrency limit.
     async fn watch(
         &self,
         request: Request<pb::WatchRequest>,
     ) -> Result<Response<Self::WatchStream>, Status> {
-        let cx = self.cx(&request, "Watch")?;
+        let md = request.metadata();
+        let (cx, exp_s) = self
+            .app
+            .authenticate_until(|k| md.get(k).and_then(|v| v.to_str().ok()), true)
+            .map_err(|e| {
+                self.app.refused("Watch", &e);
+                Status::from(e)
+            })?;
         let req: Watch = wire(request.into_inner())?;
+        let slot = self
+            .app
+            .watches
+            .acquire(&cx.principal.subject)
+            .map_err(|e| {
+                self.app.refused("Watch", &e);
+                Status::from(e)
+            })?;
+        let limits = self.app.watches.limits();
         let app = self.app.clone();
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
-            let wait = Duration::from_millis(req.wait_ms.into());
+            let _slot = slot;
+            let started = Instant::now();
+            let wait = Duration::from_millis(req.wait_ms.into()).min(limits.max_wait);
             let mut from = req.from_lsn.max(1);
             let mut idle_since = Instant::now();
             loop {
+                if app.now_s() >= exp_s {
+                    app.refused("Watch", &ApiError::Unauthenticated);
+                    let _ = tx.send(Err(ApiError::Unauthenticated.into())).await;
+                    return;
+                }
                 let mut page_req = req.clone();
                 page_req.from_lsn = from;
                 page_req.wait_ms = 0;
@@ -557,14 +582,15 @@ impl pb::repo_service_server::RepoService for Services {
                 };
                 let advanced = page.next_lsn > from;
                 from = page.next_lsn;
+                let over = started.elapsed() >= limits.max_lifetime;
                 if advanced {
                     idle_since = Instant::now();
-                    if tx.send(Ok(page.into())).await.is_err() {
+                    if tx.send(Ok(page.into())).await.is_err() || over {
                         return;
                     }
                     continue;
                 }
-                if idle_since.elapsed() >= wait {
+                if over || idle_since.elapsed() >= wait {
                     let _ = tx.send(Ok(page.into())).await;
                     return;
                 }

@@ -25,6 +25,7 @@ use crate::admission::Admission;
 use crate::app::App;
 use crate::config::ServerConfig;
 use crate::grpc::Services;
+use crate::watch::Watches;
 use crate::{http, keys};
 
 /// Runs the server until a shutdown signal.
@@ -93,6 +94,7 @@ async fn run(
         admission,
         telemetry,
         config.max_token_ttl_s,
+        Watches::new(config.watch_limits()),
     ));
 
     let listener = bind(&config.listen).await?;

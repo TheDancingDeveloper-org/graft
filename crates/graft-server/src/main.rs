@@ -17,6 +17,7 @@ mod http;
 mod keys;
 mod mint;
 mod serve;
+mod watch;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

@@ -107,7 +107,22 @@ impl Site {
 
     /// Mints a token with `scopes` on the host.
     pub fn mint(&self, scopes: &[&str]) -> String {
-        let mut args = vec!["token", "mint", "--subject", "tester", "--kind", "agent"];
+        self.mint_as("tester", scopes, 3600)
+    }
+
+    /// Mints a token for `subject` with `scopes`, valid for `ttl_s`.
+    pub fn mint_as(&self, subject: &str, scopes: &[&str], ttl_s: u64) -> String {
+        let ttl = ttl_s.to_string();
+        let mut args = vec![
+            "token",
+            "mint",
+            "--subject",
+            subject,
+            "--kind",
+            "agent",
+            "--ttl",
+            &ttl,
+        ];
         for s in scopes {
             args.extend(["--scope", s]);
         }

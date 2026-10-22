@@ -11,6 +11,10 @@
 //! json_logs = true
 //! max_token_ttl_s = 43200            # MintToken cap (12 h)
 //! shutdown_grace_s = 10              # drain time on SIGTERM
+//! max_watch_wait_ms = 60000          # longest idle wait of a Watch
+//! max_watch_lifetime_s = 3600        # longest Watch stream (and token exp)
+//! max_watches_per_principal = 16     # concurrent Watch streams
+//! max_watches = 1024
 //! ```
 //!
 //! Unknown keys are refused, so a typo fails at start-up rather than being
@@ -53,6 +57,15 @@ pub(crate) struct ServerConfig {
     pub(crate) max_token_ttl_s: u64,
     /// How long a graceful shutdown waits for in-flight calls, seconds.
     pub(crate) shutdown_grace_s: u64,
+    /// The longest idle wait a `Watch` may ask for, ms.
+    pub(crate) max_watch_wait_ms: u64,
+    /// The longest a `Watch` stream runs, seconds (it also ends at its
+    /// token's expiry).
+    pub(crate) max_watch_lifetime_s: u64,
+    /// Concurrent `Watch` streams per principal.
+    pub(crate) max_watches_per_principal: usize,
+    /// Concurrent `Watch` streams in total.
+    pub(crate) max_watches: usize,
 }
 
 impl Default for ServerConfig {
@@ -69,6 +82,10 @@ impl Default for ServerConfig {
             otlp_endpoint: None,
             max_token_ttl_s: 12 * 3600,
             shutdown_grace_s: 10,
+            max_watch_wait_ms: 60_000,
+            max_watch_lifetime_s: 3600,
+            max_watches_per_principal: 16,
+            max_watches: 1024,
         }
     }
 }
@@ -104,10 +121,29 @@ impl ServerConfig {
                 "min_free_fraction must be between 0 and 1".into(),
             ));
         }
-        if self.max_token_ttl_s == 0 {
-            return Err(ConfigError("max_token_ttl_s must be positive".into()));
+        let positive = [
+            ("max_token_ttl_s", self.max_token_ttl_s),
+            ("max_watch_lifetime_s", self.max_watch_lifetime_s),
+            (
+                "max_watches_per_principal",
+                self.max_watches_per_principal as u64,
+            ),
+            ("max_watches", self.max_watches as u64),
+        ];
+        if let Some((key, _)) = positive.iter().find(|(_, v)| *v == 0) {
+            return Err(ConfigError(format!("{key} must be positive")));
         }
         Ok(())
+    }
+
+    /// The `Watch` bounds.
+    pub(crate) fn watch_limits(&self) -> crate::watch::WatchLimits {
+        crate::watch::WatchLimits {
+            max_wait: std::time::Duration::from_millis(self.max_watch_wait_ms),
+            max_lifetime: std::time::Duration::from_secs(self.max_watch_lifetime_s),
+            per_principal: self.max_watches_per_principal,
+            total: self.max_watches,
+        }
     }
 
     /// The signing key file.
@@ -150,6 +186,7 @@ metrics = "0.0.0.0:9464"
         assert!(ServerConfig::parse("min_free_fraction = 1.5").is_err());
         assert!(ServerConfig::parse("min_free_fraction = -0.1").is_err());
         assert!(ServerConfig::parse("max_token_ttl_s = 0").is_err());
+        assert!(ServerConfig::parse("max_watches = 0").is_err());
         assert!(ServerConfig::parse("min_free_fraction = 1.0").is_ok());
     }
 }

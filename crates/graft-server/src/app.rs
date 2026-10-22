@@ -21,6 +21,7 @@ use graft_telemetry::Telemetry;
 use tracing::Instrument as _;
 
 use crate::admission::Admission;
+use crate::watch::Watches;
 
 /// The engine over the production stores.
 pub(crate) type ServerEngine = Engine<SqliteMetaStore, FsObjectStore>;
@@ -71,6 +72,7 @@ pub(crate) struct App {
     pub(crate) admission: Admission,
     pub(crate) telemetry: Arc<Telemetry>,
     pub(crate) max_token_ttl_s: u64,
+    pub(crate) watches: Watches,
     ready: AtomicBool,
     next_request: AtomicU64,
 }
@@ -83,6 +85,7 @@ impl App {
         admission: Admission,
         telemetry: Arc<Telemetry>,
         max_token_ttl_s: u64,
+        watches: Watches,
     ) -> Self {
         Self {
             engine,
@@ -91,6 +94,7 @@ impl App {
             admission,
             telemetry,
             max_token_ttl_s,
+            watches,
             ready: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
         }
@@ -119,6 +123,16 @@ impl App {
         header: impl Fn(&str) -> Option<&'a str>,
         grpc: bool,
     ) -> Result<CallContext, ApiError> {
+        self.authenticate_until(header, grpc).map(|(cx, _)| cx)
+    }
+
+    /// [`App::authenticate`], also returning the token's expiry (seconds
+    /// since the epoch), for calls that outlive one request.
+    pub(crate) fn authenticate_until<'a>(
+        &self,
+        header: impl Fn(&str) -> Option<&'a str>,
+        grpc: bool,
+    ) -> Result<(CallContext, i64), ApiError> {
         if grpc {
             PROTOCOL_VERSION.accept(header(graft_proto::VERSION_HEADER))?;
         }
@@ -135,11 +149,12 @@ impl App {
             Some(id) if is_request_id(id) => id.to_owned(),
             _ => format!("srv-{}", self.next_request.fetch_add(1, Ordering::Relaxed)),
         };
-        Ok(CallContext {
+        let cx = CallContext {
             principal: claims.principal,
             request_id,
             deadline_ms: None,
-        })
+        };
+        Ok((cx, claims.exp))
     }
 
     /// Runs one engine call for `op` on its own task, inside a request span,
