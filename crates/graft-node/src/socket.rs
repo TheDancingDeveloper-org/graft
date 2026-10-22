@@ -16,13 +16,15 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt as _, FileTypeExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::{Sleep, sleep};
+use tokio_stream::Stream;
 use tonic::transport::server::Connected;
 
 use crate::metrics::NodeMetrics;
@@ -147,6 +149,32 @@ impl AsyncWrite for Conn {
     }
 }
 
+/// The listener, shared with its [`Closer`]. `None` once closed.
+type Slot = Arc<Mutex<Option<UnixListener>>>;
+
+/// The accepting end of the socket. It accepts on the listener itself, not
+/// from a spawned task, so the listener is dropped the moment it is closed.
+pub(crate) struct Incoming {
+    listener: Slot,
+    slots: Arc<Semaphore>,
+    metrics: NodeMetrics,
+    backoff: Option<Pin<Box<Sleep>>>,
+}
+
+/// Closes an [`Incoming`]'s listener. The socket path refuses connections
+/// from then on, even while the server still drains the ones it has.
+#[derive(Clone)]
+pub(crate) struct Closer(Slot);
+
+impl Closer {
+    pub(crate) fn close(&self) {
+        // Taken out of the lock first, then dropped, so the close is
+        // complete before this returns.
+        let listener = self.0.lock().unwrap().take();
+        drop(listener);
+    }
+}
+
 /// Accepts connections on `listener`, at most `max` open at once: past it a
 /// new connection is closed at once (the client falls back to the server),
 /// rather than queued.
@@ -154,26 +182,42 @@ pub(crate) fn incoming(
     listener: UnixListener,
     max: usize,
     metrics: NodeMetrics,
-) -> ReceiverStream<io::Result<Conn>> {
-    let (tx, rx) = mpsc::channel(16);
-    let slots = Arc::new(Semaphore::new(max));
-    tokio::spawn(async move {
+) -> (Incoming, Closer) {
+    let slot: Slot = Arc::new(Mutex::new(Some(listener)));
+    let incoming = Incoming {
+        listener: slot.clone(),
+        slots: Arc::new(Semaphore::new(max)),
+        metrics,
+        backoff: None,
+    };
+    (incoming, Closer(slot))
+}
+
+impl Stream for Incoming {
+    type Item = io::Result<Conn>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
         loop {
-            let accepted = tokio::select! {
-                a = listener.accept() => a,
-                () = tx.closed() => return,
+            if let Some(backoff) = this.backoff.as_mut() {
+                ready!(backoff.as_mut().poll(cx));
+                this.backoff = None;
+            }
+            let slot = this.listener.lock().unwrap();
+            let Some(listener) = slot.as_ref() else {
+                return Poll::Ready(None);
             };
-            let io = match accepted {
+            let io = match ready!(listener.poll_accept(cx)) {
                 Ok((io, _)) => io,
                 Err(e) => {
                     tracing::warn!(error = %e, "accept failed");
                     // Out of descriptors and the like: don't spin.
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    this.backoff = Some(Box::pin(sleep(Duration::from_millis(50))));
                     continue;
                 }
             };
-            let Ok(permit) = slots.clone().try_acquire_owned() else {
-                metrics.connections_refused.inc();
+            let Ok(permit) = this.slots.clone().try_acquire_owned() else {
+                this.metrics.connections_refused.inc();
                 drop(io);
                 continue;
             };
@@ -185,17 +229,14 @@ pub(crate) fn incoming(
                 },
                 Err(_) => continue,
             };
-            metrics.connections.inc();
+            this.metrics.connections.inc();
             let conn = Conn {
                 io,
                 peer,
                 _permit: permit,
-                metrics: metrics.clone(),
+                metrics: this.metrics.clone(),
             };
-            if tx.send(Ok(conn)).await.is_err() {
-                return;
-            }
+            return Poll::Ready(Some(Ok(conn)));
         }
-    });
-    ReceiverStream::new(rx)
+    }
 }

@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::time::Duration;
 
 use common::*;
-use graft_node::socket;
+use graft_node::{NodeMetrics, socket};
 use graft_proto::types::GetObjects;
 use graft_proto::{ApiError, ObjectApi as _};
 use tokio::io::AsyncReadExt as _;
@@ -48,6 +48,76 @@ async fn a_stale_socket_is_replaced_but_a_live_one_or_a_file_is_refused() {
     std::fs::write(&file, b"keep me").unwrap();
     assert!(socket::bind(&file, 0o600).is_err());
     assert_eq!(std::fs::read(&file).unwrap(), b"keep me");
+}
+
+#[tokio::test]
+async fn a_stopped_node_frees_its_socket_before_its_connections_drain() {
+    let up = Upstream::start().await;
+    let (id, frame) = blob(1);
+    up.put("r", id, frame);
+    // Upstream is slow, so the answer in flight keeps the node draining.
+    up.set_delay(Duration::from_secs(3));
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path(), &up.url());
+    let listener = socket::bind(&cfg.socket, cfg.mode().unwrap()).unwrap();
+    let node = graft_node::Node::open(&cfg, NodeMetrics::new().unwrap()).unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let serving = {
+        let node = node.clone();
+        tokio::spawn(async move {
+            node.serve(listener, async {
+                let _ = stopped.await;
+            })
+            .await
+        })
+    };
+    let client =
+        graft_client::Remote::connect(graft_client::Endpoint::NodeSocket(cfg.socket.clone()))
+            .await
+            .unwrap()
+            .with_token(token(&["repo:r:read"]));
+    let slow = tokio::spawn(async move {
+        client
+            .get_objects(
+                &cx(),
+                GetObjects {
+                    repo: "r".into(),
+                    ids: vec![id],
+                },
+            )
+            .await
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while up.calls().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the call never arrived"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    stop.send(()).unwrap();
+    // The stopped node stops answering the path while it still drains.
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let rebound = loop {
+        match socket::bind(&cfg.socket, 0o660) {
+            Ok(l) => break l,
+            Err(e) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the stopped node still holds the socket: {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
+    drop(rebound);
+    tokio::time::timeout(Duration::from_secs(10), serving)
+        .await
+        .expect("drained once the answer was sent")
+        .unwrap()
+        .unwrap();
+    assert_eq!(slow.await.unwrap().unwrap().found.len(), 1);
 }
 
 #[tokio::test]

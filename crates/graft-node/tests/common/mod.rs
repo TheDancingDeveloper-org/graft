@@ -311,12 +311,17 @@ impl NodeRun {
         }
     }
 
+    /// Stops the node and waits for its serve task to finish, so the socket
+    /// is free by the time this returns.
     pub async fn stop(&mut self) {
         if let Some(tx) = self.stop.take() {
             let _ = tx.send(());
         }
         if let Some(task) = self.task.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+            let done = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("node did not stop within 5s");
+            done.expect("serve task panicked").expect("serve failed");
         }
     }
 

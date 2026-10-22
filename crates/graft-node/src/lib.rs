@@ -157,7 +157,14 @@ impl Node {
         listener: UnixListener,
         shutdown: impl Future<Output = ()> + Send,
     ) -> Result<(), String> {
-        let incoming = socket::incoming(listener, self.max_connections, self.metrics.clone());
+        let (incoming, closer) =
+            socket::incoming(listener, self.max_connections, self.metrics.clone());
+        // The socket stops answering as soon as shutdown starts, not once the
+        // open connections have drained: a restart may take the path at once.
+        let shutdown = async move {
+            shutdown.await;
+            closer.close();
+        };
         tonic::transport::Server::builder()
             .max_concurrent_streams(Some(self.max_streams))
             .http2_keepalive_interval(Some(Duration::from_secs(30)))
