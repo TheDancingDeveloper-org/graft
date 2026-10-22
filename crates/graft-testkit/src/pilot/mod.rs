@@ -45,7 +45,7 @@ use serde_json::Value;
 
 use crate::bench::{Results, Samples, Spread, spread, spread_markdown};
 use fixture::FixtureSpec;
-use proc::{Bins, Ran, Site, Token, git, run};
+use proc::{Bins, Ran, STEP_TIMEOUT, Site, Token, git, run, run_with};
 use verify::{Fidelity, Mapped};
 
 /// Why the harness stopped.
@@ -548,46 +548,74 @@ fn git_blame(bare: &Path, tip: &str, path: &str) -> Result<Vec<String>, PilotErr
 ///
 /// Identical lines (blank lines, `}`, the same dependency line in a
 /// lock file) can be matched by a diff to any of their copies, so two
-/// valid attributions can name different commits. An origin `c` and the
-/// other tool's origin `d` are equivalent when both are on `path`'s
-/// first-parent history and each introduced the line's content: some diff
-/// of the commit against its first parent adds a line with those bytes.
-/// Both the default (Myers) diff and the histogram diff count, since git
-/// blame uses the first and graft the second. The check never accepts a
-/// commit that did not write the content, so a wrong origin still fails.
+/// valid attributions can name different commits. An attribution of line
+/// `L` to commit `C` is valid when both hold:
+///
+/// 1. `C` introduced `L`'s exact content: `C` is a version on `path`'s
+///    first-parent history and some diff of it against its first parent
+///    adds a line with those bytes. Both the default (Myers) diff and the
+///    histogram diff count, since git blame uses the first and graft the
+///    second.
+/// 2. The content is present in every version of `path` from `C` to the
+///    tip, along the first-parent path. A content deleted and re-added
+///    after `C` was last written by the re-adding commit, so `C` is a
+///    stale origin and is rejected.
+///
+/// Two origins are equivalent when both are valid. The path is the
+/// first-parent one because both blames are first-parent blames (git's
+/// runs `--first-parent`, graft's index carries lines along first-parent
+/// versions). A line that arrives from a merge's second parent is
+/// attributed to the merge commit, whose first-parent diff adds it; the
+/// side-branch commit that wrote it is never an origin, and accepting the
+/// line's full ancestry would let such a commit through.
+///
+/// The cost is bounded by the file's first-parent versions, the same ones
+/// blame walks: each is read at most once, and only when a line
+/// disagrees.
 struct TieCheck<'a> {
     bare: &'a Path,
     path: &'a str,
-    /// The file's first-parent history, newest first.
-    history: BTreeSet<String>,
+    /// The file's first-parent versions, newest first (index 0 is the
+    /// version the tip holds).
+    history: Vec<String>,
+    /// Position of each version in `history`.
+    position: BTreeMap<String, usize>,
     /// The file at the tip, one entry per line.
     content: Vec<Vec<u8>>,
+    /// Per version, the line contents it holds; read on first use.
+    held: Vec<Option<BTreeSet<Vec<u8>>>>,
     /// Per commit, the line contents its diffs add.
     introduced: BTreeMap<String, BTreeSet<Vec<u8>>>,
 }
 
 impl<'a> TieCheck<'a> {
     fn new(bare: &'a Path, tip: &str, path: &'a str) -> Result<Self, PilotError> {
-        let history = git_text(
+        let history: Vec<String> = git_text(
             bare,
             &["log", "--first-parent", "--format=%H", tip, "--", path],
         )?
         .lines()
         .map(str::to_owned)
         .collect();
+        let position = history
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.clone(), i))
+            .collect();
         let shown = run(git(None)
             .arg("--git-dir")
             .arg(bare)
             .args(["show", &format!("{tip}:{path}")]))?;
-        let content = shown
-            .stdout
-            .split(|&b| b == b'\n')
+        let content = split_lines(&shown.stdout)
+            .into_iter()
             .map(<[u8]>::to_vec)
             .collect();
         Ok(Self {
             bare,
             path,
+            held: vec![None; history.len()],
             history,
+            position,
             content,
             introduced: BTreeMap::new(),
         })
@@ -596,22 +624,57 @@ impl<'a> TieCheck<'a> {
     /// Whether `git` and `graft` (commit shas) are equivalent origins for
     /// line `line` (0-based) of the file at the tip.
     fn equivalent(&mut self, line: usize, git: &str, graft: &str) -> Result<bool, PilotError> {
-        let Some(content) = self.content.get(line) else {
+        Ok(self.valid(line, git)? && self.valid(line, graft)?)
+    }
+
+    /// Whether `sha` is a valid origin for line `line`: rules 1 and 2.
+    fn valid(&mut self, line: usize, sha: &str) -> Result<bool, PilotError> {
+        let Some(content) = self.content.get(line).cloned() else {
             return Ok(false);
         };
-        if !self.history.contains(git) || !self.history.contains(graft) {
+        let Some(&at) = self.position.get(sha) else {
+            return Ok(false);
+        };
+        if !self.introduced.contains_key(sha) {
+            let lines = self.added_by(sha)?;
+            self.introduced.insert(sha.to_owned(), lines);
+        }
+        if !self.introduced[sha].contains(&content) {
             return Ok(false);
         }
-        for sha in [git, graft] {
-            if !self.introduced.contains_key(sha) {
-                let lines = self.added_by(sha)?;
-                self.introduced.insert(sha.to_owned(), lines);
-            }
-            if !self.introduced[sha].contains(content) {
+        // Rule 2: every version from the tip back to `sha` holds it.
+        for v in 0..=at {
+            if !self.held(v)?.contains(&content) {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    /// The line contents of version `v` (an index into `history`).
+    fn held(&mut self, v: usize) -> Result<&BTreeSet<Vec<u8>>, PilotError> {
+        if self.held[v].is_none() {
+            let spec = format!("{}:{}", self.history[v], self.path);
+            let ran = run_with(
+                git(None)
+                    .arg("--git-dir")
+                    .arg(self.bare)
+                    .args(["show", &spec]),
+                STEP_TIMEOUT,
+                true,
+            )?;
+            // A version that deletes the file holds nothing.
+            let lines = if ran.status.success() {
+                split_lines(&ran.stdout)
+                    .into_iter()
+                    .map(<[u8]>::to_vec)
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
+            self.held[v] = Some(lines);
+        }
+        Ok(self.held[v].get_or_insert_default())
     }
 
     /// The lines `sha` adds to the file, under each diff algorithm.
@@ -640,6 +703,15 @@ impl<'a> TieCheck<'a> {
         }
         Ok(out)
     }
+}
+
+/// A file's lines, without the empty piece after a final newline.
+fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    body.split(|&b| b == b'\n').collect()
 }
 
 /// Per-line origin shas from `graft blame`, mapped through the mirror DB.
@@ -1155,39 +1227,141 @@ mod tests {
         assert!(!t.contains("secret-value"));
     }
 
-    /// Two commits on `f.txt`: `x y x`, then `x y x x`. The last line is
-    /// `x`, which both commits wrote, so git's `c2` and an attribution to
-    /// `c1` are equivalent. The middle `y` only `c1` wrote.
-    #[test]
-    fn equivalent_tie_breaks_agree_and_wrong_origins_do_not() {
-        let dir = crate::crash::TempDir::new("tie-check");
+    /// A bare repo built by `git fast-import`. `commits` are, in order,
+    /// `(branch, from, merge, content of f.txt)`; `from` and `merge` are
+    /// indices of earlier commits. Returns the repo's temp dir.
+    fn tie_repo(
+        name: &str,
+        commits: &[(&str, Option<usize>, Option<usize>, &str)],
+    ) -> crate::crash::TempDir {
+        let dir = crate::crash::TempDir::new(name);
         let bare = dir.path().join("repo.git");
         run(git(None).arg("init").arg("-q").arg("--bare").arg(&bare)).expect("init");
-        let stream = b"blob\nmark :1\ndata 6\nx\ny\nx\n\
-blob\nmark :2\ndata 8\nx\ny\nx\nx\n\
-commit refs/heads/main\nmark :10\ncommitter t <t@example.com> 1 +0000\ndata 7\ncreate\nM 100644 :1 f.txt\n\
-commit refs/heads/main\nmark :11\ncommitter t <t@example.com> 2 +0000\ndata 6\nappend\nfrom :10\nM 100644 :2 f.txt\n\
-done\n";
+        let mut stream = String::new();
+        for (i, (branch, from, merge, content)) in commits.iter().enumerate() {
+            let msg = format!("c{i}");
+            let _ = write!(
+                stream,
+                "blob\nmark :{}\ndata {}\n{content}\n\
+commit refs/heads/{branch}\nmark :{}\ncommitter t <t@example.com> {} +0000\ndata {}\n{msg}\n",
+                1000 + i,
+                content.len(),
+                i + 1,
+                i + 1,
+                msg.len(),
+            );
+            if let Some(f) = from {
+                let _ = writeln!(stream, "from :{}", f + 1);
+            }
+            if let Some(m) = merge {
+                let _ = writeln!(stream, "merge :{}", m + 1);
+            }
+            let _ = writeln!(stream, "M 100644 :{} f.txt", 1000 + i);
+        }
+        stream.push_str("done\n");
         let mut child = git(Some(&bare))
             .args(["fast-import", "--quiet", "--done"])
             .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("fast-import");
-        std::io::Write::write_all(&mut child.stdin.take().expect("stdin"), stream)
+        std::io::Write::write_all(&mut child.stdin.take().expect("stdin"), stream.as_bytes())
             .expect("write stream");
         assert!(child.wait().expect("wait").success());
+        dir
+    }
 
-        let shas = git_text(&bare, &["log", "--format=%H", "main"]).expect("log");
-        let mut shas = shas.lines();
-        let (c2, c1) = (shas.next().expect("c2"), shas.next().expect("c1"));
+    fn sha(bare: &Path, rev: &str) -> String {
+        git_text(bare, &["rev-parse", rev])
+            .expect("rev-parse")
+            .trim()
+            .to_owned()
+    }
+
+    /// git's own first-parent blame is always a valid attribution.
+    fn git_blame_is_valid(ties: &mut TieCheck<'_>, bare: &Path) {
+        for (i, origin) in git_blame(bare, "main", "f.txt")
+            .expect("blame")
+            .iter()
+            .enumerate()
+        {
+            assert!(ties.valid(i, origin).expect("check"), "line {i}: {origin}");
+        }
+    }
+
+    /// Two commits on `f.txt`: `x y x`, then `x y x x`. The last line is
+    /// `x`, which both commits wrote and which never left the file, so
+    /// git's `c2` and an attribution to `c1` are equivalent. The middle
+    /// `y` only `c1` wrote.
+    #[test]
+    fn equivalent_tie_breaks_agree_and_wrong_origins_do_not() {
+        let dir = tie_repo(
+            "tie-check",
+            &[
+                ("main", None, None, "x\ny\nx"),
+                ("main", Some(0), None, "x\ny\nx\nx"),
+            ],
+        );
+        let bare = dir.path().join("repo.git");
+        let (c2, c1) = (sha(&bare, "main"), sha(&bare, "main~1"));
 
         let mut ties = TieCheck::new(&bare, "main", "f.txt").expect("tie check");
+        git_blame_is_valid(&mut ties, &bare);
         // Line 3 (`x`): git says c2, graft says c1.
-        assert!(ties.equivalent(3, c2, c1).expect("check"));
+        assert!(ties.equivalent(3, &c2, &c1).expect("check"));
         // Line 1 (`y`): c2 never wrote `y`, so c2 is not a valid origin.
-        assert!(!ties.equivalent(1, c2, c1).expect("check"));
+        assert!(!ties.equivalent(1, &c2, &c1).expect("check"));
         // A commit outside the file's history is never equivalent.
         let other = "0".repeat(40);
-        assert!(!ties.equivalent(3, c2, &other).expect("check"));
+        assert!(!ties.equivalent(3, &c2, &other).expect("check"));
+    }
+
+    /// `a x`, then `a` (x deleted), then `a x` again. c1 wrote `x`, but the
+    /// `x` at the tip is c3's: naming c1 is a stale origin.
+    #[test]
+    fn a_line_deleted_and_re_added_is_not_a_tie() {
+        let dir = tie_repo(
+            "tie-readd",
+            &[
+                ("main", None, None, "a\nx"),
+                ("main", Some(0), None, "a"),
+                ("main", Some(1), None, "a\nx"),
+            ],
+        );
+        let bare = dir.path().join("repo.git");
+        let (c3, c1) = (sha(&bare, "main"), sha(&bare, "main~2"));
+
+        let mut ties = TieCheck::new(&bare, "main", "f.txt").expect("tie check");
+        git_blame_is_valid(&mut ties, &bare);
+        assert!(ties.valid(1, &c3).expect("check"));
+        assert!(!ties.equivalent(1, &c3, &c1).expect("check"));
+        // `a` never left, so c1 stays its origin.
+        assert!(ties.valid(0, &c1).expect("check"));
+    }
+
+    /// main has `x`; a side branch makes it `x x`; main merges the side.
+    /// Under first-parent blame the second `x` arrives with the merge, so
+    /// the merge and c1 (which wrote `x`, never removed) are equivalent,
+    /// and the side commit is not an origin.
+    #[test]
+    fn a_line_from_a_merges_second_parent_belongs_to_the_merge() {
+        let dir = tie_repo(
+            "tie-merge",
+            &[
+                ("main", None, None, "x"),
+                ("side", Some(0), None, "x\nx\ny"),
+                ("main", Some(0), Some(1), "x\nx\ny"),
+            ],
+        );
+        let bare = dir.path().join("repo.git");
+        let (m, c1, s1) = (sha(&bare, "main"), sha(&bare, "main^1"), sha(&bare, "side"));
+
+        let mut ties = TieCheck::new(&bare, "main", "f.txt").expect("tie check");
+        git_blame_is_valid(&mut ties, &bare);
+        assert!(ties.equivalent(1, &m, &c1).expect("check"));
+        assert!(!ties.equivalent(1, &m, &s1).expect("check"));
+        // `y` only the merge brought in on the first-parent path.
+        assert!(ties.valid(2, &m).expect("check"));
+        assert!(!ties.valid(2, &c1).expect("check"));
+        assert!(!ties.valid(2, &s1).expect("check"));
     }
 }

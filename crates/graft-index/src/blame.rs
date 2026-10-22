@@ -29,11 +29,18 @@
 //! file). Graft's rule is histogram diff ([`carry`]); git blame uses its
 //! default Myers diff. Graft does not try to reproduce git's choice.
 //!
-//! Both answers are right in the sense that matters: the commit that
-//! attributes the line introduced its content, and that commit is on the
-//! file's first-parent history. The harness's agreement check accepts
-//! such a pair as equivalent (`TieCheck` in `graft-testkit`). A wrong
-//! attribution, to a commit that did not write the line, still fails it.
+//! Both answers are right in the sense that matters. An attribution of
+//! a line to commit `C` is valid when `C` is a version on the file's
+//! first-parent history whose diff adds the line's exact content, and
+//! that content is present in every first-parent version from `C` to the
+//! tip. The second condition rules out a stale origin: a line deleted and
+//! later re-added belongs to the commit that re-added it. The path is the
+//! first-parent one because blame carries lines along first-parent
+//! versions; a line that arrives from a merge's second parent is the
+//! merge's. The harness's agreement check accepts two valid origins as
+//! equivalent (`TieCheck` in `graft-testkit`). A wrong attribution, to a
+//! commit that did not write the line or whose copy was since removed,
+//! still fails it.
 
 use std::collections::HashMap;
 use std::future::Future;
