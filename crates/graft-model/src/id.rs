@@ -90,7 +90,9 @@ impl ObjectId {
             return Err(IdError::Length(bytes.len()));
         }
         let mut out = [0u8; 32];
-        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+        // The length check above leaves no remainder.
+        let (pairs, _rest) = bytes.as_chunks::<2>();
+        for (i, pair) in pairs.iter().enumerate() {
             out[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
         }
         Ok(ObjectId(out))
