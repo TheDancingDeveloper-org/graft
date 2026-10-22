@@ -1,0 +1,23 @@
+[package]
+name = "graft-node"
+description = "Per-host graft cache daemon serving every session on the host over a Unix socket."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "graft-node"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+graft-auth.workspace = true
+graft-proto.workspace = true
+graft-store.workspace = true
+graft-store-fs.workspace = true
+graft-telemetry.workspace = true

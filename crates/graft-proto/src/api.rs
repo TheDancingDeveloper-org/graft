@@ -1,0 +1,215 @@
+//! The API traits (`docs/design.md` §5.2, §7.2).
+//!
+//! Streaming operations (`GetObjects`, `Watch`) are expressed as pages here;
+//! the gRPC transport maps them to server streams.
+
+use std::future::Future;
+
+use graft_model::{ChangesetId, ObjectId};
+
+use crate::context::CallContext;
+use crate::error::ApiResult;
+use crate::types::*;
+
+/// Object operations, answered identically by every tier.
+pub trait ObjectApi: Send + Sync {
+    /// Returns what it has; misses are listed, not errors.
+    fn get_objects(
+        &self,
+        cx: &CallContext,
+        req: GetObjects,
+    ) -> impl Future<Output = ApiResult<Objects>> + Send;
+    /// Returns the ids not stored.
+    fn has_objects(
+        &self,
+        cx: &CallContext,
+        req: HasObjects,
+    ) -> impl Future<Output = ApiResult<Vec<ObjectId>>> + Send;
+    /// Stores blobs; idempotent.
+    fn put_objects(
+        &self,
+        cx: &CallContext,
+        req: PutObjects,
+    ) -> impl Future<Output = ApiResult<Vec<ObjectId>>> + Send;
+}
+
+/// Repository operations, answered by the server (the node forwards them).
+pub trait RepoApi: Send + Sync {
+    /// Creates a changeset ("commit"); idempotent.
+    fn create_changeset(
+        &self,
+        cx: &CallContext,
+        req: CreateChangeset,
+    ) -> impl Future<Output = ApiResult<Created>> + Send;
+    /// Fetches changesets with their records.
+    fn get_changesets(
+        &self,
+        cx: &CallContext,
+        req: GetChangesets,
+    ) -> impl Future<Output = ApiResult<Changesets>> + Send;
+    /// Resolves a ref.
+    fn resolve_ref(
+        &self,
+        cx: &CallContext,
+        req: ResolveRef,
+    ) -> impl Future<Output = ApiResult<RefView>> + Send;
+    /// Lists refs.
+    fn list_refs(
+        &self,
+        cx: &CallContext,
+        req: ListRefs,
+    ) -> impl Future<Output = ApiResult<Vec<RefView>>> + Send;
+    /// Moves an admin or tool ref by CAS.
+    fn update_ref(
+        &self,
+        cx: &CallContext,
+        req: UpdateRef,
+    ) -> impl Future<Output = ApiResult<RefView>> + Send;
+    /// Stats a path.
+    fn stat(
+        &self,
+        cx: &CallContext,
+        req: PathAt,
+    ) -> impl Future<Output = ApiResult<EntryView>> + Send;
+    /// Lists a directory.
+    fn list_tree(
+        &self,
+        cx: &CallContext,
+        req: ListTree,
+    ) -> impl Future<Output = ApiResult<Entries>> + Send;
+    /// Reads a file.
+    fn read_file(
+        &self,
+        cx: &CallContext,
+        req: PathAt,
+    ) -> impl Future<Output = ApiResult<FileContent>> + Send;
+    /// First-parent history.
+    fn log(&self, cx: &CallContext, req: Log) -> impl Future<Output = ApiResult<History>> + Send;
+    /// Whether `a` is an ancestor of `b`.
+    fn is_ancestor(
+        &self,
+        cx: &CallContext,
+        req: Pair,
+    ) -> impl Future<Output = ApiResult<bool>> + Send;
+    /// A merge base of `a` and `b`, if any.
+    fn merge_base(
+        &self,
+        cx: &CallContext,
+        req: Pair,
+    ) -> impl Future<Output = ApiResult<Option<ChangesetId>>> + Send;
+    /// Diff two snapshots.
+    fn diff(
+        &self,
+        cx: &CallContext,
+        req: Diff,
+    ) -> impl Future<Output = ApiResult<DiffResult>> + Send;
+    /// Line blame.
+    fn blame(
+        &self,
+        cx: &CallContext,
+        req: Blame,
+    ) -> impl Future<Output = ApiResult<BlameResult>> + Send;
+    /// Rebase a changeset or stack.
+    fn rebase(
+        &self,
+        cx: &CallContext,
+        req: Rebase,
+    ) -> impl Future<Output = ApiResult<ChangesetId>> + Send;
+    /// Create an inverse changeset.
+    fn revert(
+        &self,
+        cx: &CallContext,
+        req: Revert,
+    ) -> impl Future<Output = ApiResult<ChangesetId>> + Send;
+    /// Land a stack on a line.
+    fn land(&self, cx: &CallContext, req: Land) -> impl Future<Output = ApiResult<Landed>> + Send;
+    /// Record a check result.
+    fn attest(&self, cx: &CallContext, req: Attest) -> impl Future<Output = ApiResult<()>> + Send;
+    /// Read the journal (long-poll page).
+    fn watch(
+        &self,
+        cx: &CallContext,
+        req: Watch,
+    ) -> impl Future<Output = ApiResult<JournalPage>> + Send;
+}
+
+/// Workspace operations.
+pub trait WorkspaceApi: Send + Sync {
+    /// Opens a workspace.
+    fn open_workspace(
+        &self,
+        cx: &CallContext,
+        req: OpenWorkspace,
+    ) -> impl Future<Output = ApiResult<WorkspaceView>> + Send;
+    /// Gets one workspace.
+    fn get_workspace(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+    ) -> impl Future<Output = ApiResult<WorkspaceView>> + Send;
+    /// Lists the caller's workspaces.
+    fn list_workspaces(
+        &self,
+        cx: &CallContext,
+        repo: String,
+        page: Page,
+    ) -> impl Future<Output = ApiResult<Vec<WorkspaceView>>> + Send;
+    /// Extends the lease.
+    fn renew_lease(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        lease_ms: u64,
+    ) -> impl Future<Output = ApiResult<WorkspaceView>> + Send;
+    /// Moves the head by CAS.
+    fn set_head(
+        &self,
+        cx: &CallContext,
+        req: SetHead,
+    ) -> impl Future<Output = ApiResult<WorkspaceView>> + Send;
+    /// Rebases the stack onto the line tip (or `onto`).
+    fn sync(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        onto: Option<ChangesetId>,
+    ) -> impl Future<Output = ApiResult<Synced>> + Send;
+    /// Applies a stack operation.
+    fn stack(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        op: StackOp,
+    ) -> impl Future<Output = ApiResult<WorkspaceView>> + Send;
+    /// Closes a workspace.
+    fn close_workspace(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        keep_drafts: bool,
+    ) -> impl Future<Output = ApiResult<()>> + Send;
+}
+
+/// Admin operations.
+pub trait AdminApi: Send + Sync {
+    /// Creates a repository.
+    fn create_repo(
+        &self,
+        cx: &CallContext,
+        name: String,
+    ) -> impl Future<Output = ApiResult<()>> + Send;
+    /// Bulk import preserving parents.
+    fn import_changesets(
+        &self,
+        cx: &CallContext,
+        req: ImportChangesets,
+    ) -> impl Future<Output = ApiResult<Vec<Created>>> + Send;
+    /// Runs or previews collection.
+    fn gc(&self, cx: &CallContext, req: Gc) -> impl Future<Output = ApiResult<GcReport>> + Send;
+    /// Mints a token no broader than the caller's.
+    fn mint_token(
+        &self,
+        cx: &CallContext,
+        req: MintToken,
+    ) -> impl Future<Output = ApiResult<String>> + Send;
+}

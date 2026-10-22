@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "AGPL-3.0-only"
+publish = false
+repository = "https://github.com/TheDancingDeveloper-org/graft"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "allow"
+
+# One dependency per line, sorted, so parallel PRs don't conflict
+# (docs/plan.md, "Crate ownership and parallelism"). External dependencies are
+# added by the work item that first needs them.
+[workspace.dependencies]
+graft-auth = { path = "crates/graft-auth" }
+graft-client = { path = "crates/graft-client" }
+graft-engine = { path = "crates/graft-engine" }
+graft-gc = { path = "crates/graft-gc" }
+graft-git = { path = "crates/graft-git" }
+graft-index = { path = "crates/graft-index" }
+graft-lsp = { path = "crates/graft-lsp" }
+graft-mcp = { path = "crates/graft-mcp" }
+graft-model = { path = "crates/graft-model" }
+graft-proto = { path = "crates/graft-proto" }
+graft-store = { path = "crates/graft-store" }
+graft-store-fs = { path = "crates/graft-store-fs" }
+graft-store-sqlite = { path = "crates/graft-store-sqlite" }
+graft-telemetry = { path = "crates/graft-telemetry" }
+graft-testkit = { path = "crates/graft-testkit" }

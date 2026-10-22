@@ -1,0 +1,28 @@
+[package]
+name = "graft-server"
+description = "The authoritative graft server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "graft-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+graft-auth.workspace = true
+graft-engine.workspace = true
+graft-gc.workspace = true
+graft-mcp.workspace = true
+graft-model.workspace = true
+graft-proto.workspace = true
+graft-store.workspace = true
+graft-store-fs.workspace = true
+graft-store-sqlite.workspace = true
+graft-telemetry.workspace = true

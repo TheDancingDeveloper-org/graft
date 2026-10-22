@@ -1,0 +1,23 @@
+[package]
+name = "graft-mirror"
+description = "git and GitHub mirror for graft: import, follow, PR bridge, export, authority switch."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "graft-mirror"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+graft-client.workspace = true
+graft-git.workspace = true
+graft-model.workspace = true
+graft-proto.workspace = true
+graft-telemetry.workspace = true
