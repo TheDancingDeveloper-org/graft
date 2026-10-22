@@ -5,8 +5,8 @@
 # usage: scripts/dev/smoke.sh [repo-name]   (default: graft-dev)
 set -uo pipefail
 
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$root"
 
 repo="${1:-graft-dev}"
 status=0

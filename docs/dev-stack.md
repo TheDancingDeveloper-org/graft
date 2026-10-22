@@ -1,58 +1,53 @@
 # Local dev stack
 
 The dev stack runs graft-server, graft-node, graft-mirror and the `graft` CLI
-under docker compose on one host, so server and client work can be iterated
-without a deploy cycle. G1.17 then promotes this compose file to a Komodo
-stack.
+under docker compose, so server and client work can be iterated without a
+deploy cycle. G1.17 then promotes this compose file to a Komodo stack.
 
 Today the binaries are stubs. Each prints `not implemented yet` and exits, and
 the stack retries it a few times and stops. The stack is written so the real
 binaries work unchanged once they land.
 
+## Design: no host paths
+
+The stack works with a Docker daemon on any host, including one reached over a
+socket on another machine. It never bind-mounts a path from the checkout:
+
+- **Build mode.** `docker compose build` streams this repository as the build
+  context over the API. Configs (`docker/dev/server.toml`, the mirror configs
+  and the fixture entrypoint) are baked into the image, so changing one means
+  a rebuild. The obs images (`docker/dev/prometheus`, `docker/dev/grafana`) are
+  built the same way.
+- **Fast loop.** Each graft service has a `develop.watch` block:
+  `action: sync+restart` from `./target/debug/<bin>` to
+  `/opt/graft-dev/bin/<bin>`. `docker compose watch` copies the file over the
+  API and restarts the container, so the daemon never needs to see the
+  checkout. The target is `/opt/graft-dev/bin`, not `/usr/local/bin`: the
+  `graft` user cannot write the root-owned `/usr/local/bin`, and the sync
+  needs to replace files there. `/opt/graft-dev/bin` comes first on `PATH`;
+  with no dev copy, the image binary in `/usr/local/bin` runs.
+
 ## Files
 
 | Path | What it is |
 | --- | --- |
-| `docker/Dockerfile` | one multi-stage image: cargo-chef dependency cache, rust builder, debian trixie-slim runtime with git and ca-certificates, non-root user `graft` (uid 10001) |
+| `docker/Dockerfile` | one multi-stage image: cargo-chef dependency cache, rust builder, debian trixie-slim runtime with git and ca-certificates, non-root user `graft` (uid 10001); bakes in the dev configs |
 | `.dockerignore` | keeps `target/`, `.git` and local agent state out of the build context |
-| `compose.yaml` | the services, profiles and named volumes |
-| `docker/dev/server.toml` | server config mounted at `/etc/graft/server.toml` |
-| `docker/dev/mirror/` | fixture and rustTorrent mirror configs, and the fixture entrypoint |
-| `docker/dev/prometheus/`, `docker/dev/grafana/` | scrape config and Grafana datasource |
+| `compose.yaml` | the services, profiles, watch blocks and named volumes |
+| `docker/dev/server.toml` | server config, baked in at `/etc/graft/server.toml` |
+| `docker/dev/mirror/` | fixture and rustTorrent mirror configs and the fixture entrypoint, baked in at `/etc/graft-dev/mirror/` |
+| `docker/dev/prometheus/`, `docker/dev/grafana/` | obs images: scrape config and datasource provisioning |
 | `scripts/dev/` | `up.sh`, `down.sh`, `seed.sh`, `smoke.sh`, `crash.sh` |
 
-Images are `graft-dev:local`. Named volumes are `graft-dev_*`.
-
-## Where the daemon must be
-
-Bind mounts (`docker/dev/`, and in dev mode `target/debug/`) are resolved on
-the Docker daemon's filesystem. `scripts/dev/lib.sh` computes
-`GRAFT_HOST_ROOT`, the checkout's path on that filesystem, and compose uses it
-for every bind source. Locally it is the checkout itself.
-
-With a remote daemon, `lib.sh` maps the checkout's mount point to the subpath
-`findmnt` reports, then checks the mapping by reading `README.md` through a
-read-only `/` mount on the daemon. The check reads only; it never bind-mounts
-the missing path. A mismatch stops `up.sh` with a message.
-
-**Current finding (not resolved):** on the `vogt-prod` checkout, `findmnt`
-reports `/home/sprooty/Working` as `/dev/nvme0n1p1[/vogt/prod/workspace]`, a
-local disk on vogt-prod. The daemon behind `/var/run/docker.sock` is Node B
-(`winrarhost`), and `/vogt/prod/workspace` does not exist there. So the mapping
-fails and `up.sh` refuses. Earlier bind attempts left empty root-owned
-directories under `/vogt` on Node B. They need removing by someone with access.
-
-Options: a local daemon on vogt-prod, a host that has a local daemon, or
-copying the checkout to Node B and mapping that copy. `docker compose watch`
-can sync binaries over the API, but its config bind mounts still need the
-checkout on the daemon's host, so it doesn't avoid this.
+Images are `graft-dev:local`, `graft-dev-prometheus:local` and
+`graft-dev-grafana:local`. Named volumes are `graft-dev_*`.
 
 ## Profiles
 
 | Profile | Services | Use |
 | --- | --- | --- |
 | (none, default) | `graft-server`, `graft-node` | the image binaries; plain `docker compose ps` and `logs` show them |
-| `dev` | `graft-server-dev`, `graft-node-dev`, `graft-mirror-dev` | fast loop: host `target/debug` binaries bind-mounted over the image copies |
+| `dev` | `graft-server-dev`, `graft-node-dev`, `graft-mirror-dev` | the fast loop: `docker compose --profile dev watch` |
 | `mirror` | `graft-mirror` | follows the local fixture repository |
 | `rusttorrent` | `graft-mirror-rusttorrent` | clones `TheDancingDeveloper-org/rustTorrent` |
 | `obs` | `prometheus`, `grafana` | scrapes `/metrics` on the loopback ports below |
@@ -68,27 +63,32 @@ by hand: they publish the same port.
 ## Loop
 
 ```sh
-scripts/dev/up.sh                    # build graft-dev:local if missing; start server and node
+scripts/dev/up.sh                                  # build if missing; start the default server and node
 docker compose run --rm client graft version
 
 # after changing Rust code:
 cargo build -p graft-server -p graft-node -p graft-mirror
-scripts/dev/up.sh --dev              # host binaries; the image server and node are scaled to 0
-docker compose --profile dev restart graft-server-dev   # pick up a rebuilt binary
+scripts/dev/up.sh --dev                            # dev variants from the image, defaults scaled to 0
+docker compose --profile dev watch                 # keep running: syncs and restarts on each rebuild
 ```
 
-Run `docker compose build` after changing the Dockerfile or the workspace
-dependencies. `up.sh` builds only when `graft-dev:local` is missing; it does
-not rebuild on every run. `up.sh --dev` sets the mode bits of the three host
-binaries to world-readable and executable, because the container runs as
-uid 10001.
+`docker compose --profile dev watch` runs in the foreground. Each `cargo build`
+that changes `target/debug/<bin>` is copied into its container and the
+container restarts with it. Without `watch`, the dev containers run the image
+binaries.
+
+Run `docker compose build` after changing the Dockerfile, the dev configs or
+the workspace dependencies. `up.sh` builds only when an image is missing.
+`up.sh --dev` sets the mode bits of the three host binaries to world-readable
+and executable, because the container runs as uid 10001 and the sync keeps the
+mode.
 
 ### Host binaries and glibc
 
-The dev profile runs binaries built on the host inside `debian:trixie-slim`,
+The fast loop runs binaries built on the host inside `debian:trixie-slim`,
 which ships glibc 2.41. A binary built against a newer glibc will not start.
 This checkout's host has glibc 2.43, so a `GLIBC_2.4x not found` error means
-the dev loop has to build inside the builder image, or use image mode.
+the loop has to build inside the builder image, or use the image binaries.
 
 ## Ports
 
@@ -126,9 +126,8 @@ client reads it there.
 ## Restart policy
 
 Every runtime service has `restart: on-failure:3`. `docker inspect` shows
-`RestartCount=3` after a stub has run out of retries. A stub exits 2 once, and
-Docker retries it three times at most, then leaves it exited. `docker compose
-ps` shows the final state. The obs services use `unless-stopped`.
+`RestartCount=3` after a stub has run out of retries. The obs services use
+`unless-stopped`.
 
 ## Secrets
 
@@ -139,19 +138,22 @@ ps` shows the final state. The obs services use `unless-stopped`.
 
 ## Verification status
 
-Checked before the guard was added, on the daemon host (Node B):
-
-- `docker compose config -q`, and with `--profile dev`, `mirror`,
-  `rusttorrent`, `obs` and `tools`: valid.
-- `docker compose build`: succeeds (the image runs as uid 10001 on trixie).
-- `up.sh` (with the earlier override): both stubs log their `not implemented
-  yet` line, retry three times and stop (`RestartCount=3`). That run mounted
-  `docker/dev/server.toml` on Node B, which created an empty directory there.
-- `up.sh --dev`: stopped by the mapping guard on that daemon (see above), so
-  the dev loop, its glibc behaviour, `develop.watch` and `crash.sh` are
-  unverified.
-  `smoke.sh`, `seed.sh` and `mirror`, `obs` and `tools` are not yet run against
-  live binaries.
+- `docker compose config -q`, default and with `--profile` `dev`, `mirror`,
+  `rusttorrent`, `obs` and `tools`: valid, and no service has a bind mount.
+- `docker compose build`: succeeds (rebuilt after the change to the image).
+- `up.sh --dev`: the dev variants start from the image.
+- **Watch cycle: NOT demonstrated.** `docker compose watch` recorded no sync
+  for any of these, even though the kernel delivers inotify events for the same
+  directories (checked with a raw inotify probe): the real `target/debug` binary
+  with the committed `.dockerignore` (which excludes `target`), with a trimmed
+  `.dockerignore`, a probe path outside `target`, and a directory sync. A
+  probe path synced once earlier in this session, so the cause is not settled.
+  `.dockerignore` is the first suspect, since compose watch may skip
+  dockerignored paths. A fix needs a decision: either let `target/debug/graft-*`
+  into the context (the context then carries the three binaries only), or
+  stage the binaries outside `target/`.
+- `smoke.sh`, `seed.sh`, `crash.sh`, and the `mirror`, `obs` and `tools`
+  profiles are not yet run against live binaries.
 
 ## Volumes
 
@@ -175,8 +177,6 @@ These need decisions from the crates that own the behaviour:
   `meta_db`, `min_free_fraction`, the node's socket and cache paths). The
   metrics key and port (`metrics = "0.0.0.0:9464"`) are a dev convention.
   G1.12 (server), G2.3 (node) and G1.14 (mirror) decide the real keys.
-- **Dev-mode daemon.** The dev loop needs the checkout on the daemon's host
-  (see above): a local daemon here, or a host that has one.
 - **Node upstream.** The node stub has no way to set its upstream server.
   Once the real parser lands, add it to the node command.
 - **Healthcheck.** Add `healthcheck` to `graft-server` once `/healthz` exists.

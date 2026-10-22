@@ -1,23 +1,24 @@
 # Local dev stack for graft. Read docs/dev-stack.md first.
 #
+# No service bind-mounts a host path. Configs are baked into the image, and the
+# obs images are built from this repository, so the stack works with a Docker
+# daemon on another host (the build context and file syncs go over the API).
+#
 # Services without a profile are the default stack: graft-server and graft-node
 # from the image. Profiles:
-#   dev         graft-server-dev, graft-node-dev, graft-mirror-dev: host binaries
-#               from target/debug (fast loop; no image rebuild). scripts/dev/up.sh
-#               --dev scales the default server and node to 0 while they run.
+#   dev         graft-server-dev, graft-node-dev, graft-mirror-dev: the same
+#               services with the fast loop. `docker compose --profile dev watch`
+#               copies ./target/debug/<bin> into the container and restarts it.
+#               scripts/dev/up.sh --dev scales the default server and node to 0.
 #   mirror      graft-mirror following a local fixture git repo
 #   rusttorrent graft-mirror-rusttorrent cloning the rustTorrent repository
 #   obs         prometheus and grafana scraping /metrics
 #   tools       client, the graft CLI toolbox: docker compose run --rm client graft ...
 #
-# Bind sources use ${GRAFT_HOST_ROOT}, the checkout's path on the Docker daemon's
-# host. scripts/dev/lib.sh sets it; it defaults to "." for a local daemon.
-#
-# Every published port is bound to 127.0.0.1. Host ports default to values that
-# are free on the dev host (7878, 3000 and 9090 are taken by other services
-# there); override with GRAFT_DEV_SERVER_PORT, GRAFT_DEV_PROMETHEUS_PORT and
-# GRAFT_DEV_GRAFANA_PORT. Images and named volumes are prefixed graft-dev.
-# Nothing here holds a secret.
+# Host ports bind to 127.0.0.1 and default to values free on the dev host (7878,
+# 3000 and 9090 are taken there); override with GRAFT_DEV_SERVER_PORT,
+# GRAFT_DEV_PROMETHEUS_PORT and GRAFT_DEV_GRAFANA_PORT. Images and named volumes
+# are prefixed graft-dev. Nothing here holds a secret.
 name: graft-dev
 
 x-build: &build
@@ -33,50 +34,59 @@ x-build: &build
 x-retry: &retry
   restart: "on-failure:3"
 
+# Fast loop: copy the host debug binary into the running container and restart it.
+# The target is /opt/graft-dev/bin (writable by graft, first on PATH); the image
+# binary in /usr/local/bin is the fallback when no dev copy exists.
+x-watch-server: &watch-server
+  develop:
+    watch:
+      - action: sync+restart
+        path: ./target/debug/graft-server
+        target: /opt/graft-dev/bin/graft-server
+
+x-watch-node: &watch-node
+  develop:
+    watch:
+      - action: sync+restart
+        path: ./target/debug/graft-node
+        target: /opt/graft-dev/bin/graft-node
+
+x-watch-mirror: &watch-mirror
+  develop:
+    watch:
+      - action: sync+restart
+        path: ./target/debug/graft-mirror
+        target: /opt/graft-dev/bin/graft-mirror
+
 services:
   # ---- default stack (no profile) -----------------------------------------
 
   graft-server:
-    <<: [*build, *retry]
+    <<: [*build, *retry, *watch-server]
     command: ["graft-server", "serve", "--config", "/etc/graft/server.toml"]
     ports:
       - "127.0.0.1:${GRAFT_DEV_SERVER_PORT:-17878}:7878"
     volumes:
-      - ${GRAFT_HOST_ROOT:-.}/docker/dev/server.toml:/etc/graft/server.toml:ro
       - graft-dev-server-objects:/var/lib/graft/objects
       - graft-dev-server-meta:/var/lib/graft/meta
     # healthcheck: add once the server serves /healthz (docs/dev-stack.md).
-    # Fallback loop that works with a remote daemon: `docker compose watch graft-server`
-    # copies target/debug/graft-server into the container over the API, then restarts it.
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./target/debug/graft-server
-          target: /usr/local/bin/graft-server
 
   graft-node:
-    <<: [*build, *retry]
+    <<: [*build, *retry, *watch-node]
     command: ["graft-node"]
     volumes:
       - graft-dev-run:/run/graft
       - graft-dev-node-cache:/var/cache/graft
-    develop:
-      watch:
-        - action: sync+restart
-          path: ./target/debug/graft-node
-          target: /usr/local/bin/graft-node
 
-  # ---- dev profile: host binaries from target/debug (bind over the image copy)
+  # ---- dev profile: the fast loop (same names and aliases) ----------------
 
   graft-server-dev:
-    <<: [*build, *retry]
+    <<: [*build, *retry, *watch-server]
     profiles: [dev]
     command: ["graft-server", "serve", "--config", "/etc/graft/server.toml"]
     ports:
       - "127.0.0.1:${GRAFT_DEV_SERVER_PORT:-17878}:7878"
     volumes:
-      - ${GRAFT_HOST_ROOT:-.}/docker/dev/server.toml:/etc/graft/server.toml:ro
-      - ${GRAFT_HOST_ROOT:-.}/target/debug/graft-server:/usr/local/bin/graft-server:ro
       - graft-dev-server-objects:/var/lib/graft/objects
       - graft-dev-server-meta:/var/lib/graft/meta
     networks:
@@ -84,25 +94,22 @@ services:
         aliases: [graft-server]
 
   graft-node-dev:
-    <<: [*build, *retry]
+    <<: [*build, *retry, *watch-node]
     profiles: [dev]
     command: ["graft-node"]
     volumes:
       - graft-dev-run:/run/graft
       - graft-dev-node-cache:/var/cache/graft
-      - ${GRAFT_HOST_ROOT:-.}/target/debug/graft-node:/usr/local/bin/graft-node:ro
     networks:
       default:
         aliases: [graft-node]
 
   graft-mirror-dev:
-    <<: [*build, *retry]
+    <<: [*build, *retry, *watch-mirror]
     profiles: [dev]
     entrypoint: ["sh", "/etc/graft-dev/mirror/fixture-entrypoint.sh"]
     command: ["graft-mirror", "follow", "--config", "/etc/graft-dev/mirror/fixture.toml"]
     volumes:
-      - ${GRAFT_HOST_ROOT:-.}/docker/dev:/etc/graft-dev:ro
-      - ${GRAFT_HOST_ROOT:-.}/target/debug/graft-mirror:/usr/local/bin/graft-mirror:ro
       - graft-dev-mirror-fixture:/var/lib/graft/mirror
     networks:
       default:
@@ -111,20 +118,18 @@ services:
   # ---- mirror profiles -----------------------------------------------------
 
   graft-mirror:
-    <<: [*build, *retry]
+    <<: [*build, *retry, *watch-mirror]
     profiles: [mirror]
     entrypoint: ["sh", "/etc/graft-dev/mirror/fixture-entrypoint.sh"]
     command: ["graft-mirror", "follow", "--config", "/etc/graft-dev/mirror/fixture.toml"]
     volumes:
-      - ${GRAFT_HOST_ROOT:-.}/docker/dev:/etc/graft-dev:ro
       - graft-dev-mirror-fixture:/var/lib/graft/mirror
 
   graft-mirror-rusttorrent:
-    <<: [*build, *retry]
+    <<: [*build, *retry, *watch-mirror]
     profiles: [rusttorrent]
     command: ["graft-mirror", "follow", "--config", "/etc/graft-dev/mirror/rusttorrent.toml"]
     volumes:
-      - ${GRAFT_HOST_ROOT:-.}/docker/dev:/etc/graft-dev:ro
       - graft-dev-mirror-rusttorrent:/var/lib/graft/mirror
 
   # ---- tools profile -------------------------------------------------------
@@ -141,7 +146,9 @@ services:
   # ---- obs profile ---------------------------------------------------------
 
   prometheus:
-    image: prom/prometheus:v3.5.0
+    build:
+      context: docker/dev/prometheus
+    image: graft-dev-prometheus:local
     profiles: [obs]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -150,12 +157,13 @@ services:
     ports:
       - "127.0.0.1:${GRAFT_DEV_PROMETHEUS_PORT:-19090}:9090"
     volumes:
-      - ${GRAFT_HOST_ROOT:-.}/docker/dev/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - graft-dev-prometheus:/prometheus
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:12.2.0
+    build:
+      context: docker/dev/grafana
+    image: graft-dev-grafana:local
     profiles: [obs]
     environment:
       # Local, loopback-only dev dashboards: no login, editor role.
@@ -164,7 +172,6 @@ services:
     ports:
       - "127.0.0.1:${GRAFT_DEV_GRAFANA_PORT:-13100}:3000"
     volumes:
-      - ${GRAFT_HOST_ROOT:-.}/docker/dev/grafana/provisioning:/etc/grafana/provisioning:ro
       - graft-dev-grafana:/var/lib/grafana
     restart: unless-stopped
 

@@ -33,17 +33,27 @@ FROM debian:${DEBIAN_VERSION}-slim AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git \
  && rm -rf /var/lib/apt/lists/*
+# /opt/graft-dev/bin is writable by graft, so `docker compose watch` can sync
+# host binaries there. /usr/local/bin stays root-owned. It is first on PATH.
 RUN groupadd --system --gid 10001 graft \
  && useradd --system --uid 10001 --gid graft \
       --home-dir /var/lib/graft --shell /usr/sbin/nologin graft \
  && mkdir -p /var/lib/graft/mirror /var/cache/graft /run/graft /work /etc/graft \
- && chown -R graft:graft /var/lib/graft /var/cache/graft /run/graft /work
+ && mkdir -p /opt/graft-dev/bin \
+ && chown -R graft:graft /var/lib/graft /var/cache/graft /run/graft /work /opt/graft-dev
+
+# Dev configs and the fixture entrypoint are baked in, so the stack needs no
+# host paths. Rebuild the image after changing them.
+COPY docker/dev/server.toml /etc/graft/server.toml
+COPY docker/dev/mirror /etc/graft-dev/mirror
 
 COPY --from=builder /src/target/release/graft \
      /src/target/release/graft-server \
      /src/target/release/graft-node \
      /src/target/release/graft-mirror \
      /usr/local/bin/
+
+ENV PATH=/opt/graft-dev/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 USER graft:graft
 WORKDIR /work

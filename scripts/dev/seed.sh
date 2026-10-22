@@ -6,8 +6,8 @@
 # usage: scripts/dev/seed.sh [repo-name]   (default: graft-dev)
 set -euo pipefail
 
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$root"
 
 repo="${1:-graft-dev}"
 fixture=/var/lib/graft/mirror/fixtures/graft-fixture.git

@@ -3,15 +3,15 @@
 #
 # usage: scripts/dev/up.sh [--dev] [--mirror] [--rusttorrent] [--obs]
 #   default      graft-server and graft-node from graft-dev:local
-#   --dev        dev profile: host binaries from target/debug (run cargo build first)
+#   --dev        dev profile; then `docker compose --profile dev watch` syncs target/debug (cargo build first)
 #   --mirror     add graft-mirror following the fixture repository
 #   --rusttorrent add graft-mirror-rusttorrent (needs GitHub access)
 #   --obs        add prometheus and grafana on 127.0.0.1
-# A remote daemon (Node B) is supported: lib.sh maps the checkout path (GRAFT_HOST_ROOT).
+# Works with a Docker daemon on any host: no bind mounts of host paths.
 set -euo pipefail
 
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$root"
 
 mode=image
 extra=()
@@ -53,3 +53,6 @@ else
   docker compose "${extra[@]}" up -d --remove-orphans
 fi
 docker compose --profile '*' ps
+if [ "$mode" = dev ]; then
+  echo "up.sh: dev containers run the image binaries until a sync: run 'docker compose --profile dev watch' to load target/debug." >&2
+fi

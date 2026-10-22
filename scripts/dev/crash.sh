@@ -5,8 +5,8 @@
 # usage: scripts/dev/crash.sh
 set -euo pipefail
 
-# shellcheck source=lib.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$root"
 
 # Find the running server container: dev variant when up, else the image one.
 cid="$(docker compose --profile '*' ps -q --status running graft-server-dev graft-server 2>/dev/null | head -n 1)"
