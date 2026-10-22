@@ -89,12 +89,18 @@ enum Attribution {
 
 /// Estimated work for histogram diff of `old` against `new`. For each line
 /// occurring more than [`REPEAT_THRESHOLD`] times on either side, its
-/// count in `old` times its count in `new`; the sum is divided by one plus
-/// the anchors, the lines of `new` that occur on both sides at most
-/// [`REPEAT_THRESHOLD`] times. Anchors split the diff into regions that
-/// each see only their share of the repeats, so ordinary source (with many
-/// blank lines and braces, but distinct lines between them) stays cheap,
-/// while a file of a few lines repeated has no anchors and pays in full.
+/// count in `old` times its count in `new`; the sum is divided by the
+/// regions the anchors split the diff into. Anchors are the lines that
+/// occur on both sides at most [`REPEAT_THRESHOLD`] times, and each region
+/// sees only its share of the repeats, so ordinary source (with many blank
+/// lines and braces, but distinct lines between them) stays cheap, while a
+/// file of a few lines repeated has no anchors and pays in full.
+///
+/// Anchors only help where they sit: 300 distinct lines at the top of a
+/// large repetitive block leave one region holding nearly all of it. So
+/// the regions counted are at most each side's length over its longest
+/// run of lines without an anchor, which keeps the estimate honest when
+/// the anchors are clustered.
 fn work(old: &[Token], new: &[Token]) -> u64 {
     let mut counts: HashMap<Token, (u64, u64)> = HashMap::new();
     for t in old {
@@ -112,7 +118,23 @@ fn work(old: &[Token], new: &[Token]) -> u64 {
             anchors += b;
         }
     }
-    pairs / (anchors + 1)
+    if pairs == 0 {
+        return 0;
+    }
+    let is_anchor = |t: &Token| {
+        let (a, b) = counts[t];
+        a > 0 && b > 0 && a <= limit && b <= limit
+    };
+    let regions = |side: &[Token]| {
+        let (mut gap, mut longest) = (0u64, 0u64);
+        for t in side {
+            gap = if is_anchor(t) { 0 } else { gap + 1 };
+            longest = longest.max(gap);
+        }
+        side.len() as u64 / longest.max(1)
+    };
+    let regions = (anchors + 1).min(regions(old)).min(regions(new)).max(1);
+    pairs / regions
 }
 
 /// `new`'s line origins: those of the lines it keeps from `old` (whose
@@ -376,6 +398,52 @@ mod tests {
         let (_, how) = carry_with(&old, &new, &vec![id(1); 9_000], id(2));
         assert_eq!(how, Attribution::Diff);
         assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    /// The re-review's residual probe: about 300 distinct lines on top of
+    /// a large repetitive block, with the top changing in every version.
+    /// The anchors all sit in the top, so before they were weighed by
+    /// where they sit, 80k lines x 6 versions diffed in full (10.5s).
+    fn clustered_anchors(n: usize, v: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for i in 0..300 {
+            let tag = if i == 0 { v } else { 0 };
+            out.extend_from_slice(format!("top {i} v{tag}\n").as_bytes());
+        }
+        out.extend(repetitive(n, v));
+        out
+    }
+
+    fn timed_clustered(n: usize, versions: usize, bound: std::time::Duration) {
+        let start = std::time::Instant::now();
+        let mut content = Vec::new();
+        let mut origins = Vec::new();
+        let mut coarse = 0;
+        for v in 0..versions {
+            let next = clustered_anchors(n, v);
+            let (o, how) = carry_with(&content, &next, &origins, id(v as u8));
+            coarse += usize::from(how == Attribution::Coarse);
+            assert_eq!(o.len(), n + 300);
+            origins = o;
+            content = next;
+        }
+        assert_eq!(coarse, versions - 1);
+        let took = start.elapsed();
+        assert!(
+            took < bound,
+            "{n} lines x {versions} versions took {took:?}"
+        );
+    }
+
+    #[test]
+    fn clustered_anchors_are_bounded() {
+        timed_clustered(20_000, 6, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    #[ignore = "slow in debug; run with --ignored"]
+    fn clustered_anchors_80k_is_bounded() {
+        timed_clustered(80_000, 6, std::time::Duration::from_secs(10));
     }
 
     #[test]
