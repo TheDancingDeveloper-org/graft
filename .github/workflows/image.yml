@@ -37,7 +37,35 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      # Layer cache (WI-2234): a named builder whose BuildKit state is kept
+      # in the runner's own Docker daemon between jobs, so its layer cache and
+      # the Dockerfile's cargo cache mounts stay warm on that runner. This
+      # replaces cache-from/to type=gha, which started empty and was slow to
+      # reach from a self-hosted runner. A builder left by a job that died
+      # before its cleanup is removed first, keeping its state.
+      - name: Remove a stale builder
+        run: docker buildx rm --keep-state graft-image 2>/dev/null || true
       - uses: docker/setup-buildx-action@v3
+        with:
+          name: graft-image
+          keep-state: true
+
+      # The runners compile through the shared sccache bucket (ops repo
+      # personal/github-runner). Hand its settings to the build; the keys go
+      # in as build secrets (secret-envs below), never as build args. On a
+      # runner without them, the Dockerfile builds without sccache.
+      - name: sccache settings
+        id: sccache
+        run: |
+          {
+            echo "args<<EOF"
+            echo "SCCACHE_BUCKET=${SCCACHE_BUCKET:-}"
+            echo "SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT:-}"
+            echo "SCCACHE_REGION=${SCCACHE_REGION:-}"
+            echo "SCCACHE_S3_USE_SSL=${SCCACHE_S3_USE_SSL:-}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       # Registry names must be lowercase; the org name is not.
       - name: Image references
@@ -72,8 +100,10 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: ${{ steps.sccache.outputs.args }}
+          secret-envs: |
+            sccache_key_id=AWS_ACCESS_KEY_ID
+            sccache_secret=AWS_SECRET_ACCESS_KEY
 
       - name: Summary
         if: github.event_name != 'pull_request'
