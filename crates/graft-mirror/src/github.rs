@@ -276,8 +276,20 @@ impl<C: CredentialProvider> HttpForge<C> {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok())
             .map(Duration::from_secs);
+        // The primary rate limit: the budget is spent, and the reset time says
+        // when it comes back. GitHub sends no Retry-After for it.
+        let exhausted = resp
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            == Some("0");
+        let reset = header_u64(&resp, "x-ratelimit-reset").map(reset_wait);
         if status.is_success() {
             return match resp.json::<Value>().await {
+                Ok(v) if graphql_rate_limited(&v) => {
+                    Answer::Transient(None, "GraphQL rate limit".to_owned())
+                }
                 Ok(v) => Answer::Done(v),
                 Err(_) => Answer::Refused("GitHub answered with malformed JSON".to_owned()),
             };
@@ -289,12 +301,45 @@ impl<C: CredentialProvider> HttpForge<C> {
             .and_then(|v| v.get("message").and_then(Value::as_str).map(str::to_owned))
             .map(|m| clean(&m, MESSAGE_CHARS))
             .unwrap_or_default();
-        let limited = status.as_u16() == 429 || (status.as_u16() == 403 && retry_after.is_some());
-        if limited || status.is_server_error() {
+        let limited = status.as_u16() == 429
+            || (status.as_u16() == 403 && (retry_after.is_some() || exhausted));
+        if limited {
+            return Answer::Transient(
+                retry_after.or(reset),
+                format!("rate limited (status {})", status.as_u16()),
+            );
+        }
+        if status.is_server_error() {
             return Answer::Transient(retry_after, format!("status {}", status.as_u16()));
         }
         Answer::Refused(format!("status {}: {message}", status.as_u16()))
     }
+}
+
+/// A numeric response header, if it is present and well formed.
+fn header_u64(resp: &reqwest::Response, name: &str) -> Option<u64> {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// How long until a rate limit resets, from its reset time (epoch seconds).
+fn reset_wait(reset: u64) -> Duration {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    Duration::from_secs(reset.saturating_sub(now))
+}
+
+/// Whether a GraphQL reply (HTTP 200 with `errors`) says the rate limit is hit.
+fn graphql_rate_limited(v: &Value) -> bool {
+    v.get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errs| {
+            errs.iter()
+                .any(|e| e.get("type").and_then(Value::as_str) == Some("RATE_LIMITED"))
+        })
 }
 
 /// A short name for a transport error, without its URL.

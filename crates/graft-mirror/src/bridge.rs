@@ -450,6 +450,9 @@ where
     /// Runs whichever step the request is at, once each, until it waits on
     /// something or is final.
     async fn advance(&mut self, rec: &mut PullRecord) -> Result<(), MirrorError> {
+        if !self.held(rec).await? {
+            return Ok(());
+        }
         if rec.state == BridgeState::Requested {
             self.push(rec).await?;
         }
@@ -466,6 +469,47 @@ where
             self.land_check(rec).await?;
         }
         Ok(())
+    }
+
+    /// Checks, before a step that writes, that every changeset of the stack
+    /// is still a draft. One batched read. A draft that was abandoned (its
+    /// workspace closed), superseded, or collected can no longer be exported
+    /// or landed as asked, so the request is rejected with that reason. A
+    /// merged request is not checked: its landing reads the commit GitHub
+    /// made, not the drafts. Returns `false` once the request is rejected.
+    async fn held(&mut self, rec: &mut PullRecord) -> Result<bool, MirrorError> {
+        if rec.state.is_terminal() || rec.state == BridgeState::Merged {
+            return Ok(true);
+        }
+        let cx = self.call("held");
+        let repo = self.config.repo.clone();
+        let found = self
+            .api
+            .get_changesets(
+                &cx,
+                GetChangesets {
+                    repo,
+                    ids: rec.covered.clone(),
+                },
+            )
+            .await
+            .map_err(MirrorError::from)?;
+        let not_draft = found
+            .found
+            .iter()
+            .filter(|v| v.state != DraftState::Draft)
+            .count();
+        let gone = found.missing.len() + found.collected.len();
+        if not_draft == 0 && gone == 0 && found.found.len() == rec.covered.len() {
+            return Ok(true);
+        }
+        let detail = format!(
+            "drafts abandoned: {} of {} changesets are no longer held as drafts",
+            not_draft + gone,
+            rec.covered.len()
+        );
+        self.reject(rec, detail)?;
+        Ok(false)
     }
 
     /// Exports the stack onto upstream's tip and pushes its branch.
@@ -570,6 +614,10 @@ where
         }
         body.push('\n');
         body.push_str(&clean_text(&head.message, BODY_CHARS, true));
+        // The trailer GitHub's squash message will carry (its default takes
+        // the PR title and body). It goes last, as a trailer, after the
+        // draft's own text, so it is never mistaken for that text.
+        body.push_str(&format!("\n\n{TRAILER} {}\n", rec.head));
         NewPull {
             title,
             body,

@@ -27,7 +27,9 @@ use graft_model::{
     Timestamp,
 };
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi, WorkspaceApi};
-use graft_proto::types::{CreateChangeset, DraftState, GetChangesets, OpenWorkspace, PutObjects};
+use graft_proto::types::{
+    CreateChangeset, DraftState, GetChangesets, OpenWorkspace, PutObjects, WorkspaceRef,
+};
 use graft_proto::{CallContext, Frame, Principal, PrincipalKind};
 use graft_store::memory::MemoryStore;
 use graft_testkit::clock::FakeClock;
@@ -531,6 +533,41 @@ impl FakeGitHub {
         mock.mount(&self.server).await;
     }
 
+    /// GitHub's primary rate limit on `POST /pulls`, `times` over: a 403 with
+    /// the budget spent and no Retry-After, and a reset an hour away. The
+    /// bridge must wait (capped by the retry policy), not refuse.
+    async fn answer_pulls_rate_limited(&self, times: u64) {
+        let reset = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let resp = ResponseTemplate::new(403)
+            .insert_header("x-ratelimit-remaining", "0")
+            .insert_header("x-ratelimit-reset", reset.to_string())
+            .set_body_json(json!({"message": "API rate limit exceeded"}));
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{GH_REPO}/pulls")))
+            .respond_with(resp)
+            .up_to_n_times(times)
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// GraphQL's rate limit: HTTP 200 with a `RATE_LIMITED` error, `times` over.
+    async fn answer_graphql_rate_limited(&self, times: u64) {
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]
+            })))
+            .up_to_n_times(times)
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
     async fn pull_requests_seen(&self) -> usize {
         self.server
             .received_requests()
@@ -540,12 +577,6 @@ impl FakeGitHub {
             .filter(|r| r.method.as_str() == "POST" && r.url.path().ends_with("/pulls"))
             .count()
     }
-}
-
-/// Lands a draft on `main` upstream by a squash commit that names `head`,
-/// as GitHub would after the merge queue. Returns the merge commit.
-fn squash_on_main(w: &World, head: ChangesetId) -> GitSha {
-    w.commit(&format!("Add feature\n\nGraft-Changeset: {head}"))
 }
 
 /// The base commit, followed into the line, and the workspace that holds
@@ -597,8 +628,11 @@ async fn land_pr_merge_follow_landed() {
     assert!(body.contains(WORK_ITEM), "PR body names the work item");
     assert!(body.contains(SESSION), "PR body names the session");
 
-    // Merged outside graft; the merge commit names the head.
-    let merge = squash_on_main(&w, head);
+    // Merged outside graft by a squash whose message is the PR title and
+    // body, GitHub's default. Nothing is written into the message by hand:
+    // the trailer has to come from the PR body the bridge opened.
+    let title = gh.creates()[0]["title"].as_str().unwrap().to_owned();
+    let merge = w.commit(&format!("{title}\n\n{body}"));
     w.push_main();
     gh.merge(1, merge);
     let tracked = bridge.track().await.unwrap();
@@ -621,6 +655,44 @@ async fn land_pr_merge_follow_landed() {
         "the line holds the squashed commit"
     );
     assert_eq!(db.sha_of(landed).unwrap(), Some(merge));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_rebase_merge_lands_the_replayed_head() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let gh = FakeGitHub::start(&w.upstream).await;
+    let forge = gh.forge();
+    let tip = base(&w, &db).await;
+    let head = draft(&w.api, tip, "feature.txt", b"feature\n", "Add feature").await;
+
+    let mut bridge = w.bridge(&db, &forge);
+    let rec = bridge.submit("ws1", head).await.unwrap();
+    assert_eq!(rec.state, BridgeState::Open, "{}", rec.detail);
+    let exported = rec.export_sha.unwrap().to_hex();
+
+    // Rebase-merged: GitHub replays the PR's commit onto main with its
+    // message, so the replayed commit carries the head's trailer.
+    git(&w.work, &["fetch", "-q", "origin", &rec.branch]);
+    git(&w.work, &["cherry-pick", &exported]);
+    w.push_main();
+    let merge = GitSha::from_hex(&git(&w.work, &["rev-parse", "HEAD"])).unwrap();
+    gh.merge(1, merge);
+    bridge.track().await.unwrap();
+    assert_eq!(
+        bridge.request(head).unwrap().unwrap().state,
+        BridgeState::Merged
+    );
+
+    assert!(matches!(w.follow(&db).await, LineOutcome::Imported { .. }));
+    bridge.track().await.unwrap();
+    let rec = bridge.request(head).unwrap().unwrap();
+    assert_eq!(rec.state, BridgeState::Landed, "detail: {}", rec.detail);
+    assert_eq!(
+        w.tip().await,
+        rec.landed,
+        "the line holds the replayed head"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -898,6 +970,47 @@ async fn a_rate_limit_is_retried_and_a_5xx_is_bounded() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_spent_rate_limit_is_waited_out_not_refused() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let gh = FakeGitHub::start(&w.upstream).await;
+    let forge = gh.forge();
+    let tip = base(&w, &db).await;
+    let head = draft(&w.api, tip, "feature.txt", b"feature\n", "Add feature").await;
+
+    // The budget is spent: a 403 with x-ratelimit-remaining 0 and no
+    // Retry-After. It is transient, so the PR opens after the retry.
+    gh.answer_pulls_rate_limited(1).await;
+    let mut bridge = w.bridge(&db, &forge);
+    let rec = bridge.submit("ws1", head).await.unwrap();
+    assert_eq!(rec.state, BridgeState::Open, "{}", rec.detail);
+    assert_eq!(
+        gh.pull_requests_seen().await,
+        2,
+        "one limited call, then the PR"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_graphql_rate_limit_is_retried_not_refused() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let gh = FakeGitHub::start(&w.upstream).await;
+    let forge = gh.forge();
+    let tip = base(&w, &db).await;
+    let head = draft(&w.api, tip, "feature.txt", b"feature\n", "Add feature").await;
+
+    // The merge queue call answers HTTP 200 with RATE_LIMITED once. That is
+    // a wait and a retry, not a refusal that would reject the request.
+    gh.answer_graphql_rate_limited(1).await;
+    let mut bridge = w.bridge(&db, &forge);
+    let rec = bridge.submit("ws1", head).await.unwrap();
+    assert_eq!(rec.state, BridgeState::Open, "{}", rec.detail);
+    assert!(rec.enqueued, "{}", rec.detail);
+    assert_eq!(gh.enqueues(), vec![1]);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_persistent_5xx_stops_after_bounded_attempts_and_resumes_later() {
     let w = World::new().await;
     let db = w.open_db();
@@ -946,6 +1059,47 @@ async fn a_stale_base_is_refused_before_anything_is_pushed() {
     let err = bridge.submit("ws1", head).await.unwrap_err();
     assert!(matches!(err, MirrorError::Config(_)), "{err}");
     assert!(gh.creates().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn abandoned_drafts_reject_the_request_before_a_pr_is_opened() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let gh = FakeGitHub::start(&w.upstream).await;
+    let forge = gh.forge();
+    let tip = base(&w, &db).await;
+    let head = draft(&w.api, tip, "feature.txt", b"feature\n", "Add feature").await;
+
+    // GitHub fails the PR open, so the request waits in Pushed.
+    gh.answer_pulls_with(500, None, Some(3)).await;
+    let mut bridge = w.bridge(&db, &forge);
+    assert!(bridge.submit("ws1", head).await.is_err());
+    assert_eq!(
+        bridge.request(head).unwrap().unwrap().state,
+        BridgeState::Pushed
+    );
+
+    // The workspace closes before the PR opens: its drafts are abandoned.
+    w.api
+        .close_workspace(
+            &cx(),
+            WorkspaceRef {
+                repo: REPO.to_owned(),
+                name: WS.to_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(state_of(&w.api, head).await, DraftState::Abandoned);
+
+    let rec = bridge.submit("ws1", head).await.unwrap();
+    assert_eq!(rec.state, BridgeState::Rejected);
+    assert!(rec.detail.contains("drafts abandoned"), "{}", rec.detail);
+    assert!(
+        gh.creates().is_empty(),
+        "no PR is opened for abandoned drafts"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
