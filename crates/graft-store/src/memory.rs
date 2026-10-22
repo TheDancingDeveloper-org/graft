@@ -526,4 +526,49 @@ impl MetaStore for MemoryStore {
                 .collect())
         }))
     }
+
+    fn list_records(
+        &self,
+        repo: RepoId,
+        state: RecordState,
+        after: Option<ChangesetId>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(ChangesetId, ChangesetRecord)>>> + Send {
+        ready(self.with(|st| {
+            use std::ops::Bound;
+            let start = after.map_or(Bound::Unbounded, Bound::Excluded);
+            Ok(st
+                .repo(repo)?
+                .changesets
+                .range((start, Bound::Unbounded))
+                .filter(|(_, (_, record))| record.state == state)
+                .take(page_limit(limit))
+                .map(|(id, (_, record))| (*id, record.clone()))
+                .collect())
+        }))
+    }
+
+    fn holder_rows(
+        &self,
+        repo: RepoId,
+        object: ObjectId,
+        after: Option<String>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<String>>> + Send {
+        ready(self.with(|st| {
+            use std::ops::Bound;
+            let start = match after {
+                Some(name) => Bound::Excluded((object, name)),
+                None => Bound::Included((object, String::new())),
+            };
+            Ok(st
+                .repo(repo)?
+                .holders
+                .range((start, Bound::Unbounded))
+                .take_while(|(o, _)| *o == object)
+                .take(page_limit(limit))
+                .map(|(_, holder)| holder.clone())
+                .collect())
+        }))
+    }
 }
