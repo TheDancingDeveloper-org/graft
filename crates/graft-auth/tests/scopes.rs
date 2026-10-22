@@ -1,7 +1,4 @@
 //! Scope text forms and `authorize`.
-//!
-//! Tests that build a `RepoPath` are `#[ignore]`d until G1.1 lands
-//! `RepoPath::new`; run them with `cargo test -p graft-auth -- --ignored`.
 
 use graft_auth::{AuthError, Scope, authorize};
 use graft_model::RepoPath;
@@ -59,7 +56,6 @@ fn text_forms_round_trip() {
 }
 
 #[test]
-#[ignore = "needs RepoPath::new (G1.1)"]
 fn write_prefix_round_trips() {
     let s = "repo:graft:write:crates/graft-auth";
     let scope = Scope::parse(s).unwrap();
@@ -147,7 +143,17 @@ fn implied_scopes() {
 }
 
 #[test]
-#[ignore = "needs RepoPath::new (G1.1)"]
+fn prefix_is_a_component_boundary() {
+    // "a/b" covers "a/b" and below it, never a sibling that shares the text.
+    let p = principal(&["repo:graft:write:a/b"]);
+    for ok in ["a/b", "a/b/c"] {
+        assert_eq!(authorize(&p, &write(), Some(&path(ok))), Ok(()), "{ok}");
+    }
+    assert!(authorize(&p, &write(), Some(&path("a/bc"))).is_err());
+    assert!(authorize(&p, &write(), Some(&path("a"))).is_err());
+}
+
+#[test]
 fn write_path_prefix() {
     let p = principal(&["repo:graft:write:crates/graft-auth"]);
     for ok in ["crates/graft-auth", "crates/graft-auth/src/lib.rs"] {
