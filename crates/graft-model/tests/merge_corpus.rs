@@ -6,6 +6,12 @@
 //! conflicted exit must match `Conflicts` (with the same number of regions)
 //! and `render_conflict_markers` byte for byte.
 //!
+//! The required test, `agrees_with_recorded_git`, is hermetic: it compares
+//! against git's output recorded in `fixtures/merge3/corpus.txt` (git
+//! 2.53.0), because git's placement of conflict regions differs between
+//! releases. `agrees_with_git_merge_file` (ignored) runs the installed git
+//! live; with `GRAFT_BLESS=1` it rewrites the fixture instead of comparing.
+//!
 //! The corpus also passed with 20 000 cases while it was written.
 //!
 //! Known, intended differences (the corpus does not generate them):
@@ -20,12 +26,16 @@
 //!   to both files, which can align differently; and a diff that runs over
 //!   the whole budget is `Merge3::TooComplex` where git would still merge.
 //!   Neither happens below a million units of work, so not in this corpus.
+//! - Older git releases (e.g. the 2.43 on GitHub's Ubuntu runners) can place
+//!   a conflict differently: in corpus case 88 they end the first conflict
+//!   at `{` and leave the shared `a … return x;` run outside it, where git
+//!   2.53 and graft fold that run into the conflict. Both are valid diff3
+//!   output; graft follows current git, so the fixture records 2.53.
 //! - git's `xhistogram` also falls back when more than 64 distinct lines
 //!   collide in one bucket of its hash table; graft has no such limit.
 //!
-//! The test is skipped (with a note on stderr) when `git` is not installed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use graft_model::merge::{Merge3, merge3, render_conflict_markers};
@@ -125,69 +135,144 @@ fn have_git() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-#[test]
-fn agrees_with_git_merge_file() {
-    if !have_git() {
-        eprintln!("skipping: git is not installed");
-        return;
-    }
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("merge_corpus");
-    std::fs::create_dir_all(&dir).unwrap();
+/// One generated case: base, ours, theirs.
+fn corpus() -> Vec<[Vec<u8>; 3]> {
     let mut rng = Rng(0x6772_6166_7433_2e34);
-    let (mut clean, mut conflicted) = (0, 0);
-    for case in 0..CASES {
-        let mut fresh = 0;
-        let len = rng.below(40);
-        let base: Vec<String> = (0..len).map(|_| line(&mut rng, &mut fresh)).collect();
-        let ours = edit(&mut rng, &base, &mut fresh);
-        let theirs = edit(&mut rng, &base, &mut fresh);
-        let nl = [rng.below(5) != 0, rng.below(5) != 0, rng.below(5) != 0];
-        let (b, o, t) = (join(&base, nl[0]), join(&ours, nl[1]), join(&theirs, nl[2]));
+    (0..CASES)
+        .map(|_| {
+            let mut fresh = 0;
+            let len = rng.below(40);
+            let base: Vec<String> = (0..len).map(|_| line(&mut rng, &mut fresh)).collect();
+            let ours = edit(&mut rng, &base, &mut fresh);
+            let theirs = edit(&mut rng, &base, &mut fresh);
+            let nl = [rng.below(5) != 0, rng.below(5) != 0, rng.below(5) != 0];
+            [join(&base, nl[0]), join(&ours, nl[1]), join(&theirs, nl[2])]
+        })
+        .collect()
+}
 
-        let (git_clean, git_out) = git_merge(&dir, &b, &o, &t);
-        let ctx = || {
-            format!(
-                "case {case}\n--- base\n{}--- ours\n{}--- theirs\n{}--- git\n{}",
-                String::from_utf8_lossy(&b),
-                String::from_utf8_lossy(&o),
-                String::from_utf8_lossy(&t),
-                String::from_utf8_lossy(&git_out),
-            )
+fn fixture_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/merge3/corpus.txt")
+}
+
+/// The fixture: per case a header `<case> <clean|conflict> <len>\n`, then
+/// `len` bytes of git's output, then `\n`.
+fn write_fixture(results: &[(bool, Vec<u8>)]) {
+    let mut out = Vec::new();
+    for (case, (clean, bytes)) in results.iter().enumerate() {
+        let kind = if *clean { "clean" } else { "conflict" };
+        out.extend_from_slice(format!("{case} {kind} {}\n", bytes.len()).as_bytes());
+        out.extend_from_slice(bytes);
+        out.push(b'\n');
+    }
+    std::fs::create_dir_all(fixture_path().parent().unwrap()).unwrap();
+    std::fs::write(fixture_path(), out).unwrap();
+}
+
+fn read_fixture() -> Vec<(bool, Vec<u8>)> {
+    let data = std::fs::read(fixture_path()).expect("read the merge3 fixture");
+    let mut rest = &data[..];
+    let mut results = Vec::new();
+    while !rest.is_empty() {
+        let nl = rest.iter().position(|&c| c == b'\n').unwrap();
+        let header = std::str::from_utf8(&rest[..nl]).unwrap();
+        let mut parts = header.split(' ');
+        let case: usize = parts.next().unwrap().parse().unwrap();
+        assert_eq!(case, results.len(), "fixture cases are in order");
+        let clean = match parts.next().unwrap() {
+            "clean" => true,
+            "conflict" => false,
+            other => panic!("bad fixture kind {other}"),
         };
-        match merge3(&b, &o, &t) {
-            Merge3::Clean(bytes) => {
-                assert!(git_clean, "graft clean, git conflicted\n{}", ctx());
-                assert_eq!(
-                    String::from_utf8_lossy(&bytes),
-                    String::from_utf8_lossy(&git_out),
-                    "{}",
-                    ctx()
-                );
-                clean += 1;
-            }
-            Merge3::Conflicts(regions) => {
-                assert!(!git_clean, "graft conflicted, git clean\n{}", ctx());
-                assert!(!regions.is_empty());
-                let markers = git_out
-                    .split_inclusive(|&c| c == b'\n')
-                    .filter(|l| l.starts_with(b"<<<<<<< "))
-                    .count();
-                assert_eq!(regions.len(), markers, "{}", ctx());
-                assert_eq!(
-                    String::from_utf8_lossy(&render_conflict_markers(&b, &o, &t)),
-                    String::from_utf8_lossy(&git_out),
-                    "{}",
-                    ctx()
-                );
-                conflicted += 1;
-            }
-            Merge3::NotText => panic!("generated text is text"),
-            Merge3::TooComplex => panic!("a small case is never too complex\n{}", ctx()),
+        let len: usize = parts.next().unwrap().parse().unwrap();
+        let body = &rest[nl + 1..];
+        results.push((clean, body[..len].to_vec()));
+        assert_eq!(body[len], b'\n');
+        rest = &body[len + 1..];
+    }
+    results
+}
+
+/// Checks graft against one recorded git result.
+fn check(case: usize, [b, o, t]: &[Vec<u8>; 3], git_clean: bool, git_out: &[u8]) -> bool {
+    let ctx = || {
+        format!(
+            "case {case}\n--- base\n{}--- ours\n{}--- theirs\n{}--- git\n{}",
+            String::from_utf8_lossy(b),
+            String::from_utf8_lossy(o),
+            String::from_utf8_lossy(t),
+            String::from_utf8_lossy(git_out),
+        )
+    };
+    match merge3(b, o, t) {
+        Merge3::Clean(bytes) => {
+            assert!(git_clean, "graft clean, git conflicted\n{}", ctx());
+            assert_eq!(
+                String::from_utf8_lossy(&bytes),
+                String::from_utf8_lossy(git_out),
+                "{}",
+                ctx()
+            );
+            true
         }
+        Merge3::Conflicts(regions) => {
+            assert!(!git_clean, "graft conflicted, git clean\n{}", ctx());
+            assert!(!regions.is_empty());
+            let markers = git_out
+                .split_inclusive(|&c| c == b'\n')
+                .filter(|l| l.starts_with(b"<<<<<<< "))
+                .count();
+            assert_eq!(regions.len(), markers, "{}", ctx());
+            assert_eq!(
+                String::from_utf8_lossy(&render_conflict_markers(b, o, t)),
+                String::from_utf8_lossy(git_out),
+                "{}",
+                ctx()
+            );
+            false
+        }
+        Merge3::NotText => panic!("generated text is text"),
+        Merge3::TooComplex => panic!("a small case is never too complex\n{}", ctx()),
+    }
+}
+
+fn check_all(results: &[(bool, Vec<u8>)]) {
+    let cases = corpus();
+    assert_eq!(
+        results.len(),
+        cases.len(),
+        "fixture is out of date; re-bless"
+    );
+    let mut clean = 0;
+    for (case, (inputs, (git_clean, git_out))) in cases.iter().zip(results).enumerate() {
+        clean += usize::from(check(case, inputs, *git_clean, git_out));
     }
     // The corpus must exercise both outcomes.
+    let conflicted = CASES - clean;
     assert!(
         clean > CASES / 10 && conflicted > CASES / 10,
         "{clean} clean, {conflicted} conflicted"
     );
+}
+
+#[test]
+fn agrees_with_recorded_git() {
+    check_all(&read_fixture());
+}
+
+/// Runs the installed git live. `GRAFT_BLESS=1` rewrites the fixture.
+#[test]
+#[ignore = "depends on the installed git version; the fixture test is the required one"]
+fn agrees_with_git_merge_file() {
+    assert!(have_git(), "git is not installed");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("merge_corpus");
+    std::fs::create_dir_all(&dir).unwrap();
+    let results: Vec<_> = corpus()
+        .iter()
+        .map(|[b, o, t]| git_merge(&dir, b, o, t))
+        .collect();
+    if std::env::var_os("GRAFT_BLESS").is_some() {
+        write_fixture(&results);
+    }
+    check_all(&results);
 }
