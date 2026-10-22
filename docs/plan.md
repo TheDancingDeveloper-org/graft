@@ -93,7 +93,7 @@ pushed; don't poll CI; print AUTOPILOT: DONE.*
 - `docs/design.md`, `docs/plan.md`, `docs/decisions.md`.
 
 **Before phase 1 starts**, the operator answers the phase 1 blockers in
-decisions.md: D11, D12, D13, D14, and D18. (D2, D3, D4, D5, D7 and D15 are
+decisions.md: D18. (D2, D3, D4, D5, D7, D11, D12, D13, D14 and D15 are
 decided.)
 
 ---

@@ -21,6 +21,9 @@ Already decided by the operator (2026-10-22):
 - **D3, D4, D5, D7** (operator, 2026-10-22): SQLite + filesystem; gRPC plus a
   read-only JSON facade; the gzip frame at rest; BLAKE3. Each was the
   recommendation below.
+- **D11, D12, D13, D14** (operator, 2026-10-22): reject and report bad
+  paths on import; a separate object namespace per repository; a Komodo stack
+  on Node B; rustTorrent as the pilot. Each was the recommendation below.
 
 | # | Decision | Recommendation | Blocks |
 | --- | --- | --- | --- |
@@ -34,10 +37,10 @@ Already decided by the operator (2026-10-22):
 | D8 | GitHub mirror identity | A GitHub App with ruleset bypass on `main` | Phase 2 (PR bridge), Phase 3 (export) |
 | D9 | GitHub change notification | Poll every 15 s in phase 1; add webhooks in phase 2 if lag matters | Phase 1 (G1.12) |
 | D10 | Agent token issuance | Vogt mints per-session graft tokens | Phase 2 |
-| D11 | Path rules on import | Reject non-UTF-8 and non-portable paths, with a report | Phase 1 (G1.8) |
-| D12 | Repository namespaces | One server, many repos, a separate object namespace per repo | Phase 1 (G1.2) |
-| D13 | Deployment | A Komodo stack on Node B; the node daemon as a systemd unit per host | Phase 1 (G1.15) |
-| D14 | Pilot repository | rustTorrent | Phase 1 |
+| D11 | Path rules on import | **Decided:** reject non-UTF-8 and non-portable paths, with a report | — |
+| D12 | Repository namespaces | **Decided:** one server, many repos, a separate object namespace per repo | — |
+| D13 | Deployment | **Decided:** a Komodo stack on Node B; the node daemon as a systemd unit per host | — |
+| D14 | Pilot repository | **Decided:** rustTorrent | — |
 | D15 | Where graft's source lives | **Decided:** GitHub `TheDancingDeveloper-org/graft`, public | — |
 | D16 | Line-level merge in rebase | On for text files under 1 MiB, recorded in metadata | Phase 3 |
 | D17 | MCP hosting | Both: `graft mcp` (stdio) and the server's `/mcp` | Phase 1 (read tools), Phase 2 (write tools) |
@@ -232,6 +235,8 @@ Phase 1 (read pilot) uses a static read token per repo. Phase 2 needs D10.
 
 ## D11. Path rules on import
 
+**Decided (operator, 2026-10-22): the recommendation below.**
+
 Git allows any bytes in paths. graft requires UTF-8, and it can enforce
 portability (no names that differ only by case, no Windows-reserved names).
 
@@ -245,6 +250,8 @@ portability (no names that differ only by case, no Windows-reserved names).
 
 ## D12. Repository namespaces
 
+**Decided (operator, 2026-10-22): the recommendation below.**
+
 - **One server, many repos, a separate object namespace per repo**
   (**Recommended**). Simple authorization (the repository is the read
   boundary), simple GC, simple deletion. We lose dedup across repos, which is
@@ -255,6 +262,8 @@ portability (no names that differ only by case, no Windows-reserved names).
   work for every new repo.
 
 ## D13. Deployment
+
+**Decided (operator, 2026-10-22): the recommendation below.**
 
 - **graft-server and graft-mirror as a Komodo stack on Node B; graft-node as
   a systemd unit on each host that runs sessions** (**Recommended**).
@@ -267,6 +276,8 @@ portability (no names that differ only by case, no Windows-reserved names).
   sessions run today.
 
 ## D14. Pilot repository
+
+**Decided (operator, 2026-10-22): the recommendation below.**
 
 - **rustTorrent** (**Recommended**). Real, active, and agent-heavy. The
   OpenScion trial gives a baseline (git timings, history shape: 296 commits, 9
