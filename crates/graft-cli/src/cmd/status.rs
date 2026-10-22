@@ -37,17 +37,17 @@ pub(crate) fn run(g: &Global) -> Result<(), Failure> {
             "changes": changes.iter().map(change_json).collect::<Vec<_>>(),
         }));
     }
-    println!("line {}", state.line);
-    println!("base {}", short(state.base));
+    outln!("line {}", state.line);
+    outln!("base {}", short(state.base));
     match state.head {
-        Some(head) => println!("head {}", short(head)),
-        None => println!("head (none)"),
+        Some(head) => outln!("head {}", short(head)),
+        None => outln!("head (none)"),
     }
     if changes.is_empty() {
-        println!("clean");
+        outln!("clean");
     }
     for change in &changes {
-        println!("{:<9} {}", word(change), change.path());
+        outln!("{:<9} {}", word(change), change.path());
     }
     Ok(())
 }

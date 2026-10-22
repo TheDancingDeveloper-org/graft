@@ -53,13 +53,13 @@ fn print_sparse(json: bool, sparse: &Sparse) -> Result<(), Failure> {
         }));
     }
     if sparse.is_full() {
-        println!("full snapshot");
+        outln!("full snapshot");
     }
     for prefix in &prefixes {
-        println!("{prefix}");
+        outln!("{prefix}");
     }
     if sparse.root_files {
-        println!("(root files)");
+        outln!("(root files)");
     }
     Ok(())
 }

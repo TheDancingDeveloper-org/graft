@@ -40,10 +40,10 @@ pub(crate) fn run(g: &Global, args: &LsArgs) -> Result<(), Failure> {
             return print_json(&value);
         }
         for e in &page.entries {
-            println!("{:<9} {}", kind_name(e.kind), e.path);
+            outln!("{:<9} {}", kind_name(e.kind), e.path);
         }
         if let Some(next) = &page.next {
-            println!("more: --cursor {next}");
+            outln!("more: --cursor {next}");
         }
         Ok(())
     })

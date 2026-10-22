@@ -41,10 +41,10 @@ pub(crate) fn run(g: &Global, args: &LogArgs) -> Result<(), Failure> {
             return print_json(&history(&page));
         }
         for s in &page.changesets {
-            println!("{}  {}  ({})", short(s.id), s.subject, s.author.name);
+            outln!("{}  {}  ({})", short(s.id), s.subject, s.author.name);
         }
         if let Some(next) = &page.next {
-            println!("more: --cursor {next}");
+            outln!("more: --cursor {next}");
         }
         Ok(())
     })

@@ -52,7 +52,7 @@ pub(crate) fn run(g: &Global, args: &BlameArgs) -> Result<(), Failure> {
         }
         for r in &result.ranges {
             let by = &r.origin;
-            println!(
+            outln!(
                 "{:>5}-{:<5} {} {}  {}",
                 r.start + 1,
                 r.end,

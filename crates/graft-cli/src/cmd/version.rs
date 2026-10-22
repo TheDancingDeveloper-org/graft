@@ -19,9 +19,10 @@ pub(crate) fn run(g: &Global) -> Result<(), Failure> {
             },
         }));
     }
-    println!(
+    outln!(
         "graft {version} (protocol {}.{})",
-        PROTOCOL_VERSION.major, PROTOCOL_VERSION.minor
+        PROTOCOL_VERSION.major,
+        PROTOCOL_VERSION.minor
     );
     Ok(())
 }

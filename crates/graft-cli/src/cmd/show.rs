@@ -90,35 +90,36 @@ pub(crate) fn run(g: &Global, args: &ShowArgs) -> Result<(), Failure> {
         if g.json {
             return print_json(&value);
         }
-        print_text(&view, &files);
+        print_text(&view, &files)?;
         Ok(())
     })
 }
 
 /// The human form: the header, the message, then each file and its patch.
-fn print_text(view: &ChangesetView, files: &DiffResult) {
+fn print_text(view: &ChangesetView, files: &DiffResult) -> Result<(), Failure> {
     let c = &view.changeset;
-    println!("changeset {}", c.id());
+    outln!("changeset {}", c.id());
     for parent in &c.parents {
-        println!("parent {parent}");
+        outln!("parent {parent}");
     }
-    println!("author {} <{}>", c.author.name, c.author.email);
-    println!("authored {} ms since the epoch", c.authored_at.ms);
-    println!("state {}", state_name(view.state));
-    println!();
-    println!("{}", c.message.trim_end());
-    println!();
+    outln!("author {} <{}>", c.author.name, c.author.email);
+    outln!("authored {} ms since the epoch", c.authored_at.ms);
+    outln!("state {}", state_name(view.state));
+    outln!();
+    outln!("{}", c.message.trim_end());
+    outln!();
     for f in &files.files {
         let line = match &f.change {
             Change::Put { path, kind, .. } => format!("put {} {path}", kind_name(*kind)),
             Change::Delete { path } => format!("delete {path}"),
         };
-        println!("{line}");
+        outln!("{line}");
         if let Some(patch) = &f.patch {
-            print!("{patch}");
+            out!("{patch}");
         }
     }
     if let Some(next) = &files.next {
-        println!("more files: --cursor {next}");
+        outln!("more files: --cursor {next}");
     }
+    Ok(())
 }

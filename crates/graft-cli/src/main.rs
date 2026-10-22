@@ -3,6 +3,9 @@
 //! Every read command takes `--json`, whose shape is the JSON Schema saved
 //! under `crates/graft-cli/schemas/`. Exit codes follow design §8.2 ([`Exit`]).
 
+#[macro_use]
+mod out;
+
 mod api;
 mod cli;
 mod cmd;
@@ -53,7 +56,10 @@ const PLANNED: &[&str] = &[
 ];
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => return parse_failure(e),
+    };
     let json = cli.global.json;
     let result = dispatch(&cli);
     let code = match result {
@@ -61,6 +67,23 @@ fn main() -> ExitCode {
         Err(failure) => failure.report(json),
     };
     ExitCode::from(code as u8)
+}
+
+/// A command line clap refused. Help and version print as usual. A usage
+/// error prints as the JSON error object when `--json` is on the line.
+fn parse_failure(e: clap::Error) -> ExitCode {
+    if e.exit_code() == 0 {
+        let _ = e.print();
+        return ExitCode::SUCCESS;
+    }
+    if std::env::args_os().any(|a| a == "--json") {
+        let first = e.to_string();
+        let message = first.lines().next().unwrap_or("usage error");
+        let message = message.strip_prefix("error: ").unwrap_or(message);
+        let code = Failure::usage(message.to_owned()).report(true);
+        return ExitCode::from(code as u8);
+    }
+    e.exit()
 }
 
 fn dispatch(cli: &Cli) -> Result<(), Failure> {

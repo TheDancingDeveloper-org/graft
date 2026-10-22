@@ -80,7 +80,7 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
                 },
             }));
         }
-        println!(
+        outln!(
             "cloned {} {} at {} into {} ({files} files)",
             conn.repo,
             args.line,

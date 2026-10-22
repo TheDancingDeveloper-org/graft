@@ -18,7 +18,7 @@ use crate::error::Failure;
 /// Writes `value` as pretty JSON and a newline to standard output.
 pub(crate) fn print_json(value: &Value) -> Result<(), Failure> {
     let mut out = io::stdout().lock();
-    serde_json::to_writer_pretty(&mut out, value).map_err(io::Error::other)?;
+    serde_json::to_writer_pretty(&mut out, value).map_err(io::Error::from)?;
     writeln!(out)?;
     Ok(())
 }

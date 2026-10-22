@@ -124,7 +124,7 @@ impl From<ClientError> for Failure {
                 ),
             ),
             ClientError::State(what) => Failure::new(Exit::Failure, "state", what),
-            ClientError::Io(e) => Failure::new(Exit::Failure, "io", e.to_string()),
+            ClientError::Io(e) => e.into(),
             ClientError::Store(e) => {
                 Failure::new(Exit::Failure, "store", format!("object cache: {e:?}"))
             }
@@ -135,6 +135,10 @@ impl From<ClientError> for Failure {
 
 impl From<io::Error> for Failure {
     fn from(e: io::Error) -> Self {
+        // A reader that closed early (`graft log | head`) is not a failure.
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            return Failure::silent(Exit::Ok);
+        }
         Failure::new(Exit::Failure, "io", e.to_string())
     }
 }

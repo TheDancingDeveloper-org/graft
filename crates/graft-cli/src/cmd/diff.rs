@@ -39,12 +39,12 @@ fn working_copy_diff(g: &Global) -> Result<(), Failure> {
         }));
     }
     for change in &changes {
-        println!("{:<9} {}", word(change), change.path());
+        outln!("{:<9} {}", word(change), change.path());
     }
     if changes.is_empty() {
-        println!("no changes against {}", short(wc.state().base));
+        outln!("no changes against {}", short(wc.state().base));
     } else {
-        println!("(paths only; diff two changesets for patches)");
+        outln!("(paths only; diff two changesets for patches)");
     }
     Ok(())
 }
@@ -88,16 +88,16 @@ fn changeset_diff(g: &Global, args: &DiffArgs, from: &str, to: &str) -> Result<(
         for f in &result.files {
             match &f.change {
                 Change::Put { path, kind, .. } => {
-                    println!("put {} {path}", kind_name(*kind));
+                    outln!("put {} {path}", kind_name(*kind));
                 }
-                Change::Delete { path } => println!("delete {path}"),
+                Change::Delete { path } => outln!("delete {path}"),
             }
             if let Some(patch) = &f.patch {
-                print!("{patch}");
+                out!("{patch}");
             }
         }
         if let Some(next) = &result.next {
-            println!("more: --cursor {next}");
+            outln!("more: --cursor {next}");
         }
         Ok(())
     })

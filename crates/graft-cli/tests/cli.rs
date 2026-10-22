@@ -498,3 +498,46 @@ fn every_schema_file_compiles() {
     }
     assert_eq!(count, 13, "one schema per command, plus error and api-list");
 }
+
+#[test]
+fn a_reader_that_closes_early_ends_the_command_quietly() {
+    use std::process::Stdio;
+
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path(), &[]);
+    // Enough new files that the status listing overflows the pipe buffer, so
+    // the write fails once the reader has gone.
+    for i in 0..3000 {
+        fs::write(app.join(format!("new-{i:04}.txt")), "x\n").unwrap();
+    }
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_graft"))
+        .current_dir(&app)
+        .arg("status")
+        .env_remove("GRAFT_ENDPOINT")
+        .env_remove("GRAFT_TOKEN")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn graft");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_clap_error_under_json_prints_the_error_object() {
+    let dir = scratch();
+    let out = graft(dir.path())
+        .args(["--json", "frobnicate-now"])
+        .assert()
+        .code(2);
+    let value = json_out(out.get_output());
+    assert_valid("error", &value);
+    assert_eq!(value["error"]["kind"], json!("usage"));
+}
