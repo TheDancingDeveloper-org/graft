@@ -46,6 +46,7 @@ Already decided by the operator (2026-10-22):
 | D17 | MCP hosting | Both: `graft mcp` (stdio) and the server's `/mcp` | Phase 1 (read tools), Phase 2 (write tools) |
 | D18 | Phase 1 kill criteria | **Decided:** as in plan.md, unchanged | — |
 | D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
+| D20 | Pilot period | **Decided:** none; G1.18 dropped, phase 2 not gated (replaces D18's gate) | — |
 
 ---
 
@@ -349,4 +350,22 @@ them can't be re-exported to its git sha.
   - a committer field in the core model (git baggage, and it would change the
     pinned changeset encoding);
   - accepting the 4 commits as lossy (fails the 100% fidelity exit criterion).
+
+## D20. No pilot period
+
+**Decided (operator, 2026-10-22): no pilot period. This replaces the gate in
+[D18](#d18-phase-1-kill-criteria).**
+
+- G1.18, the 7-day rustTorrent read pilot and its go or no-go verdict, is
+  dropped.
+- Phase 2 starts as soon as each item's dependencies are done. It doesn't wait
+  for a phase 1 verdict.
+- The phase 1 exit criteria in
+  [plan.md](plan.md#phase-1-exit-and-kill-criteria) become targets: the G1.16
+  harness measures and reports them, but nothing is held on them. The
+  follow-lag and agent-adoption criteria need a long-running deployment, so
+  they are tracked once the G1.17 stack is deployed rather than scored up
+  front.
+- Cost: the kill criteria no longer stop phase 2. If graft's reads turn out
+  not to pay their way, phase 2 work may be wasted.
 
