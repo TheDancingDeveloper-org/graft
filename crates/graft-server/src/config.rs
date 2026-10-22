@@ -17,6 +17,8 @@
 //! max_watches = 1024
 //! max_put_call_bytes = 67108864      # PutObjects buffered per call (64 MiB)
 //! put_buffer_bytes = 536870912       # PutObjects buffered by all calls
+//! put_wait_ms = 10000                # longest wait for that budget
+//! put_idle_ms = 30000                # longest gap between PutObjects messages
 //! ```
 //!
 //! Unknown keys are refused, so a typo fails at start-up rather than being
@@ -73,6 +75,12 @@ pub(crate) struct ServerConfig {
     /// Frame bytes every `PutObjects` call in flight buffers together; past
     /// it calls wait (backpressure).
     pub(crate) put_buffer_bytes: u64,
+    /// How long a `PutObjects` message waits for the shared budget before
+    /// the call answers `Unavailable`, ms.
+    pub(crate) put_wait_ms: u64,
+    /// The longest gap between two `PutObjects` messages before the call
+    /// answers `Unavailable` and gives its budget back, ms.
+    pub(crate) put_idle_ms: u64,
 }
 
 impl Default for ServerConfig {
@@ -95,6 +103,8 @@ impl Default for ServerConfig {
             max_watches: 1024,
             max_put_call_bytes: 64 << 20,
             put_buffer_bytes: 512 << 20,
+            put_wait_ms: 10_000,
+            put_idle_ms: 30_000,
         }
     }
 }
@@ -139,6 +149,8 @@ impl ServerConfig {
             ),
             ("max_watches", self.max_watches as u64),
             ("max_put_call_bytes", self.max_put_call_bytes),
+            ("put_wait_ms", self.put_wait_ms),
+            ("put_idle_ms", self.put_idle_ms),
         ];
         if let Some((key, _)) = positive.iter().find(|(_, v)| *v == 0) {
             return Err(ConfigError(format!("{key} must be positive")));

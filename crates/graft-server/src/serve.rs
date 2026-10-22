@@ -95,7 +95,10 @@ async fn run(
         telemetry,
         config.max_token_ttl_s,
         Watches::new(config.watch_limits()),
-        PutBudget::new(config.max_put_call_bytes, config.put_buffer_bytes),
+        PutBudget::new(config.max_put_call_bytes, config.put_buffer_bytes).with_waits(
+            std::time::Duration::from_millis(config.put_wait_ms),
+            std::time::Duration::from_millis(config.put_idle_ms),
+        ),
     ));
 
     let listener = bind(&config.listen).await?;

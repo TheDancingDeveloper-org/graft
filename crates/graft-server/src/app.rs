@@ -73,6 +73,10 @@ const BUDGET_UNIT: u64 = 1024;
 pub(crate) struct PutBudget {
     /// Most frame bytes one call buffers.
     pub(crate) call_bytes: u64,
+    /// How long a message waits for budget before the call is refused.
+    pub(crate) wait: std::time::Duration,
+    /// The longest gap between messages of one call.
+    pub(crate) idle: std::time::Duration,
     shared: Arc<tokio::sync::Semaphore>,
 }
 
@@ -86,8 +90,15 @@ impl PutBudget {
             .min(tokio::sync::Semaphore::MAX_PERMITS);
         Self {
             call_bytes,
+            wait: std::time::Duration::from_secs(10),
+            idle: std::time::Duration::from_secs(30),
             shared: Arc::new(tokio::sync::Semaphore::new(permits)),
         }
+    }
+
+    /// Sets the budget wait and the idle gap.
+    pub(crate) fn with_waits(self, wait: std::time::Duration, idle: std::time::Duration) -> Self {
+        Self { wait, idle, ..self }
     }
 
     /// Takes `bytes` of the shared budget, waiting while it is spent. The

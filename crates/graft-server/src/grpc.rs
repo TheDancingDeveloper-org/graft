@@ -33,15 +33,15 @@ const GET_BATCH: usize = 4;
 /// Pages a `GetObjects` stream holds ahead of the client.
 const GET_CHANNEL: usize = 1;
 
-/// How long a `PutObjects` message waits for buffer budget.
-const PUT_WAIT: Duration = Duration::from_secs(10);
-
-/// The retry hint when it waited too long, ms.
+/// The retry hint when a `PutObjects` waited too long, ms.
 const PUT_RETRY_MS: u64 = 1_000;
 
 /// The largest message the server decodes: one maximal blob frame plus
 /// framing.
 pub(crate) const MAX_MESSAGE: usize = 80 << 20;
+
+/// Room for message and frame headers above a call's frame-byte cap.
+const PUT_FRAMING: u64 = 1 << 20;
 
 /// How often a following `Watch` polls the journal.
 const WATCH_POLL: Duration = Duration::from_millis(100);
@@ -113,10 +113,15 @@ impl Services {
     /// tonic routes.
     pub(crate) fn routes(self) -> tonic::service::Routes {
         let gz = CompressionEncoding::Gzip;
+        // One decoded `PutObjects` message is never larger than a whole
+        // call may buffer, so decoding stays inside the per-call cap.
+        let decode = usize::try_from(self.app.put_budget.call_bytes.saturating_add(PUT_FRAMING))
+            .unwrap_or(usize::MAX)
+            .min(MAX_MESSAGE);
         let objects = pb::object_service_server::ObjectServiceServer::new(self.clone())
             .accept_compressed(gz)
             .send_compressed(gz)
-            .max_decoding_message_size(MAX_MESSAGE)
+            .max_decoding_message_size(decode)
             .max_encoding_message_size(MAX_MESSAGE);
         let repo = pb::repo_service_server::RepoServiceServer::new(self.clone())
             .accept_compressed(gz)
@@ -269,7 +274,9 @@ impl pb::object_service_server::ObjectService for Services {
     /// taking its share of the server-wide `put_buffer_bytes` budget: when
     /// the budget is spent, the call stops reading its stream until others
     /// finish, so the client is held back by flow control. A message that
-    /// waits longer than `PUT_WAIT` fails the call with `Unavailable`.
+    /// waits longer than the budget's `wait` fails the call with
+    /// `Unavailable`, as does a client that sends nothing for `idle`, so a
+    /// trickling writer gives its share back.
     async fn put_objects(
         &self,
         request: Request<Streaming<pb::PutObjectsRequest>>,
@@ -313,20 +320,17 @@ impl pb::object_service_server::ObjectService for Services {
             }
             // Calls that each hold part of the budget could wait on one
             // another; a bounded wait turns that into a retry.
-            match tokio::time::timeout(PUT_WAIT, self.app.put_budget.reserve(len)).await {
+            let budget = &self.app.put_budget;
+            match tokio::time::timeout(budget.wait, budget.reserve(len)).await {
                 Ok(permit) => permits.push(permit),
-                Err(_) => {
-                    let e = ApiError::Unavailable {
-                        retry_after_ms: PUT_RETRY_MS,
-                    };
-                    self.app.refused("PutObjects", &e);
-                    return Err(e.into());
-                }
+                Err(_) => return Err(self.put_unavailable()),
             }
             req.blobs.extend(part.blobs);
-            match stream.message().await? {
-                Some(m) => part = wire(m)?,
-                None => break,
+            match tokio::time::timeout(budget.idle, stream.message()).await {
+                Ok(Ok(Some(m))) => part = wire(m)?,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(self.put_unavailable()),
             }
         }
         let ids = self
@@ -342,6 +346,15 @@ impl pb::object_service_server::ObjectService for Services {
 }
 
 impl Services {
+    /// A `PutObjects` that waited too long, for budget or for its client.
+    fn put_unavailable(&self) -> Status {
+        let e = ApiError::Unavailable {
+            retry_after_ms: PUT_RETRY_MS,
+        };
+        self.app.refused("PutObjects", &e);
+        e.into()
+    }
+
     /// One `GetObjects` engine call.
     async fn get_batch(
         &self,
