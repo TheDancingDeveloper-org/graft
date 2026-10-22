@@ -1,0 +1,11 @@
+# graft-server dev configuration (container paths; see compose.yaml).
+# The server reads this file once G1.12 lands; until then the stub ignores it.
+# Listens on all interfaces inside the container only: compose publishes the
+# port on 127.0.0.1 alone.
+listen = "0.0.0.0:7878"
+objects_dir = "/var/lib/graft/objects"
+meta_db = "/var/lib/graft/meta/meta.db"
+min_free_fraction = 0.05
+# Metrics listener (Prometheus scrapes it from the obs profile). Port 9464 is a
+# dev convention; the config key is decided by G1.12.
+metrics = "0.0.0.0:9464"
