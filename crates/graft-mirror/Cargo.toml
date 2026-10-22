@@ -16,8 +16,21 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+axum.workspace = true
 graft-client.workspace = true
 graft-git.workspace = true
 graft-model.workspace = true
 graft-proto.workspace = true
 graft-telemetry.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["process", "signal"] }
+toml.workspace = true
+tonic = { workspace = true, features = ["gzip"] }
+tracing.workspace = true
+
+[dev-dependencies]
+graft-engine.workspace = true
+graft-store = { workspace = true, features = ["testkit"] }
+graft-testkit.workspace = true
+tempfile.workspace = true

@@ -1,0 +1,214 @@
+//! The git CLI, for what talks to the upstream: `ls-remote`, `fetch` into the
+//! local bare mirror, and ancestry checks (`docs/design.md` §11.1 step 1).
+//! Reading the mirror for import is `graft-git`'s job.
+//!
+//! Every command runs with a timeout, without a terminal prompt, and is killed
+//! if the caller gives up. The upstream URL is never logged (it may carry a
+//! credential); errors name the command and git's first stderr line only.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+use graft_git::GitSha;
+use tokio::process::Command;
+
+/// The longest any one git command may run.
+pub const GIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The ref namespace in the bare mirror that fetch writes upstream branches
+/// to. Kept apart from `refs/heads/` so a force-push upstream never rewrites
+/// anything but this copy.
+pub const UPSTREAM_NS: &str = "refs/graft-mirror/upstream/";
+
+/// A git CLI failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitCliError(pub String);
+
+impl std::fmt::Display for GitCliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GitCliError {}
+
+/// The local bare mirror of one upstream.
+#[derive(Clone, Debug)]
+pub struct Mirror {
+    dir: PathBuf,
+    upstream: String,
+}
+
+/// The exit status and stdout of a finished command.
+struct Output {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+async fn git(dir: Option<&Path>, args: &[&str]) -> Result<Output, GitCliError> {
+    let mut cmd = Command::new("git");
+    if let Some(dir) = dir {
+        cmd.arg("-C").arg(dir);
+    }
+    cmd.args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let what = args.first().copied().unwrap_or("git");
+    let child = cmd
+        .spawn()
+        .map_err(|e| GitCliError(format!("git {what}: cannot run git: {e}")))?;
+    let out = tokio::time::timeout(GIT_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| GitCliError(format!("git {what}: timed out")))?
+        .map_err(|e| GitCliError(format!("git {what}: {e}")))?;
+    Ok(Output {
+        code: out.status.code(),
+        stdout: out.stdout,
+        stderr: out.stderr,
+    })
+}
+
+fn failed(what: &str, out: &Output) -> GitCliError {
+    let line = String::from_utf8_lossy(&out.stderr);
+    let line: String = line
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect();
+    GitCliError(format!("git {what} failed ({:?}): {line}", out.code))
+}
+
+async fn ok(dir: Option<&Path>, args: &[&str]) -> Result<Vec<u8>, GitCliError> {
+    let out = git(dir, args).await?;
+    if out.code == Some(0) {
+        Ok(out.stdout)
+    } else {
+        Err(failed(args.first().copied().unwrap_or("git"), &out))
+    }
+}
+
+impl Mirror {
+    /// The mirror at `dir` of `upstream` (a URL or a local path).
+    pub fn new(dir: impl Into<PathBuf>, upstream: impl Into<String>) -> Mirror {
+        Mirror {
+            dir: dir.into(),
+            upstream: upstream.into(),
+        }
+    }
+
+    /// The bare repository's directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The mirror ref fetch writes `branch` to.
+    pub fn upstream_ref(branch: &str) -> String {
+        format!("{UPSTREAM_NS}{branch}")
+    }
+
+    /// Creates the bare repository if it does not exist yet.
+    pub async fn ensure(&self) -> Result<(), GitCliError> {
+        if self.dir.join("HEAD").exists() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| GitCliError(format!("creating the mirror directory: {e}")))?;
+        ok(Some(&self.dir), &["init", "-q", "--bare"]).await?;
+        Ok(())
+    }
+
+    /// `git ls-remote` for `branches`: each branch's upstream commit, or
+    /// `None` when upstream has no such branch.
+    pub async fn ls_remote(
+        &self,
+        branches: &[&str],
+    ) -> Result<Vec<(String, Option<GitSha>)>, GitCliError> {
+        let refs: Vec<String> = branches.iter().map(|b| format!("refs/heads/{b}")).collect();
+        let mut args = vec!["ls-remote", self.upstream.as_str()];
+        args.extend(refs.iter().map(String::as_str));
+        let out = ok(Some(&self.dir), &args).await?;
+        let text = String::from_utf8_lossy(&out);
+        let mut found = Vec::new();
+        for line in text.lines() {
+            let mut parts = line.split('\t');
+            let (Some(sha), Some(name)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            if let Some(sha) = GitSha::from_hex(sha) {
+                found.push((name.to_owned(), sha));
+            }
+        }
+        Ok(branches
+            .iter()
+            .zip(&refs)
+            .map(|(b, r)| {
+                let sha = found.iter().find(|(n, _)| n == r).map(|(_, s)| *s);
+                ((*b).to_owned(), sha)
+            })
+            .collect())
+    }
+
+    /// Fetches `branches` from upstream into [`UPSTREAM_NS`], forced: the
+    /// copy always equals upstream, and follow decides what graft may take.
+    pub async fn fetch(&self, branches: &[&str]) -> Result<(), GitCliError> {
+        let specs: Vec<String> = branches
+            .iter()
+            .map(|b| format!("+refs/heads/{b}:{}", Mirror::upstream_ref(b)))
+            .collect();
+        let mut args = vec!["fetch", "-q", "--no-tags", self.upstream.as_str()];
+        args.extend(specs.iter().map(String::as_str));
+        ok(Some(&self.dir), &args).await?;
+        Ok(())
+    }
+
+    /// Whether `ancestor` is `descendant` or one of its ancestors. A commit
+    /// the mirror does not hold is not an ancestor.
+    pub async fn is_ancestor(
+        &self,
+        ancestor: GitSha,
+        descendant: GitSha,
+    ) -> Result<bool, GitCliError> {
+        let (a, d) = (ancestor.to_hex(), descendant.to_hex());
+        let out = git(Some(&self.dir), &["merge-base", "--is-ancestor", &a, &d]).await?;
+        match out.code {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            // 128: an object is missing (upstream rewrote history the mirror
+            // never fetched): not an ancestor.
+            Some(128) if !self.has_commit(ancestor).await? => Ok(false),
+            _ => Err(failed("merge-base", &out)),
+        }
+    }
+
+    /// Whether the mirror holds `sha` as a commit.
+    pub async fn has_commit(&self, sha: GitSha) -> Result<bool, GitCliError> {
+        let spec = format!("{}^{{commit}}", sha.to_hex());
+        let out = git(Some(&self.dir), &["cat-file", "-e", &spec]).await?;
+        Ok(out.code == Some(0))
+    }
+
+    /// Commits reachable from `to` and not from `from`
+    /// (`git rev-list --count`): what graft lacks. O(the new commits).
+    pub async fn count_between(
+        &self,
+        from: Option<GitSha>,
+        to: GitSha,
+    ) -> Result<u64, GitCliError> {
+        let range = match from {
+            Some(f) => format!("{}..{}", f.to_hex(), to.to_hex()),
+            None => to.to_hex(),
+        };
+        let out = ok(Some(&self.dir), &["rev-list", "--count", &range]).await?;
+        String::from_utf8_lossy(&out)
+            .trim()
+            .parse()
+            .map_err(|_| GitCliError("git rev-list: unexpected output".to_owned()))
+    }
+}
