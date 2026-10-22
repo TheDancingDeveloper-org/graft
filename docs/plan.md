@@ -576,15 +576,27 @@ server ships.
 
 **G3.2 GC: sweep.**
 - Crates: `graft-gc`
-- Needs: G2.9
-- Deliver: mark, doom, grace, delete and revive as in design §8.6; batched
-  and rate-limited; journalled; metrics.
+- Needs: G2.9, G3.11 (protection records). Real deletion is not safe without
+  them. Under [D20](decisions.md#d20-no-pilot-period) it starts as soon as
+  both are done, with no phase 2 gate, so it runs after G3.11 even though it
+  is listed in wave 3.A.
+- Deliver: the sweep in design §8.6: lapse, collect (with the successor
+  rule and parent pins), uploads, doom, grace, delete with the `deleting`
+  mark, and revival; batched and rate-limited, under a per-repo lease;
+  journalled; metrics, including `graft_orphans{state="pinned"}`. The dry run
+  reads protection records, and `--verify` checks it against the G2.9
+  ancestry walk. Deletion is off per repository until the operator turns it
+  on.
 - Accept: a property test over random interleavings of create, upload,
-  land, close and GC never deletes a held or landed object. Revival during
-  the grace period works. A delete followed by a reference yields
-  `MissingObjects` and a successful re-upload. Reclaimed bytes match the
-  model.
-- Test: model-based concurrency tests; the crash harness during a sweep.
+  land, close, adopt and GC never deletes an object a non-collected changeset
+  can reach, nor a landed one. Revival during the grace period works. A
+  delete followed by a reference yields `MissingObjects` and a successful
+  re-upload. A parent with a live child is never collected. Reclaimed bytes
+  match the model. Collection reads are proportional to the changes
+  collected (asserted by counting reads), not to history depth. The sweep
+  refuses a repository without the `gc_protection` marker.
+- Test: model-based concurrency tests; the crash harness during a sweep,
+  including a crash between the `deleting` mark and the frame delete.
 
 **G3.3 Mirror: export mode.**
 - Crates: `graft-mirror`
@@ -636,6 +648,30 @@ server ships.
   manual smoke test, recorded with screenshots in the PR.
 - Test: a scripted LSP client (`tower-lsp` test utilities or an equivalent).
 
+**G3.11 Store and engine: GC protection records.**
+- Crates: `graft-store`, `graft-store-sqlite`, `graft-engine`
+- Needs: G2.9. It runs after G3.1, because both edit `graft-engine`.
+- Deliver: the protection records in design §8.6. In `graft-store`: parent
+  pins and `expires_at` on records, rows read by holder, the `deleting` mark,
+  and index reads for expiry, lapsed leases and old doomed rows, all paged,
+  with conformance cases. In `graft-store-sqlite`: the schema migration and
+  its backfill (pins, `expires_at`, the row check, the `gc_protection`
+  marker). In `graft-engine`: `CreateChangeset` writes rows for every tree
+  on its changed paths and pins each non-landed parent in its transaction,
+  with the parent precondition; state transitions set and clear
+  `expires_at`; writes refuse or wait on `deleting` objects. No deletion.
+- Accept: after any random sequence of writes, rebases, syncs, lands and
+  closes, the §8.6 invariant holds when checked by brute force. Pins equal
+  the number of non-collected children. A create racing a parent's
+  collection either pins the parent or fails `Collected`. The migration on a
+  repository written by today's code adds pins and no rows, and reads no
+  landed record. A write adds O(parents) pin writes, asserted by counting.
+- Test: proptest against a brute-force reachability model; conformance on
+  memory and SQLite; a migration test from a v3 database.
+
+Wave 3.B has four items. Their crates are still disjoint, so the four can
+run at once.
+
 ### Wave 3.C
 
 **G3.7 Engine: Revert, stack ops, line merge.**
@@ -673,7 +709,7 @@ server ships.
 
 **G3.10 Cutover of rustTorrent.**
 - Crates: none (operations)
-- Needs: G3.1–G3.9, D6, D8
+- Needs: G3.1–G3.9, G3.11, D6, D8 (decided)
 - Deliver: rustTorrent `main` flipped to graft-primary in a scheduled window;
   the merge-queue rule replaced by the line policy; delivery-process docs
   updated for the repository.
@@ -747,6 +783,7 @@ publish decisions (D1, D2).
 | G3.8 | 3.C | graft-auth, ci/ |
 | G3.9 | 3.C | graft-mirror |
 | G3.10 | 3.D | operations |
+| G3.11 | 3.B | graft-store, graft-store-sqlite, graft-engine |
 
 Note: G3.6 touches one file in `graft-cli` (`src/cmd/lsp.rs`) while G3.5 owns
 `graft-cli`. The skeleton already has that file as a stub, and G3.5 must not
