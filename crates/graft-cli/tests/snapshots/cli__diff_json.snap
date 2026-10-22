@@ -1,0 +1,27 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "files": [
+    {
+      "id": "1b19e72f76533faebe744ffdf0a97dc95a842b40f293c283832f2cdf57200f0c",
+      "kind": "file",
+      "op": "put",
+      "patch": null,
+      "path": "docs/guide.md",
+      "truncated": false
+    },
+    {
+      "id": "dbee0aa9385a013f88df7cc2fc248ff42cb0483de682577af611066460986160",
+      "kind": "file",
+      "op": "put",
+      "patch": null,
+      "path": "src/lib.rs",
+      "truncated": false
+    }
+  ],
+  "from": "cdb48eb55c33daad6e99842398cedb4ba6b1a756269c8bb587213df155775f0d9",
+  "next": null,
+  "to": "ceb9d51a431efa31e031494ec857b6e71b3fc89b7df21172c5365879f263cec50"
+}

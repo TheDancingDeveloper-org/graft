@@ -1,0 +1,237 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+[
+  {
+    "api": "ObjectApi",
+    "command": "clone",
+    "excluded": null,
+    "op": "get_objects",
+    "raw": false
+  },
+  {
+    "api": "ObjectApi",
+    "command": null,
+    "excluded": "upload check for commit (phase 2)",
+    "op": "has_objects",
+    "raw": false
+  },
+  {
+    "api": "ObjectApi",
+    "command": null,
+    "excluded": "blob upload for commit (phase 2)",
+    "op": "put_objects",
+    "raw": false
+  },
+  {
+    "api": "RepoApi",
+    "command": null,
+    "excluded": "commit creates a draft (phase 2)",
+    "op": "create_changeset",
+    "raw": false
+  },
+  {
+    "api": "RepoApi",
+    "command": "show",
+    "excluded": null,
+    "op": "get_changesets",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": "api",
+    "excluded": null,
+    "op": "resolve_ref",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": "api",
+    "excluded": null,
+    "op": "list_refs",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": null,
+    "excluded": "moves admin and tool refs; served by graft-server admin (G1.12)",
+    "op": "update_ref",
+    "raw": false
+  },
+  {
+    "api": "RepoApi",
+    "command": "api",
+    "excluded": null,
+    "op": "stat",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": "ls",
+    "excluded": null,
+    "op": "list_tree",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": "cat",
+    "excluded": null,
+    "op": "read_file",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": "log",
+    "excluded": null,
+    "op": "log",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": "api",
+    "excluded": null,
+    "op": "is_ancestor",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": "api",
+    "excluded": null,
+    "op": "merge_base",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": "diff",
+    "excluded": null,
+    "op": "diff",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": "blame",
+    "excluded": null,
+    "op": "blame",
+    "raw": true
+  },
+  {
+    "api": "RepoApi",
+    "command": null,
+    "excluded": "rebase is part of sync and land (phase 2 and 3)",
+    "op": "rebase",
+    "raw": false
+  },
+  {
+    "api": "RepoApi",
+    "command": null,
+    "excluded": "revert command (phase 2)",
+    "op": "revert",
+    "raw": false
+  },
+  {
+    "api": "RepoApi",
+    "command": null,
+    "excluded": "land command (phase 2)",
+    "op": "land",
+    "raw": false
+  },
+  {
+    "api": "RepoApi",
+    "command": null,
+    "excluded": "CI check results, attest (phase 3)",
+    "op": "attest",
+    "raw": false
+  },
+  {
+    "api": "RepoApi",
+    "command": "api",
+    "excluded": null,
+    "op": "watch",
+    "raw": true
+  },
+  {
+    "api": "WorkspaceApi",
+    "command": null,
+    "excluded": "workspace command (phase 2)",
+    "op": "open_workspace",
+    "raw": false
+  },
+  {
+    "api": "WorkspaceApi",
+    "command": null,
+    "excluded": "workspace command (phase 2)",
+    "op": "get_workspace",
+    "raw": false
+  },
+  {
+    "api": "WorkspaceApi",
+    "command": null,
+    "excluded": "workspace command (phase 2)",
+    "op": "list_workspaces",
+    "raw": false
+  },
+  {
+    "api": "WorkspaceApi",
+    "command": null,
+    "excluded": "workspace command (phase 2)",
+    "op": "renew_lease",
+    "raw": false
+  },
+  {
+    "api": "WorkspaceApi",
+    "command": null,
+    "excluded": "commit and stack move the head (phase 2)",
+    "op": "set_head",
+    "raw": false
+  },
+  {
+    "api": "WorkspaceApi",
+    "command": null,
+    "excluded": "sync command (phase 2)",
+    "op": "sync",
+    "raw": false
+  },
+  {
+    "api": "WorkspaceApi",
+    "command": null,
+    "excluded": "stack command (phase 2 and 3)",
+    "op": "stack",
+    "raw": false
+  },
+  {
+    "api": "WorkspaceApi",
+    "command": null,
+    "excluded": "workspace command (phase 2)",
+    "op": "close_workspace",
+    "raw": false
+  },
+  {
+    "api": "AdminApi",
+    "command": null,
+    "excluded": "admin; graft-server admin subcommands (G1.12)",
+    "op": "create_repo",
+    "raw": false
+  },
+  {
+    "api": "AdminApi",
+    "command": null,
+    "excluded": "admin; graft-server admin subcommands (G1.12)",
+    "op": "import_changesets",
+    "raw": false
+  },
+  {
+    "api": "AdminApi",
+    "command": null,
+    "excluded": "admin; graft-server admin subcommands (G1.12)",
+    "op": "gc",
+    "raw": false
+  },
+  {
+    "api": "AdminApi",
+    "command": null,
+    "excluded": "admin; graft-server admin subcommands (G1.12)",
+    "op": "mint_token",
+    "raw": false
+  }
+]

@@ -1,0 +1,36 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: value
+---
+{
+  "author": {
+    "email": "test@example.com",
+    "kind": "human",
+    "name": "test"
+  },
+  "authored_at": {
+    "ms": 1,
+    "offset_min": 0
+  },
+  "files": [
+    {
+      "id": "dbee0aa9385a013f88df7cc2fc248ff42cb0483de682577af611066460986160",
+      "kind": "file",
+      "op": "put",
+      "patch": null,
+      "path": "src/lib.rs",
+      "truncated": false
+    }
+  ],
+  "files_next": null,
+  "id": "c94756c9bdf549c6e4841e4b243848d1156fbead59970bb4be1efc61866b30d93",
+  "lsn": 2,
+  "message": "main 2",
+  "metadata": {},
+  "parents": [
+    "cdb48eb55c33daad6e99842398cedb4ba6b1a756269c8bb587213df155775f0d9"
+  ],
+  "root": "eadaf1d7172818b1faa6559cd2f36fd5d999a9688b68044ef25d5ce81b8f51a2",
+  "state": "landed",
+  "superseded_by": null
+}

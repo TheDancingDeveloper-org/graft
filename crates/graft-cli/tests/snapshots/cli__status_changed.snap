@@ -1,0 +1,10 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: text(out.get_output())
+---
+line main
+base ceb9d51a431ef
+head (none)
+modified  README.md
+deleted   assets/logo.bin
+added     new.txt

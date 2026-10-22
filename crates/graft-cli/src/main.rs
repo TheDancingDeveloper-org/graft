@@ -1,20 +1,38 @@
 //! `graft`: the command-line client (`docs/design.md` §3 verbs, §9).
 //!
-//! Every command takes `--json`; exit codes follow design §8.2 ([`Exit`]).
+//! Every read command takes `--json`, whose shape is the JSON Schema saved
+//! under `crates/graft-cli/schemas/`. Exit codes follow design §8.2 ([`Exit`]).
 
+#[macro_use]
+mod out;
+
+mod api;
+mod cli;
 mod cmd;
+mod conn;
+mod error;
+mod render;
 
 use std::process::ExitCode;
 
-/// Exit codes shared by every command (`docs/design.md` §8.2).
+use clap::Parser;
+
+use cli::{Cli, Command};
+use error::Failure;
+
+/// Exit codes (`docs/design.md` §8.2). `Failure` is for everything §8.2 does
+/// not name (not found, a damaged working copy, an I/O error); it is 1, the
+/// conventional general failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-enum Exit {
-    /// Success (or landed).
+#[repr(u8)]
+pub(crate) enum Exit {
+    /// Success.
     Ok = 0,
+    /// Any other failure.
+    Failure = 1,
     /// Usage error.
     Usage = 2,
-    /// Land or sync conflict.
+    /// Land or sync conflict, or local changes that would be overwritten.
     Conflict = 3,
     /// Contended; retryable.
     Contended = 4,
@@ -26,55 +44,91 @@ enum Exit {
     Unavailable = 7,
 }
 
-const COMMANDS: &[(&str, &str)] = &[
-    (
-        "clone",
-        "open a workspace and lay out a sparse working copy",
-    ),
-    ("status", "working-copy changes against the head"),
-    ("diff", "diff the working copy or two changesets"),
-    ("log", "first-parent history"),
-    ("show", "a changeset and its patch"),
-    ("blame", "line origins"),
-    ("cat", "print a file at a changeset"),
-    ("ls", "list a directory at a changeset"),
-    ("sparse", "add or remove slice prefixes"),
-    ("commit", "create a draft on the server"),
-    ("land", "land the stack on a line"),
-    ("sync", "move the base to the line tip"),
-    ("stack", "list, reorder, squash, split or drop drafts"),
-    ("revert", "create a draft inverting a changeset"),
-    ("workspace", "list, open, renew or close workspaces"),
-    ("api", "call any RPC with JSON in and out"),
-    ("mcp", "run the MCP server over stdio"),
-    ("lsp", "run the LSP server over stdio"),
-    ("version", "print versions"),
+/// Commands that are designed but not built yet (`docs/plan.md`).
+const PLANNED: &[&str] = &[
+    "commit",
+    "land",
+    "mcp",
+    "revert",
+    "stack",
+    "sync",
+    "workspace",
 ];
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let code = match args.first().map(String::as_str) {
-        Some("version") => {
-            println!(
-                "graft {} (protocol {}.{})",
-                env!("CARGO_PKG_VERSION"),
-                graft_proto::PROTOCOL_VERSION.major,
-                graft_proto::PROTOCOL_VERSION.minor
-            );
-            Exit::Ok
-        }
-        Some("lsp") => cmd::lsp::run(&args[1..]),
-        Some(c) if COMMANDS.iter().any(|(n, _)| *n == c) => {
-            eprintln!("graft {c}: not implemented yet (see docs/plan.md)");
-            Exit::Usage
-        }
-        _ => {
-            eprintln!("usage: graft <command> [--json] [args]\n");
-            for (name, help) in COMMANDS {
-                eprintln!("  {name:<10} {help}");
-            }
-            Exit::Usage
-        }
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => return parse_failure(e),
+    };
+    let json = cli.global.json;
+    let result = dispatch(&cli);
+    let code = match result {
+        Ok(()) => Exit::Ok,
+        Err(failure) => failure.report(json),
     };
     ExitCode::from(code as u8)
+}
+
+/// A command line clap refused. Help and version print as usual. A usage
+/// error prints as the JSON error object when `--json` is on the line.
+fn parse_failure(e: clap::Error) -> ExitCode {
+    if e.exit_code() == 0 {
+        let _ = e.print();
+        return ExitCode::SUCCESS;
+    }
+    if std::env::args_os().any(|a| a == "--json") {
+        let first = e.to_string();
+        let message = first.lines().next().unwrap_or("usage error");
+        let message = message.strip_prefix("error: ").unwrap_or(message);
+        let code = Failure::usage(message.to_owned()).report(true);
+        return ExitCode::from(code as u8);
+    }
+    e.exit()
+}
+
+fn dispatch(cli: &Cli) -> Result<(), Failure> {
+    let g = &cli.global;
+    match &cli.command {
+        Command::Clone(args) => cmd::clone::run(g, args),
+        Command::Status => cmd::status::run(g),
+        Command::Diff(args) => cmd::diff::run(g, args),
+        Command::Log(args) => cmd::log::run(g, args),
+        Command::Show(args) => cmd::show::run(g, args),
+        Command::Blame(args) => cmd::blame::run(g, args),
+        Command::Cat(args) => cmd::cat::run(g, args),
+        Command::Ls(args) => cmd::ls::run(g, args),
+        Command::Sparse(args) => cmd::sparse::run(g, args),
+        Command::Api(args) => api::run(g, args),
+        Command::Version => cmd::version::run(g),
+        Command::Lsp { args } => match cmd::lsp::run(args) {
+            Exit::Ok => Ok(()),
+            code => Err(Failure::silent(code)),
+        },
+        Command::Planned(args) => {
+            let name = args.first().map_or("", String::as_str);
+            if PLANNED.contains(&name) {
+                Err(Failure::usage(format!(
+                    "graft {name}: not implemented yet (see docs/plan.md)"
+                )))
+            } else {
+                Err(Failure::usage(format!("unknown command: {name}")))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_codes_match_design() {
+        assert_eq!(Exit::Ok as u8, 0);
+        assert_eq!(Exit::Usage as u8, 2);
+        assert_eq!(Exit::Conflict as u8, 3);
+        assert_eq!(Exit::Contended as u8, 4);
+        assert_eq!(Exit::Rejected as u8, 5);
+        assert_eq!(Exit::Denied as u8, 6);
+        assert_eq!(Exit::Unavailable as u8, 7);
+    }
 }

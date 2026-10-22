@@ -1,0 +1,5 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: text(out.get_output())
+---
+cloned demo main at ceb9d51a431ef into app (4 files)

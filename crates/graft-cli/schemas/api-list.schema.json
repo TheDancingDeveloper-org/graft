@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft api --list",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "op",
+      "api",
+      "raw",
+      "command",
+      "excluded"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "op": {
+        "type": "string"
+      },
+      "api": {
+        "enum": [
+          "ObjectApi",
+          "RepoApi",
+          "WorkspaceApi",
+          "AdminApi"
+        ]
+      },
+      "raw": {
+        "type": "boolean"
+      },
+      "command": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "excluded": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    }
+  }
+}
