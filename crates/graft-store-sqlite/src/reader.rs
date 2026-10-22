@@ -409,3 +409,88 @@ pub(crate) fn journal(
     })
     .collect()
 }
+
+pub(crate) fn list_records(
+    conn: &Connection,
+    repo: RepoId,
+    state: RecordState,
+    after: Option<ChangesetId>,
+    limit: u32,
+) -> StoreResult<Vec<(ChangesetId, ChangesetRecord)>> {
+    check_repo(conn, repo)?;
+    let after = after.map(|id| id.0.0.to_vec());
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT id, lsn, received_at, holder, superseded_by FROM changesets
+             WHERE repo = ?1 AND state = ?2 AND (?3 IS NULL OR id > ?3)
+             ORDER BY id LIMIT ?4",
+        )
+        .map_err(sql_err)?;
+    type Raw = (Vec<u8>, i64, i64, Option<String>, Option<Vec<u8>>);
+    let rows = stmt
+        .query_map(
+            params![repo.0, state_code(state), after, limit],
+            |r| -> rusqlite::Result<Raw> {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            },
+        )
+        .map_err(sql_err)?;
+    rows.map(|row| {
+        let (id, lsn, received_at_ms, holder, superseded_by) = row.map_err(sql_err)?;
+        let record = ChangesetRecord {
+            lsn: uint(lsn)?,
+            received_at_ms,
+            state,
+            holder,
+            superseded_by: superseded_by.as_deref().map(changeset_id).transpose()?,
+        };
+        Ok((changeset_id(&id)?, record))
+    })
+    .collect()
+}
+
+pub(crate) fn holder_rows(
+    conn: &Connection,
+    repo: RepoId,
+    object: ObjectId,
+    after: Option<String>,
+    limit: u32,
+) -> StoreResult<Vec<String>> {
+    check_repo(conn, repo)?;
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT holder FROM holders
+             WHERE repo = ?1 AND object = ?2 AND (?3 IS NULL OR holder > ?3)
+             ORDER BY holder LIMIT ?4",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, &object.0[..], after, limit], |r| {
+            r.get::<_, String>(0)
+        })
+        .map_err(sql_err)?;
+    rows.map(|r| r.map_err(sql_err)).collect()
+}
+
+pub(crate) fn list_all_workspaces(
+    conn: &Connection,
+    repo: RepoId,
+    after: &str,
+    limit: u32,
+) -> StoreResult<Vec<WorkspaceRecord>> {
+    check_repo(conn, repo)?;
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT {WORKSPACE_COLUMNS} FROM workspaces
+             WHERE repo = ?1 AND name > ?2 ORDER BY name LIMIT ?3"
+        ))
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, after, limit], raw_workspace)
+        .map_err(sql_err)?;
+    rows.map(|r| r.map_err(sql_err).and_then(workspace_record))
+        .collect()
+}

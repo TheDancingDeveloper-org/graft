@@ -2,7 +2,13 @@
 //! listener (and optionally `/metrics` on a second), and shut down
 //! gracefully on SIGTERM or SIGINT.
 //!
-//! Start-up prints one line per listener to stdout,
+//! The signal handlers are the first thing installed, so a signal at any
+//! point in start-up is a request to stop, never the default action that
+//! kills the process. A signal before the listeners are bound exits 0 with
+//! nothing bound.
+//!
+//! Start-up prints `graft-server signals armed` to stdout once the handlers
+//! are installed, then one line per listener,
 //! `graft-server listening on <addr>` and `graft-server metrics on <addr>`,
 //! once the server is ready to answer, so a supervisor or a test can wait
 //! for it and learn a port chosen with `:0`.
@@ -18,6 +24,8 @@ use graft_store_fs::{FsMode, FsObjectStore};
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
 use graft_telemetry::TelemetryConfig;
 use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
 use tonic::transport::server::TcpIncoming;
 
@@ -29,15 +37,12 @@ use crate::grpc::{self, Services};
 use crate::watch::Watches;
 use crate::{http, keys, mcp};
 
+/// Set by the start-up tests (only): start-up pauses after the handlers are
+/// armed until a stop is requested. Unset in production.
+pub(crate) const HOLD_START_UP_ENV: &str = "GRAFT_TEST_HOLD_START_UP";
+
 /// Runs the server until a shutdown signal.
 pub(crate) fn serve(config: ServerConfig) -> Result<(), String> {
-    let telemetry = graft_telemetry::init(&TelemetryConfig {
-        service: "graft-server".into(),
-        json_logs: config.json_logs,
-        metrics_addr: config.metrics.clone(),
-        otlp_endpoint: config.otlp_endpoint.clone(),
-    })
-    .map_err(|e| format!("telemetry: {e}"))?;
     // Panics (an operation not built yet is a `todo!`) go to the log as one
     // line, not as raw text between JSON log lines.
     std::panic::set_hook(Box::new(|info| tracing::error!(panic = %info, "panic")));
@@ -46,7 +51,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), String> {
         .thread_name("graft-server")
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
-    let result = runtime.block_on(run(config, Arc::new(telemetry)));
+    let result = runtime.block_on(run(config));
     // Calls still running past the grace period are abandoned here.
     runtime.shutdown_timeout(Duration::from_secs(1));
     result
@@ -66,10 +71,26 @@ pub(crate) fn open_stores(
     Ok((meta, objects))
 }
 
-async fn run(
-    config: ServerConfig,
-    telemetry: Arc<graft_telemetry::Telemetry>,
-) -> Result<(), String> {
+async fn run(config: ServerConfig) -> Result<(), String> {
+    // Handlers first, before telemetry, stores or any listener. The forwarder
+    // turns a signal into a flag that every later step can see.
+    let mut shutdown = Shutdown::install()?;
+    let (signal_tx, signal_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown.recv().await;
+        let _ = signal_tx.send(true);
+    });
+    println!("graft-server signals armed");
+
+    let telemetry = Arc::new(
+        graft_telemetry::init(&TelemetryConfig {
+            service: "graft-server".into(),
+            json_logs: config.json_logs,
+            metrics_addr: config.metrics.clone(),
+            otlp_endpoint: config.otlp_endpoint.clone(),
+        })
+        .map_err(|e| format!("telemetry: {e}"))?,
+    );
     let started = Instant::now();
     let (meta, objects) = open_stores(&config)?;
     let signing =
@@ -104,12 +125,24 @@ async fn run(
         denylist,
     ));
 
+    if std::env::var_os(HOLD_START_UP_ENV).is_some() {
+        // Test hook: hold start-up here until a stop is requested, so a test
+        // can signal the server before any listener is bound.
+        println!("graft-server holding start-up");
+        let _ = signal_rx.clone().wait_for(|stop| *stop).await;
+    }
+
     let listener = bind(&config.listen).await?;
     let addr = local_addr(&listener)?;
     let metrics_listener = match &config.metrics {
         Some(m) => Some(bind(m).await?),
         None => None,
     };
+    if *signal_rx.borrow() {
+        // Stopped during start-up: the listeners drop here, unserved.
+        tracing::info!("stopped during start-up");
+        return Ok(());
+    }
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let stopped = |mut rx: watch::Receiver<bool>| async move {
@@ -150,7 +183,7 @@ async fn run(
     // Serve until a signal, or until a listener fails.
     let mut failed = None;
     tokio::select! {
-        () = shutdown_signal() => {}
+        () = stopped(signal_rx) => {}
         Some(result) = servers.join_next() => {
             failed = Some(match result {
                 Ok(Ok(())) => "a listener stopped".to_owned(),
@@ -209,25 +242,42 @@ fn announce(addr: SocketAddr, metrics: Option<SocketAddr>) {
     let _ = out.flush();
 }
 
-/// SIGTERM or SIGINT.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = term.recv() => {}
-                    _ = tokio::signal::ctrl_c() => {}
-                }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-            }
+/// SIGTERM and SIGINT. The handlers are installed when this is built, so a
+/// signal from then on is kept until it is received, never lost.
+#[cfg(unix)]
+struct Shutdown {
+    term: Signal,
+    interrupt: Signal,
+}
+
+#[cfg(unix)]
+impl Shutdown {
+    fn install() -> Result<Self, String> {
+        Ok(Self {
+            term: signal(SignalKind::terminate()).map_err(|e| format!("SIGTERM handler: {e}"))?,
+            interrupt: signal(SignalKind::interrupt())
+                .map_err(|e| format!("SIGINT handler: {e}"))?,
+        })
+    }
+
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.term.recv() => {}
+            _ = self.interrupt.recv() => {}
         }
     }
-    #[cfg(not(unix))]
-    {
+}
+
+#[cfg(not(unix))]
+struct Shutdown;
+
+#[cfg(not(unix))]
+impl Shutdown {
+    fn install() -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) {
         let _ = tokio::signal::ctrl_c().await;
     }
 }

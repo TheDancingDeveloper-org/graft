@@ -386,9 +386,15 @@ async fn vogt_delegates_a_session_that_owns_its_workspaces() {
         .expect_err("agents do not delegate");
     assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
     // A token it mints for itself keeps its identity and its workspaces.
+    // Ask for less than the session token's remaining life (it was minted
+    // with 600 s a moment ago), so a clock tick between the two mints can't
+    // push the request over the caller's expiry.
     let own = s
         .admin
-        .mint_token(mint_req("", None, None))
+        .mint_token(pb::MintTokenRequest {
+            ttl_s: 300,
+            ..mint_req("", None, None)
+        })
         .await
         .expect("for itself")
         .into_inner()
