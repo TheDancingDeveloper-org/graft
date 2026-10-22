@@ -1,7 +1,13 @@
 //! An in-memory API for the MCP tests. It implements the `graft-proto` traits
 //! over a small fixed repository. The standard fixture has no files; the
-//! path-bearing tests use [`Fake::with_files`], which adds a tree to `main`.
-//! Diffs that name paths are not modelled.
+//! path-bearing tests use [`Fake::with_files`] or [`Fake::with_tree`], which
+//! add a tree to every snapshot and file changes to the changesets.
+//!
+//! A diff between two snapshots is the net effect of the changesets after the
+//! first up to and including the second, one entry per path. Patches are
+//! synthesised from the fixture's file bytes (every line added), and clipped
+//! to the caller's cap as the real API does. Diffs that filter by path are not
+//! modelled.
 
 #![allow(dead_code, unreachable_pub)]
 
@@ -9,8 +15,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use graft_model::{
-    Author, AuthorKind, BlobId, Changeset, ChangesetId, EntryKind, Metadata, ObjectId, ObjectKind,
-    RepoPath, Timestamp, TreeId,
+    Author, AuthorKind, BlobId, Change, Changeset, ChangesetId, EntryKind, Metadata, ObjectId,
+    ObjectKind, RepoPath, Timestamp, TreeId,
 };
 use graft_proto::context::{CallContext, Principal, PrincipalKind};
 use graft_proto::error::ApiResult;
@@ -22,18 +28,65 @@ pub fn cid(byte: u8) -> ChangesetId {
     ChangesetId(ObjectId([byte; 32]))
 }
 
+/// The bytes of [`binary_file`]: not UTF-8 (the first byte is never valid),
+/// and 40,001 of them, so reads of it need several chunks.
+pub fn blob_data() -> Vec<u8> {
+    std::iter::once(0xFF)
+        .chain((0..40_000u32).map(|i| 0x80 + (i % 128) as u8))
+        .collect()
+}
+
 /// A text file with one line per entry, each line tagged with the changeset
 /// that introduced it.
-fn file(lines: &[(&str, ChangesetId)]) -> FileSpec {
+pub fn text_file<S: AsRef<str>>(lines: &[(S, ChangesetId)]) -> FileSpec {
     let mut data = Vec::new();
     for (text, _) in lines {
-        data.extend_from_slice(text.as_bytes());
+        data.extend_from_slice(text.as_ref().as_bytes());
         data.push(b'\n');
     }
     FileSpec {
         data,
         origins: lines.iter().map(|(_, origin)| *origin).collect(),
     }
+}
+
+/// A binary file. It has no lines to blame.
+pub fn binary_file(data: Vec<u8>) -> FileSpec {
+    FileSpec {
+        data,
+        origins: Vec::new(),
+    }
+}
+
+/// A `Put` of `spec` at `path`, as a changeset would record it.
+pub fn put(path: &str, spec: &FileSpec) -> Change {
+    Change::Put {
+        path: RepoPath::new(path).expect("fixture paths are valid"),
+        kind: EntryKind::File,
+        id: BlobId::hash(&spec.data).0,
+    }
+}
+
+/// A `Delete` of `path`.
+pub fn delete(path: &str) -> Change {
+    Change::Delete {
+        path: RepoPath::new(path).expect("fixture paths are valid"),
+    }
+}
+
+/// Clips a patch to `max` bytes at a character boundary. Returns the kept
+/// text and whether anything was cut.
+fn clip_patch(mut patch: String, max: u64) -> (String, bool) {
+    let max = usize::try_from(max).unwrap_or(usize::MAX);
+    if patch.len() <= max {
+        return (patch, false);
+    }
+    let mut end = max;
+    while !patch.is_char_boundary(end) {
+        end -= 1;
+    }
+    patch.truncate(end);
+    (patch, true)
 }
 
 pub fn principal() -> Principal {
@@ -48,9 +101,24 @@ pub fn principal() -> Principal {
 
 /// A file in the fixture tree: its bytes and, per line, the changeset that
 /// introduced the line.
-struct FileSpec {
+pub struct FileSpec {
     data: Vec<u8>,
     origins: Vec<ChangesetId>,
+}
+
+impl FileSpec {
+    /// The unified patch for the file, with every line added. Binary files
+    /// have none.
+    fn patch(&self) -> Option<String> {
+        let text = std::str::from_utf8(&self.data).ok()?;
+        let mut patch = format!("@@ -0,0 +1,{} @@\n", text.lines().count());
+        for line in text.lines() {
+            patch.push('+');
+            patch.push_str(line);
+            patch.push('\n');
+        }
+        Some(patch)
+    }
 }
 
 /// A fake repository: a linear history `c1 <- c2 <- c3` on `main`.
@@ -70,29 +138,65 @@ impl Fake {
         Self::with_authors(3, |i| format!("author {i}"), |_| "short subject".into())
     }
 
-    /// The standard history with a tree on every snapshot: `README.md`,
-    /// `src/lib.rs` and `src/util/mod.rs`. Each line of `README.md` names the
-    /// changeset that introduced it, so blame has several origins.
+    /// The standard history with a tree on every snapshot, and file changes
+    /// that a diff shows:
+    ///
+    /// - `README.md`, `src/lib.rs`, `src/util/mod.rs`, `docs/big.md` (a text
+    ///   file whose patch is over the 4 KiB cap) and `bin/blob.dat` (binary);
+    /// - `c2` adds `src/lib.rs`; `c3` changes `README.md`, adds `src/util/mod.rs`,
+    ///   `docs/big.md` and `bin/blob.dat`, and deletes `src/old.rs`.
+    ///
+    /// Each line of `README.md` names the changeset that introduced it, so
+    /// blame has several origins.
     pub fn with_files() -> Arc<Self> {
-        let mut fake = Self::linear(3, |i| format!("author {i}"), |_| "short subject".into());
         let c = cid;
-        fake.files.insert(
-            "README.md".into(),
-            file(&[
-                ("# fixture", c(1)),
-                ("", c(1)),
-                ("A repository for the MCP tests.", c(2)),
-                ("Each line names the changeset that added it.", c(2)),
-                ("Three changesets, one branch.", c(3)),
-                ("", c(3)),
-            ]),
-        );
-        fake.files
-            .insert("src/lib.rs".into(), file(&[("pub mod util;", c(2))]));
-        fake.files.insert(
-            "src/util/mod.rs".into(),
-            file(&[("pub fn id() -> u8 { 1 }", c(3))]),
-        );
+        let readme = text_file(&[
+            ("# fixture", c(1)),
+            ("", c(1)),
+            ("A repository for the MCP tests.", c(2)),
+            ("Each line names the changeset that added it.", c(2)),
+            ("Three changesets, one branch.", c(3)),
+            ("", c(3)),
+        ]);
+        let lib = text_file(&[("pub mod util;", c(2))]);
+        let util = text_file(&[("pub fn id() -> u8 { 1 }", c(3))]);
+        let big_lines: Vec<(String, ChangesetId)> = (0..200)
+            .map(|i| (format!("docs line {i:03} {}", "x".repeat(60)), c(3)))
+            .collect();
+        let big = text_file(&big_lines);
+        let blob = binary_file(blob_data());
+        let changes = vec![
+            (2, put("src/lib.rs", &lib)),
+            (3, put("README.md", &readme)),
+            (3, put("src/util/mod.rs", &util)),
+            (3, put("docs/big.md", &big)),
+            (3, put("bin/blob.dat", &blob)),
+            (3, delete("src/old.rs")),
+        ];
+        let tree = vec![
+            ("README.md".into(), readme),
+            ("src/lib.rs".into(), lib),
+            ("src/util/mod.rs".into(), util),
+            ("docs/big.md".into(), big),
+            ("bin/blob.dat".into(), blob),
+        ];
+        Self::with_tree(tree, changes)
+    }
+
+    /// The standard history with `tree` on every snapshot and `changes`
+    /// applied to the changesets at the given 1-based indices.
+    pub fn with_tree(tree: Vec<(String, FileSpec)>, changes: Vec<(u8, Change)>) -> Arc<Self> {
+        let mut fake = Self::linear(3, |i| format!("author {i}"), |_| "short subject".into());
+        for (path, spec) in tree {
+            fake.files.insert(path, spec);
+        }
+        for (at, change) in changes {
+            fake.changesets
+                .get_mut(&cid(at))
+                .expect("the fixture has changesets 1 to 3")
+                .changes
+                .push(change);
+        }
         Arc::new(fake)
     }
 
@@ -142,6 +246,16 @@ impl Fake {
 
     fn unavailable<T>() -> ApiResult<T> {
         Err(ApiError::Unavailable { retry_after_ms: 0 })
+    }
+
+    /// The position of a changeset in `order`, oldest first.
+    fn position(&self, id: ChangesetId) -> ApiResult<usize> {
+        self.order
+            .iter()
+            .position(|x| *x == id)
+            .ok_or_else(|| ApiError::NotFound {
+                what: format!("changeset {id}"),
+            })
     }
 
     fn check_at(&self, at: ChangesetId) -> ApiResult<()> {
@@ -326,19 +440,59 @@ impl RepoApi for Fake {
     }
 
     async fn diff(&self, _: &CallContext, req: Diff) -> ApiResult<DiffResult> {
-        // The fixture has no file changes, so a diff between known
-        // snapshots is empty. Paths are not modelled.
         if !req.paths.is_empty() {
             return Self::unavailable();
         }
-        for id in [req.from, req.to] {
-            if !self.changesets.contains_key(&id) {
-                return Err(ApiError::NotFound {
-                    what: format!("changeset {id}"),
-                });
+        let from = self.position(req.from)?;
+        let to = self.position(req.to)?;
+        // The last change to each path in the changesets after `from`, up to
+        // and including `to`. A range that runs backwards has no changes.
+        let mut net: BTreeMap<&str, &Change> = BTreeMap::new();
+        for id in self
+            .order
+            .iter()
+            .skip(from + 1)
+            .take(to.saturating_sub(from))
+        {
+            for change in &self.changesets[id].changes {
+                net.insert(change.path().as_str(), change);
             }
         }
-        Ok(DiffResult::default())
+        let all: Vec<&Change> = net.into_values().collect();
+        let start = match &req.page.token {
+            Some(token) => token.parse::<usize>().map_err(|_| ApiError::NotFound {
+                what: "cursor".into(),
+            })?,
+            None => 0,
+        }
+        .min(all.len());
+        let end = (start + req.page.limit as usize).min(all.len());
+        let files = all[start..end]
+            .iter()
+            .map(|change| {
+                let (patch, truncated) = match (&req.patch, change) {
+                    (Some(opts), Change::Put { path, .. }) => {
+                        match self.files.get(path.as_str()).and_then(FileSpec::patch) {
+                            Some(text) => {
+                                let (text, cut) = clip_patch(text, opts.max_bytes_per_file);
+                                (Some(text), cut)
+                            }
+                            None => (None, false),
+                        }
+                    }
+                    _ => (None, false),
+                };
+                FileDiff {
+                    change: (*change).clone(),
+                    patch,
+                    truncated,
+                }
+            })
+            .collect();
+        Ok(DiffResult {
+            files,
+            next: (end < all.len()).then(|| end.to_string()),
+        })
     }
 
     async fn blame(&self, _: &CallContext, req: Blame) -> ApiResult<BlameResult> {

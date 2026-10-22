@@ -742,10 +742,10 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> ServerHandler for McpSer
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         match self.read_uri(&request.uri).await {
-            Ok(value) => Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                value.to_string(),
-                request.uri,
-            )])
+            Ok(value) => Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(value.to_string(), request.uri)
+                    .with_mime_type("application/json"),
+            ])
             .into()),
             Err(e) => {
                 let detail = e.into_result().structured_content.map(|v| v.to_string());

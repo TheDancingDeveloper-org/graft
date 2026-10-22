@@ -3,7 +3,7 @@
 
 mod support;
 
-use graft_mcp::MAX_RESULT_BYTES;
+use graft_mcp::{MAX_RESULT_BYTES, PATCH_MAX_BYTES};
 use serde_json::{Value, json};
 use support::{Fake, assert_golden, call, cid, connect};
 
@@ -69,7 +69,7 @@ async fn show_a_root_lists_no_files() {
 
 #[tokio::test]
 async fn show_a_child_diffs_against_its_first_parent() {
-    let client = connect(Fake::standard()).await;
+    let client = connect(Fake::with_files()).await;
     let result = call(
         &client,
         "graft_show",
@@ -77,18 +77,90 @@ async fn show_a_child_diffs_against_its_first_parent() {
     )
     .await;
     assert_golden("show_child", &structured(&result));
+
+    // `main` is c3: a Put, a Delete, a binary Put with no patch, and a text
+    // Put whose patch is clipped and flagged.
+    let files = &structured(&result)["files"];
+    assert_eq!(files.as_array().unwrap().len(), 5);
+    let delete = files
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["op"] == "delete");
+    assert_eq!(delete.unwrap()["path"], "src/old.rs");
+    let blob = files
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "bin/blob.dat");
+    assert!(
+        blob.unwrap()["patch"].is_null(),
+        "binary files have no patch"
+    );
+    let big = files
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "docs/big.md")
+        .unwrap();
+    assert_eq!(big["truncated"], true);
+    assert_eq!(big["patch"].as_str().unwrap().len(), PATCH_MAX_BYTES);
 }
 
 #[tokio::test]
 async fn diff_between_snapshots() {
-    let client = connect(Fake::standard()).await;
+    let client = connect(Fake::with_files()).await;
     let result = call(
         &client,
         "graft_diff",
         json!({"repo": "r", "from": cid(1).to_string(), "to": "main"}),
     )
     .await;
-    assert_golden("diff_empty", &structured(&result));
+    assert_golden("diff_range", &structured(&result));
+
+    // c2 and c3 together: each path once, sorted, with the Delete of src/old.rs
+    // and the clipped patch of docs/big.md.
+    let files = structured(&result)["files"].clone();
+    let paths: Vec<&str> = files
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "README.md",
+            "bin/blob.dat",
+            "docs/big.md",
+            "src/lib.rs",
+            "src/old.rs",
+            "src/util/mod.rs"
+        ]
+    );
+    assert_eq!(files[4]["op"], "delete");
+    assert_eq!(files[2]["truncated"], true);
+    assert_eq!(files[3]["truncated"], false);
+}
+
+#[tokio::test]
+async fn diff_with_patches_off_omits_them() {
+    let client = connect(Fake::with_files()).await;
+    let result = call(
+        &client,
+        "graft_diff",
+        json!({"repo": "r", "from": cid(2).to_string(), "to": "main", "patch": false}),
+    )
+    .await;
+    let files = &structured(&result)["files"];
+    assert_eq!(files.as_array().unwrap().len(), 5);
+    assert!(
+        files
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["patch"].is_null())
+    );
 }
 
 #[tokio::test]

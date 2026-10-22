@@ -23,6 +23,7 @@ todo = "allow"
 # (docs/plan.md, "Crate ownership and parallelism"). External dependencies are
 # added by the work item that first needs them.
 [workspace.dependencies]
+axum = "0.8"
 blake3 = "1.8"
 flate2 = "1.1"
 graft-auth = { path = "crates/graft-auth" }
