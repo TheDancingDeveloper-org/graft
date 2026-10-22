@@ -1,33 +1,64 @@
+# syntax=docker/dockerfile:1.12
 # One image for the graft binaries (graft, graft-server, graft-node,
 # graft-mirror). Used by the dev stack in compose.yaml; see docs/dev-stack.md.
 #
-# Stages: chef (cargo-chef installed) -> planner (recipe) -> builder (deps
-# cooked from the recipe, then the workspace) -> runtime (debian trixie-slim,
-# git and ca-certificates, non-root user).
+# Stages: builder (rust, sccache) -> runtime (debian trixie-slim, git and
+# ca-certificates, non-root user).
+#
+# Build caching (WI-2234). There is no cargo-chef stage: the cargo registry,
+# git checkouts and target directory are BuildKit cache mounts, so a warm
+# builder only recompiles what changed, and a cold one compiles through
+# sccache when the build is given its S3 credentials (the CI runners' shared
+# Garage bucket, .github/workflows/image.yml). Without them (a local
+# `docker compose build`) sccache stays off and the cache mounts alone apply.
+#
+# Parallelism is not capped here. A shared host passes CARGO_BUILD_JOBS as a
+# build arg (compose.yaml does, default 4).
 
 ARG RUST_VERSION=1.90
 ARG DEBIAN_VERSION=trixie
-ARG CARGO_CHEF_VERSION=0.1.71
 
-FROM rust:${RUST_VERSION}-slim-${DEBIAN_VERSION} AS chef
-ARG CARGO_CHEF_VERSION
-RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
+FROM rust:${RUST_VERSION}-slim-${DEBIAN_VERSION} AS builder
+ARG SCCACHE_VERSION=0.18.0
+ADD --checksum=sha256:45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89 \
+    https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz \
+    /tmp/sccache.tar.gz
+RUN tar -xzf /tmp/sccache.tar.gz -C /usr/local/bin --strip-components=1 \
+      "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" \
+ && rm /tmp/sccache.tar.gz \
+ && sccache --version
 WORKDIR /src
-
-FROM chef AS planner
 COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM chef AS builder
-ARG CARGO_BUILD_JOBS=4
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
-# Dependencies first: this layer only changes when Cargo.lock or a manifest
-# changes, not when workspace sources do.
-COPY --from=planner /src/recipe.json recipe.json
-RUN cargo chef cook --release --locked --recipe-path recipe.json
-COPY . .
-RUN cargo build --release --locked \
-      -p graft-cli -p graft-server -p graft-node -p graft-mirror
+# Empty means no cap. Non-secret sccache settings come in as build args; the
+# S3 keys only as build secrets, so they never reach a layer or the history.
+ARG CARGO_BUILD_JOBS=
+ARG SCCACHE_BUCKET=
+ARG SCCACHE_ENDPOINT=
+ARG SCCACHE_REGION=
+ARG SCCACHE_S3_USE_SSL=
+ENV CARGO_INCREMENTAL=0 \
+    SCCACHE_IGNORE_SERVER_IO_ERROR=1
+# The binaries are copied out of the target cache mount into /out, which is
+# part of this stage's layer, for the runtime stage to copy.
+RUN --mount=type=cache,id=graft-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=graft-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=graft-target,target=/src/target,sharing=locked \
+    --mount=type=secret,id=sccache_key_id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=sccache_secret,env=AWS_SECRET_ACCESS_KEY \
+    set -eu; unset RUSTC_WRAPPER; \
+    [ -n "${CARGO_BUILD_JOBS}" ] || unset CARGO_BUILD_JOBS; \
+    if [ -n "${SCCACHE_BUCKET}" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] \
+       && sccache --start-server; then \
+      export RUSTC_WRAPPER=sccache; \
+    else \
+      echo "sccache: off (no bucket, no credentials, or server did not start)"; \
+    fi; \
+    cargo build --release --locked \
+      -p graft-cli -p graft-server -p graft-node -p graft-mirror; \
+    if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; sccache --stop-server; fi; \
+    mkdir -p /out; \
+    cp target/release/graft target/release/graft-server \
+       target/release/graft-node target/release/graft-mirror /out/
 
 FROM debian:${DEBIAN_VERSION}-slim AS runtime
 RUN apt-get update \
@@ -50,10 +81,10 @@ RUN groupadd --system --gid 10001 graft \
 COPY docker/dev/server.toml /etc/graft/server.toml
 COPY docker/dev/mirror /etc/graft-dev/mirror
 
-COPY --from=builder /src/target/release/graft \
-     /src/target/release/graft-server \
-     /src/target/release/graft-node \
-     /src/target/release/graft-mirror \
+COPY --from=builder /out/graft \
+     /out/graft-server \
+     /out/graft-node \
+     /out/graft-mirror \
      /usr/local/bin/
 
 ENV PATH=/opt/graft-dev/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

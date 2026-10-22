@@ -36,7 +36,7 @@ socket on another machine. It never bind-mounts a path from the checkout:
 
 | Path | What it is |
 | --- | --- |
-| `docker/Dockerfile` | one multi-stage image: cargo-chef dependency cache, rust builder, debian trixie-slim runtime with git and ca-certificates, non-root user `graft` (uid 10001); bakes in the dev configs |
+| `docker/Dockerfile` | one multi-stage image: rust builder (cargo cache mounts, sccache in CI), debian trixie-slim runtime with git and ca-certificates, non-root user `graft` (uid 10001); bakes in the dev configs |
 | `.dockerignore` | keeps `target/`, `.git` and local agent state out of the build context |
 | `compose.yaml` | the services, profiles, watch blocks and named volumes |
 | `docker/dev/server.toml` | server config, baked in at `/etc/graft/server.toml` |
