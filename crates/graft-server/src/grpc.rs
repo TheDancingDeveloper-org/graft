@@ -16,17 +16,16 @@ use graft_model::{ChangesetId, ObjectId};
 use graft_proto::pb;
 use graft_proto::types::*;
 use graft_proto::{
-    AdminApi as _, ApiError, CallContext, Frame, ObjectApi as _, PROTOCOL_VERSION, RepoApi as _,
-    VERSION_HEADER,
+    AdminApi as _, ApiError, Frame, ObjectApi as _, PROTOCOL_VERSION, RepoApi as _, VERSION_HEADER,
 };
-use graft_proto::{WireError, WorkspaceApi as _};
+use graft_proto::{CallContext, WireError, WorkspaceApi as _};
 use graft_store::MetaStore as _;
 use tokio::sync::mpsc;
 use tonic::codec::CompressionEncoding;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::app::{App, CallError};
+use crate::app::{App, CallError, Caller, ServerEngine};
 use crate::mint;
 
 /// Frame bytes per `GetObjects` stream message. A single frame larger than
@@ -46,6 +45,9 @@ const PUT_RETRY_MS: u64 = 1_000;
 /// The largest message the server decodes: one maximal blob frame plus
 /// framing.
 pub(crate) const MAX_MESSAGE: usize = 80 << 20;
+
+/// The largest workspace request or answer (control messages).
+const CONTROL_MESSAGE: usize = 4 << 20;
 
 /// Room for message and frame headers above a call's frame-byte cap.
 const PUT_FRAMING: u64 = 1 << 20;
@@ -93,6 +95,34 @@ fn req_cid(b: Vec<u8>, field: &'static str) -> Result<ChangesetId, Status> {
         })
     })?;
     Ok(ChangesetId(graft_model::ObjectId(bytes)))
+}
+
+/// A workspace is its owner's (`docs/design.md` §7.2): a caller that neither
+/// owns `ws` nor administers its repository is refused before the operation
+/// runs, and learns nothing of it. A workspace that does not exist is left
+/// to the operation to answer.
+async fn own_workspace(
+    e: &ServerEngine,
+    cx: &CallContext,
+    ws: &WorkspaceRef,
+) -> Result<(), ApiError> {
+    let view = match e.get_workspace(cx, ws.clone()).await {
+        Ok(view) => view,
+        Err(ApiError::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let admin = Scope::Admin {
+        repo: ws.repo.clone(),
+    };
+    if view.owner != cx.principal.subject
+        && graft_auth::authorize(&cx.principal, &admin, None).is_err()
+    {
+        return Err(ApiError::PermissionDenied {
+            scope: admin.to_string(),
+            path: None,
+        });
+    }
+    Ok(())
 }
 
 fn workspace_ref(w: Option<pb::WorkspaceRef>) -> Result<WorkspaceRef, Status> {
@@ -151,9 +181,13 @@ impl Services {
             .send_compressed(gz)
             .max_decoding_message_size(MAX_MESSAGE)
             .max_encoding_message_size(MAX_MESSAGE);
+        // Workspace requests and answers are small control messages; a bigger
+        // one is refused, not buffered.
         let workspaces = pb::workspace_service_server::WorkspaceServiceServer::new(self.clone())
             .accept_compressed(gz)
-            .send_compressed(gz);
+            .send_compressed(gz)
+            .max_decoding_message_size(CONTROL_MESSAGE)
+            .max_encoding_message_size(CONTROL_MESSAGE);
         let admin = pb::admin_service_server::AdminServiceServer::new(self)
             .accept_compressed(gz)
             .send_compressed(gz)
@@ -165,7 +199,7 @@ impl Services {
     }
 
     /// Authenticates a gRPC call.
-    fn cx<T>(&self, req: &Request<T>, op: &'static str) -> Result<CallContext, Status> {
+    fn cx<T>(&self, req: &Request<T>, op: &'static str) -> Result<Caller, Status> {
         let md = req.metadata();
         self.app
             .authenticate(|k| md.get(k).and_then(|v| v.to_str().ok()), true)
@@ -382,7 +416,7 @@ impl Services {
     async fn get_batch(
         &self,
         repo: &str,
-        cx: &CallContext,
+        cx: &Caller,
         ids: Vec<ObjectId>,
     ) -> Result<Objects, Status> {
         let req = GetObjects {
@@ -404,11 +438,12 @@ impl Services {
     /// What the engine will check for `PutObjects`, done before a byte is
     /// buffered: an unprefixed write scope on the repository (scope first,
     /// so a caller without one learns nothing), then that it exists.
-    async fn check_put(&self, cx: &CallContext, repo: &str) -> Result<(), Status> {
+    async fn check_put(&self, cx: &Caller, repo: &str) -> Result<(), Status> {
         let refuse = |e: ApiError| {
             self.app.refused("PutObjects", &e);
             Status::from(e)
         };
+        self.app.check_not_revoked(&cx.jti).await.map_err(refuse)?;
         let scope = Scope::Write {
             repo: repo.to_owned(),
             prefix: None,
@@ -739,13 +774,14 @@ impl pb::repo_service_server::RepoService for Services {
         request: Request<pb::WatchRequest>,
     ) -> Result<Response<Self::WatchStream>, Status> {
         let md = request.metadata();
-        let (cx, exp_s) = self
+        let cx = self
             .app
-            .authenticate_until(|k| md.get(k).and_then(|v| v.to_str().ok()), true)
+            .authenticate(|k| md.get(k).and_then(|v| v.to_str().ok()), true)
             .map_err(|e| {
                 self.app.refused("Watch", &e);
                 Status::from(e)
             })?;
+        let exp_s = cx.exp_s;
         let req: Watch = wire(request.into_inner())?;
         let slot = self
             .app
@@ -831,15 +867,18 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         &self,
         request: Request<pb::WorkspaceRef>,
     ) -> Result<Response<pb::WorkspaceView>, Status> {
-        unary!(
-            self,
-            request,
-            "GetWorkspace",
-            false,
-            WorkspaceRef,
-            |e, cx, req| e.get_workspace(&cx, req).await,
-            pb::WorkspaceView::from
-        )
+        let cx = self.cx(&request, "GetWorkspace")?;
+        let req: WorkspaceRef = wire(request.into_inner())?;
+        let repo = req.repo.clone();
+        let out = self
+            .app
+            .call("GetWorkspace", &repo, cx, false, move |e, cx| async move {
+                own_workspace(&e, &cx, &req).await?;
+                e.get_workspace(&cx, req).await
+            })
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(pb::WorkspaceView::from(out)))
     }
 
     async fn list_workspaces(
@@ -876,6 +915,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let out = self
             .app
             .call("RenewLease", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &ws).await?;
                 e.renew_lease(&cx, ws, lease_ms).await
             })
             .await
@@ -893,6 +933,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let out = self
             .app
             .call("SetHead", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &req.workspace).await?;
                 e.set_head(&cx, req).await
             })
             .await
@@ -912,6 +953,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let out = self
             .app
             .call("Sync", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &ws).await?;
                 e.sync(&cx, ws, onto).await
             })
             .await
@@ -936,6 +978,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let out = self
             .app
             .call("Stack", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &ws).await?;
                 e.stack(&cx, ws, op).await
             })
             .await
@@ -954,6 +997,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let repo = ws.repo.clone();
         self.app
             .call("CloseWorkspace", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &ws).await?;
                 e.close_workspace(&cx, ws, keep).await
             })
             .await
@@ -1016,9 +1060,15 @@ impl pb::admin_service_server::AdminService for Services {
     ) -> Result<Response<pb::Token>, Status> {
         let cx = self.cx(&request, "MintToken")?;
         let req: MintToken = wire(request.into_inner())?;
+        // A revoked token mints nothing, even within its own scopes.
+        self.app.check_not_revoked(&cx.jti).await.map_err(|e| {
+            self.app.refused("MintToken", &e);
+            Status::from(CallError::Api(e))
+        })?;
         let token = mint::mint_for(
             &self.app.signing,
             &cx.principal,
+            cx.exp_s,
             req,
             self.app.max_token_ttl_s,
             self.app.now_s(),

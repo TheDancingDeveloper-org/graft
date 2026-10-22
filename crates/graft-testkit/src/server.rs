@@ -11,7 +11,7 @@
 //! put behind it: [`FakeApi`] for objects and changesets, plus lines and a
 //! `Diff` computed with graft-model's id-pruned tree diff.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -27,11 +27,12 @@ use graft_model::{
     ObjectId, ObjectKind, ObjectSource, RepoPath, SourceError, Timestamp, Tree, TreeId,
     apply_changes_with, diff_trees_after,
 };
-use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
+use graft_proto::api::{AdminApi, ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::error::ApiResult;
 use graft_proto::pb;
 use graft_proto::pb::object_service_server::{ObjectService, ObjectServiceServer};
 use graft_proto::pb::repo_service_server::{RepoService, RepoServiceServer};
+use graft_proto::pb::workspace_service_server::WorkspaceServiceServer;
 use graft_proto::types::*;
 use graft_proto::{
     ApiError, CallContext, Frame, PROTOCOL_VERSION, Principal, PrincipalKind, ProtocolVersion,
@@ -41,9 +42,13 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::task::JoinHandle;
 use tonic::codec::CompressionEncoding;
 use tonic::metadata::MetadataValue;
+use tonic::transport::server::Router;
 use tonic::{Request, Response, Status};
 
 use crate::fake_api::{FakeApi, admin_cx};
+
+#[path = "snapshot_workspaces.rs"]
+mod workspaces;
 
 /// Frames per `GetObjects` response page.
 pub const PAGE_FRAMES: usize = 16;
@@ -62,6 +67,8 @@ pub enum Rpc {
     PutObjects(usize),
     /// A `RepoService` call, by method name.
     Repo(&'static str),
+    /// A `WorkspaceService` call, by method name.
+    Workspace(&'static str),
 }
 
 /// A served API on a loopback socket. Stops when dropped.
@@ -81,15 +88,31 @@ impl Drop for TestServer {
 impl TestServer {
     /// Serves `api` on `127.0.0.1` at a free port.
     pub async fn tcp<A: ObjectApi + RepoApi + 'static>(api: Arc<A>) -> TestServer {
+        Self::tcp_with(|shared, incoming| spawn(router(api, shared), incoming)).await
+    }
+
+    /// [`TestServer::tcp`], also serving `WorkspaceService`.
+    pub async fn tcp_workspaces<A: ObjectApi + RepoApi + WorkspaceApi + 'static>(
+        api: Arc<A>,
+    ) -> TestServer {
+        Self::tcp_with(|shared, incoming| spawn(workspace_router(api, shared), incoming)).await
+    }
+
+    async fn tcp_with<F>(start: F) -> TestServer
+    where
+        F: FnOnce(Arc<Shared>, TcpIncoming) -> JoinHandle<()>,
+    {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback");
         let addr: SocketAddr = listener.local_addr().expect("local addr");
         let shared = Arc::new(Shared::default());
         let wrap = shared.clone();
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener)
-            .map(move |s| s.map(|s| wrap.wrap(s)));
-        let task = spawn(api, shared.clone(), incoming);
+        let incoming: TcpIncoming = Box::pin(
+            tokio_stream::wrappers::TcpListenerStream::new(listener)
+                .map(move |s| s.map(|s| wrap.wrap(s))),
+        );
+        let task = start(shared.clone(), incoming);
         TestServer {
             url: format!("http://{addr}"),
             socket: None,
@@ -105,7 +128,7 @@ impl TestServer {
         let wrap = shared.clone();
         let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener)
             .map(move |s| s.map(|s| wrap.wrap(s)));
-        let task = spawn(api, shared.clone(), incoming);
+        let task = spawn(router(api, shared.clone()), incoming);
         TestServer {
             url: format!("unix:{}", path.display()),
             socket: Some(path.to_owned()),
@@ -178,13 +201,39 @@ impl TestServer {
     }
 }
 
-fn spawn<A, I, IO>(api: Arc<A>, shared: Arc<Shared>, incoming: I) -> JoinHandle<()>
+/// The accepted TCP connections, wrapped for fault injection.
+type TcpIncoming =
+    Pin<Box<dyn Stream<Item = io::Result<Conn<tokio::net::TcpStream>>> + Send + 'static>>;
+
+fn spawn<I, IO>(router: Router, incoming: I) -> JoinHandle<()>
 where
-    A: ObjectApi + RepoApi + 'static,
     I: Stream<Item = io::Result<IO>> + Send + 'static,
     IO: AsyncRead + AsyncWrite + tonic::transport::server::Connected + Unpin + Send + 'static,
 {
+    tokio::spawn(async move {
+        let _ = router.serve_with_incoming(incoming).await;
+    })
+}
+
+/// The object and repository services, plus the workspace service.
+fn workspace_router<A>(api: Arc<A>, shared: Arc<Shared>) -> Router
+where
+    A: ObjectApi + RepoApi + WorkspaceApi + 'static,
+{
     let svc = Arc::new(Svc { api, shared });
+    let workspaces = WorkspaceServiceServer::from_arc(svc.clone())
+        .accept_compressed(CompressionEncoding::Gzip)
+        .send_compressed(CompressionEncoding::Gzip)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES);
+    services(svc).add_service(workspaces)
+}
+
+fn router<A: ObjectApi + RepoApi + 'static>(api: Arc<A>, shared: Arc<Shared>) -> Router {
+    services(Arc::new(Svc { api, shared }))
+}
+
+fn services<A: ObjectApi + RepoApi + 'static>(svc: Arc<Svc<A>>) -> Router {
     let objects = ObjectServiceServer::from_arc(svc.clone())
         .accept_compressed(CompressionEncoding::Gzip)
         .max_decoding_message_size(MAX_MESSAGE_BYTES)
@@ -194,12 +243,9 @@ where
         .send_compressed(CompressionEncoding::Gzip)
         .max_decoding_message_size(MAX_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_MESSAGE_BYTES);
-    let router = tonic::transport::Server::builder()
+    tonic::transport::Server::builder()
         .add_service(objects)
-        .add_service(repo);
-    tokio::spawn(async move {
-        let _ = router.serve_with_incoming(incoming).await;
-    })
+        .add_service(repo)
 }
 
 struct Shared {
@@ -628,6 +674,115 @@ impl<A: ObjectApi + RepoApi + 'static> RepoService for Svc<A> {
     }
 }
 
+/// The workspace a wire request names, refused when absent.
+fn ws_ref(w: Option<pb::WorkspaceRef>) -> Result<WorkspaceRef, Status> {
+    w.map(Into::into)
+        .ok_or_else(|| Status::invalid_argument("workspace: required"))
+}
+
+#[tonic::async_trait]
+impl<A: ObjectApi + RepoApi + WorkspaceApi + 'static> pb::workspace_service_server::WorkspaceService
+    for Svc<A>
+{
+    async fn open_workspace(
+        &self,
+        req: Request<pb::OpenWorkspaceRequest>,
+    ) -> Result<Response<pb::WorkspaceView>, Status> {
+        let cx = self.bind(&req)?;
+        let r: OpenWorkspace = conv(req.into_inner())?;
+        self.shared.record(Rpc::Workspace("OpenWorkspace"));
+        let out = self.api.open_workspace(&cx, r).await?;
+        Ok(self.reply(out.into()))
+    }
+
+    async fn get_workspace(
+        &self,
+        req: Request<pb::WorkspaceRef>,
+    ) -> Result<Response<pb::WorkspaceView>, Status> {
+        let cx = self.bind(&req)?;
+        let r = WorkspaceRef::from(req.into_inner());
+        self.shared.record(Rpc::Workspace("GetWorkspace"));
+        let out = self.api.get_workspace(&cx, r).await?;
+        Ok(self.reply(out.into()))
+    }
+
+    async fn list_workspaces(
+        &self,
+        req: Request<pb::ListWorkspacesRequest>,
+    ) -> Result<Response<pb::WorkspaceViews>, Status> {
+        let cx = self.bind(&req)?;
+        let r = req.into_inner();
+        self.shared.record(Rpc::Workspace("ListWorkspaces"));
+        let page = r.page.map(Into::into).unwrap_or_default();
+        let out = self.api.list_workspaces(&cx, r.repo, page).await?;
+        Ok(self.reply(out.into()))
+    }
+
+    async fn renew_lease(
+        &self,
+        req: Request<pb::RenewLeaseRequest>,
+    ) -> Result<Response<pb::WorkspaceView>, Status> {
+        let cx = self.bind(&req)?;
+        let r = req.into_inner();
+        let ws = ws_ref(r.workspace)?;
+        self.shared.record(Rpc::Workspace("RenewLease"));
+        let out = self.api.renew_lease(&cx, ws, r.lease_ms).await?;
+        Ok(self.reply(out.into()))
+    }
+
+    async fn set_head(
+        &self,
+        req: Request<pb::SetHeadRequest>,
+    ) -> Result<Response<pb::WorkspaceView>, Status> {
+        let cx = self.bind(&req)?;
+        let r: SetHead = conv(req.into_inner())?;
+        self.shared.record(Rpc::Workspace("SetHead"));
+        let out = self.api.set_head(&cx, r).await?;
+        Ok(self.reply(out.into()))
+    }
+
+    async fn sync(&self, req: Request<pb::SyncRequest>) -> Result<Response<pb::Synced>, Status> {
+        let cx = self.bind(&req)?;
+        let r = req.into_inner();
+        let ws = ws_ref(r.workspace)?;
+        let onto = match r.onto {
+            None => None,
+            Some(b) => Some(ChangesetId(ObjectId(
+                <[u8; 32]>::try_from(b.as_slice())
+                    .map_err(|_| Status::invalid_argument("onto: id is not 32 bytes"))?,
+            ))),
+        };
+        self.shared.record(Rpc::Workspace("Sync"));
+        let out = self.api.sync(&cx, ws, onto).await?;
+        Ok(self.reply(out.into()))
+    }
+
+    async fn stack(
+        &self,
+        req: Request<pb::StackRequest>,
+    ) -> Result<Response<pb::WorkspaceView>, Status> {
+        let cx = self.bind(&req)?;
+        let r = req.into_inner();
+        let ws = ws_ref(r.workspace)?;
+        let op: StackOp = conv(r.op.ok_or_else(|| Status::invalid_argument("op: required"))?)?;
+        self.shared.record(Rpc::Workspace("Stack"));
+        let out = self.api.stack(&cx, ws, op).await?;
+        Ok(self.reply(out.into()))
+    }
+
+    async fn close_workspace(
+        &self,
+        req: Request<pb::CloseWorkspaceRequest>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let cx = self.bind(&req)?;
+        let r = req.into_inner();
+        let ws = ws_ref(r.workspace)?;
+        self.shared.record(Rpc::Workspace("CloseWorkspace"));
+        self.api.close_workspace(&cx, ws, r.keep_drafts).await?;
+        Ok(self.reply(pb::Empty {}))
+    }
+}
+
 // ---- SnapshotRepo ---------------------------------------------------------
 
 struct Line {
@@ -637,9 +792,11 @@ struct Line {
 }
 
 /// A small in-memory repository to serve: [`FakeApi`] holds the objects and
-/// changesets; this adds lines (`ResolveRef`, `ListRefs`) and `Diff`. Other
-/// repository operations answer `Rejected { policy: "fake" }`. Like
-/// [`FakeApi`], it ignores the repository name.
+/// changesets; this adds lines (`ResolveRef`, `ListRefs`), `Diff`, and a
+/// model of workspaces, drafts and land (`CreateChangeset`, `Land` and the
+/// `WorkspaceApi`; see the `snapshot_workspaces` module). Other repository
+/// operations answer `Rejected { policy: "fake" }`. Like [`FakeApi`], it
+/// ignores the repository name.
 ///
 /// For hostile-server tests it can also serve unvalidated objects and
 /// changesets ([`SnapshotRepo::insert_raw`]), a canned `Diff`
@@ -653,6 +810,9 @@ pub struct SnapshotRepo {
     raw_changesets: Mutex<HashMap<ChangesetId, Changeset>>,
     diff_lie: Mutex<Option<DiffResult>>,
     padding: AtomicUsize,
+    records: Mutex<HashMap<ChangesetId, (DraftState, Option<ChangesetId>)>>,
+    ws: Mutex<workspaces::Workspaces>,
+    failures: Mutex<HashMap<&'static str, VecDeque<ApiError>>>,
 }
 
 /// Reads trees from a [`FakeApi`] through `GetObjects`.
@@ -892,10 +1052,12 @@ impl ObjectApi for SnapshotRepo {
     }
 
     async fn has_objects(&self, cx: &CallContext, req: HasObjects) -> ApiResult<Vec<ObjectId>> {
+        self.take_failure("HasObjects")?;
         self.api.has_objects(cx, req).await
     }
 
     async fn put_objects(&self, cx: &CallContext, req: PutObjects) -> ApiResult<Vec<ObjectId>> {
+        self.take_failure("PutObjects")?;
         self.api.put_objects(cx, req).await
     }
 }
@@ -904,9 +1066,9 @@ impl RepoApi for SnapshotRepo {
     async fn create_changeset(
         &self,
         _cx: &CallContext,
-        _req: CreateChangeset,
+        req: CreateChangeset,
     ) -> ApiResult<Created> {
-        rejected()
+        self.create(req).await
     }
 
     async fn get_changesets(
@@ -914,6 +1076,7 @@ impl RepoApi for SnapshotRepo {
         cx: &CallContext,
         mut req: GetChangesets,
     ) -> ApiResult<Changesets> {
+        self.take_failure("GetChangesets")?;
         let mut raw_found = Vec::new();
         {
             let raw = self.raw_changesets.lock().expect("raw");
@@ -935,6 +1098,7 @@ impl RepoApi for SnapshotRepo {
         } else {
             self.api.get_changesets(cx, req).await?
         };
+        self.restate(&mut out);
         out.found.extend(raw_found);
         Ok(out)
     }
@@ -1058,8 +1222,8 @@ impl RepoApi for SnapshotRepo {
         rejected()
     }
 
-    async fn land(&self, _cx: &CallContext, _req: Land) -> ApiResult<Landed> {
-        rejected()
+    async fn land(&self, _cx: &CallContext, req: Land) -> ApiResult<Landed> {
+        self.do_land(req).await
     }
 
     async fn attest(&self, _cx: &CallContext, _req: Attest) -> ApiResult<()> {

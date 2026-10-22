@@ -1,0 +1,25 @@
+---
+source: crates/graft-cli/tests/write.rs
+expression: amended
+---
+{
+  "changes": [
+    {
+      "id": "17d8f9a930ce547159465ec2cbfe64742a3a09a684cae90d24a30923bc9866a5",
+      "kind": "file",
+      "op": "put",
+      "path": "src/lib.rs"
+    }
+  ],
+  "id": "ce34107755e5c701f36ce14082ac65d91b34307bfcb07ed29cafd62b51da7ff25",
+  "parent": "c5fdc21b361638190b521b6753b2a9e3ad89d5e5ef455b0a5c56eecb32dba5e7f",
+  "recovered": null,
+  "superseded": "c7682385f43f5423b15807a8a0796f6d73bf7a590e2a9478c12bbf2b2799c6acc",
+  "upload": {
+    "blobs": 1,
+    "bytes": 14,
+    "requests": 1,
+    "uploaded": 1
+  },
+  "workspace": "w-1"
+}

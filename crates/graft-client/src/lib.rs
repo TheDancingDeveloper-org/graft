@@ -9,7 +9,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use graft_model::RepoPath;
+use graft_model::{ChangesetId, RepoPath};
 use graft_proto::ApiError;
 use graft_store::StoreError;
 
@@ -17,6 +17,7 @@ pub mod fetch;
 pub mod remote;
 pub mod sparse;
 pub mod workcopy;
+pub mod workspace;
 
 pub use remote::Remote;
 pub use sparse::Sparse;
@@ -108,6 +109,38 @@ pub enum Error {
     /// Writing or removing this path would go through a symlink or a file:
     /// a parent component is not a real directory, on disk or in the base.
     UnsafePath(RepoPath),
+    /// `commit` found no change in the slice.
+    NothingToCommit,
+    /// The operation needs a draft (`commit --amend`, `land`) and the
+    /// workspace has none.
+    NoDraft,
+    /// This file kept changing while it was being read, so no consistent
+    /// content could be committed.
+    Unstable(RepoPath),
+    /// The server's workspace head is not the one this working copy holds:
+    /// someone else moved it.
+    Diverged {
+        /// The workspace.
+        workspace: String,
+        /// Its head on the server.
+        server: Option<ChangesetId>,
+        /// The head this working copy holds.
+        local: Option<ChangesetId>,
+    },
+    /// `land --wait` ran out of time while the pull request was still open.
+    StillQueued {
+        /// The pull request.
+        pr_url: String,
+    },
+    /// The stack landed, but these paths have local changes the update to
+    /// the landed snapshot would overwrite. Running `land` again (it is
+    /// idempotent) finishes the update once they are committed or reverted.
+    LandedDirty {
+        /// What landed.
+        landed: ChangesetId,
+        /// The paths in the way.
+        paths: Vec<RepoPath>,
+    },
 }
 
 /// Result alias for client calls.
@@ -125,8 +158,31 @@ impl fmt::Display for Error {
             Error::UnsafePath(path) => {
                 write!(f, "refusing {path:?}: a parent is a symlink or a file")
             }
+            Error::NothingToCommit => f.write_str("nothing to commit"),
+            Error::NoDraft => f.write_str("the workspace has no draft"),
+            Error::Unstable(path) => write!(f, "{path} kept changing while it was read"),
+            Error::Diverged {
+                workspace,
+                server,
+                local,
+            } => write!(
+                f,
+                "workspace {workspace} moved on the server (head {}, this working copy has {})",
+                id_or_none(*server),
+                id_or_none(*local)
+            ),
+            Error::StillQueued { pr_url } => write!(f, "still queued: {pr_url}"),
+            Error::LandedDirty { landed, paths } => write!(
+                f,
+                "landed {landed}, but {} paths have local changes; commit or revert them and run land again",
+                paths.len()
+            ),
         }
     }
+}
+
+fn id_or_none(id: Option<ChangesetId>) -> String {
+    id.map_or_else(|| "none".to_owned(), |id| id.to_string())
 }
 
 impl std::error::Error for Error {}

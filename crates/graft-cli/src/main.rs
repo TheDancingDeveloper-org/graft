@@ -1,6 +1,6 @@
 //! `graft`: the command-line client (`docs/design.md` §3 verbs, §9).
 //!
-//! Every read command takes `--json`, whose shape is the JSON Schema saved
+//! Every command takes `--json`, whose shape is the JSON Schema saved
 //! under `crates/graft-cli/schemas/`. Exit codes follow design §8.2 ([`Exit`]).
 
 #[macro_use]
@@ -45,15 +45,7 @@ pub(crate) enum Exit {
 }
 
 /// Commands that are designed but not built yet (`docs/plan.md`).
-const PLANNED: &[&str] = &[
-    "commit",
-    "land",
-    "mcp",
-    "revert",
-    "stack",
-    "sync",
-    "workspace",
-];
+const PLANNED: &[&str] = &["mcp", "revert"];
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -98,6 +90,11 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         Command::Cat(args) => cmd::cat::run(g, args),
         Command::Ls(args) => cmd::ls::run(g, args),
         Command::Sparse(args) => cmd::sparse::run(g, args),
+        Command::Commit(args) => cmd::commit::run(g, args),
+        Command::Workspace(args) => cmd::workspace::run(g, args),
+        Command::Stack(args) => cmd::stack::run(g, args),
+        Command::Sync => cmd::sync::run(g),
+        Command::Land(args) => cmd::land::run(g, args),
         Command::Api(args) => api::run(g, args),
         Command::Version => cmd::version::run(g),
         Command::Lsp { args } => match cmd::lsp::run(args) {

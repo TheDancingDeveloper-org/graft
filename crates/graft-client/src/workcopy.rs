@@ -41,6 +41,12 @@ use crate::fetch::{
 use crate::sparse::{escape, unescape};
 use crate::{Error, Result, Sparse};
 
+mod commit;
+mod session;
+
+pub use commit::{CommitLimits, CommitOptions, Committed, UploadStats};
+pub use session::{Begun, LandOptions, LandOutcome, Recovered, SyncOutcome};
+
 /// The working copy's state directory.
 pub const GRAFT_DIR: &str = ".graft";
 
@@ -480,10 +486,13 @@ impl WorkingCopy {
         Ok(out)
     }
 
-    /// Moves the base to `to`: diffs the base against `to` within the slice,
-    /// fetches only the blobs the diff names (and the cache lacks), and
-    /// rewrites only the changed files. Refuses, changing nothing, when a
-    /// changed path has local changes.
+    /// The snapshot the files and the index hold: the head draft, else the
+    /// base.
+    pub fn snapshot(&self) -> ChangesetId {
+        self.state.head.unwrap_or(self.state.base)
+    }
+
+    /// Moves the base to `to` with no stack (see [`WorkingCopy::move_to`]).
     pub async fn update<A: ObjectApi + RepoApi, S: ObjectStore>(
         &mut self,
         api: &A,
@@ -492,9 +501,42 @@ impl WorkingCopy {
         to: ChangesetId,
         opts: &FetchOptions,
     ) -> Result<UpdateStats> {
-        let from = self.state.base;
+        self.move_to(api, cache, cx, to, None, opts).await
+    }
+
+    /// Moves the working copy to `base` and `head`: diffs the current
+    /// snapshot against the new one within the slice, fetches only the blobs
+    /// the diff names (and the cache lacks), and rewrites only the changed
+    /// files. Refuses, changing nothing, when a changed path has local
+    /// changes.
+    pub async fn move_to<A: ObjectApi + RepoApi, S: ObjectStore>(
+        &mut self,
+        api: &A,
+        cache: &S,
+        cx: &CallContext,
+        base: ChangesetId,
+        head: Option<ChangesetId>,
+        opts: &FetchOptions,
+    ) -> Result<UpdateStats> {
+        let plan = self.plan_move(api, cx, head.unwrap_or(base), opts).await?;
+        self.apply_move(api, cache, cx, plan, base, head, opts)
+            .await
+    }
+
+    /// The first half of a move: the diff from the current snapshot to `to`
+    /// within the slice, checked against the working files. Nothing is
+    /// written, so a caller can make a server change between planning and
+    /// applying.
+    pub(crate) async fn plan_move<A: RepoApi>(
+        &self,
+        api: &A,
+        cx: &CallContext,
+        to: ChangesetId,
+        opts: &FetchOptions,
+    ) -> Result<Vec<Change>> {
+        let from = self.snapshot();
         if from == to {
-            return Ok(UpdateStats::default());
+            return Ok(Vec::new());
         }
         let repo = self.config.repo.clone();
         let mut changes = Vec::new();
@@ -541,7 +583,23 @@ impl WorkingCopy {
         if !dirty.is_empty() {
             return Err(Error::Dirty(dirty));
         }
+        Ok(changes)
+    }
 
+    /// The second half of a move: fetches and writes `changes` (from
+    /// [`WorkingCopy::plan_move`]) and records `base` and `head`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn apply_move<A: ObjectApi, S: ObjectStore>(
+        &mut self,
+        api: &A,
+        cache: &S,
+        cx: &CallContext,
+        changes: Vec<Change>,
+        base: ChangesetId,
+        head: Option<ChangesetId>,
+        opts: &FetchOptions,
+    ) -> Result<UpdateStats> {
+        let repo = self.config.repo.clone();
         let mut seen = HashSet::new();
         let wanted: Vec<(ObjectId, ObjectKind)> = changes
             .iter()
@@ -584,8 +642,11 @@ impl WorkingCopy {
                 );
             }
         }
-        self.save_index()?;
-        self.state.base = to;
+        if !changes.is_empty() {
+            self.save_index()?;
+        }
+        self.state.base = base;
+        self.state.head = head;
         self.save_state()?;
         Ok(UpdateStats {
             fetch,
@@ -682,6 +743,19 @@ impl WorkingCopy {
         Ok(out)
     }
 
+    /// Records the workspace this working copy writes through.
+    pub fn set_workspace(&mut self, name: Option<String>) -> Result<()> {
+        if let Some(n) = &name {
+            check_workspace_name(n)?;
+        }
+        self.config.workspace = name;
+        write_atomic(
+            &self.root.join(GRAFT_DIR).join(CONFIG_FILE),
+            self.config_text().as_bytes(),
+        )?;
+        Ok(())
+    }
+
     fn config_text(&self) -> String {
         let mut s = format!("repo = {}\n", self.config.repo);
         if let Some(e) = &self.config.endpoint {
@@ -724,6 +798,26 @@ impl WorkingCopy {
         write_atomic(&path, s.as_bytes())?;
         self.index.written_ns = Stat::of(&fs::metadata(&path)?).mtime_ns;
         Ok(())
+    }
+}
+
+/// Refuses a workspace name that could not have come from a server: the
+/// engine's names are lowercase ASCII segments of at most 128 bytes, so
+/// anything else (a newline that would forge a config line, for one) is a
+/// broken or hostile reply.
+pub(crate) fn check_workspace_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-' | b'/')
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Api(ApiError::InvalidPath {
+            path: name.chars().take(128).collect(),
+            reason: "workspace-name".to_owned(),
+        }))
     }
 }
 

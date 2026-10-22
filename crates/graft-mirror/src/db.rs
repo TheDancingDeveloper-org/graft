@@ -14,6 +14,8 @@ use std::sync::{Mutex, MutexGuard};
 use graft_git::map::{ImportedCommit, MirrorMap, RawTree};
 use graft_git::{GitError, GitSha};
 use graft_model::{BlobId, ChangesetId, ObjectId, RepoPath};
+
+use crate::bridge::{BridgeState, PullRecord};
 use rusqlite::{Connection, OptionalExtension, params};
 
 const SCHEMA: &str = "
@@ -33,6 +35,28 @@ CREATE TABLE IF NOT EXISTS lines (
     upstream BLOB,
     behind_since_ms INTEGER,
     diverged BLOB
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS authority (
+    line TEXT PRIMARY KEY,
+    claim TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS bridge (
+    head BLOB PRIMARY KEY,
+    line TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    requested_ms INTEGER NOT NULL,
+    covered BLOB NOT NULL,
+    export_sha BLOB,
+    pr_number INTEGER,
+    pr_url TEXT,
+    node_id TEXT,
+    enqueued INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    merge_sha BLOB,
+    landed BLOB,
+    attempts INTEGER NOT NULL
 ) WITHOUT ROWID;
 ";
 
@@ -130,6 +154,129 @@ impl MirrorDb {
                 diverged: sha_col(diverged)?,
             }),
         }
+    }
+
+    /// Records `claim` as the authority over `line`, unless another claim
+    /// is already there. Returns the claim that holds the line now. Two
+    /// writers never both hold one line (`docs/design.md` §11.3).
+    pub fn claim_authority(&self, line: &str, claim: &str) -> Result<String, GitError> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO authority (line, claim) VALUES (?1, ?2)",
+            params![line, claim],
+        )
+        .map_err(db_err)?;
+        conn.query_row(
+            "SELECT claim FROM authority WHERE line = ?1",
+            params![line],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(db_err)
+    }
+
+    /// The bridge record for the stack headed by `head`, if there is one.
+    pub fn pull(&self, head: ChangesetId) -> Result<Option<PullRecord>, GitError> {
+        let conn = self.conn();
+        let row = conn
+            .query_row(
+                "SELECT line, workspace, branch, requested_ms, covered, export_sha,
+                        pr_number, pr_url, node_id, enqueued, state, detail, merge_sha,
+                        landed, attempts
+                 FROM bridge WHERE head = ?1",
+                params![&head.0.0[..]],
+                pull_row,
+            )
+            .optional()
+            .map_err(db_err)?;
+        row.map(|r| r.into_record(head)).transpose()
+    }
+
+    /// The bridge records that are not final, oldest request first. Finished
+    /// requests are not read, so a poll costs the open ones only.
+    pub fn open_pulls(&self) -> Result<Vec<PullRecord>, GitError> {
+        self.pulls_where("WHERE state NOT IN ('landed', 'rejected')")
+    }
+
+    /// Every bridge record, oldest request first.
+    pub fn pulls(&self) -> Result<Vec<PullRecord>, GitError> {
+        self.pulls_where("")
+    }
+
+    fn pulls_where(&self, filter: &str) -> Result<Vec<PullRecord>, GitError> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT head, line, workspace, branch, requested_ms, covered, export_sha,
+                        pr_number, pr_url, node_id, enqueued, state, detail, merge_sha,
+                        landed, attempts
+                 FROM bridge {filter} ORDER BY requested_ms, head"
+            ))
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                let head: Vec<u8> = r.get(0)?;
+                let row = PullRow {
+                    line: r.get(1)?,
+                    workspace: r.get(2)?,
+                    branch: r.get(3)?,
+                    requested_ms: r.get(4)?,
+                    covered: r.get(5)?,
+                    export_sha: r.get(6)?,
+                    pr_number: r.get(7)?,
+                    pr_url: r.get(8)?,
+                    node_id: r.get(9)?,
+                    enqueued: r.get(10)?,
+                    state: r.get(11)?,
+                    detail: r.get(12)?,
+                    merge_sha: r.get(13)?,
+                    landed: r.get(14)?,
+                    attempts: r.get(15)?,
+                };
+                Ok((head, row))
+            })
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (head, row) = row.map_err(db_err)?;
+            out.push(row.into_record(id_col(head).map(ChangesetId)?)?);
+        }
+        Ok(out)
+    }
+
+    /// Writes the bridge record for its head, replacing any earlier one.
+    pub fn put_pull(&self, rec: &PullRecord) -> Result<(), GitError> {
+        let covered: Vec<u8> = rec.covered.iter().flat_map(|c| c.0.0).collect();
+        self.conn()
+            .execute(
+                "INSERT INTO bridge (head, line, workspace, branch, requested_ms, covered,
+                     export_sha, pr_number, pr_url, node_id, enqueued, state, detail,
+                     merge_sha, landed, attempts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 ON CONFLICT (head) DO UPDATE SET line = ?2, workspace = ?3, branch = ?4,
+                     requested_ms = ?5, covered = ?6, export_sha = ?7, pr_number = ?8,
+                     pr_url = ?9, node_id = ?10, enqueued = ?11, state = ?12, detail = ?13,
+                     merge_sha = ?14, landed = ?15, attempts = ?16",
+                params![
+                    &rec.head.0.0[..],
+                    rec.line,
+                    rec.workspace,
+                    rec.branch,
+                    rec.requested_ms,
+                    covered,
+                    rec.export_sha.map(|s| s.0.to_vec()),
+                    rec.pr_number.map(|n| n as i64),
+                    rec.pr_url,
+                    rec.node_id,
+                    rec.enqueued,
+                    rec.state.as_str(),
+                    rec.detail,
+                    rec.merge_sha.map(|s| s.0.to_vec()),
+                    rec.landed.map(|c| c.0.0.to_vec()),
+                    rec.attempts,
+                ],
+            )
+            .map(drop)
+            .map_err(db_err)
     }
 
     /// Replaces follow's record of `line`.
@@ -249,6 +396,83 @@ impl MirrorMap for MirrorDb {
             .optional()
             .map_err(db_err)?;
         sha_col(sha)
+    }
+}
+
+/// A bridge row as stored, before the head id and the state are parsed.
+struct PullRow {
+    line: String,
+    workspace: String,
+    branch: String,
+    requested_ms: i64,
+    covered: Vec<u8>,
+    export_sha: Option<Vec<u8>>,
+    pr_number: Option<i64>,
+    pr_url: Option<String>,
+    node_id: Option<String>,
+    enqueued: bool,
+    state: String,
+    detail: String,
+    merge_sha: Option<Vec<u8>>,
+    landed: Option<Vec<u8>>,
+    attempts: u32,
+}
+
+fn pull_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PullRow> {
+    Ok(PullRow {
+        line: r.get(0)?,
+        workspace: r.get(1)?,
+        branch: r.get(2)?,
+        requested_ms: r.get(3)?,
+        covered: r.get(4)?,
+        export_sha: r.get(5)?,
+        pr_number: r.get(6)?,
+        pr_url: r.get(7)?,
+        node_id: r.get(8)?,
+        enqueued: r.get(9)?,
+        state: r.get(10)?,
+        detail: r.get(11)?,
+        merge_sha: r.get(12)?,
+        landed: r.get(13)?,
+        attempts: r.get(14)?,
+    })
+}
+
+impl PullRow {
+    fn into_record(self, head: ChangesetId) -> Result<PullRecord, GitError> {
+        let bad = |what: &str| GitError::Map(format!("mirror db: malformed bridge row ({what})"));
+        let covered = self
+            .covered
+            .chunks(32)
+            .map(|c| {
+                <[u8; 32]>::try_from(c)
+                    .map(|a| ChangesetId(ObjectId(a)))
+                    .map_err(|_| bad("covered"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let state = BridgeState::parse(&self.state).ok_or_else(|| bad("state"))?;
+        let landed = match self.landed {
+            Some(b) => Some(id_col(b).map(ChangesetId)?),
+            None => None,
+        };
+        Ok(PullRecord {
+            head,
+            line: self.line,
+            workspace: self.workspace,
+            branch: self.branch,
+            requested_ms: self.requested_ms,
+            covered,
+            export_sha: sha_col(self.export_sha)?,
+            pr_number: self.pr_number.map(|n| n as u64),
+            pr_url: self.pr_url,
+            node_id: self.node_id,
+            enqueued: self.enqueued,
+            state,
+            detail: self.detail,
+            merge_sha: sha_col(self.merge_sha)?,
+            landed,
+            attempts: self.attempts,
+        })
     }
 }
 

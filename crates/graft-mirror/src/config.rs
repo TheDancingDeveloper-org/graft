@@ -61,6 +61,90 @@ pub struct FileConfig {
     pub allow_lossy: Vec<String>,
     /// The followed branches.
     pub lines: Vec<LineConfig>,
+    /// The PR bridge's GitHub repository and credential. Optional: without
+    /// it the mirror follows and imports but does not bridge.
+    #[serde(default)]
+    pub github: Option<GithubFile>,
+}
+
+/// The PR bridge's GitHub repository and how it authenticates.
+///
+/// ```toml
+/// [github]
+/// owner = "indexarr"
+/// repo = "rusttorrent"
+/// # exactly one of these two (decision D8; there is no default):
+/// token_file = "/run/secrets/github-token"
+/// [github.github_app]
+/// app_id = 12345
+/// installation_id = 67890
+/// private_key_file = "/run/secrets/github-app.pem"
+/// ```
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubFile {
+    /// The API root (default `https://api.github.com`).
+    #[serde(default)]
+    pub api: Option<String>,
+    /// The owner (user or organisation).
+    pub owner: String,
+    /// The repository name.
+    pub repo: String,
+    /// A file holding a token to use as is.
+    #[serde(default)]
+    pub token_file: Option<PathBuf>,
+    /// A GitHub App to mint installation tokens from.
+    #[serde(default)]
+    pub github_app: Option<AppFile>,
+}
+
+/// A GitHub App's identity and key.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppFile {
+    /// The App's id.
+    pub app_id: u64,
+    /// The installation of the App on the repository's owner.
+    pub installation_id: u64,
+    /// The PEM private key file.
+    pub private_key_file: PathBuf,
+}
+
+/// The one credential the config chose.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthChoice {
+    /// A token file.
+    TokenFile(PathBuf),
+    /// A GitHub App (its key file is checked when it is loaded).
+    App {
+        /// The App id.
+        app_id: u64,
+        /// The installation id.
+        installation_id: u64,
+        /// The key file.
+        private_key_file: PathBuf,
+    },
+}
+
+impl GithubFile {
+    /// The credential the file chose. Exactly one of `token_file` and
+    /// `github_app` must be set; neither or both is a config error.
+    pub fn auth(&self) -> Result<AuthChoice, MirrorError> {
+        match (&self.token_file, &self.github_app) {
+            (Some(path), None) => Ok(AuthChoice::TokenFile(path.clone())),
+            (None, Some(app)) => Ok(AuthChoice::App {
+                app_id: app.app_id,
+                installation_id: app.installation_id,
+                private_key_file: app.private_key_file.clone(),
+            }),
+            (None, None) => Err(bad(
+                "[github] needs a credential: set token_file or github_app (there is no default)",
+            )),
+            (Some(_), Some(_)) => Err(bad(
+                "[github] must choose one credential, not both token_file and github_app",
+            )),
+        }
+    }
 }
 
 /// One followed branch.
@@ -122,6 +206,12 @@ impl FileConfig {
             return Err(bad("poll_interval_secs must be at least 1"));
         }
         parse_shas(&config.allow_lossy)?;
+        if let Some(github) = &config.github {
+            github.auth()?;
+            if github.owner.is_empty() || github.repo.is_empty() {
+                return Err(bad("[github] needs an owner and a repo"));
+            }
+        }
         Ok(config)
     }
 
@@ -178,6 +268,37 @@ db = "/var/lib/m.sqlite"
             }]
         );
         assert_eq!(f.batch, 256);
+    }
+
+    #[test]
+    fn the_github_credential_has_no_default() {
+        let gh = |extra: &str| {
+            format!(
+                "{BASE}[[lines]]\nbranch = \"main\"\n[github]\nowner = \"o\"\nrepo = \"r\"\n{extra}"
+            )
+        };
+        assert!(FileConfig::parse(&gh("")).is_err(), "no credential chosen");
+        assert!(
+            FileConfig::parse(&gh("token_file = \"/t\"\n[github.github_app]\napp_id = 1\ninstallation_id = 2\nprivate_key_file = \"/k\"\n")).is_err(),
+            "both chosen"
+        );
+        let token = FileConfig::parse(&gh("token_file = \"/t\"\n")).unwrap();
+        assert_eq!(
+            token.github.unwrap().auth().unwrap(),
+            AuthChoice::TokenFile("/t".into())
+        );
+        let app = FileConfig::parse(&gh(
+            "[github.github_app]\napp_id = 1\ninstallation_id = 2\nprivate_key_file = \"/k\"\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            app.github.unwrap().auth().unwrap(),
+            AuthChoice::App {
+                app_id: 1,
+                installation_id: 2,
+                private_key_file: "/k".into()
+            }
+        );
     }
 
     #[test]

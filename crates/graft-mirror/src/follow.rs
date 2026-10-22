@@ -193,6 +193,17 @@ where
     /// per-line failures are reported in the outcomes.
     pub async fn poll_once(&mut self) -> Result<Vec<(String, LineOutcome)>, MirrorError> {
         self.polls += 1;
+        for l in &self.config.lines {
+            let holder = self
+                .db
+                .claim_authority(&l.line, crate::bridge::GIT_PRIMARY)?;
+            if holder != crate::bridge::GIT_PRIMARY {
+                return Err(MirrorError::Config(format!(
+                    "line {} is claimed by {holder}; follow cannot also write it",
+                    l.line
+                )));
+            }
+        }
         self.mirror.ensure().await?;
         let branches: Vec<&str> = self
             .config

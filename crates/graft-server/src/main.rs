@@ -11,6 +11,7 @@ mod admission;
 mod app;
 mod backup;
 mod config;
+mod denylist;
 mod fsck;
 mod grpc;
 mod http;
@@ -30,6 +31,7 @@ const USAGE: &str = "usage: graft-server [--config <file>] <serve|admin> [args]
   admin token mint --subject <s> --scope <scope>... [--ttl <secs>]
         [--kind human|agent|ci|service] [--session <ses_…>] [--work-item <WI-…>]
                                  mint a token (printed to stdout)
+  admin token revoke             revoke the token read from stdin (server running)
   admin repo create <name>       create a repository
   admin fsck <repo>              verify every referenced object (server stopped)
   admin backup <dir> [--objects] snapshot metadata (and copy objects)
