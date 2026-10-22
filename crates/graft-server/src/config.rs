@@ -17,20 +17,28 @@
 //! max_watches = 1024
 //! max_put_call_bytes = 67108864      # PutObjects buffered per call (64 MiB)
 //! put_buffer_bytes = 536870912       # PutObjects buffered by all calls
-//! put_wait_ms = 10000                # longest wait for that budget
-//! put_idle_ms = 30000                # longest gap between PutObjects messages
+//! put_wait_ms = 10000                # longest wait for that budget (≤ 1 h)
+//! put_idle_ms = 30000                # longest gap between PutObjects messages (≤ 1 h)
 //! ```
 //!
 //! Unknown keys are refused, so a typo fails at start-up rather than being
-//! silently ignored.
+//! silently ignored. So are values out of bounds: `max_put_call_bytes` above
+//! 80 MiB (the largest `PutObjects` message) and the put timeouts above one
+//! hour, which would otherwise mean no timeout at all.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::grpc::MAX_MESSAGE;
+
 /// The config file `serve` and `admin` read when `--config` is not given.
 pub(crate) const DEFAULT_CONFIG: &str = "/etc/graft/server.toml";
+
+/// The longest `put_wait_ms` or `put_idle_ms` a config may name: one hour.
+/// Past it a put is in effect unbounded, so a larger value is refused.
+pub(crate) const MAX_PUT_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 /// Server configuration.
 #[derive(Clone, Debug, Deserialize)]
@@ -160,6 +168,23 @@ impl ServerConfig {
                 "put_buffer_bytes must be at least max_put_call_bytes".into(),
             ));
         }
+        // The decode limit of `PutObjects` clamps at MAX_MESSAGE, so a larger
+        // per-call cap would not be honoured for a single message: refuse it.
+        if self.max_put_call_bytes > MAX_MESSAGE as u64 {
+            return Err(ConfigError(format!(
+                "max_put_call_bytes must be at most {MAX_MESSAGE} (80 MiB, the largest PutObjects message)"
+            )));
+        }
+        for (key, value) in [
+            ("put_wait_ms", self.put_wait_ms),
+            ("put_idle_ms", self.put_idle_ms),
+        ] {
+            if value > MAX_PUT_TIMEOUT_MS {
+                return Err(ConfigError(format!(
+                    "{key} must be at most {MAX_PUT_TIMEOUT_MS} (one hour)"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -216,5 +241,32 @@ metrics = "0.0.0.0:9464"
         assert!(ServerConfig::parse("max_watches = 0").is_err());
         assert!(ServerConfig::parse("max_put_call_bytes = 10\nput_buffer_bytes = 5").is_err());
         assert!(ServerConfig::parse("min_free_fraction = 1.0").is_ok());
+    }
+
+    #[test]
+    fn put_timeouts_are_bounded_at_one_hour() {
+        let at = |key: &str, v: u64| ServerConfig::parse(&format!("{key} = {v}"));
+        // The maximum is accepted; one more is refused, and so is u64::MAX.
+        for key in ["put_wait_ms", "put_idle_ms"] {
+            assert!(at(key, MAX_PUT_TIMEOUT_MS).is_ok(), "{key} at the maximum");
+            assert!(at(key, MAX_PUT_TIMEOUT_MS + 1).is_err(), "{key} past it");
+            assert!(at(key, i64::MAX as u64).is_err(), "{key} at i64::MAX");
+            assert!(at(key, 0).is_err(), "{key} at zero");
+        }
+        // A value past i64::MAX is not even an integer the TOML reader takes.
+        let huge = format!("put_wait_ms = {}", u64::MAX);
+        assert!(ServerConfig::parse(&huge).is_err());
+    }
+
+    #[test]
+    fn max_put_call_bytes_is_bounded_by_the_decode_clamp() {
+        let cap = |v: u64| {
+            ServerConfig::parse(&format!("max_put_call_bytes = {v}\nput_buffer_bytes = {v}"))
+        };
+        let clamp = MAX_MESSAGE as u64;
+        assert!(cap(clamp).is_ok(), "exactly the clamp is honoured");
+        assert!(cap(clamp + 1).is_err(), "one past the clamp is refused");
+        // The largest integer TOML takes; the clamp check is what refuses it.
+        assert!(cap(i64::MAX as u64).is_err(), "i64::MAX is refused");
     }
 }

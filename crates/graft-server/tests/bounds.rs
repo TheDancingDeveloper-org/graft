@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use common::{Site, api, noise};
+use graft_client::{Endpoint, Remote};
 use graft_model::{ObjectId, ObjectKind};
+use graft_proto::api::ObjectApi as _;
 use graft_proto::types::{Objects, PutObjects};
 use graft_proto::{ApiError, Frame, pb};
 use tokio::sync::mpsc;
@@ -25,6 +27,49 @@ fn put_message(repo: &str, blobs: &[Vec<u8>]) -> pb::PutObjectsRequest {
             .collect(),
     }
     .into()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_put_over_the_decode_limit_is_a_limit_for_the_client() {
+    // The decode limit of a PutObjects message is the call cap plus 1 MiB.
+    let site = Site::new(
+        "server-put-decode",
+        "max_put_call_bytes = 65536\nput_buffer_bytes = 65536",
+    );
+    let token = site.mint(&["repo:r:admin"]);
+    let server = site.start();
+    let mut c = server.clients(Some(&token)).await;
+    c.create_repo("r").await.expect("create");
+
+    let remote = Remote::connect(Endpoint::parse(&format!("http://{}", server.addr)))
+        .await
+        .expect("connect")
+        .with_token(token.clone());
+    let cx = graft_testkit::fake_api::admin_cx();
+    let put = |blob: &[u8]| PutObjects {
+        repo: "r".into(),
+        blobs: vec![Frame::encode(ObjectKind::Blob, blob)],
+    };
+
+    // A small put is well under the limit.
+    remote
+        .put_objects(&cx, put(&noise(1, 1 << 10)))
+        .await
+        .expect("a small put");
+
+    // A 2 MiB blob is over it: tonic refuses the message as OutOfRange, and
+    // the client reports the typed limit, with the server's own number.
+    let e = remote
+        .put_objects(&cx, put(&noise(2, 2 << 20)))
+        .await
+        .expect_err("over the decode limit");
+    assert_eq!(
+        e,
+        ApiError::LimitExceeded {
+            limit: "put-objects-message".into(),
+            max: (64 << 10) + (1 << 20),
+        }
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -7,11 +7,18 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::Router;
+use axum::extract::Request as HttpRequest;
+use axum::http::HeaderValue;
+use axum::middleware::{self, Next};
 use graft_auth::Scope;
 use graft_model::{ChangesetId, ObjectId};
 use graft_proto::pb;
 use graft_proto::types::*;
-use graft_proto::{AdminApi as _, ApiError, CallContext, Frame, ObjectApi as _, RepoApi as _};
+use graft_proto::{
+    AdminApi as _, ApiError, CallContext, Frame, ObjectApi as _, PROTOCOL_VERSION, RepoApi as _,
+    VERSION_HEADER,
+};
 use graft_proto::{WireError, WorkspaceApi as _};
 use graft_store::MetaStore as _;
 use tokio::sync::mpsc;
@@ -96,6 +103,22 @@ fn workspace_ref(w: Option<pb::WorkspaceRef>) -> Result<WorkspaceRef, Status> {
         }
         .into()
     })
+}
+
+/// Stamps the protocol version on every gRPC answer, so a client can bind
+/// it (`docs/design.md` §7.1). Covers unary and streamed answers, and error
+/// statuses too: tonic sends those as a response whose status is in its
+/// headers.
+pub(crate) fn stamp_version(services: Router) -> Router {
+    services.layer(middleware::from_fn(
+        |req: HttpRequest, next: Next| async move {
+            let mut resp = next.run(req).await;
+            let version =
+                HeaderValue::try_from(PROTOCOL_VERSION.to_string()).expect("version is ASCII");
+            resp.headers_mut().insert(VERSION_HEADER, version);
+            resp
+        },
+    ))
 }
 
 /// The gRPC services over one [`App`].
