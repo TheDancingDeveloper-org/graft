@@ -12,5 +12,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+gix.workspace = true
 graft-model.workspace = true
 graft-proto.workspace = true
+
+[dev-dependencies]
+graft-testkit.workspace = true

@@ -1,26 +1,168 @@
 //! git interop (`docs/design.md` §11). The only crate that knows git.
 //!
 //! Work items G1.8 (import and fidelity), G2.2 (export).
+//!
+//! - [`import::import`] reads a bare repository with `gix`, walks every commit
+//!   reachable from the configured refs oldest first, and sends blobs and
+//!   `ImportChangesets` batches through the API traits. It checks every path
+//!   first (decision D11) and verifies per commit that the export reproduces
+//!   the git sha.
+//! - [`export`] holds the deterministic git encoders: blob, tree (by path
+//!   copying from the parent's git tree) and commit shas.
+//! - [`map`] is the mirror map: graft ids ↔ git shas, raw commit headers and
+//!   the raw git trees graft's model cannot express.
 
+use std::fmt;
+
+mod diff;
 pub mod export;
+mod git;
 pub mod import;
 pub mod map;
+mod walk;
 
 /// A git object id (SHA-1, 20 bytes).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GitSha(pub [u8; 20]);
+
+impl GitSha {
+    /// Lowercase hex, as git prints it.
+    pub fn to_hex(&self) -> String {
+        let mut s = String::with_capacity(40);
+        for b in self.0 {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    }
+
+    /// Parses 40 hex digits (either case).
+    pub fn from_hex(s: &str) -> Option<GitSha> {
+        if s.len() != 40 || !s.is_ascii() {
+            return None;
+        }
+        let mut out = [0u8; 20];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(GitSha(out))
+    }
+}
+
+impl fmt::Display for GitSha {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
+impl fmt::Debug for GitSha {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GitSha({})", self.to_hex())
+    }
+}
+
+/// A path that breaks graft's path rules, found before anything is written.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BadPath {
+    /// The path, with bytes that are not UTF-8 shown as U+FFFD.
+    pub path: String,
+    /// The rule broken: a [`graft_model::PathError::reason`], the
+    /// portability rule (`portability (case-clash)`), `duplicate-entry` or
+    /// `unsupported-mode`.
+    pub reason: String,
+    /// The first commit (in import order) that introduced it.
+    pub commit: GitSha,
+}
+
+/// A commit graft's model cannot hold, found before anything is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unrepresentable {
+    /// The commit.
+    pub commit: GitSha,
+    /// Why: `empty-changeset` (no change against a single or absent parent,
+    /// which validity rule 9 forbids) or `commit-shape` (the object does not
+    /// start with a tree line and parent lines).
+    pub reason: &'static str,
+}
 
 /// A git interop failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitError {
     /// Reading the git repository failed.
     Read(String),
-    /// Paths that break graft's path rules (decision D11).
-    BadPaths(Vec<String>),
-    /// Commits whose export does not reproduce their sha.
+    /// Paths that break graft's path rules (decision D11), every one of them.
+    /// Nothing was imported.
+    BadPaths(Vec<BadPath>),
+    /// Commits graft cannot represent. Nothing was imported.
+    Unrepresentable(Vec<Unrepresentable>),
+    /// Commits whose export does not reproduce their sha and that
+    /// `allow_lossy` does not name. Changesets before the first of them were
+    /// imported; none after.
     Fidelity(Vec<GitSha>),
-    /// The graft API refused a write.
-    Api(String),
+    /// Pairs of commits (first imported, second) that map to the same
+    /// changeset: they differ only in what a changeset does not hold (the
+    /// committer, a signature, the encoding or extra headers), so one export
+    /// cannot reproduce both. Changesets before the first pair were imported;
+    /// none after.
+    Indistinct(Vec<(GitSha, GitSha)>),
+    /// A commit's changes broke a validity rule while deriving its root.
+    Invalid {
+        /// The commit.
+        commit: GitSha,
+        /// The rule (`graft_model::Rule::as_str`) or source failure.
+        rule: String,
+    },
+    /// The graft API refused a call.
+    Api(graft_proto::ApiError),
     /// The mirror map failed.
     Map(String),
+}
+
+impl fmt::Display for GitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GitError::Read(what) => write!(f, "reading the git repository failed: {what}"),
+            GitError::BadPaths(paths) => {
+                write!(f, "{} paths break graft's path rules", paths.len())
+            }
+            GitError::Unrepresentable(commits) => {
+                write!(f, "{} commits cannot be represented", commits.len())
+            }
+            GitError::Fidelity(shas) => {
+                write!(f, "{} commits do not export to their sha", shas.len())
+            }
+            GitError::Indistinct(pairs) => {
+                write!(
+                    f,
+                    "{} commits map to a changeset another commit has",
+                    pairs.len()
+                )
+            }
+            GitError::Invalid { commit, rule } => write!(f, "commit {commit} breaks rule {rule}"),
+            GitError::Api(e) => write!(f, "the graft API refused: {e:?}"),
+            GitError::Map(what) => write!(f, "mirror map failed: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for GitError {}
+
+impl From<graft_proto::ApiError> for GitError {
+    fn from(e: graft_proto::ApiError) -> Self {
+        GitError::Api(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha_hex_round_trips() {
+        let hex = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+        let sha = GitSha::from_hex(hex).unwrap();
+        assert_eq!(sha.to_hex(), hex);
+        assert_eq!(GitSha::from_hex(&hex.to_uppercase()), Some(sha));
+        assert_eq!(GitSha::from_hex("4b82"), None);
+        assert_eq!(GitSha::from_hex(&"g".repeat(40)), None);
+    }
 }
