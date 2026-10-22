@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use base64::Engine;
 use graft_git::GitSha;
 use tokio::process::Command;
 
@@ -33,6 +34,15 @@ impl std::fmt::Display for GitCliError {
 
 impl std::error::Error for GitCliError {}
 
+/// What a push that did not force came back as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushOutcome {
+    /// The branch now names the commit.
+    Pushed,
+    /// The branch holds other commits (or moved): nothing was changed.
+    Rejected,
+}
+
 /// The local bare mirror of one upstream.
 #[derive(Clone, Debug)]
 pub struct Mirror {
@@ -48,11 +58,21 @@ struct Output {
 }
 
 async fn git(dir: Option<&Path>, args: &[&str]) -> Result<Output, GitCliError> {
+    git_env(dir, args, &[]).await
+}
+
+/// [`git`] with extra environment variables. Secrets go here, never in argv.
+async fn git_env(
+    dir: Option<&Path>,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<Output, GitCliError> {
     let mut cmd = Command::new("git");
     if let Some(dir) = dir {
         cmd.arg("-C").arg(dir);
     }
     cmd.args(args)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -166,6 +186,46 @@ impl Mirror {
         args.extend(specs.iter().map(String::as_str));
         ok(Some(&self.dir), &args).await?;
         Ok(())
+    }
+
+    /// Pushes `sha` to `refs/heads/<branch>` on upstream, never forced. A
+    /// branch that already holds other commits is [`PushOutcome::Rejected`],
+    /// and the caller decides. A bearer token (for HTTPS upstreams) travels
+    /// in the environment as a git `http.extraHeader`, never in argv.
+    pub async fn push_branch(
+        &self,
+        branch: &str,
+        sha: GitSha,
+        bearer: Option<&str>,
+    ) -> Result<PushOutcome, GitCliError> {
+        let spec = format!("{}:refs/heads/{branch}", sha.to_hex());
+        let mut env = Vec::new();
+        if let Some(token) = bearer
+            && self.upstream.starts_with("https://")
+        {
+            let basic =
+                base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+            env.push(("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()));
+            env.push(("GIT_CONFIG_KEY_0".to_owned(), "http.extraHeader".to_owned()));
+            env.push((
+                "GIT_CONFIG_VALUE_0".to_owned(),
+                format!("Authorization: Basic {basic}"),
+            ));
+        }
+        let out = git_env(
+            Some(&self.dir),
+            &["push", "-q", "--no-force", self.upstream.as_str(), &spec],
+            &env,
+        )
+        .await?;
+        if out.code == Some(0) {
+            return Ok(PushOutcome::Pushed);
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+        if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
+            return Ok(PushOutcome::Rejected);
+        }
+        Err(failed("push", &out))
     }
 
     /// Whether `ancestor` is `descendant` or one of its ancestors. A commit

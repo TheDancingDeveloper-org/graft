@@ -25,10 +25,14 @@ use graft_proto::api::RepoApi;
 use graft_proto::types::{RefKind, ResolveRef, UpdateRef};
 use graft_proto::{ApiError, CallContext};
 
+use crate::github::ForgeError;
+
+pub mod bridge;
 pub mod config;
 pub mod db;
 pub mod follow;
 pub mod git;
+pub mod github;
 pub mod import;
 pub mod server;
 
@@ -46,6 +50,8 @@ pub enum MirrorError {
     Api(ApiError),
     /// The configuration is unusable, described.
     Config(String),
+    /// GitHub refused or could not be reached.
+    Forge(ForgeError),
 }
 
 impl fmt::Display for MirrorError {
@@ -55,6 +61,7 @@ impl fmt::Display for MirrorError {
             MirrorError::Cli(e) => e.fmt(f),
             MirrorError::Api(e) => write!(f, "the graft API refused: {e:?}"),
             MirrorError::Config(what) => write!(f, "configuration: {what}"),
+            MirrorError::Forge(e) => e.fmt(f),
         }
     }
 }
@@ -73,6 +80,12 @@ impl From<GitError> for MirrorError {
 impl From<GitCliError> for MirrorError {
     fn from(e: GitCliError) -> Self {
         MirrorError::Cli(e)
+    }
+}
+
+impl From<ForgeError> for MirrorError {
+    fn from(e: ForgeError) -> Self {
+        MirrorError::Forge(e)
     }
 }
 
