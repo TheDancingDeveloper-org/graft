@@ -62,6 +62,7 @@ pub struct Remote {
     token: Option<String>,
     protocol: ProtocolVersion,
     timeout: Duration,
+    max_response_bytes: u64,
 }
 
 impl fmt::Debug for Remote {
@@ -110,6 +111,7 @@ impl Remote {
             token: None,
             protocol: PROTOCOL_VERSION,
             timeout: DEFAULT_TIMEOUT,
+            max_response_bytes: MAX_GET_OBJECTS_BYTES,
         })
     }
 
@@ -129,6 +131,13 @@ impl Remote {
     /// compatibility tests).
     pub fn with_protocol_version(mut self, version: ProtocolVersion) -> Self {
         self.protocol = version;
+        self
+    }
+
+    /// Caps the frame bytes of one `GetObjects` answer below
+    /// [`MAX_GET_OBJECTS_BYTES`] (never above it).
+    pub fn with_max_response_bytes(mut self, bytes: u64) -> Self {
+        self.max_response_bytes = bytes.min(MAX_GET_OBJECTS_BYTES);
         self
     }
 
@@ -263,7 +272,8 @@ impl ObjectApi for Remote {
     /// Collects every page of the stream, keeping only ids that were asked
     /// for, each once, as the pages arrive. The answer is bounded: at most
     /// one page per requested id plus one, and at most
-    /// [`MAX_GET_OBJECTS_BYTES`] of frames; past either the call fails with
+    /// [`MAX_GET_OBJECTS_BYTES`] of frames (or less, see
+    /// [`Remote::with_max_response_bytes`]); past either the call fails with
     /// `LimitExceeded`. A dropped stream is an error; the caller asks again
     /// for what it still lacks.
     async fn get_objects(&self, cx: &CallContext, req: GetObjects) -> ApiResult<Objects> {
@@ -288,10 +298,10 @@ impl ObjectApi for Remote {
                 });
             }
             bytes += page.found.iter().map(|f| f.frame.len() as u64).sum::<u64>();
-            if bytes > MAX_GET_OBJECTS_BYTES {
+            if bytes > self.max_response_bytes {
                 return Err(ApiError::LimitExceeded {
                     limit: "get-objects-bytes".to_owned(),
-                    max: MAX_GET_OBJECTS_BYTES,
+                    max: self.max_response_bytes,
                 });
             }
             // Unrequested or repeated ids are dropped before they are parsed.

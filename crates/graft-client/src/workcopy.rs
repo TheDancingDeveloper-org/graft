@@ -600,6 +600,29 @@ impl WorkingCopy {
     /// the deletes remove first. `write_entry` and `remove_entry` check each
     /// component again as they go.
     fn check_routes(&self, changes: &[Change]) -> Result<()> {
+        // A diff that puts a symlink at P and also touches a path under P
+        // is not a tree; refusing it here keeps an update from stopping
+        // half applied.
+        let symlinks: HashSet<&RepoPath> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::Put {
+                    path,
+                    kind: EntryKind::Symlink,
+                    ..
+                } => Some(path),
+                _ => None,
+            })
+            .collect();
+        for c in changes {
+            let mut parent = c.path().parent();
+            while let Some(p) = parent {
+                if symlinks.contains(&p) {
+                    return Err(Error::UnsafePath(c.path().clone()));
+                }
+                parent = p.parent();
+            }
+        }
         let deleted: HashSet<&RepoPath> = changes
             .iter()
             .filter_map(|c| match c {
@@ -708,9 +731,40 @@ fn missing(id: ObjectId) -> Error {
     Error::Api(ApiError::MissingObjects { ids: vec![id] })
 }
 
-/// Refuses a path that would write into `.graft/`.
+/// Whether a top-level name could reach `.graft` on some filesystem: equal
+/// to it after Unicode compatibility normalization (NFKC, which covers the
+/// NFC and NFD forms), full case folding, and dropping the default-ignorable
+/// code points that HFS+ and APFS ignore in names. Case-insensitive (NTFS,
+/// default APFS and HFS+) and normalizing filesystems would otherwise let
+/// `.GRAFT/config` or a look-alike overwrite the working copy's own state.
+pub fn is_reserved_name(name: &str) -> bool {
+    use unicode_normalization::UnicodeNormalization;
+    let ignorable = |c: &char| {
+        matches!(*c as u32,
+            0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
+            | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
+            | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFF8 | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A
+            | 0xE0000..=0xE0FFF)
+    };
+    if name.eq_ignore_ascii_case(GRAFT_DIR) {
+        return true;
+    }
+    if name.is_ascii() {
+        return false;
+    }
+    let folded: String = name
+        .nfkc()
+        .filter(|c| !ignorable(c))
+        .collect::<String>()
+        .to_lowercase();
+    let folded: String = folded.nfkc().collect();
+    folded == GRAFT_DIR
+}
+
+/// Refuses a path that would write into `.graft/`, in any spelling a
+/// filesystem might treat as the same name ([`is_reserved_name`]).
 fn check_reserved(path: &RepoPath) -> Result<()> {
-    if path.components().next() == Some(GRAFT_DIR) {
+    if path.components().next().is_some_and(is_reserved_name) {
         return Err(Error::Api(ApiError::InvalidPath {
             path: path.as_str().to_owned(),
             reason: "reserved for the working copy state".to_owned(),
@@ -1026,6 +1080,24 @@ mod tests {
             ctime_ns: mtime_ns,
             ino: 7,
             mode: 0o100644,
+        }
+    }
+
+    #[test]
+    fn reserved_names_cover_case_and_unicode_forms() {
+        for name in [
+            ".graft",
+            ".GRAFT",
+            ".Graft",
+            ".gRaFt",
+            "\u{FF0E}\u{FF47}\u{FF52}\u{FF41}\u{FF46}\u{FF54}", // fullwidth
+            ".gr\u{200D}aft",                                   // zero-width joiner
+            ".GR\u{00AD}AFT",                                   // soft hyphen
+        ] {
+            assert!(is_reserved_name(name), "{name:?}");
+        }
+        for name in [".graf", ".grafts", "graft", ".gräft", "src"] {
+            assert!(!is_reserved_name(name), "{name:?}");
         }
     }
 

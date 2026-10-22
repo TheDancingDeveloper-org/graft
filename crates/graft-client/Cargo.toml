@@ -22,6 +22,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tonic = { workspace = true, features = ["gzip"] }
 tower.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 graft-testkit.workspace = true
