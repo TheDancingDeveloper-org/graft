@@ -380,6 +380,67 @@ fn graceful_shutdown_drains_and_readiness_drops() {
     );
 }
 
+/// A SIGTERM during start-up is a clean stop: exit 0, and no listener left
+/// bound. The test waits for `signals armed`, the first line of start-up:
+/// before the handlers are installed, no code can catch the signal.
+#[test]
+fn sigterm_during_start_up_exits_clean_with_nothing_bound() {
+    let site = Site::new("server-early-stop", "");
+    // Give the server a port the test knows, to check that nothing is left bound.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("probe port")
+        .local_addr()
+        .expect("probe address")
+        .port();
+    let text = std::fs::read_to_string(&site.config).expect("read config");
+    std::fs::write(
+        &site.config,
+        text.replace("127.0.0.1:0", &format!("127.0.0.1:{port}")),
+    )
+    .expect("write config");
+
+    let mut child = std::process::Command::new(common::bin())
+        .arg("--config")
+        .arg(&site.config)
+        .arg("serve")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = std::io::BufRead::read_line(&mut stdout, &mut line).expect("read stdout");
+        assert!(n > 0, "exited before the signal handlers were armed");
+        if line.trim() == "graft-server signals armed" {
+            break;
+        }
+    }
+    let killed = std::process::Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kill -TERM");
+    assert!(killed.success());
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("server did not stop");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(0), "{status:?}");
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "still listening"
+    );
+}
+
 #[test]
 fn admin_commands_and_their_exit_codes() {
     let site = Site::new("server-admin", "");
