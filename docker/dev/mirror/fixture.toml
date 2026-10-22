@@ -1,11 +1,13 @@
 # graft-mirror dev configuration following a local fixture git repository.
-# Created by fixture-entrypoint.sh on first start. Key names are provisional
-# until the mirror crate's config lands (G1.14).
-[source]
-url = "file:///var/lib/graft/mirror/fixtures/graft-fixture.git"
-branch = "main"
-
-[graft]
+# Created by fixture-entrypoint.sh on first start. Parsed by
+# graft_mirror::config::FileConfig; a test in crates/graft-mirror checks this
+# file. Nothing here is secret.
 server = "http://graft-server:7878"
 repo = "graft-dev"
+upstream = "/var/lib/graft/mirror/fixtures/graft-fixture.git"
+mirror_dir = "/var/lib/graft/mirror/graft-fixture.git"
+db = "/var/lib/graft/mirror/graft-fixture.sqlite"
+
+[[lines]]
+branch = "main"
 line = "main"

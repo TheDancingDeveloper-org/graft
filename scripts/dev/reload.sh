@@ -50,6 +50,23 @@ for bin in "${bins[@]}"; do
   fi
 done
 
+# A mirror that refuses its config exits, and on-failure restarts it a few
+# times before it gives up. Wait briefly, then fail loudly if the container is
+# not running, and show its last log lines (the refusal is printed there).
+# usage: check_mirror <service>
+check_mirror() {
+  local svc="$1" id
+  sleep "${RELOAD_SETTLE_SECS:-3}"
+  id="$(docker compose --profile '*' ps --status running -q "$svc" 2>/dev/null)"
+  if [ -z "$id" ]; then
+    echo "reload.sh: $svc is not running: it exited or refused its config." >&2
+    echo "reload.sh: last log lines from $svc:" >&2
+    docker compose --profile '*' logs --no-color --tail 20 "$svc" 2>&1 | sed 's/^/  /' >&2
+    return 1
+  fi
+}
+
+status=0
 for svc in "$@"; do
   bin="${svc%-dev}"
   src="$out_dir/$bin"
@@ -59,4 +76,12 @@ for svc in "$@"; do
   docker compose --profile '*' cp "$src" "$svc:/opt/graft-dev/bin/$bin"
   docker compose --profile '*' restart "$svc"
   echo "reload.sh: $svc now runs $src"
+  if [ "$bin" = graft-mirror ]; then
+    if check_mirror "$svc"; then
+      echo "reload.sh: $svc is running"
+    else
+      status=1
+    fi
+  fi
 done
+exit "$status"
