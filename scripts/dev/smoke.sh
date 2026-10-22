@@ -5,19 +5,20 @@
 # usage: scripts/dev/smoke.sh [repo-name]   (default: graft-dev)
 set -uo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$root"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || exit 1
+cd "$root" || exit 1
 
 repo="${1:-graft-dev}"
 status=0
 stub=0
 
-# Run one graft command in the client toolbox and report its outcome.
-# usage: run <label> <graft args...>
+# Run one graft command in the client toolbox and report its outcome. Each run
+# is a fresh container, so the working directory is set per call.
+# usage: run <label> <workdir> <graft args...>
 run() {
-  local label="$1"; shift
+  local label="$1" dir="$2"; shift 2
   local out rc
-  out="$(docker compose --profile tools run --rm client "$@" 2>&1)"
+  out="$(docker compose --profile tools run --rm -w "$dir" client "$@" 2>&1)"
   rc=$?
   if grep -q "not implemented yet" <<<"$out"; then
     stub=1
@@ -31,10 +32,10 @@ run() {
   fi
 }
 
-run clone graft clone "$repo" "/work/$repo"
-run log graft log --json
-run diff graft diff
-run blame graft blame README.md
+run clone /work graft clone "$repo" "/work/$repo"
+run log "/work/$repo" graft log --json
+run diff "/work/$repo" graft diff
+run blame "/work/$repo" graft blame README.md
 
 if [ "$stub" -eq 1 ]; then
   echo "smoke: not implemented yet: the graft CLI and graft-server are stubs (docs/plan.md)" >&2

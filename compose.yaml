@@ -63,6 +63,9 @@ services:
 
   graft-server:
     <<: [*build, *retry, *watch-server]
+    # init: PID 1 is a small init that exits when the server exits, so a killed
+    # server ends the container with a non-zero status and on-failure restarts it.
+    init: true
     command: ["graft-server", "serve", "--config", "/etc/graft/server.toml"]
     ports:
       - "127.0.0.1:${GRAFT_DEV_SERVER_PORT:-17878}:7878"
@@ -83,6 +86,7 @@ services:
   graft-server-dev:
     <<: [*build, *retry, *watch-server]
     profiles: [dev]
+    init: true
     command: ["graft-server", "serve", "--config", "/etc/graft/server.toml"]
     ports:
       - "127.0.0.1:${GRAFT_DEV_SERVER_PORT:-17878}:7878"

@@ -1,32 +1,58 @@
 #!/usr/bin/env bash
-# Copy host debug binaries into running dev containers and restart them.
-# The fast loop that works with a remote Docker daemon: docker cp goes through
-# the API, so the daemon never needs to see the checkout (docs/dev-stack.md).
+# Build static musl binaries on the host, copy them into running dev containers
+# and restart them. The fast loop that works with a remote Docker daemon:
+# docker cp goes through the API, so the daemon never needs to see the checkout
+# (docs/dev-stack.md).
+#
+# Binaries are static (x86_64-unknown-linux-musl), so they run in the trixie
+# runtime whatever glibc the host has. Needs the musl target installed.
 #
 # usage: scripts/dev/reload.sh <service>...
 #   e.g. scripts/dev/reload.sh graft-server graft-node
 #   A `-dev` suffix is accepted and maps to the same binary.
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$root"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || exit 1
+cd "$root" || exit 1
+
+target="x86_64-unknown-linux-musl"
+out_dir="target/$target/debug"
 
 if [ "$#" -eq 0 ]; then
-  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'
   exit 64
 fi
 
+# Validate the service names before building anything.
+bins=()
 for svc in "$@"; do
   bin="${svc%-dev}"
   case "$bin" in
-    graft-server|graft-node|graft-mirror) ;;
+    graft-server|graft-node|graft-mirror) bins+=("$bin") ;;
     *) echo "reload.sh: no graft binary for service '$svc'" >&2; exit 64 ;;
   esac
-  src="target/debug/$bin"
+done
+
+if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+  echo "reload.sh: the $target target is not installed. Run:" >&2
+  echo "  rustup target add $target" >&2
+  exit 1
+fi
+
+cargo build --target "$target" \
+  -p graft-server -p graft-node -p graft-mirror -p graft-cli
+
+for bin in "${bins[@]}"; do
+  src="$out_dir/$bin"
   if [ ! -f "$src" ]; then
-    echo "reload.sh: $src is missing; run 'cargo build -p $bin' first" >&2
+    echo "reload.sh: $src was not built" >&2
     exit 1
   fi
+done
+
+for svc in "$@"; do
+  bin="${svc%-dev}"
+  src="$out_dir/$bin"
   # The container user (uid 10001) must be able to execute the copy.
   chmod a+rx "$src"
   # Copy into the graft-owned dev dir, then restart so the new binary runs.
