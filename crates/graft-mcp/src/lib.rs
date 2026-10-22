@@ -4,7 +4,14 @@
 //! `graft mcp` (stdio, remote API, with working-copy tools) and on the
 //! server's `/mcp` endpoint (streamable HTTP, in-process engine).
 
-use graft_proto::api::{RepoApi, WorkspaceApi};
+mod render;
+mod server;
+
+pub use render::{MAX_RESULT_BYTES, PATCH_MAX_BYTES};
+pub use server::{
+    BlameArgs, DiffArgs, LogArgs, LsArgs, McpServer, ReadArgs, ShowArgs, StatusArgs,
+    streamable_http_service,
+};
 
 /// A tool's identity and hints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,26 +87,3 @@ pub const TOOLS: &[ToolSpec] = &[
         read_only: false,
     },
 ];
-
-/// An MCP server over an API implementation `A`.
-#[derive(Debug)]
-pub struct McpServer<A> {
-    api: A,
-}
-
-impl<A: RepoApi + WorkspaceApi> McpServer<A> {
-    /// Wraps an API.
-    pub fn new(api: A) -> Self {
-        Self { api }
-    }
-
-    /// The API in use.
-    pub fn api(&self) -> &A {
-        &self.api
-    }
-
-    /// Serves MCP over stdin and stdout until EOF.
-    pub async fn serve_stdio(&self) -> std::io::Result<()> {
-        todo!("G1.15")
-    }
-}

@@ -1,0 +1,16 @@
+{
+  "at": "c0303030303030303030303030303030303030303030303030303030303030303",
+  "entries": [
+    {
+      "id": "fe58d9d5234486b312c1ee3b1a308d72d528133bf02a20d8742af46a69b055cc",
+      "kind": "file",
+      "path": "src/lib.rs"
+    },
+    {
+      "id": "501dff884239f615ef232204a8b7682650c1f7fce99bd4719aaf9bf350562708",
+      "kind": "tree",
+      "path": "src/util"
+    }
+  ],
+  "next": null
+}

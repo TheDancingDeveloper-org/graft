@@ -1,0 +1,39 @@
+{
+  "changesets": [
+    {
+      "author": {
+        "email": "a3@example.test",
+        "kind": "agent",
+        "name": "author 3"
+      },
+      "authored_at": {
+        "ms": 1700000180000,
+        "offset_min": 0
+      },
+      "id": "c0303030303030303030303030303030303030303030303030303030303030303",
+      "line_pos": null,
+      "subject": {
+        "text": "short subject",
+        "truncated": false
+      }
+    },
+    {
+      "author": {
+        "email": "a2@example.test",
+        "kind": "agent",
+        "name": "author 2"
+      },
+      "authored_at": {
+        "ms": 1700000120000,
+        "offset_min": 0
+      },
+      "id": "c0202020202020202020202020202020202020202020202020202020202020202",
+      "line_pos": null,
+      "subject": {
+        "text": "short subject",
+        "truncated": false
+      }
+    }
+  ],
+  "next": "0"
+}
