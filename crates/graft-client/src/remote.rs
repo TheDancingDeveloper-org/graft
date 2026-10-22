@@ -87,6 +87,9 @@ impl Remote {
             Endpoint::Server(url) => tonic::transport::Endpoint::from_shared(url.clone())
                 .map_err(|_| Error::Endpoint("not a valid server URL".to_owned()))?
                 .connect_timeout(CONNECT_TIMEOUT)
+                // Explicit, not left to tonic's default: with Nagle on, a
+                // small request can wait out the server's delayed ACK.
+                .tcp_nodelay(true)
                 .connect()
                 .await
                 .map_err(|_| Error::Api(unavailable()))?,
