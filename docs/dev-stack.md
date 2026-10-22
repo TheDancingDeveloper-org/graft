@@ -18,11 +18,15 @@ socket on another machine. It never bind-mounts a path from the checkout:
   and the fixture entrypoint) are baked into the image, so changing one means
   a rebuild. The obs images (`docker/dev/prometheus`, `docker/dev/grafana`) are
   built the same way.
-- **Fast loop.** Each graft service has a `develop.watch` block:
+- **Fast loop.** `scripts/dev/reload.sh <service>...` copies the host binary
+  in with `docker compose cp` (the API, so no host path is needed) and restarts
+  the service. This is the loop to use with a remote daemon. Each graft service
+  also has a `develop.watch` block (see below):
   `action: sync+restart` from `./target/debug/<bin>` to
-  `/opt/graft-dev/bin/<bin>`. `docker compose watch` copies the file over the
-  API and restarts the container, so the daemon never needs to see the
-  checkout. The target is `/opt/graft-dev/bin`, not `/usr/local/bin`: the
+  `/opt/graft-dev/bin/<bin>`. `docker compose watch` would do the same on
+  change. It did not sync in this environment, and it honours `.dockerignore`,
+  which excludes `target/`; it may not work with a remote daemon. Use
+  `reload.sh`. The target is `/opt/graft-dev/bin`, not `/usr/local/bin`: the
   `graft` user cannot write the root-owned `/usr/local/bin`, and the sync
   needs to replace files there. `/opt/graft-dev/bin` comes first on `PATH`;
   with no dev copy, the image binary in `/usr/local/bin` runs.
@@ -68,20 +72,22 @@ docker compose run --rm client graft version
 
 # after changing Rust code:
 cargo build -p graft-server -p graft-node -p graft-mirror
-scripts/dev/up.sh --dev                            # dev variants from the image, defaults scaled to 0
-docker compose --profile dev watch                 # keep running: syncs and restarts on each rebuild
+scripts/dev/reload.sh graft-server graft-node      # docker cp the binaries in, then restart each service
 ```
 
-`docker compose --profile dev watch` runs in the foreground. Each `cargo build`
-that changes `target/debug/<bin>` is copied into its container and the
-container restarts with it. Without `watch`, the dev containers run the image
-binaries.
+`reload.sh` takes service names and accepts the `-dev` variants too. It checks
+that `target/debug/<bin>` exists, makes it world-executable (the container runs
+as uid 10001), copies it to `/opt/graft-dev/bin/<bin>` (graft-owned, first on
+`PATH`), and restarts the service. With no dev copy, the image binary in
+`/usr/local/bin` runs.
+
+`docker compose --profile dev watch` is the alternative for a local daemon. It
+is unverified here (see Verification status).
 
 Run `docker compose build` after changing the Dockerfile, the dev configs or
 the workspace dependencies. `up.sh` builds only when an image is missing.
-`up.sh --dev` sets the mode bits of the three host binaries to world-readable
-and executable, because the container runs as uid 10001 and the sync keeps the
-mode.
+`up.sh --dev` starts the dev variants from the image; run `reload.sh` for the
+`-dev` service names to load host binaries into them.
 
 ### Host binaries and glibc
 
@@ -108,6 +114,9 @@ client reads it there.
 
 ## Scripts
 
+- `reload.sh <service>...`. Copies `target/debug/<bin>` into each service's
+  container at `/opt/graft-dev/bin/<bin>` with `docker compose cp`, then
+  restarts it. Works with a remote daemon.
 - `up.sh [--dev] [--mirror] [--rusttorrent] [--obs]`. Starts the stack with
   `--remove-orphans`, so switching modes removes the other mode's containers.
 - `down.sh [--wipe]`. Stops everything in every profile. Keeps the named
@@ -141,8 +150,12 @@ Every runtime service has `restart: on-failure:3`. `docker inspect` shows
 - `docker compose config -q`, default and with `--profile` `dev`, `mirror`,
   `rusttorrent`, `obs` and `tools`: valid, and no service has a bind mount.
 - `docker compose build`: succeeds (rebuilt after the change to the image).
+- **Reload cycle: demonstrated.** A stub with a locally changed message (not
+  committed) was built on the host and reloaded with `reload.sh graft-server`.
+  The container log then showed the new message, and the restart count went
+  to 3 with the new binary. The edit was reverted and the host binary rebuilt.
 - `up.sh --dev`: the dev variants start from the image.
-- **Watch cycle: NOT demonstrated.** `docker compose watch` recorded no sync
+- **Watch cycle: NOT demonstrated (`develop.watch`).** `docker compose watch` recorded no sync
   for any of these, even though the kernel delivers inotify events for the same
   directories (checked with a raw inotify probe): the real `target/debug` binary
   with the committed `.dockerignore` (which excludes `target`), with a trimmed

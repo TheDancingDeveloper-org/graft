@@ -7,8 +7,8 @@
 # Services without a profile are the default stack: graft-server and graft-node
 # from the image. Profiles:
 #   dev         graft-server-dev, graft-node-dev, graft-mirror-dev: the same
-#               services with the fast loop. `docker compose --profile dev watch`
-#               copies ./target/debug/<bin> into the container and restarts it.
+#               services. Load host binaries with scripts/dev/reload.sh (docker cp,
+#               works with a remote daemon); develop.watch may not work there.
 #               scripts/dev/up.sh --dev scales the default server and node to 0.
 #   mirror      graft-mirror following a local fixture git repo
 #   rusttorrent graft-mirror-rusttorrent cloning the rustTorrent repository

@@ -3,7 +3,7 @@
 #
 # usage: scripts/dev/up.sh [--dev] [--mirror] [--rusttorrent] [--obs]
 #   default      graft-server and graft-node from graft-dev:local
-#   --dev        dev profile; then `docker compose --profile dev watch` syncs target/debug (cargo build first)
+#   --dev        dev variants from the image; then scripts/dev/reload.sh loads target/debug (cargo build first)
 #   --mirror     add graft-mirror following the fixture repository
 #   --rusttorrent add graft-mirror-rusttorrent (needs GitHub access)
 #   --obs        add prometheus and grafana on 127.0.0.1
@@ -54,5 +54,5 @@ else
 fi
 docker compose --profile '*' ps
 if [ "$mode" = dev ]; then
-  echo "up.sh: dev containers run the image binaries until a sync: run 'docker compose --profile dev watch' to load target/debug." >&2
+  echo "up.sh: dev containers run the image binaries until reload: run 'scripts/dev/reload.sh' with the -dev service names to load target/debug." >&2
 fi
