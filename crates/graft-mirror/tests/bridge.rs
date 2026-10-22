@@ -18,6 +18,7 @@ use graft_git::GitSha;
 use graft_git::exporter::{SESSION_KEY, WORK_ITEM_KEY};
 use graft_git::map::MirrorMap;
 use graft_mirror::bridge::{Bridge, BridgeConfig, BridgeState};
+use graft_mirror::credentials::{SecretToken, StaticToken};
 use graft_mirror::follow::{FollowConfig, FollowLine, Follower, LineOutcome, POLL_INTERVAL};
 use graft_mirror::github::{ForgeError, HttpForge, RetryPolicy};
 use graft_mirror::{Mirror, MirrorDb, MirrorError, current_ref};
@@ -230,23 +231,19 @@ impl World {
         current_ref(&self.api, &cx(), REPO, "main").await.unwrap()
     }
 
-    fn bridge<'a>(&'a self, db: &'a MirrorDb, forge: &'a HttpForge) -> Bridge<'a, Api, HttpForge> {
+    fn bridge<'a>(
+        &'a self,
+        db: &'a MirrorDb,
+        forge: &'a HttpForge<StaticToken>,
+    ) -> Bridge<'a, Api, HttpForge<StaticToken>> {
         let config = BridgeConfig {
             repo: REPO.to_owned(),
             line: "main".to_owned(),
             base_branch: "main".to_owned(),
         };
-        Bridge::new(
-            &self.api,
-            cx(),
-            db,
-            self.mirror(),
-            forge,
-            config,
-            Some(TOKEN.to_owned()),
-        )
-        .unwrap()
-        .with_clock(clock)
+        Bridge::new(&self.api, cx(), db, self.mirror(), forge, config)
+            .unwrap()
+            .with_clock(clock)
     }
 }
 
@@ -369,8 +366,16 @@ impl FakeGitHub {
         self.server.uri()
     }
 
-    fn forge(&self) -> HttpForge {
-        HttpForge::new(&self.uri(), OWNER, GH_REPO, TOKEN.to_owned(), retry()).unwrap()
+    fn forge(&self) -> HttpForge<StaticToken> {
+        let token = SecretToken::new(TOKEN.to_owned()).unwrap();
+        HttpForge::new(
+            &self.uri(),
+            OWNER,
+            GH_REPO,
+            StaticToken::new(token),
+            retry(),
+        )
+        .unwrap()
     }
 
     async fn mount_defaults(&self) {
@@ -826,7 +831,7 @@ async fn two_authorities_cannot_claim_one_line() {
         line: "main".to_owned(),
         base_branch: "main".to_owned(),
     };
-    let err = Bridge::new(&w.api, cx(), &db, w.mirror(), &forge, config, None)
+    let err = Bridge::new(&w.api, cx(), &db, w.mirror(), &forge, config)
         .err()
         .unwrap();
     assert!(

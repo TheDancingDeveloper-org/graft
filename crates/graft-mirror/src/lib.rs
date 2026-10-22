@@ -29,6 +29,7 @@ use crate::github::ForgeError;
 
 pub mod bridge;
 pub mod config;
+pub mod credentials;
 pub mod db;
 pub mod follow;
 pub mod git;

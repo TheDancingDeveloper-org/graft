@@ -123,6 +123,11 @@ impl Mirror {
         }
     }
 
+    /// Whether the upstream is reached over HTTPS (where a token is needed).
+    pub fn is_https(&self) -> bool {
+        self.upstream.starts_with("https://")
+    }
+
     /// The bare repository's directory.
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -201,7 +206,7 @@ impl Mirror {
         let spec = format!("{}:refs/heads/{branch}", sha.to_hex());
         let mut env = Vec::new();
         if let Some(token) = bearer
-            && self.upstream.starts_with("https://")
+            && self.is_https()
         {
             let basic =
                 base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));

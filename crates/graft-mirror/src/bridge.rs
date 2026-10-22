@@ -39,6 +39,7 @@ use graft_proto::api::{ObjectApi, RepoApi};
 use graft_proto::types::{DraftState, GetChangesets};
 
 use crate::MirrorError;
+use crate::credentials::SecretToken;
 use crate::current_ref;
 use crate::db::MirrorDb;
 use crate::git::{Mirror, PushOutcome};
@@ -163,7 +164,6 @@ pub struct Bridge<'a, A, F> {
     mirror: Mirror,
     forge: &'a F,
     config: BridgeConfig,
-    push_token: Option<String>,
     clock: fn() -> i64,
     calls: u64,
 }
@@ -248,7 +248,6 @@ where
         mirror: Mirror,
         forge: &'a F,
         config: BridgeConfig,
-        push_token: Option<String>,
     ) -> Result<Self, MirrorError> {
         let holder = db.claim_authority(&config.line, GIT_PRIMARY)?;
         if holder != GIT_PRIMARY {
@@ -264,7 +263,6 @@ where
             mirror,
             forge,
             config,
-            push_token,
             clock: system_ms,
             calls: 0,
         })
@@ -500,9 +498,15 @@ where
             )?;
             exporter.export_changeset(rec.head).await?
         };
+        // The token travels to git in the environment, and only for HTTPS.
+        let token = if self.mirror.is_https() {
+            Some(self.forge.token().await?)
+        } else {
+            None
+        };
         let outcome = self
             .mirror
-            .push_branch(&rec.branch, sha, self.push_token.as_deref())
+            .push_branch(&rec.branch, sha, token.as_ref().map(SecretToken::expose))
             .await?;
         if outcome == PushOutcome::Rejected {
             // The branch exists. The same commit is fine; other commits are

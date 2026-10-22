@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::MirrorError;
 use crate::bridge::clean_text;
+use crate::credentials::{CredentialProvider, SecretToken};
 
 /// How many characters of a GitHub message are kept.
 const MESSAGE_CHARS: usize = 200;
@@ -128,6 +129,8 @@ pub trait Forge: Send + Sync {
         &self,
         sha: &str,
     ) -> impl Future<Output = Result<Vec<CheckRun>, ForgeError>> + Send;
+    /// A token valid now, for authenticating a git push over HTTPS.
+    fn token(&self) -> impl Future<Output = Result<SecretToken, ForgeError>> + Send;
 }
 
 /// Keeps a repository owner or name to what GitHub accepts.
@@ -143,22 +146,22 @@ fn check_slug(what: &str, s: &str) -> Result<(), MirrorError> {
     }
 }
 
-/// [`Forge`] over GitHub's REST and GraphQL APIs.
-pub struct HttpForge {
+/// [`Forge`] over GitHub's REST and GraphQL APIs, authenticated by a
+/// [`CredentialProvider`] (a static token or a GitHub App).
+pub struct HttpForge<C> {
     client: reqwest::Client,
     api: String,
     owner: String,
     repo: String,
-    token: String,
+    credentials: C,
     retry: RetryPolicy,
 }
 
-impl fmt::Debug for HttpForge {
+impl<C> fmt::Debug for HttpForge<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpForge")
             .field("api", &self.api)
             .field("repo", &format_args!("{}/{}", self.owner, self.repo))
-            .field("token", &"<redacted>")
             .finish_non_exhaustive()
     }
 }
@@ -170,21 +173,18 @@ enum Answer {
     Refused(String),
 }
 
-impl HttpForge {
+impl<C: CredentialProvider> HttpForge<C> {
     /// A forge for `owner/repo` at the API root `api` (for example
-    /// `https://api.github.com`), authenticated with `token`.
+    /// `https://api.github.com`), authenticated by `credentials`.
     pub fn new(
         api: &str,
         owner: &str,
         repo: &str,
-        token: String,
+        credentials: C,
         retry: RetryPolicy,
-    ) -> Result<HttpForge, MirrorError> {
+    ) -> Result<HttpForge<C>, MirrorError> {
         check_slug("owner", owner)?;
         check_slug("repository", repo)?;
-        if token.is_empty() {
-            return Err(MirrorError::Config("the GitHub token is empty".to_owned()));
-        }
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .user_agent("graft-mirror")
@@ -195,18 +195,12 @@ impl HttpForge {
             api: api.trim_end_matches('/').to_owned(),
             owner: owner.to_owned(),
             repo: repo.to_owned(),
-            token,
+            credentials,
             retry: RetryPolicy {
                 attempts: retry.attempts.max(1),
                 ..retry
             },
         })
-    }
-
-    /// The bridge's clone of the token, for `git push` over HTTPS. Kept out
-    /// of argv by the caller.
-    pub fn token(&self) -> &str {
-        &self.token
     }
 
     fn repo_path(&self) -> String {
@@ -247,8 +241,13 @@ impl HttpForge {
         query: &[(&str, String)],
         body: Option<&Value>,
     ) -> Answer {
+        let token = match self.credentials.token().await {
+            Ok(t) => t,
+            Err(ForgeError::Transient(what)) => return Answer::Transient(None, what),
+            Err(ForgeError::Refused(what)) => return Answer::Refused(what),
+        };
         let mut auth =
-            match reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.token)) {
+            match reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.expose())) {
                 Ok(v) => v,
                 Err(_) => {
                     return Answer::Refused("the token is not a valid header value".to_owned());
@@ -369,7 +368,11 @@ fn pull_from(v: Value) -> Result<Pull, ForgeError> {
     })
 }
 
-impl Forge for HttpForge {
+impl<C: CredentialProvider> Forge for HttpForge<C> {
+    async fn token(&self) -> Result<SecretToken, ForgeError> {
+        self.credentials.token().await
+    }
+
     async fn find_pull(&self, branch: &str) -> Result<Option<Pull>, ForgeError> {
         let query = [
             ("head", format!("{}:{branch}", self.owner)),
@@ -468,6 +471,7 @@ impl Forge for HttpForge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::StaticToken;
 
     #[test]
     fn cleaning_drops_control_characters_and_caps() {
@@ -493,11 +497,12 @@ mod tests {
 
     #[test]
     fn a_token_never_prints() {
+        let token = SecretToken::new("fake-token-for-tests".to_owned()).unwrap();
         let forge = HttpForge::new(
             "https://api.github.com",
             "o",
             "r",
-            "fake-token-for-tests".into(),
+            StaticToken::new(token),
             RetryPolicy::default(),
         )
         .unwrap();
