@@ -12,3 +12,17 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+opentelemetry = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+prometheus.workspace = true
+tracing.workspace = true
+tracing-opentelemetry = { workspace = true, optional = true }
+tracing-subscriber.workspace = true
+
+[features]
+# OTLP trace export to Tempo (design §13). Off by default.
+otlp = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
+
+[dev-dependencies]
+serde_json.workspace = true

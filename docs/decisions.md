@@ -45,6 +45,7 @@ Already decided by the operator (2026-10-22):
 | D16 | Line-level merge in rebase | On for text files under 1 MiB, recorded in metadata | Phase 3 |
 | D17 | MCP hosting | Both: `graft mcp` (stdio) and the server's `/mcp` | Phase 1 (read tools), Phase 2 (write tools) |
 | D18 | Phase 1 kill criteria | As in plan.md; the operator confirms the thresholds | Phase 1 exit |
+| D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
 
 ---
 
@@ -326,3 +327,23 @@ start on phase 1 it needs a home:
 [plan.md](plan.md#phase-1-exit-and-kill-criteria) proposes the thresholds. The
 operator should confirm them, or tighten them, before the pilot starts, so the
 verdict is not argued after the fact.
+
+## D19. Import identity
+
+**Decided (operator, 2026-10-22): a provenance key on every imported
+changeset.**
+
+rustTorrent has 4 commits that differ from other commits only in the git
+committer line (rebased copies). A changeset id doesn't include a committer,
+so without a key each pair collapses into one changeset, and the merge joining
+them can't be re-exported to its git sha.
+
+- **Chosen:** every imported changeset carries metadata
+  `mirror.git-commit = <40-hex sha>`. It's set only by `graft-git`, is never
+  written into exported commits, and the core model stays git-free.
+- **Rejected:**
+  - a digest key only on collisions (inconsistent provenance);
+  - a committer field in the core model (git baggage, and it would change the
+    pinned changeset encoding);
+  - accepting the 4 commits as lossy (fails the 100% fidelity exit criterion).
+
