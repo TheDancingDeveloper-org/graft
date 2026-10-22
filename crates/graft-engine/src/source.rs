@@ -31,6 +31,15 @@ impl<'a, O: ObjectStore> Trees<'a, O> {
         }
     }
 
+    /// Makes trees that are not stored yet readable through this source
+    /// (a planned changeset's new trees, before they are written).
+    pub(crate) fn remember(&self, trees: &[(TreeId, Tree)]) {
+        let mut cache = self.cache.lock().expect("tree cache");
+        for (id, tree) in trees {
+            cache.insert(*id, tree.clone());
+        }
+    }
+
     fn cached(&self, id: TreeId) -> Option<Tree> {
         self.cache.lock().expect("tree cache").get(&id).cloned()
     }

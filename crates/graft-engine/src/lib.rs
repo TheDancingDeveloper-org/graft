@@ -5,6 +5,8 @@
 //! G2.7 (rebase and sync), G3.1 (land and policies), G3.7 (revert, stacks,
 //! line merge).
 //!
+//! G2.7 adds file-level `Rebase` and `Sync` ([`rebase`]).
+//!
 //! G2.1 adds the workspace API (`OpenWorkspace`, `GetWorkspace`,
 //! `ListWorkspaces`, `RenewLease`, `SetHead`, `CloseWorkspace`), drafts held
 //! by workspaces, [`Engine::expire_leases`] and [`Engine::gauges`].
@@ -36,12 +38,14 @@ pub mod journal;
 mod objects;
 pub mod policy;
 mod read;
+mod rebase;
 mod refs;
 mod source;
 mod workspace;
 mod write;
 
 pub use diff::MAX_CONTEXT;
+pub use rebase::REBASED_FROM;
 pub use refs::MAX_REF_NAME;
 pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
 pub use write::MAX_REPO_NAME;
@@ -92,6 +96,8 @@ pub struct EngineConfig {
     pub max_patch_bytes: u64,
     /// Blobs larger than this get no patch, bytes.
     pub max_patch_input_bytes: u64,
+    /// Most changed paths a `Sync` reports.
+    pub max_sync_paths: u32,
 }
 
 impl Default for EngineConfig {
@@ -118,6 +124,7 @@ impl Default for EngineConfig {
             max_patch_file_bytes: 1 << 20,
             max_patch_bytes: 4 << 20,
             max_patch_input_bytes: 1 << 20,
+            max_sync_paths: 100_000,
         }
     }
 }
@@ -239,8 +246,8 @@ where
     async fn blame(&self, cx: &CallContext, req: Blame) -> ApiResult<BlameResult> {
         self.do_blame(cx, req).await
     }
-    async fn rebase(&self, _cx: &CallContext, _req: Rebase) -> ApiResult<ChangesetId> {
-        todo!("G2.7")
+    async fn rebase(&self, cx: &CallContext, req: Rebase) -> ApiResult<ChangesetId> {
+        self.do_rebase(cx, req).await
     }
     async fn revert(&self, _cx: &CallContext, _req: Revert) -> ApiResult<ChangesetId> {
         todo!("G3.7")
@@ -292,11 +299,11 @@ where
     }
     async fn sync(
         &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-        _onto: Option<ChangesetId>,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        onto: Option<ChangesetId>,
     ) -> ApiResult<Synced> {
-        todo!("G2.7")
+        self.do_sync(cx, req, onto).await
     }
     async fn stack(
         &self,
