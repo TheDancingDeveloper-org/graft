@@ -26,13 +26,14 @@ use graft_index::Index;
 use graft_model::{ChangesetId, Clock, ObjectId};
 use graft_proto::CallContext;
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi, WorkspaceApi};
-use graft_proto::error::{ApiError, ApiResult};
+use graft_proto::error::ApiResult;
 use graft_proto::types::*;
 use graft_store::{MAX_PAGE, MetaStore, ObjectStore};
 
 mod access;
 mod diff;
 mod errors;
+mod gc;
 mod history;
 pub mod journal;
 mod objects;
@@ -338,15 +339,8 @@ where
     ) -> ApiResult<Vec<Created>> {
         self.do_import_changesets(cx, req).await
     }
-    async fn gc(&self, _cx: &CallContext, _req: Gc) -> ApiResult<GcReport> {
-        // Refused for both dry run and sweep until the dry-run planner can
-        // match the design (WI-2203, docs/plan.md G2.9). No path here deletes.
-        Err(ApiError::Rejected {
-            policy: "gc".to_owned(),
-            detail: "gc is not available yet: the holder model cannot yet protect \
-                     objects that live changesets reference without introducing"
-                .to_owned(),
-        })
+    async fn gc(&self, cx: &CallContext, req: Gc) -> ApiResult<GcReport> {
+        self.do_gc(cx, req).await
     }
     async fn mint_token(&self, _cx: &CallContext, _req: MintToken) -> ApiResult<String> {
         todo!("G2.4 via graft-auth")

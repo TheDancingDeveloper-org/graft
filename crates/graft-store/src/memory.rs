@@ -571,4 +571,22 @@ impl MetaStore for MemoryStore {
                 .collect())
         }))
     }
+
+    fn list_all_workspaces(
+        &self,
+        repo: RepoId,
+        after: &str,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        ready(self.with(|st| {
+            use std::ops::Bound;
+            Ok(st
+                .repo(repo)?
+                .workspaces
+                .range::<str, _>((Bound::Excluded(after), Bound::Unbounded))
+                .take(page_limit(limit))
+                .map(|(_, ws)| ws.clone())
+                .collect())
+        }))
+    }
 }

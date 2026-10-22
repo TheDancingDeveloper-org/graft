@@ -49,6 +49,7 @@ where
     case!(line_positions_are_per_line);
     case!(pagination_is_bounded);
     case!(index_reads_page_in_order);
+    case!(all_workspaces_page_in_name_order);
 }
 
 fn cs(n: u8) -> ChangesetId {
@@ -1314,6 +1315,41 @@ async fn index_reads_page_in_order<O: ObjectStore, M: MetaStore>(_objects: &O, m
         meta.holder_rows(repo, oid(8), None, 10)
             .await
             .expect("rows")
+            .is_empty()
+    );
+}
+
+async fn all_workspaces_page_in_name_order<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "all-ws").await;
+    let other = new_repo(meta, "all-ws-other").await;
+    run_txn(
+        meta,
+        repo,
+        txn(
+            vec![],
+            vec![
+                Write::PutWorkspace(ws("c", None, 1)),
+                Write::PutWorkspace(ws("a", None, 2)),
+                Write::PutWorkspace(ws("b", None, 3)),
+            ],
+        ),
+    )
+    .await;
+    run_txn(
+        meta,
+        other,
+        txn(vec![], vec![Write::PutWorkspace(ws("z", None, 4))]),
+    )
+    .await;
+
+    let first = meta.list_all_workspaces(repo, "", 2).await.expect("page");
+    assert_eq!(names(first.clone()), ["a", "b"]);
+    let rest = meta.list_all_workspaces(repo, "b", 2).await.expect("page");
+    assert_eq!(names(rest), ["c"]);
+    assert!(
+        meta.list_all_workspaces(repo, "c", 2)
+            .await
+            .expect("page")
             .is_empty()
     );
 }

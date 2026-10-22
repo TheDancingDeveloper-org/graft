@@ -473,3 +473,24 @@ pub(crate) fn holder_rows(
         .map_err(sql_err)?;
     rows.map(|r| r.map_err(sql_err)).collect()
 }
+
+pub(crate) fn list_all_workspaces(
+    conn: &Connection,
+    repo: RepoId,
+    after: &str,
+    limit: u32,
+) -> StoreResult<Vec<WorkspaceRecord>> {
+    check_repo(conn, repo)?;
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT {WORKSPACE_COLUMNS} FROM workspaces
+             WHERE repo = ?1 AND name > ?2 ORDER BY name LIMIT ?3"
+        ))
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, after, limit], raw_workspace)
+        .map_err(sql_err)?;
+    rows.map(|r| r.map_err(sql_err).and_then(workspace_record))
+        .collect()
+}

@@ -334,6 +334,17 @@ impl MetaStore for SqliteMetaStore {
             .await
     }
 
+    async fn list_all_workspaces(
+        &self,
+        repo: RepoId,
+        after: &str,
+        limit: u32,
+    ) -> StoreResult<Vec<WorkspaceRecord>> {
+        let after = after.to_owned();
+        self.read(move |c| reader::list_all_workspaces(c, repo, &after, limit))
+            .await
+    }
+
     async fn holder_rows(
         &self,
         repo: RepoId,

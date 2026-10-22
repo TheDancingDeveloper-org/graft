@@ -14,3 +14,7 @@ workspace = true
 [dependencies]
 graft-model.workspace = true
 graft-store.workspace = true
+
+[dev-dependencies]
+graft-store = { workspace = true, features = ["testkit"] }
+proptest.workspace = true

@@ -364,6 +364,17 @@ pub trait MetaStore: Send + Sync {
     ) -> impl Future<Output = StoreResult<Vec<(ChangesetId, ChangesetRecord)>>> + Send {
         async { Err(unsupported("list_records")) }
     }
+    /// Every workspace of the repository in name order, names after `after`
+    /// (from the start for `""`), up to `limit`. A store without this index
+    /// answers `StoreError::Backend`.
+    fn list_all_workspaces(
+        &self,
+        _repo: RepoId,
+        _after: &str,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        async { Err(unsupported("list_all_workspaces")) }
+    }
     /// Holder names of `object` in name order after `after` (from the start
     /// for `None`), up to `limit`. Its length equals [`MetaStore::holders`]
     /// when the limit is not reached. A store without this index answers
@@ -525,5 +536,13 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<String>>> + Send {
         (**self).holder_rows(repo, object, after, limit)
+    }
+    fn list_all_workspaces(
+        &self,
+        repo: RepoId,
+        after: &str,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        (**self).list_all_workspaces(repo, after, limit)
     }
 }
