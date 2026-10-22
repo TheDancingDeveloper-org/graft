@@ -1905,11 +1905,25 @@ dependencies = [
 name = "graft-node"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "graft-auth",
+ "graft-client",
+ "graft-model",
  "graft-proto",
  "graft-store",
  "graft-store-fs",
  "graft-telemetry",
+ "hyper-util",
+ "prometheus",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tonic",
+ "tonic-prost",
+ "tower",
+ "tracing",
 ]
 
 [[package]]
