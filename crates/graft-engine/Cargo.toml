@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 graft-auth.workspace = true
+graft-gc.workspace = true
 graft-index.workspace = true
 graft-model.workspace = true
 graft-proto.workspace = true
