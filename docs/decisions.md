@@ -44,7 +44,7 @@ Already decided by the operator (2026-10-22):
 | D15 | Where graft's source lives | **Decided:** GitHub `TheDancingDeveloper-org/graft`, public | — |
 | D16 | Line-level merge in rebase | On for text files under 1 MiB, recorded in metadata | Phase 3 |
 | D17 | MCP hosting | Both: `graft mcp` (stdio) and the server's `/mcp` | Phase 1 (read tools), Phase 2 (write tools) |
-| D18 | Phase 1 kill criteria | As in plan.md; the operator confirms the thresholds | Phase 1 exit |
+| D18 | Phase 1 kill criteria | **Decided:** as in plan.md, unchanged | — |
 | D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
 
 ---
@@ -323,6 +323,9 @@ start on phase 1 it needs a home:
 - Server only. No working-copy tools.
 
 ## D18. Phase 1 kill criteria
+
+**Decided (operator, 2026-10-22): the exit and kill criteria in
+[plan.md](plan.md#phase-1-exit-and-kill-criteria), unchanged.**
 
 [plan.md](plan.md#phase-1-exit-and-kill-criteria) proposes the thresholds. The
 operator should confirm them, or tighten them, before the pilot starts, so the
