@@ -321,6 +321,7 @@ async fn a_three_prefix_clone_fetches_only_objects_under_the_prefixes() {
         &FetchOptions {
             batch: 32,
             window: 4,
+            ..FetchOptions::default()
         },
     )
     .await
@@ -362,6 +363,7 @@ async fn an_interrupted_fetch_resumes_asking_only_for_missing_ids() {
     let opts = FetchOptions {
         batch: 8,
         window: 2,
+        ..FetchOptions::default()
     };
 
     // Drop the connection part way through the stream.

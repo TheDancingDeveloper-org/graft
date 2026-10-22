@@ -60,7 +60,7 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
     }
 
     /// A stored changeset's content.
-    async fn load(&self, repo: RepoId, id: ChangesetId) -> StoreResult<Changeset> {
+    pub(crate) async fn load(&self, repo: RepoId, id: ChangesetId) -> StoreResult<Changeset> {
         let (content, _) = self
             .meta
             .changeset(repo, id)

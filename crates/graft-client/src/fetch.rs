@@ -34,13 +34,57 @@ pub const MAX_BATCH: usize = 1024;
 /// fetch gives up with `Unavailable`.
 const MAX_STALLS: u32 = 8;
 
-/// How a fetch batches and pipelines its requests.
+/// Limits on the work one fetch, checkout or update does for a server, so a
+/// hostile or broken server can't make the client do unbounded work. When a
+/// limit is reached the operation stops with
+/// `ApiError::LimitExceeded { limit, max }`, `limit` naming the field.
+///
+/// - `max_entries`: tree entries examined (fetch, checkout) or changes
+///   applied (update). A snapshot whose trees repeat a child under several
+///   names has 2^depth paths while it has only `depth` distinct trees. The
+///   fetch reads each distinct tree once, but checkout writes every path, so
+///   this bound is what stops it.
+/// - `max_bytes`: decoded object bytes received (fetch) or file bytes
+///   written (checkout, update).
+/// - `max_depth`: directory depth below the root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Budget {
+    /// Tree entries examined, or changes applied.
+    pub max_entries: u64,
+    /// Object bytes received, or file bytes written.
+    pub max_bytes: u64,
+    /// Directory depth.
+    pub max_depth: usize,
+}
+
+impl Default for Budget {
+    /// 10 million entries, 64 GiB, and depth 256.
+    fn default() -> Self {
+        Self {
+            max_entries: 10_000_000,
+            max_bytes: 64 * 1024 * 1024 * 1024,
+            max_depth: 256,
+        }
+    }
+}
+
+/// The error for a spent budget field.
+pub(crate) fn over_budget(limit: &str, max: u64) -> Error {
+    Error::Api(ApiError::LimitExceeded {
+        limit: format!("client.{limit}"),
+        max,
+    })
+}
+
+/// How a fetch batches and pipelines its requests, and its budget.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FetchOptions {
     /// Ids per request (clamped to `1..=MAX_BATCH`).
     pub batch: usize,
     /// Requests in flight at once (at least one).
     pub window: usize,
+    /// Work limits.
+    pub budget: Budget,
 }
 
 impl Default for FetchOptions {
@@ -48,6 +92,7 @@ impl Default for FetchOptions {
         Self {
             batch: 256,
             window: 4,
+            budget: Budget::default(),
         }
     }
 }
@@ -126,7 +171,7 @@ pub async fn fetch_slice<A: ObjectApi, S: ObjectStore>(
     sparse: &Sparse,
     opts: &FetchOptions,
 ) -> Result<FetchStats> {
-    let mut walk = Walk::new(cache, Some(sparse));
+    let mut walk = Walk::new(cache, Some(sparse), opts.budget);
     if root != empty_tree() {
         walk.want(vec![Want::tree(root.0, None)]).await?;
     }
@@ -144,7 +189,7 @@ pub async fn fetch_objects<A: ObjectApi, S: ObjectStore>(
     ids: &[(ObjectId, ObjectKind)],
     opts: &FetchOptions,
 ) -> Result<FetchStats> {
-    let mut walk = Walk::new(cache, None);
+    let mut walk = Walk::new(cache, None, opts.budget);
     walk.want(
         ids.iter()
             .map(|&(id, kind)| Want {
@@ -237,10 +282,15 @@ struct Walk<'a, S> {
     /// Trees in hand whose entries are not yet examined.
     local: VecDeque<(TreeId, Tree, Option<RepoPath>)>,
     stats: FetchStats,
+    budget: Budget,
+    /// Tree entries examined so far.
+    entries: u64,
+    /// Decoded bytes received so far.
+    received: u64,
 }
 
 impl<'a, S: ObjectStore> Walk<'a, S> {
-    fn new(cache: &'a S, sparse: Option<&'a Sparse>) -> Self {
+    fn new(cache: &'a S, sparse: Option<&'a Sparse>, budget: Budget) -> Self {
         Self {
             cache,
             sparse,
@@ -249,6 +299,9 @@ impl<'a, S: ObjectStore> Walk<'a, S> {
             blobs: VecDeque::new(),
             local: VecDeque::new(),
             stats: FetchStats::default(),
+            budget,
+            entries: 0,
+            received: 0,
         }
     }
 
@@ -295,11 +348,19 @@ impl<'a, S: ObjectStore> Walk<'a, S> {
         }
     }
 
-    /// The wants under `tree` that lie in the slice.
-    fn expand(&self, id: TreeId, tree: &Tree, dir: Option<&RepoPath>) -> Result<Vec<Want>> {
+    /// The wants under `tree` that lie in the slice, charged to the budget.
+    fn expand(&mut self, id: TreeId, tree: &Tree, dir: Option<&RepoPath>) -> Result<Vec<Want>> {
         let Some(sparse) = self.sparse else {
             return Ok(Vec::new());
         };
+        self.entries += tree.entries.len() as u64;
+        if self.entries > self.budget.max_entries {
+            return Err(over_budget("max_entries", self.budget.max_entries));
+        }
+        let depth = dir.map_or(0, |d| d.components().count());
+        if depth >= self.budget.max_depth && tree.entries.iter().any(|e| e.kind.is_tree()) {
+            return Err(over_budget("max_depth", self.budget.max_depth as u64));
+        }
         let mut out = Vec::new();
         for e in &tree.entries {
             let path = match dir {
@@ -355,6 +416,10 @@ impl<'a, S: ObjectStore> Walk<'a, S> {
             let payload = frame
                 .decode_verified(id)
                 .map_err(|_| ApiError::CorruptObject { id })?;
+            self.received += payload.len() as u64;
+            if self.received > self.budget.max_bytes {
+                return Err(over_budget("max_bytes", self.budget.max_bytes));
+            }
             let tree = match w.kind {
                 ObjectKind::Tree => {
                     Some(Tree::decode(&payload).map_err(|_| ApiError::CorruptObject { id })?)
