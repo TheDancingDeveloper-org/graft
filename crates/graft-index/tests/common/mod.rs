@@ -3,6 +3,7 @@
 
 #![allow(dead_code, unreachable_pub)]
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::pin;
 use std::sync::Arc;
@@ -11,13 +12,14 @@ use std::task::{Context, Poll, Waker};
 
 use graft_index::Index;
 use graft_model::{
-    Author, AuthorKind, Change, Changeset, ChangesetId, EntryKind, ObjectId, RepoPath, Timestamp,
-    TreeId,
+    Author, AuthorKind, Change, Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath,
+    Timestamp, TreeId,
 };
+use graft_proto::Frame;
 use graft_store::memory::MemoryStore;
 use graft_store::{
-    ChangesetRecord, Lsn, MetaStore, MetaTxn, RecordState, RefRecord, RepoId, StoreResult,
-    TxnOutcome, WorkspaceRecord, Write,
+    ChangesetRecord, Lsn, MetaStore, MetaTxn, ObjectStore, Precondition, RecordState, RefKind,
+    RefRecord, RepoId, StoreResult, TxnOutcome, WorkspaceRecord, Write,
 };
 
 /// Runs a future that never waits (the memory store's are ready at once).
@@ -37,6 +39,8 @@ pub struct Reads {
     pub changeset: AtomicUsize,
     pub derived: AtomicUsize,
     pub line_pos: AtomicUsize,
+    /// Rows returned by `scan_line_path` (calls count as `other`).
+    pub scan_rows: AtomicUsize,
     pub other: AtomicUsize,
 }
 
@@ -50,11 +54,20 @@ impl Reads {
     pub fn line_pos(&self) -> usize {
         self.line_pos.load(Ordering::SeqCst)
     }
+    pub fn scan_rows(&self) -> usize {
+        self.scan_rows.load(Ordering::SeqCst)
+    }
     pub fn other(&self) -> usize {
         self.other.load(Ordering::SeqCst)
     }
     pub fn reset(&self) {
-        for c in [&self.changeset, &self.derived, &self.line_pos, &self.other] {
+        for c in [
+            &self.changeset,
+            &self.derived,
+            &self.line_pos,
+            &self.scan_rows,
+            &self.other,
+        ] {
             c.store(0, Ordering::SeqCst);
         }
     }
@@ -156,7 +169,15 @@ impl MetaStore for Counting {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<(u64, ChangesetId)>>> + Send {
         bump(&self.reads.other);
-        self.inner.scan_line_path(repo, line, path, before, limit)
+        let reads = self.reads.clone();
+        let scan = self.inner.scan_line_path(repo, line, path, before, limit);
+        async move {
+            let rows = scan.await;
+            if let Ok(rows) = &rows {
+                reads.scan_rows.fetch_add(rows.len(), Ordering::SeqCst);
+            }
+            rows
+        }
     }
     fn holders(
         &self,
@@ -233,6 +254,58 @@ impl Fixture {
         self.commit(writes);
         cs.id()
     }
+
+    /// Commits the line rows for stored changesets landing on `line`
+    /// (oldest first, as `Index::on_land` takes them).
+    pub fn land(&self, line: &str, batch: &[Changeset]) {
+        let rows = block_on(self.index.on_land(self.repo, line, batch)).unwrap();
+        self.commit(rows);
+    }
+
+    /// Creates or moves the line ref `line` to `target`.
+    pub fn set_line(&self, line: &str, target: ChangesetId) {
+        let current = block_on(self.index.meta().get_ref(self.repo, line)).unwrap();
+        let expected = current.as_ref().map(|r| (r.target, r.version));
+        let version = current.map_or(1, |r| r.version + 1);
+        let txn = MetaTxn {
+            preconditions: vec![Precondition::RefIs {
+                name: line.to_owned(),
+                expected,
+            }],
+            writes: vec![Write::SetRef(RefRecord {
+                name: line.to_owned(),
+                target,
+                version,
+                kind: RefKind::Line,
+            })],
+        };
+        let outcome = block_on(self.index.meta().commit(self.repo, txn)).unwrap();
+        assert!(matches!(outcome, TxnOutcome::Committed(_)));
+    }
+
+    /// Stores `content` as a blob and returns its id.
+    pub fn blob(&self, content: &[u8]) -> ObjectId {
+        let id = ObjectId::hash(ObjectKind::Blob, content);
+        let frame = Frame::encode(ObjectKind::Blob, content).to_bytes();
+        block_on(self.index.objects().put(self.repo, id, frame)).unwrap();
+        id
+    }
+}
+
+/// The first-parent chain ending at `tip`, oldest first.
+pub fn first_parent_chain(
+    css: &HashMap<ChangesetId, Changeset>,
+    tip: ChangesetId,
+) -> Vec<Changeset> {
+    let mut chain = Vec::new();
+    let mut cur = Some(tip);
+    while let Some(id) = cur {
+        let cs = css[&id].clone();
+        cur = cs.first_parent();
+        chain.push(cs);
+    }
+    chain.reverse();
+    chain
 }
 
 pub fn put_changeset(cs: &Changeset) -> Write {
@@ -254,11 +327,19 @@ pub fn path(s: &str) -> RepoPath {
 }
 
 pub fn put(p: &str) -> Change {
+    put_blob(p, ObjectId([7; 32]))
+}
+
+pub fn put_blob(p: &str, id: ObjectId) -> Change {
     Change::Put {
         path: path(p),
         kind: EntryKind::File,
-        id: ObjectId([7; 32]),
+        id,
     }
+}
+
+pub fn delete(p: &str) -> Change {
+    Change::Delete { path: path(p) }
 }
 
 /// A changeset; `tag` keeps ids distinct. Changes are sorted here.
