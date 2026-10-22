@@ -37,6 +37,10 @@ use crate::grpc::{self, Services};
 use crate::watch::Watches;
 use crate::{http, keys};
 
+/// Set by the start-up tests (only): start-up pauses after the handlers are
+/// armed until a stop is requested. Unset in production.
+pub(crate) const HOLD_START_UP_ENV: &str = "GRAFT_TEST_HOLD_START_UP";
+
 /// Runs the server until a shutdown signal.
 pub(crate) fn serve(config: ServerConfig) -> Result<(), String> {
     // Panics (an operation not built yet is a `todo!`) go to the log as one
@@ -120,6 +124,13 @@ async fn run(config: ServerConfig) -> Result<(), String> {
         ),
         denylist,
     ));
+
+    if std::env::var_os(HOLD_START_UP_ENV).is_some() {
+        // Test hook: hold start-up here until a stop is requested, so a test
+        // can signal the server before any listener is bound.
+        println!("graft-server holding start-up");
+        let _ = signal_rx.clone().wait_for(|stop| *stop).await;
+    }
 
     let listener = bind(&config.listen).await?;
     let addr = local_addr(&listener)?;
