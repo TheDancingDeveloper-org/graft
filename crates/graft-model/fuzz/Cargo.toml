@@ -1,0 +1,47 @@
+# Fuzz targets for the graft-model decoders. Not a workspace member and not
+# in required CI. Run with cargo-fuzz (nightly), for example:
+#   cargo +nightly fuzz run changeset_decode
+[package]
+name = "graft-model-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+graft-model = { path = ".." }
+libfuzzer-sys = "0.4"
+
+# Keep this crate out of the repository workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "changeset_decode"
+path = "fuzz_targets/changeset_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "id_parse"
+path = "fuzz_targets/id_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "path_parse"
+path = "fuzz_targets/path_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_decode"
+path = "fuzz_targets/tree_decode.rs"
+test = false
+doc = false
+bench = false
