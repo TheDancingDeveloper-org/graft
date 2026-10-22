@@ -12,6 +12,7 @@
 //! - `WorkspaceRenewed`: `{"name":"w","lease_until_ms":123}`
 //! - `WorkspaceHeadMoved`: `{"name":"w","old":"c…"|null,"new":"c…"|null}`
 //! - `WorkspaceClosed`: `{"name":"w","reason":"closed"|"lease-expired","abandoned":2}`
+//! - `WorkspaceSynced`: `{"name":"w","old_base":"c…","new_base":"c…","old_head":"c…"|null,"new_head":"c…"|null}`
 
 use std::fmt::Write as _;
 
@@ -41,6 +42,10 @@ pub const WORKSPACE_HEAD_MOVED: &str = "WorkspaceHeadMoved";
 
 /// Kind of the entry written when a workspace closes or its lease lapses.
 pub const WORKSPACE_CLOSED: &str = "WorkspaceClosed";
+
+/// Kind of the entry written when `Sync` moves a workspace's base (and
+/// rebases its stack).
+pub const WORKSPACE_SYNCED: &str = "WorkspaceSynced";
 
 /// A JSON string literal.
 fn json_str(out: &mut String, s: &str) {
@@ -136,6 +141,27 @@ pub(crate) fn workspace_closed(name: &str, reason: &str, abandoned: usize) -> Wr
     json_str(&mut body, reason);
     let _ = write!(body, ",\"abandoned\":{abandoned}}}");
     entry(WORKSPACE_CLOSED, body)
+}
+
+/// The `WorkspaceSynced` entry.
+pub(crate) fn workspace_synced(
+    name: &str,
+    old_base: ChangesetId,
+    new_base: ChangesetId,
+    old_head: Option<ChangesetId>,
+    new_head: Option<ChangesetId>,
+) -> Write {
+    let mut body = String::from("{\"name\":");
+    json_str(&mut body, name);
+    let _ = write!(
+        body,
+        ",\"old_base\":\"{old_base}\",\"new_base\":\"{new_base}\",\"old_head\":"
+    );
+    opt_id(&mut body, old_head);
+    body.push_str(",\"new_head\":");
+    opt_id(&mut body, new_head);
+    body.push('}');
+    entry(WORKSPACE_SYNCED, body)
 }
 
 /// The `RefMoved` entry for a ref move.
@@ -238,6 +264,12 @@ mod tests {
         assert_eq!(
             text(workspace_closed("w", "lease-expired", 2)),
             "{\"name\":\"w\",\"reason\":\"lease-expired\",\"abandoned\":2}"
+        );
+        assert_eq!(
+            text(workspace_synced("w", id, id, Some(id), None)),
+            format!(
+                "{{\"name\":\"w\",\"old_base\":\"{id}\",\"new_base\":\"{id}\",\"old_head\":\"{id}\",\"new_head\":null}}"
+            )
         );
     }
 }

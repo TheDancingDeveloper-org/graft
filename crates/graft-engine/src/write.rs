@@ -276,6 +276,18 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         Ok(out)
     }
 
+    /// Stores a changeset the server built (a rebased draft) with nothing
+    /// holding it, checking its root against `cs.root`. A retry finds it.
+    pub(crate) async fn insert_unheld(
+        &self,
+        repo: RepoId,
+        cs: Changeset,
+    ) -> Result<Created, ApiError> {
+        let root = cs.root;
+        self.insert(repo, cs, Some(root), Vec::new(), Roots::IfEmpty, None)
+            .await
+    }
+
     /// Whether the repository has no changesets yet: its journal is empty
     /// (every changeset writes an entry).
     async fn is_empty(&self, repo: RepoId) -> Result<bool, ApiError> {

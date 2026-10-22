@@ -301,8 +301,7 @@ async fn health_metrics_and_the_json_facade() {
         .into_inner();
     assert_eq!(base.id, Some(first.0.0.to_vec()));
 
-    // An operation the engine has not built yet answers Unimplemented, not
-    // a crash, and the server still serves afterwards.
+    // Sync (G2.7) is built: a workspace that does not exist is NotFound.
     let e = c
         .workspaces
         .sync(pb::SyncRequest {
@@ -311,6 +310,20 @@ async fn health_metrics_and_the_json_facade() {
                 name: "w".into(),
             }),
             onto: None,
+        })
+        .await
+        .expect_err("no workspace");
+    assert_eq!(e.code(), tonic::Code::NotFound);
+
+    // An operation the engine has not built yet (Revert, G3.7) answers
+    // Unimplemented, not a crash, and the server still serves afterwards.
+    let e = c
+        .repo
+        .revert(pb::RevertRequest {
+            repo: "r".into(),
+            changeset: first.0.0.to_vec(),
+            onto: first.0.0.to_vec(),
+            workspace: None,
         })
         .await
         .expect_err("unimplemented");
