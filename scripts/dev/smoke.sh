@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Clone, log, diff and blame the dev repository through the client toolbox.
+# Check every started mirror is running, then clone, log, diff and blame the
+# dev repository through the client toolbox.
 # Exits 0 when all four pass, 2 while the binaries are stubs, 1 on any other failure.
 #
 # usage: scripts/dev/smoke.sh [repo-name]   (default: graft-dev)
@@ -31,6 +32,19 @@ run() {
     echo "smoke: $label ok"
   fi
 }
+
+# A mirror that refused its config exits and on-failure gives up, so a mirror
+# service that was started but is no longer running is a failure. Its last log
+# lines carry the refusal.
+for svc in $(docker compose --profile '*' ps -a --format '{{.Service}}' 2>/dev/null | grep '^graft-mirror'); do
+  if [ -z "$(docker compose --profile '*' ps --status running -q "$svc" 2>/dev/null)" ]; then
+    status=1
+    echo "smoke: $svc is not running: it exited or refused its config. Last log lines:" >&2
+    docker compose --profile '*' logs --no-color --tail 20 "$svc" 2>&1 | sed 's/^/  /' >&2
+  else
+    echo "smoke: $svc running"
+  fi
+done
 
 run clone /work graft clone "$repo" "/work/$repo"
 run log "/work/$repo" graft log --json
