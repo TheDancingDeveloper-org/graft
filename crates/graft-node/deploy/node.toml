@@ -1,0 +1,30 @@
+# /etc/graft/node.toml: graft-node configuration (crates/graft-node/src/config.rs).
+# Unknown keys are refused.
+
+socket = "/run/graft/node.sock"
+socket_mode = "0660"
+cache_dir = "/var/cache/graft"
+max_bytes = 21474836480          # 20 GiB of cached frames (LRU)
+min_free_bytes = 1073741824      # stop filling the cache below 1 GiB free
+
+upstream = "http://graft.internal:7878"
+# The server's Ed25519 token verifying key, 64 hex characters.
+server_public_key = "0000000000000000000000000000000000000000000000000000000000000000"
+# Optional: an `objects:read` service token (mode 0600, owned by graft) for
+# object fetches. Without it a fetch carries the token of the caller that
+# started it.
+# upstream_token_file = "/etc/graft/node.token"
+
+max_upstream_calls = 16
+max_upstream_waiting = 256
+upstream_wait_ms = 2000
+upstream_connect_timeout_ms = 1000
+upstream_timeout_ms = 60000
+max_connections = 1024
+max_streams_per_connection = 64
+max_inflight_objects = 65536
+max_repos = 4096
+
+metrics = "127.0.0.1:9465"
+json_logs = true
+shutdown_grace_s = 10

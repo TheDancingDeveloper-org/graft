@@ -30,10 +30,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use graft_model::{AuthorKind, Change, ChangesetId, EntryKind, ObjectId, RepoPath, Timestamp};
 use graft_proto::types::*;
-use graft_proto::{ApiError, CallContext, RepoApi as _};
+use graft_proto::{ApiError, RepoApi as _};
 use serde_json::{Value, json};
 
-use crate::app::{App, CallError, error_name};
+use crate::app::{App, CallError, Caller, error_name};
 
 /// The health and metrics routes, served on every listener.
 pub(crate) fn ops_router(app: Arc<App>) -> Router {
@@ -255,7 +255,7 @@ fn repo_path(p: &str) -> Result<RepoPath, CallError> {
 
 // ---- calls ----------------------------------------------------------------
 
-fn cx(app: &App, headers: &HeaderMap, op: &'static str) -> Result<CallContext, CallError> {
+fn cx(app: &App, headers: &HeaderMap, op: &'static str) -> Result<Caller, CallError> {
     app.authenticate(|k| headers.get(k).and_then(|v| v.to_str().ok()), false)
         .map_err(|e| {
             app.refused(op, &e);
@@ -264,7 +264,7 @@ fn cx(app: &App, headers: &HeaderMap, op: &'static str) -> Result<CallContext, C
 }
 
 /// A changeset id in text form, or else a ref name resolved now.
-async fn at(app: &App, cx: &CallContext, repo: &str, text: &str) -> Result<ChangesetId, CallError> {
+async fn at(app: &App, cx: &Caller, repo: &str, text: &str) -> Result<ChangesetId, CallError> {
     if let Ok(id) = ChangesetId::parse(text) {
         return Ok(id);
     }

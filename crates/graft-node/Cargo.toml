@@ -16,8 +16,24 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+axum.workspace = true
 graft-auth.workspace = true
+graft-model.workspace = true
 graft-proto.workspace = true
 graft-store.workspace = true
 graft-store-fs.workspace = true
 graft-telemetry.workspace = true
+prometheus.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream.workspace = true
+toml.workspace = true
+tonic = { workspace = true, features = ["gzip"] }
+tower.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+graft-client.workspace = true
+hyper-util.workspace = true
+tempfile.workspace = true
+tonic-prost.workspace = true
