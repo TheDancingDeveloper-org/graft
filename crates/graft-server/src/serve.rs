@@ -27,7 +27,7 @@ use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
-use tonic::codegen::tokio_stream::wrappers::TcpListenerStream;
+use tonic::transport::server::TcpIncoming;
 
 use crate::admission::Admission;
 use crate::app::{App, PutBudget};
@@ -157,12 +157,8 @@ async fn run(config: ServerConfig) -> Result<(), String> {
     servers.spawn(
         tonic::transport::Server::builder()
             .accept_http1(true)
-            .tcp_nodelay(true)
             .add_routes(tonic::service::Routes::from(router))
-            .serve_with_incoming_shutdown(
-                TcpListenerStream::new(listener),
-                stopped(stop_rx.clone()),
-            ),
+            .serve_with_incoming_shutdown(incoming(listener), stopped(stop_rx.clone())),
     );
     let mut metrics_addr = None;
     if let Some(listener) = metrics_listener {
@@ -171,7 +167,7 @@ async fn run(config: ServerConfig) -> Result<(), String> {
             tonic::transport::Server::builder()
                 .accept_http1(true)
                 .add_routes(tonic::service::Routes::from(http::ops_router(app.clone())))
-                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), stopped(stop_rx)),
+                .serve_with_incoming_shutdown(incoming(listener), stopped(stop_rx)),
         );
     }
 
@@ -222,6 +218,13 @@ async fn bind(addr: &str) -> Result<TcpListener, String> {
     TcpListener::bind(addr)
         .await
         .map_err(|e| format!("listen on {addr}: {e}"))
+}
+
+/// Accepted connections with Nagle off. The builder's `tcp_nodelay` is
+/// ignored by `serve_with_incoming*`, so it is set here; without it a small
+/// response waits for the client's delayed ACK (about 40 ms on Linux).
+fn incoming(listener: TcpListener) -> TcpIncoming {
+    TcpIncoming::from(listener).with_nodelay(Some(true))
 }
 
 fn local_addr(listener: &TcpListener) -> Result<SocketAddr, String> {
@@ -276,5 +279,21 @@ impl Shutdown {
 
     async fn recv(&mut self) {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::codegen::tokio_stream::StreamExt;
+
+    #[tokio::test]
+    async fn accepted_connections_have_nodelay() {
+        let listener = bind("127.0.0.1:0").await.unwrap();
+        let addr = local_addr(&listener).unwrap();
+        let mut accepted = incoming(listener);
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let stream = accepted.next().await.unwrap().unwrap();
+        assert!(stream.nodelay().unwrap());
     }
 }

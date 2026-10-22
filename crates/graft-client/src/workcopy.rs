@@ -304,13 +304,16 @@ impl WorkingCopy {
     }
 
     /// Opens the local object cache (`.graft/cache`), bounded to
-    /// `max_bytes`. Frames are verified by the fetch code on read.
+    /// `max_bytes`. Frames are verified by the fetch code on read, and one
+    /// that fails is deleted and fetched again, so puts are not synced: a
+    /// frame torn by a crash costs a refetch, where two fsyncs per object
+    /// made a clone about 20 times slower.
     pub fn open_cache(&self, max_bytes: u64) -> Result<FsObjectStore> {
         let store = FsObjectStore::open(
             self.root.join(GRAFT_DIR).join(CACHE_DIR),
             FsMode::Lru { max_bytes },
         )?;
-        Ok(store.verify_reads(false))
+        Ok(store.verify_reads(false).sync_writes(false))
     }
 
     /// Fetches the base's slice into `cache` and writes it out, replacing
@@ -386,14 +389,31 @@ impl WorkingCopy {
                 files.iter().map(|f| (f.2.0, ObjectKind::Blob)).collect();
             let s = fetch_objects(api, cache, cx, &repo, &ids, opts).await?;
             stats.add(&s);
+            let mut lost = Vec::new();
             for (path, kind, id) in files {
-                let data = load_blob(cache, id.0).await?.ok_or(missing(id.0))?;
+                let Some(data) = load_blob(cache, id.0).await? else {
+                    lost.push((path, kind, id));
+                    continue;
+                };
                 written += data.len() as u64;
                 if written > budget.max_bytes {
                     return Err(over_budget("max_bytes", budget.max_bytes));
                 }
                 let stat = write_entry(&self.root, &path, kind, &data)?;
                 entries.insert(path, IndexEntry { kind, id, stat });
+            }
+            if !lost.is_empty() {
+                let ids: Vec<ObjectId> = lost.iter().map(|(_, _, id)| id.0).collect();
+                stats.add(&refetch_blobs(api, cache, cx, &repo, &ids, opts).await?);
+                for (path, kind, id) in lost {
+                    let data = load_blob(cache, id.0).await?.ok_or(missing(id.0))?;
+                    written += data.len() as u64;
+                    if written > budget.max_bytes {
+                        return Err(over_budget("max_bytes", budget.max_bytes));
+                    }
+                    let stat = write_entry(&self.root, &path, kind, &data)?;
+                    entries.insert(path, IndexEntry { kind, id, stat });
+                }
             }
         }
         self.index.entries = entries;
@@ -610,7 +630,7 @@ impl WorkingCopy {
             .filter(|id| seen.insert(*id))
             .map(|id| (id, ObjectKind::Blob))
             .collect();
-        let fetch = fetch_objects(api, cache, cx, &repo, &wanted, opts).await?;
+        let mut fetch = fetch_objects(api, cache, cx, &repo, &wanted, opts).await?;
 
         let mut written = 0u64;
         // Deletes first, so a directory replaced by a file (or the reverse)
@@ -621,12 +641,16 @@ impl WorkingCopy {
                 self.index.entries.remove(path);
             }
         }
+        let mut lost = Vec::new();
         for c in &changes {
             if let Change::Put { path, kind, id } = c {
                 if *kind == EntryKind::Submodule {
                     continue;
                 }
-                let data = load_blob(cache, *id).await?.ok_or(missing(*id))?;
+                let Some(data) = load_blob(cache, *id).await? else {
+                    lost.push((path, kind, *id));
+                    continue;
+                };
                 written += data.len() as u64;
                 if written > opts.budget.max_bytes {
                     return Err(over_budget("max_bytes", opts.budget.max_bytes));
@@ -637,6 +661,26 @@ impl WorkingCopy {
                     IndexEntry {
                         kind: *kind,
                         id: BlobId(*id),
+                        stat,
+                    },
+                );
+            }
+        }
+        if !lost.is_empty() {
+            let ids: Vec<ObjectId> = lost.iter().map(|(_, _, id)| *id).collect();
+            fetch.add(&refetch_blobs(api, cache, cx, &repo, &ids, opts).await?);
+            for (path, kind, id) in lost {
+                let data = load_blob(cache, id).await?.ok_or(missing(id))?;
+                written += data.len() as u64;
+                if written > opts.budget.max_bytes {
+                    return Err(over_budget("max_bytes", opts.budget.max_bytes));
+                }
+                let stat = write_entry(&self.root, path, *kind, &data)?;
+                self.index.entries.insert(
+                    path.clone(),
+                    IndexEntry {
+                        kind: *kind,
+                        id: BlobId(id),
                         stat,
                     },
                 );
@@ -823,6 +867,22 @@ pub(crate) fn check_workspace_name(name: &str) -> Result<()> {
 
 fn missing(id: ObjectId) -> Error {
     Error::Api(ApiError::MissingObjects { ids: vec![id] })
+}
+
+/// Asks the server again for blobs the cache lost or holds torn (a crash
+/// mid-write). [`load_blob`] has already deleted their frames, so the fetch
+/// requests them, in batches of `opts.batch`, once. The caller loads each
+/// again and fails if it is still bad; nothing here loops.
+async fn refetch_blobs<A: ObjectApi, S: ObjectStore>(
+    api: &A,
+    cache: &S,
+    cx: &CallContext,
+    repo: &str,
+    lost: &[ObjectId],
+    opts: &FetchOptions,
+) -> Result<FetchStats> {
+    let ids: Vec<(ObjectId, ObjectKind)> = lost.iter().map(|&id| (id, ObjectKind::Blob)).collect();
+    fetch_objects(api, cache, cx, repo, &ids, opts).await
 }
 
 /// Whether a top-level name could reach `.graft` on some filesystem: equal

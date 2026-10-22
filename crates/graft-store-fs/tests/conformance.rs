@@ -12,6 +12,10 @@ use graft_store_fs::{FsMode, FsObjectStore};
 use graft_testkit::crash::{TempDir, block_on};
 
 fn run(mode: FsMode) {
+    run_with(mode, true);
+}
+
+fn run_with(mode: FsMode, sync_writes: bool) {
     let base = TempDir::new("fs-conformance");
     let next = Cell::new(0u32);
     block_on(graft_store::conformance::run_all(|| {
@@ -19,7 +23,8 @@ fn run(mode: FsMode) {
         let root = base.path().join(next.get().to_string());
         let objects = FsObjectStore::open(root, mode)
             .expect("open")
-            .verify_reads(false);
+            .verify_reads(false)
+            .sync_writes(sync_writes);
         (objects, MemoryStore::new())
     }));
 }
@@ -32,4 +37,9 @@ fn authoritative_store_passes_the_conformance_suite() {
 #[test]
 fn lru_store_under_its_bound_passes_the_conformance_suite() {
     run(FsMode::Lru { max_bytes: 1 << 20 });
+}
+
+#[test]
+fn unsynced_lru_store_passes_the_conformance_suite() {
+    run_with(FsMode::Lru { max_bytes: 1 << 20 }, false);
 }

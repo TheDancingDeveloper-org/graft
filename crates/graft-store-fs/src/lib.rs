@@ -5,7 +5,9 @@
 //! temp file in the target directory, fsync, no-replace rename, directory
 //! fsync, so a crash leaves at most stray `*.tmp` files, which
 //! [`FsObjectStore::open`] removes. Used by the server (authoritative mode)
-//! and by the node daemon and client (LRU mode).
+//! and by the node daemon and client (LRU mode). A cache whose reader
+//! verifies every frame may turn the syncs off
+//! ([`FsObjectStore::sync_writes`]).
 //!
 //! One process owns a root at a time: `open` takes an exclusive lock on
 //! `<root>/.lock` and holds it for the store's life.
@@ -62,6 +64,7 @@ pub struct FsObjectStore {
     root: PathBuf,
     mode: FsMode,
     verify_reads: bool,
+    sync_writes: bool,
     objects: AtomicU64,
     bytes: AtomicU64,
     /// Recency and sizes in LRU mode. Its lock also orders every change to
@@ -112,6 +115,7 @@ impl FsObjectStore {
             root,
             mode,
             verify_reads: true,
+            sync_writes: true,
             objects: AtomicU64::new(objects),
             bytes: AtomicU64::new(bytes),
             lru,
@@ -131,6 +135,17 @@ impl FsObjectStore {
     /// or where frames are opaque test bytes (the conformance suite).
     pub fn verify_reads(mut self, on: bool) -> Self {
         self.verify_reads = on;
+        self
+    }
+
+    /// Sets whether a put syncs the file and its directory before it
+    /// returns (the default). With syncing off, a crash may leave an object
+    /// file empty or torn under its final name, so turn it off only for a
+    /// cache whose reader verifies every frame and refetches a bad one (the
+    /// client's). The temp-and-rename write stays, so a reader never sees a
+    /// partial file while the process runs.
+    pub fn sync_writes(mut self, on: bool) -> Self {
+        self.sync_writes = on;
         self
     }
 
@@ -177,7 +192,7 @@ impl FsObjectStore {
                 }
                 // A concurrent writer may have renamed it in but not yet
                 // synced the directory; this put must not return before that.
-                return sync_dir(&dir);
+                return self.sync_dir(&dir);
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => return Err(io_error("stat", &target, e)),
@@ -186,7 +201,7 @@ impl FsObjectStore {
 
         let seq = self.next_tmp.fetch_add(1, Ordering::Relaxed);
         let tmp = dir.join(format!("{name}.{}.{seq}{TMP_SUFFIX}", std::process::id()));
-        if let Err(e) = write_synced(&tmp, frame) {
+        if let Err(e) = write_new(&tmp, frame, self.sync_writes) {
             let _ = fs::remove_file(&tmp);
             return Err(io_error("write", &tmp, e));
         }
@@ -215,7 +230,16 @@ impl FsObjectStore {
                 }
             }
         }
-        sync_dir(&dir)
+        self.sync_dir(&dir)
+    }
+
+    /// [`sync_dir`], unless syncing is off.
+    fn sync_dir(&self, dir: &Path) -> StoreResult<()> {
+        if self.sync_writes {
+            sync_dir(dir)
+        } else {
+            Ok(())
+        }
     }
 
     fn get_sync(&self, repo: RepoId, id: ObjectId) -> StoreResult<Option<Vec<u8>>> {
@@ -361,7 +385,7 @@ impl FsObjectStore {
             // Sync even when it already existed: it may be from before a
             // crash, created but never synced.
             if let Some(parent) = dir.parent() {
-                sync_dir(parent)?;
+                self.sync_dir(parent)?;
             }
             known.insert(dir.to_path_buf());
         }
@@ -530,10 +554,10 @@ fn is_hex(s: &str, len: usize) -> bool {
     s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn write_new(path: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
-    file.sync_all()
+    if sync { file.sync_all() } else { Ok(()) }
 }
 
 /// Renames `from` to `to` unless `to` exists. `Ok(false)` means it existed
