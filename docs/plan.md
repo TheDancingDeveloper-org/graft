@@ -385,6 +385,10 @@ through git and GitHub.
 
 ### Phase 1 exit and kill criteria
 
+**Superseded by [D20](decisions.md#d20-no-pilot-period):** there is no
+pilot period, and G1.18 is dropped. These criteria are targets that the G1.16
+harness reports on. They don't gate phase 2.
+
 **Exit (all must hold):**
 
 1. Fidelity: 100% of rustTorrent commits pass the import fidelity invariant,
