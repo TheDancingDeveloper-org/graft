@@ -9,7 +9,7 @@
 
 use std::fmt::Debug;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -69,7 +69,9 @@ impl SqliteConfig {
 /// Receives the store's own measurements. The server installs one that
 /// records them in its metric registry, so this crate needs no telemetry.
 pub trait StoreObserver: Debug + Send + Sync + 'static {
-    /// The writer queue now holds `depth` jobs.
+    /// The writer queue now holds `depth` jobs. Calls are made one at a
+    /// time, in the order the depth changed, so the last call always
+    /// carries the current depth.
     fn writer_queue_depth(&self, depth: usize);
     /// Operation `op` answered after `elapsed`, measured from the call (so
     /// queueing time is included).
@@ -81,8 +83,10 @@ pub trait StoreObserver: Debug + Send + Sync + 'static {
 pub(crate) struct WriterQueue {
     /// Batches taken off the queue so far (see `writer_batches_taken`).
     sealed: AtomicU64,
-    /// Jobs queued and not yet taken.
-    pending: AtomicUsize,
+    /// Jobs queued and not yet taken. The observer is told the new depth
+    /// while this lock is held, so reports arrive in the order of the
+    /// changes and the last one is always the current depth.
+    pending: Mutex<usize>,
     observer: Option<Arc<dyn StoreObserver>>,
 }
 
@@ -90,7 +94,7 @@ impl WriterQueue {
     fn new(observer: Option<Arc<dyn StoreObserver>>) -> Self {
         Self {
             sealed: AtomicU64::new(0),
-            pending: AtomicUsize::new(0),
+            pending: Mutex::new(0),
             observer,
         }
     }
@@ -98,26 +102,26 @@ impl WriterQueue {
     /// Counts a job before it is sent, so the writer can never take it
     /// before it is counted.
     fn enqueued(&self) {
-        let depth = self.pending.fetch_add(1, Ordering::AcqRel) + 1;
-        self.report(depth);
+        self.change(|depth| *depth += 1);
     }
 
     /// Undoes [`WriterQueue::enqueued`] for a job that was not sent.
     fn unsent(&self) {
-        let depth = self.pending.fetch_sub(1, Ordering::AcqRel) - 1;
-        self.report(depth);
+        self.change(|depth| *depth -= 1);
     }
 
     /// The writer took `n` jobs off the queue.
     fn taken(&self, n: usize) {
         self.sealed.fetch_add(1, Ordering::Release);
-        let depth = self.pending.fetch_sub(n, Ordering::AcqRel) - n;
-        self.report(depth);
+        self.change(|depth| *depth -= n);
     }
 
-    fn report(&self, depth: usize) {
+    /// Applies `f` to the depth and reports the result under the same lock.
+    fn change(&self, f: impl FnOnce(&mut usize)) {
+        let mut depth = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut depth);
         if let Some(observer) = &self.observer {
-            observer.writer_queue_depth(depth);
+            observer.writer_queue_depth(*depth);
         }
     }
 }

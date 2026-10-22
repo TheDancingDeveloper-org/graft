@@ -77,21 +77,27 @@ impl Admission {
     /// [`Admission::check_write`], and `/metrics` calls it on each scrape so
     /// the gauges are current even when no writes arrive.
     pub(crate) fn sample(&self, metrics: &Metrics) -> bool {
-        let ok = self.volumes.iter().all(|(volume, dir)| match space(dir) {
-            Some(s) => {
-                metrics
-                    .disk_free_bytes
-                    .with_label_values(&[volume])
-                    .set(saturating_i64(s.free));
-                metrics
-                    .disk_total_bytes
-                    .with_label_values(&[volume])
-                    .set(saturating_i64(s.total));
-                above_floor(s, self.min_fraction, self.min_bytes)
-            }
-            // An unreadable volume is not evidence that it is full.
-            None => true,
-        });
+        // Every volume is read and recorded, even after one is found below
+        // the floor: the other volume's gauges matter most just then.
+        let ok = self
+            .volumes
+            .iter()
+            .map(|(volume, dir)| match space(dir) {
+                Some(s) => {
+                    metrics
+                        .disk_free_bytes
+                        .with_label_values(&[volume])
+                        .set(saturating_i64(s.free));
+                    metrics
+                        .disk_total_bytes
+                        .with_label_values(&[volume])
+                        .set(saturating_i64(s.total));
+                    above_floor(s, self.min_fraction, self.min_bytes)
+                }
+                // An unreadable volume is not evidence that it is full.
+                None => true,
+            })
+            .fold(true, |all, ok| all & ok);
         *self.last.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), ok));
         ok
     }
@@ -186,5 +192,22 @@ mod tests {
             .with_label_values(&["objects"])
             .get();
         assert!(total > 0, "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_volume_below_the_floor_does_not_stop_the_others_being_recorded() {
+        let (_registry, metrics) = graft_telemetry::registry().unwrap();
+        // Both volumes are below a floor of 100%, so the first one refuses.
+        let volumes = vec![
+            ("objects", std::env::temp_dir()),
+            ("meta", std::env::temp_dir()),
+        ];
+        let a = Admission::new(volumes, 1.0, 0);
+        assert!(!a.sample(&metrics));
+        for volume in ["objects", "meta"] {
+            let total = metrics.disk_total_bytes.with_label_values(&[volume]).get();
+            assert!(total > 0, "{volume} not recorded");
+        }
     }
 }
