@@ -410,6 +410,68 @@ async fn an_interrupted_fetch_resumes_asking_only_for_missing_ids() {
 }
 
 #[tokio::test]
+async fn checkout_refetches_blobs_torn_in_the_cache_once() {
+    let files = synth(300, 4);
+    let (repo, server, remote) = serve(&files).await;
+    let tip = repo.tip("main").unwrap();
+    let root = repo.root(tip).unwrap();
+    let sparse = Sparse::full();
+
+    let dest = tempfile::tempdir().unwrap();
+    let state = WcState {
+        line: "main".into(),
+        base: tip,
+        head: None,
+        lsn: 0,
+    };
+    let mut wc = WorkingCopy::init(dest.path(), config(), state, sparse.clone()).unwrap();
+    let cache = wc.open_cache(DEFAULT_CACHE_BYTES).unwrap();
+    let opts = FetchOptions {
+        batch: 8,
+        window: 2,
+        ..FetchOptions::default()
+    };
+    fetch_slice(&remote, &cache, &cx(), REPO, root, &sparse, &opts)
+        .await
+        .unwrap();
+
+    // What a crash mid-write leaves: of the blobs, one in three is empty,
+    // one in three is cut to half length, one in three is intact.
+    let blobs: Vec<ObjectId> = files.values().map(|b| BlobId::hash(b).0).collect();
+    let mut torn = HashSet::new();
+    for (i, id) in blobs.iter().enumerate() {
+        let path = cache.object_path(CACHE_REPO, *id);
+        let len = std::fs::metadata(&path).unwrap().len();
+        let new_len = match i % 3 {
+            0 => 0,
+            1 => len / 2,
+            _ => continue,
+        };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(new_len)
+            .unwrap();
+        torn.insert(*id);
+    }
+    assert!(torn.len() > 10, "{} torn", torn.len());
+
+    // Checkout must succeed, asking the server for exactly the torn blobs,
+    // each once, in no more than ceil(torn / batch) requests.
+    server.take_calls();
+    wc.checkout(&remote, &cache, &cx(), &opts).await.unwrap();
+    let asked = server.requested_ids();
+    let unique: HashSet<ObjectId> = asked.iter().copied().collect();
+    assert_eq!(unique.len(), asked.len(), "an id was requested twice");
+    assert_eq!(unique, torn);
+    // Refetches go out per directory, in batches of `opts.batch`, so there
+    // is at most one request per torn blob.
+    assert!(server.get_objects_calls() <= torn.len());
+    assert_eq!(disk(dest.path()), files);
+}
+
+#[tokio::test]
 async fn fifty_same_size_edits_within_a_second_are_all_detected() {
     let files: Files = (0..50)
         .map(|i| (format!("src/f{i:02}.txt"), vec![b'a' + (i % 26) as u8; 64]))
