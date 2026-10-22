@@ -53,29 +53,18 @@ fn changes(old: &Snapshot, new: &Snapshot) -> Vec<Change> {
 }
 
 /// What a snapshot holds at a path, as the rebase compares it: a file
-/// entry, a directory (by its contents), or nothing (including beneath a
-/// file).
+/// entry, or nothing. Changes are file-level, so a directory (and anything
+/// beneath a file) is nothing; clashes are found by applying.
 #[derive(Debug, PartialEq, Eq)]
 enum At {
     File(EntryKind, ObjectId),
-    Dir(Vec<(String, (EntryKind, ObjectId))>),
     Absent,
 }
 
 fn at(s: &Snapshot, path: &str) -> At {
-    if let Some(&(kind, id)) = s.get(path) {
-        return At::File(kind, id);
-    }
-    let prefix = format!("{path}/");
-    let under: Vec<_> = s
-        .iter()
-        .filter(|(k, _)| k.starts_with(&prefix))
-        .map(|(k, v)| (k[prefix.len()..].to_owned(), *v))
-        .collect();
-    if under.is_empty() {
-        At::Absent
-    } else {
-        At::Dir(under)
+    match s.get(path) {
+        Some(&(kind, id)) => At::File(kind, id),
+        None => At::Absent,
     }
 }
 
@@ -207,7 +196,12 @@ fn rebase<M: MetaStore>(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    // About a fifth of the inputs make no draft change and are rejected,
+    // so allow enough rejects for a long run (PROPTEST_CASES=5000 and up).
+    #![proptest_config(ProptestConfig {
+        max_global_rejects: 1 << 20,
+        ..ProptestConfig::with_cases(512)
+    })]
 
     #[test]
     fn rebase_matches_the_model(

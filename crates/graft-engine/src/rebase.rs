@@ -72,9 +72,14 @@ struct Plan {
     head_root: TreeId,
 }
 
-/// A changeset entry as the rebase compares it.
+/// A changeset entry as the rebase compares it. Changes are file-level, so
+/// a directory counts as no entry: a draft that deletes file `a` matches a
+/// target that turned `a` into a directory. A real clash is found when the
+/// kept changes are applied.
 fn key(e: &Option<TreeEntry>) -> Option<(graft_model::EntryKind, ObjectId)> {
-    e.as_ref().map(|e| (e.kind, e.id))
+    e.as_ref()
+        .filter(|e| e.kind != graft_model::EntryKind::Tree)
+        .map(|e| (e.kind, e.id))
 }
 
 /// What a change leaves at its path.
@@ -149,15 +154,15 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 let path = change.path();
                 let b = self.entry(&trees, base_root, path).await?;
                 let o = self.entry(&trees, plan.head_root, path).await?;
-                let ours = change_key(change);
-                if key(&b) == key(&o) {
+                let (b, o, ours) = (key(&b), key(&o), change_key(change));
+                if b == o {
                     kept.push(change.clone());
-                } else if ours != key(&o) {
+                } else if ours != o {
                     conflicts.push(ConflictPath {
                         path: path.to_string(),
-                        base: b.map(|e| e.id),
+                        base: b.map(|(_, id)| id),
                         ours: ours.map(|(_, id)| id),
-                        theirs: o.map(|e| e.id),
+                        theirs: o.map(|(_, id)| id),
                     });
                 }
                 // Otherwise the change is already there: drop it.

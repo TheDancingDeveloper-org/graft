@@ -358,6 +358,50 @@ fn file_directory_clashes_conflict<M: MetaStore>(f: &Fixture<M>) {
     assert_eq!(paths(r.rebase(c, onto3)), ["d"]);
 }
 
+/// Regression (proptest, PR #31): both sides turn file `a` into the same
+/// directory. A directory is not an entry, so `Delete a` is already there
+/// on the target and the draft disappears.
+fn identical_file_to_directory_changes_are_dropped<M: MetaStore>(f: &Fixture<M>) {
+    let r = R::new(f, &[("a", b"1"), ("z", b"1")]);
+    // A different change below the identical one, so the draft's id is not
+    // the target's.
+    let c = r.commit(r.root, &[("a/b/x", b"1"), ("y", b"1")], &["a"]);
+    let onto = r.land(&[("a/b/x", b"1")], &["a"]);
+    let rebased = r.rebase(c, onto).expect("rebase");
+    assert_eq!(r.view(rebased).changeset.changes, vec![put("y", b"1")]);
+    let d = r.commit(r.root, &[("a/b/x", b"1")], &["a"]);
+    assert_eq!(r.rebase(d, onto), Ok(onto));
+    // We delete file `a`; they turned it into a directory: already gone.
+    let e = r.commit(r.root, &[], &["a"]);
+    assert_eq!(r.rebase(e, onto), Ok(onto));
+    // Both made `a` a directory, with different files in it: both kept.
+    let g = r.commit(r.root, &[("a/c", b"1")], &["a"]);
+    let rebased = r.rebase(g, onto).expect("rebase");
+    assert_eq!(
+        r.snapshot(rebased),
+        snap(&[("a/b/x", b"1"), ("a/c", b"1"), ("z", b"1")])
+    );
+    // The same file inside, with different contents, still conflicts.
+    let h = r.commit(r.root, &[("a/b/x", b"2")], &["a"]);
+    assert_eq!(paths(r.rebase(h, onto)), ["a/b/x"]);
+}
+
+/// The minimal proptest input, as a stack: the bottom draft is the target
+/// itself, and the draft above turns `a` back into a file.
+fn a_stack_on_an_identical_bottom_is_kept<M: MetaStore>(f: &Fixture<M>) {
+    let r = R::new(f, &[("a", b"1")]);
+    let c1 = r.commit(r.root, &[("a/b/x", b"1")], &["a"]);
+    let c2 = r.commit(c1, &[("a", b"1")], &["a/b/x"]);
+    let onto = r.land(&[("a/b/x", b"1")], &["a"]);
+    assert_eq!(onto, c1);
+    assert_eq!(r.rebase(c2, onto), Ok(c2));
+    // A target with the same content but another id: the bottom draft
+    // disappears and the top one moves onto the target.
+    let onto2 = r.land(&[("q", b"1")], &[]);
+    let rebased = r.rebase(c2, onto2).expect("rebase");
+    assert_eq!(r.snapshot(rebased), snap(&[("a", b"1"), ("q", b"1")]));
+}
+
 fn stacks_rebase_bottom_up<M: MetaStore>(f: &Fixture<M>) {
     let r = R::new(f, &[("a", b"1"), ("b", b"1")]);
     let c1 = r.commit(r.root, &[("a", b"2")], &[]);
@@ -584,6 +628,8 @@ on_both_stores!(
     deletes_and_renames,
     modes_and_symlinks_are_changes,
     file_directory_clashes_conflict,
+    identical_file_to_directory_changes_are_dropped,
+    a_stack_on_an_identical_bottom_is_kept,
     stacks_rebase_bottom_up,
     rebase_checks_scopes_and_limits,
     sync_moves_an_empty_workspace,
