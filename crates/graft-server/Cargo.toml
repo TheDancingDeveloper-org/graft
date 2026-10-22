@@ -39,4 +39,5 @@ tracing.workspace = true
 rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
+graft-client.workspace = true
 graft-testkit.workspace = true

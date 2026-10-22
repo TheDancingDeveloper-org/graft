@@ -24,7 +24,7 @@ use tonic::codegen::tokio_stream::wrappers::TcpListenerStream;
 use crate::admission::Admission;
 use crate::app::{App, PutBudget};
 use crate::config::ServerConfig;
-use crate::grpc::Services;
+use crate::grpc::{self, Services};
 use crate::watch::Watches;
 use crate::{http, keys};
 
@@ -113,9 +113,7 @@ async fn run(
         let _ = rx.wait_for(|stop| *stop).await;
     };
 
-    let router = Services::new(app.clone())
-        .routes()
-        .into_axum_router()
+    let router = grpc::stamp_version(Services::new(app.clone()).routes().into_axum_router())
         .merge(http::ops_router(app.clone()))
         .merge(http::facade_router(app.clone()));
     let mut servers = tokio::task::JoinSet::new();
