@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -139,6 +139,12 @@ CREATE TABLE tombstones (
 const V2: &str = "
 CREATE INDEX workspaces_owner ON workspaces (repo, owner, name);
 CREATE INDEX changesets_state ON changesets (repo, state);
+";
+
+/// Version 3 (G2.9): `list_records` pages one record state in id order
+/// without sorting.
+const V3: &str = "
+CREATE INDEX changesets_state_id ON changesets (repo, state, id);
 ";
 
 /// The database's schema version.

@@ -33,6 +33,7 @@ use graft_store::{MAX_PAGE, MetaStore, ObjectStore};
 mod access;
 mod diff;
 mod errors;
+mod gc;
 mod history;
 pub mod journal;
 mod objects;
@@ -338,8 +339,8 @@ where
     ) -> ApiResult<Vec<Created>> {
         self.do_import_changesets(cx, req).await
     }
-    async fn gc(&self, _cx: &CallContext, _req: Gc) -> ApiResult<GcReport> {
-        todo!("G2.9 via graft-gc")
+    async fn gc(&self, cx: &CallContext, req: Gc) -> ApiResult<GcReport> {
+        self.do_gc(cx, req).await
     }
     async fn mint_token(&self, _cx: &CallContext, _req: MintToken) -> ApiResult<String> {
         todo!("G2.4 via graft-auth")

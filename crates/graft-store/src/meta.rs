@@ -5,7 +5,7 @@ use std::future::Future;
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 
-use crate::{RepoId, StoreResult};
+use crate::{RepoId, StoreError, StoreResult};
 
 /// A journal position.
 pub type Lsn = u64;
@@ -351,6 +351,48 @@ pub trait MetaStore: Send + Sync {
         from: Lsn,
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<(Lsn, String, Vec<u8>)>>> + Send;
+    /// Changesets whose record is in `state`, in id order after `after`
+    /// (from the start for `None`), up to `limit`. The cost follows that
+    /// population, never the whole changeset table (design §8.6). A store
+    /// without this index answers `StoreError::Backend`.
+    fn list_records(
+        &self,
+        _repo: RepoId,
+        _state: RecordState,
+        _after: Option<ChangesetId>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(ChangesetId, ChangesetRecord)>>> + Send {
+        async { Err(unsupported("list_records")) }
+    }
+    /// Every workspace of the repository in name order, names after `after`
+    /// (from the start for `""`), up to `limit`. A store without this index
+    /// answers `StoreError::Backend`.
+    fn list_all_workspaces(
+        &self,
+        _repo: RepoId,
+        _after: &str,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        async { Err(unsupported("list_all_workspaces")) }
+    }
+    /// Holder names of `object` in name order after `after` (from the start
+    /// for `None`), up to `limit`. Its length equals [`MetaStore::holders`]
+    /// when the limit is not reached. A store without this index answers
+    /// `StoreError::Backend`.
+    fn holder_rows(
+        &self,
+        _repo: RepoId,
+        _object: ObjectId,
+        _after: Option<String>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<String>>> + Send {
+        async { Err(unsupported("holder_rows")) }
+    }
+}
+
+/// The error a store answers for an optional index it does not have yet.
+fn unsupported(what: &str) -> StoreError {
+    StoreError::Backend(format!("{what} is not implemented by this store"))
 }
 
 impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
@@ -476,5 +518,31 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<(Lsn, String, Vec<u8>)>>> + Send {
         (**self).journal(repo, from, limit)
+    }
+    fn list_records(
+        &self,
+        repo: RepoId,
+        state: RecordState,
+        after: Option<ChangesetId>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(ChangesetId, ChangesetRecord)>>> + Send {
+        (**self).list_records(repo, state, after, limit)
+    }
+    fn holder_rows(
+        &self,
+        repo: RepoId,
+        object: ObjectId,
+        after: Option<String>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<String>>> + Send {
+        (**self).holder_rows(repo, object, after, limit)
+    }
+    fn list_all_workspaces(
+        &self,
+        repo: RepoId,
+        after: &str,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        (**self).list_all_workspaces(repo, after, limit)
     }
 }
