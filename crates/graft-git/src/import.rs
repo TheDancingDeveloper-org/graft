@@ -13,6 +13,10 @@
 //! 4. Upload blobs, then send `ImportChangesets` batches, then record the
 //!    batch in the mirror map. Objects are stored before anything names them.
 //!
+//! Every imported changeset carries its commit's full 40-hex sha in metadata
+//! ([`SHA_KEY`], `mirror.git-commit`), so git and graft stay 1:1. The key is
+//! graft metadata only; the export never writes it into the git commit.
+//!
 //! Setting graft refs from the imported tips is the mirror's job (G1.12);
 //! the report carries the tips.
 
@@ -35,6 +39,12 @@ use crate::git::{Kind, RawCommit, Repo, author, parse_commit, submodule_id};
 use crate::map::{ImportedCommit, MirrorMap};
 use crate::walk::topo;
 use crate::{BadPath, GitError, GitSha, Unrepresentable};
+
+/// The metadata key that carries an imported commit's git sha (operator
+/// decision, 2026-10-22). Without it, commits that differ only in what a
+/// changeset does not hold (the committer, a signature, extra headers), such
+/// as a rebased copy, would map to one changeset.
+pub const SHA_KEY: &str = "mirror.git-commit";
 
 /// Blobs per `PutObjects` call.
 const PUT_BLOBS_MAX: usize = 256;
@@ -501,7 +511,7 @@ where
                 offset_min,
             },
             message,
-            metadata: Metadata::new(),
+            metadata: Metadata::from([(SHA_KEY.to_owned(), sha.to_hex())]),
         };
         changeset
             .check(&CheckOptions {

@@ -6,7 +6,7 @@ mod common;
 use std::process::Command;
 
 use common::{Git, TempDir, check_every_commit};
-use graft_git::import::{ImportConfig, ImportReport, import};
+use graft_git::import::{ImportConfig, ImportReport, SHA_KEY, import};
 use graft_git::map::{MemoryMirrorMap, MirrorMap};
 use graft_git::{GitError, GitSha};
 use graft_testkit::fake_api::{Call, FakeApi, admin_cx, block_on};
@@ -437,10 +437,10 @@ fn empty_non_merge_commits_are_reported() {
 }
 
 #[test]
-fn commits_that_differ_only_in_committer_are_indistinct() {
+fn commits_that_differ_only_in_committer_stay_distinct() {
     // A rebase onto the same parent with nothing to change: the copy differs
-    // from the original only in its committer, which a changeset does not
-    // hold.
+    // from the original only in its committer. The `mirror.git-commit`
+    // metadata key keeps them apart, so both import and both re-export.
     let mut git = Git::init("indistinct");
     git.write("f", b"1\n");
     let base = git.commit("base");
@@ -458,19 +458,19 @@ committer {committer} 1700000900 +0000\n\nsame change\n"
         raw("C O Mitter <committer@example.com>").as_bytes(),
     );
     let copy = git.literal("commit", raw("Someone Else <else@example.com>").as_bytes());
-    git.set_ref("refs/heads/main", &original);
-    git.set_ref("refs/heads/copy", &copy);
-    let api = FakeApi::new();
-    let map = MemoryMirrorMap::new();
-    let err = run(&api, &map, &config(&git, &["main", "copy"])).unwrap_err();
+    let merge_tree = git.out(&["rev-parse", &format!("{original}^{{tree}}")]);
+    let merge = git.commit_tree(&merge_tree, &[&original, &copy], "join both");
+    git.set_ref("refs/heads/main", &merge);
+    let (api, map, report) = import_all(&git, &["main"]);
+    assert_eq!(report.verified, 4);
+    let id = map
+        .changeset_of(GitSha::from_hex(&copy).unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        err,
-        GitError::Indistinct(vec![(
-            GitSha::from_hex(&original).unwrap(),
-            GitSha::from_hex(&copy).unwrap()
-        )])
+        api.changeset(id).unwrap().metadata.get(SHA_KEY),
+        Some(&copy)
     );
-    assert_eq!(api.changeset_count(), 0, "nothing was written");
 }
 
 #[test]
