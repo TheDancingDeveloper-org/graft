@@ -19,6 +19,21 @@
 //! coarsely: the trimmed middle is blamed on the newer version, as if it
 //! rewrote it. The choice depends only on the two contents, so the answer
 //! is deterministic. Between versions blame yields to the executor.
+//!
+//! # Ties between identical lines
+//!
+//! A diff matches a line to one of its identical copies, and which copy
+//! it picks is a tie. Each choice is a valid edit script, so two correct
+//! blames of the same file can name different commits for a line whose
+//! content repeats (a `}`, a blank line, a `[[package]]` header in a lock
+//! file). Graft's rule is histogram diff ([`carry`]); git blame uses its
+//! default Myers diff. Graft does not try to reproduce git's choice.
+//!
+//! Both answers are right in the sense that matters: the commit that
+//! attributes the line introduced its content, and that commit is on the
+//! file's first-parent history. The harness's agreement check accepts
+//! such a pair as equivalent (`TieCheck` in `graft-testkit`). A wrong
+//! attribution, to a commit that did not write the line, still fails it.
 
 use std::collections::HashMap;
 use std::future::Future;

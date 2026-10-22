@@ -144,8 +144,12 @@ pub struct Agreement {
     pub log: bool,
     /// `diff <ref>~k <ref>` named the same paths.
     pub diff: bool,
-    /// Blame lines whose origin matched git's, and lines compared.
+    /// Blame lines whose origin matched git's (equivalent tie-breaks
+    /// included), and lines compared.
     pub blame_lines: (usize, usize),
+    /// Of the agreeing blame lines, those whose origins differ but are
+    /// equivalent tie-breaks (see [`TieCheck`]).
+    pub blame_ties: usize,
     /// What differed, briefly.
     pub notes: Vec<String>,
 }
@@ -540,6 +544,104 @@ fn git_blame(bare: &Path, tip: &str, path: &str) -> Result<Vec<String>, PilotErr
     .collect())
 }
 
+/// Decides whether two blame origins for one line are equivalent tie-breaks.
+///
+/// Identical lines (blank lines, `}`, the same dependency line in a
+/// lock file) can be matched by a diff to any of their copies, so two
+/// valid attributions can name different commits. An origin `c` and the
+/// other tool's origin `d` are equivalent when both are on `path`'s
+/// first-parent history and each introduced the line's content: some diff
+/// of the commit against its first parent adds a line with those bytes.
+/// Both the default (Myers) diff and the histogram diff count, since git
+/// blame uses the first and graft the second. The check never accepts a
+/// commit that did not write the content, so a wrong origin still fails.
+struct TieCheck<'a> {
+    bare: &'a Path,
+    path: &'a str,
+    /// The file's first-parent history, newest first.
+    history: BTreeSet<String>,
+    /// The file at the tip, one entry per line.
+    content: Vec<Vec<u8>>,
+    /// Per commit, the line contents its diffs add.
+    introduced: BTreeMap<String, BTreeSet<Vec<u8>>>,
+}
+
+impl<'a> TieCheck<'a> {
+    fn new(bare: &'a Path, tip: &str, path: &'a str) -> Result<Self, PilotError> {
+        let history = git_text(
+            bare,
+            &["log", "--first-parent", "--format=%H", tip, "--", path],
+        )?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+        let shown = run(git(None)
+            .arg("--git-dir")
+            .arg(bare)
+            .args(["show", &format!("{tip}:{path}")]))?;
+        let content = shown
+            .stdout
+            .split(|&b| b == b'\n')
+            .map(<[u8]>::to_vec)
+            .collect();
+        Ok(Self {
+            bare,
+            path,
+            history,
+            content,
+            introduced: BTreeMap::new(),
+        })
+    }
+
+    /// Whether `git` and `graft` (commit shas) are equivalent origins for
+    /// line `line` (0-based) of the file at the tip.
+    fn equivalent(&mut self, line: usize, git: &str, graft: &str) -> Result<bool, PilotError> {
+        let Some(content) = self.content.get(line) else {
+            return Ok(false);
+        };
+        if !self.history.contains(git) || !self.history.contains(graft) {
+            return Ok(false);
+        }
+        for sha in [git, graft] {
+            if !self.introduced.contains_key(sha) {
+                let lines = self.added_by(sha)?;
+                self.introduced.insert(sha.to_owned(), lines);
+            }
+            if !self.introduced[sha].contains(content) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The lines `sha` adds to the file, under each diff algorithm.
+    fn added_by(&self, sha: &str) -> Result<BTreeSet<Vec<u8>>, PilotError> {
+        let mut out = BTreeSet::new();
+        for algorithm in ["--diff-algorithm=myers", "--histogram"] {
+            let ran = run(git(None).arg("--git-dir").arg(self.bare).args([
+                "log",
+                "-1",
+                "-p",
+                "-U0",
+                "--format=",
+                "--no-renames",
+                "--first-parent",
+                algorithm,
+                sha,
+                "--",
+                self.path,
+            ]))?;
+            for line in ran.stdout.split(|&b| b == b'\n') {
+                // File headers are `+++ b/<path>`; content lines start `+`.
+                if line.first() == Some(&b'+') && !line.starts_with(b"+++ ") {
+                    out.insert(line[1..].to_vec());
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// Per-line origin shas from `graft blame`, mapped through the mirror DB.
 fn graft_blame(
     cli: &Cli<'_>,
@@ -661,9 +763,19 @@ fn check_agreement(
     for f in &files {
         let g = graft_blame(cli, f, &sha_of)?;
         let want = git_blame(bare, &shape.tip, f)?;
-        let same = g.iter().zip(&want).filter(|(x, y)| x == y).count();
+        let mut ties = TieCheck::new(bare, &shape.tip, f)?;
+        let (mut same, mut tie) = (0, 0);
+        for (i, (x, y)) in g.iter().zip(&want).enumerate() {
+            if x == y {
+                same += 1;
+            } else if ties.equivalent(i, y, x)? {
+                same += 1;
+                tie += 1;
+            }
+        }
         a.blame_lines.0 += same;
         a.blame_lines.1 += want.len().max(g.len());
+        a.blame_ties += tie;
         if same != want.len() || g.len() != want.len() {
             a.notes
                 .push(format!("blame {f}: {same} of {} lines agree", want.len()));
@@ -964,8 +1076,8 @@ fn report(cfg: &PilotConfig, shape: &Shape, o: &PilotOutcome) -> String {
     let _ = writeln!(r, "- `diff`: {}", yes(a.diff));
     let _ = writeln!(
         r,
-        "- `blame`: {} of {} lines agree",
-        a.blame_lines.0, a.blame_lines.1
+        "- `blame`: {} of {} lines agree ({} as equivalent tie-breaks)",
+        a.blame_lines.0, a.blame_lines.1, a.blame_ties
     );
     for n in &a.notes {
         let _ = writeln!(r, "  - {n}");
@@ -1041,5 +1153,41 @@ mod tests {
     fn tokens_are_redacted_in_debug_output() {
         let t = format!("{:?}", proc::Token::new("secret-value"));
         assert!(!t.contains("secret-value"));
+    }
+
+    /// Two commits on `f.txt`: `x y x`, then `x y x x`. The last line is
+    /// `x`, which both commits wrote, so git's `c2` and an attribution to
+    /// `c1` are equivalent. The middle `y` only `c1` wrote.
+    #[test]
+    fn equivalent_tie_breaks_agree_and_wrong_origins_do_not() {
+        let dir = crate::crash::TempDir::new("tie-check");
+        let bare = dir.path().join("repo.git");
+        run(git(None).arg("init").arg("-q").arg("--bare").arg(&bare)).expect("init");
+        let stream = b"blob\nmark :1\ndata 6\nx\ny\nx\n\
+blob\nmark :2\ndata 8\nx\ny\nx\nx\n\
+commit refs/heads/main\nmark :10\ncommitter t <t@example.com> 1 +0000\ndata 7\ncreate\nM 100644 :1 f.txt\n\
+commit refs/heads/main\nmark :11\ncommitter t <t@example.com> 2 +0000\ndata 6\nappend\nfrom :10\nM 100644 :2 f.txt\n\
+done\n";
+        let mut child = git(Some(&bare))
+            .args(["fast-import", "--quiet", "--done"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("fast-import");
+        std::io::Write::write_all(&mut child.stdin.take().expect("stdin"), stream)
+            .expect("write stream");
+        assert!(child.wait().expect("wait").success());
+
+        let shas = git_text(&bare, &["log", "--format=%H", "main"]).expect("log");
+        let mut shas = shas.lines();
+        let (c2, c1) = (shas.next().expect("c2"), shas.next().expect("c1"));
+
+        let mut ties = TieCheck::new(&bare, "main", "f.txt").expect("tie check");
+        // Line 3 (`x`): git says c2, graft says c1.
+        assert!(ties.equivalent(3, c2, c1).expect("check"));
+        // Line 1 (`y`): c2 never wrote `y`, so c2 is not a valid origin.
+        assert!(!ties.equivalent(1, c2, c1).expect("check"));
+        // A commit outside the file's history is never equivalent.
+        let other = "0".repeat(40);
+        assert!(!ties.equivalent(3, c2, &other).expect("check"));
     }
 }
