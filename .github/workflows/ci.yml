@@ -12,13 +12,56 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
+  # The runner-policy gate (vogt's pattern, inline). Every job names a
+  # self-hosted runner, and no job selects one dynamically. graft is public:
+  # fork pull requests are held for approval by the repository's fork-PR
+  # setting, and no workflow here uses pull_request_target or gives a PR job
+  # a secret. If you fork this repo, point `runs-on:` at a GitHub-hosted
+  # runner locally; do not commit that change upstream.
+  runner-policy:
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: every job names a self-hosted runner
+        run: |
+          set -euo pipefail
+          bad=0
+          # Built from parts: the literal two-brace sequence is an Actions
+          # expression anywhere in a workflow file, even inside `run:`.
+          # shellcheck disable=SC2016
+          expr_open='${'"{"
+          while IFS=: read -r file number line; do
+            case "$line" in
+              *self-hosted*) ;;
+              *)
+                echo "::error file=$file,line=$number::job does not name a self-hosted runner"
+                bad=1
+                ;;
+            esac
+            case "$line" in
+              *"$expr_open"*)
+                echo "::error file=$file,line=$number::dynamic runner selection is not allowed"
+                bad=1
+                ;;
+            esac
+          done < <(grep -RnE '^[[:space:]]*runs-on:' .github/workflows \
+                     --include='*.yml' --include='*.yaml')
+          [ "$bad" -eq 0 ]
+
+  # The self-hosted image ships no language runtime: rust-toolchain installs
+  # rustup and the toolchain on a bare runner.
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,21 +70,29 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # Only main writes the cache back; every ref restores what main saved.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Only main writes the cache back; every ref restores what main saved.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
