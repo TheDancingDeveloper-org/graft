@@ -381,6 +381,94 @@ fn graceful_shutdown_drains_and_readiness_drops() {
     );
 }
 
+/// A SIGTERM during start-up is a clean stop: exit 0, no `listening` line,
+/// and no listener left bound. The server is held in start-up by the test
+/// hook (`GRAFT_TEST_HOLD_START_UP`) until it has been signalled, so the
+/// signal always lands before readiness. Every wait has a deadline: a server
+/// without the hook fails the test rather than hanging it.
+#[test]
+fn sigterm_during_start_up_exits_clean_with_nothing_bound() {
+    const WAIT: Duration = Duration::from_secs(20);
+    let site = Site::new("server-early-stop", "");
+    // Give the server a port the test knows, to check that nothing is left bound.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("probe port")
+        .local_addr()
+        .expect("probe address")
+        .port();
+    let text = std::fs::read_to_string(&site.config).expect("read config");
+    std::fs::write(
+        &site.config,
+        text.replace("127.0.0.1:0", &format!("127.0.0.1:{port}")),
+    )
+    .expect("write config");
+
+    let mut child = std::process::Command::new(common::bin())
+        .arg("--config")
+        .arg(&site.config)
+        .arg("serve")
+        .env("GRAFT_TEST_HOLD_START_UP", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let stdout = child.stdout.take().expect("stdout");
+    // A reader thread turns stdout into lines; its channel closes at EOF,
+    // which is when the server has exited.
+    let (tx, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(stdout)) {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Wait for the server to hold in start-up before signalling it.
+    loop {
+        match lines.recv_timeout(WAIT) {
+            Ok(line) if line == "graft-server holding start-up" => break,
+            Ok(_) => {}
+            Err(_) => abort(&mut child, "start-up never paused for the test hook"),
+        }
+    }
+    let killed = std::process::Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kill -TERM");
+    assert!(killed.success());
+
+    // Read until the server closes stdout, then reap it.
+    let mut out = Vec::new();
+    loop {
+        match lines.recv_timeout(WAIT) {
+            Ok(line) => out.push(line),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                abort(&mut child, "server did not stop")
+            }
+        }
+    }
+    let status = child.wait().expect("wait");
+    assert_eq!(status.code(), Some(0), "{status:?}");
+    assert!(
+        !out.iter().any(|line| line.contains("listening")),
+        "start-up went on past the signal: {out:?}"
+    );
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "still listening"
+    );
+}
+
+/// Kills a server the test cannot wait for, then fails the test.
+fn abort(child: &mut std::process::Child, why: &str) -> ! {
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("{why}");
+}
+
 #[test]
 fn admin_commands_and_their_exit_codes() {
     let site = Site::new("server-admin", "");
