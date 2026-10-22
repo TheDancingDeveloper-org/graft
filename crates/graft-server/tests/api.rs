@@ -1,0 +1,351 @@
+//! The server's edges through the binary: authentication and scopes,
+//! protocol binding, the free-space floor, health, metrics, and the JSON
+//! facade.
+
+mod common;
+
+use std::time::{Duration, Instant};
+
+use common::{Auth, Clients, Site, SynthSpec, api, generate};
+use graft_proto::pb;
+use graft_proto::types::{RefKind, UpdateRef};
+use graft_proto::{ApiError, PROTOCOL_VERSION};
+
+fn resolve(name: &str) -> pb::ResolveRefRequest {
+    pb::ResolveRefRequest {
+        repo: "r".into(),
+        name: name.into(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unauthenticated_and_out_of_scope_calls_are_refused() {
+    let site = Site::new("server-auth", "");
+    let admin = site.mint(&["repo:r:admin"]);
+    let reader = site.mint(&["repo:r:read"]);
+    let other = site.mint(&["repo:other:admin"]);
+    let server = site.start();
+    server
+        .clients(Some(&admin))
+        .await
+        .create_repo("r")
+        .await
+        .expect("create");
+
+    // No token, a malformed one, and one signed by another server's key.
+    let foreign = Site::new("server-auth-foreign", "").mint(&["repo:r:admin"]);
+    for token in [None, Some("v4.public.garbage"), Some(foreign.as_str())] {
+        let mut c = server.clients(token).await;
+        let e = c
+            .repo
+            .resolve_ref(resolve("main"))
+            .await
+            .expect_err("refused");
+        assert_eq!(e.code(), tonic::Code::Unauthenticated);
+        assert_eq!(api(e), ApiError::Unauthenticated, "token {token:?}");
+    }
+
+    // No protocol version: refused naming the server's.
+    let mut c = Clients::new(
+        server.channel().await,
+        Auth::new(Some(&admin)).without_version(),
+    );
+    let e = c
+        .repo
+        .resolve_ref(resolve("main"))
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        api(e),
+        ApiError::IncompatibleProtocol {
+            server: PROTOCOL_VERSION.to_string()
+        }
+    );
+
+    // A token for another repository learns nothing about this one.
+    let mut c = server.clients(Some(&other)).await;
+    let e = c
+        .repo
+        .resolve_ref(resolve("main"))
+        .await
+        .expect_err("refused");
+    assert_eq!(e.code(), tonic::Code::PermissionDenied);
+    assert!(matches!(api(e), ApiError::PermissionDenied { scope, .. } if scope == "repo:r:read"));
+
+    // A reader cannot write, create repositories or mint broader tokens.
+    let mut c = server.clients(Some(&reader)).await;
+    let e = c
+        .repo
+        .resolve_ref(resolve("main"))
+        .await
+        .expect_err("no ref yet");
+    assert!(matches!(api(e), ApiError::NotFound { .. }));
+    let e = c
+        .put_blobs("r", &[b"hello".to_vec()])
+        .await
+        .expect_err("refused");
+    assert!(matches!(e, ApiError::PermissionDenied { .. }), "{e:?}");
+    let e = c
+        .commit(
+            "r",
+            None,
+            &Default::default(),
+            &[("a".to_string(), b"x".to_vec())].into(),
+            0,
+        )
+        .await
+        .expect_err("refused");
+    assert!(matches!(e, ApiError::PermissionDenied { .. }), "{e:?}");
+    let e = c.create_repo("r2").await.expect_err("refused");
+    assert!(matches!(e, ApiError::PermissionDenied { .. }), "{e:?}");
+    let e = c
+        .admin
+        .mint_token(pb::MintTokenRequest {
+            subject: "x".into(),
+            scopes: vec!["repo:r:write".into()],
+            ttl_s: 60,
+            session: None,
+            work_item: None,
+        })
+        .await
+        .expect_err("refused");
+    assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
+
+    // MintToken within the caller's scopes works, and the token is usable.
+    let mut c = server.clients(Some(&admin)).await;
+    let minted = c
+        .admin
+        .mint_token(pb::MintTokenRequest {
+            subject: "ses_1".into(),
+            scopes: vec!["repo:r:read".into()],
+            ttl_s: 60,
+            session: Some("ses_1".into()),
+            work_item: Some("WI-2188".into()),
+        })
+        .await
+        .expect("mint")
+        .into_inner()
+        .token;
+    let mut c = server.clients(Some(&minted)).await;
+    let e = c
+        .repo
+        .resolve_ref(resolve("main"))
+        .await
+        .expect_err("no ref");
+    assert!(matches!(api(e), ApiError::NotFound { .. }));
+
+    // The JSON facade refuses the same way.
+    let r = server.get("/v1/repos/r/refs", None);
+    assert_eq!(r.status, 401);
+    assert_eq!(r.header("www-authenticate"), Some("Bearer"));
+    assert_eq!(r.json()["error"]["kind"], "unauthenticated");
+    let r = server.get("/v1/repos/r/refs", Some(&other));
+    assert_eq!(r.status, 403);
+    assert_eq!(r.json()["error"]["kind"], "permission_denied");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_metrics_and_the_json_facade() {
+    let site = Site::new("server-http", "metrics = \"127.0.0.1:0\"");
+    let token = site.mint(&["repo:r:admin"]);
+    let server = site.start();
+    assert_eq!(server.get("/healthz", None).status, 200);
+    assert_eq!(server.get("/readyz", None).text(), "ready\n");
+
+    let synth = generate(&SynthSpec {
+        files: 12,
+        depth: 2,
+        history: 3,
+        file_bytes: 200,
+        seed: 5,
+    });
+    let mut c = server.clients(Some(&token)).await;
+    c.create_repo("r").await.expect("create");
+    let created = c.import("r", &synth.snapshots).await;
+    let tip = created.last().expect("tip").id;
+    c.repo
+        .update_ref(pb::UpdateRefRequest::from(UpdateRef {
+            repo: "r".into(),
+            name: "main".into(),
+            expected: None,
+            new: tip,
+            kind: RefKind::Line,
+        }))
+        .await
+        .expect("move main");
+
+    let refs = server.get("/v1/repos/r/refs", Some(&token)).json();
+    assert_eq!(refs["refs"][0]["name"], "main");
+    assert_eq!(refs["refs"][0]["target"], tip.to_string());
+    assert_eq!(refs["refs"][0]["kind"], "line");
+    let one = server.get("/v1/repos/r/refs/main", Some(&token)).json();
+    assert_eq!(one["version"], 1);
+
+    let cs = server
+        .get(&format!("/v1/repos/r/changesets/{tip}"), Some(&token))
+        .json();
+    assert_eq!(cs["id"], tip.to_string());
+    assert_eq!(cs["parents"][0], created[created.len() - 2].id.to_string());
+    assert_eq!(cs["message"], "step 2");
+
+    let last = synth.snapshots.last().expect("tip");
+    let (path, bytes) = last.iter().next().expect("a file");
+    let file = server.get(&format!("/v1/repos/r/file/main?path={path}"), Some(&token));
+    assert_eq!(file.status, 200);
+    assert_eq!(&file.body, bytes);
+    assert_eq!(file.header("graft-kind"), Some("file"));
+
+    let tree = server
+        .get(
+            "/v1/repos/r/tree/main?recursive=true&limit=1000",
+            Some(&token),
+        )
+        .json();
+    let files: Vec<&str> = tree["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter(|e| e["kind"] == "file")
+        .map(|e| e["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(files.len(), last.len());
+
+    let stat = server
+        .get(&format!("/v1/repos/r/stat/{tip}?path={path}"), Some(&token))
+        .json();
+    assert_eq!(stat["kind"], "file");
+
+    let first = created[0].id;
+    let diff = server
+        .get(
+            &format!("/v1/repos/r/diff?from={first}&to=main&patch=true"),
+            Some(&token),
+        )
+        .json();
+    assert!(!diff["files"].as_array().expect("files").is_empty());
+
+    let journal = server
+        .get("/v1/repos/r/journal?from_lsn=1", Some(&token))
+        .json();
+    assert_eq!(journal["entries"][0]["kind"], "ChangesetCreated");
+    assert_eq!(journal["entries"][0]["body"]["id"], first.to_string());
+
+    // Not built until G1.10: 501, not a crash.
+    let log = server.get("/v1/repos/r/log?from=main", Some(&token));
+    assert_eq!(log.status, 501, "{}", log.text());
+    assert_eq!(log.json()["error"]["kind"], "unimplemented");
+    let blame = server.get(&format!("/v1/repos/r/blame/main?path={path}"), Some(&token));
+    assert_eq!(blame.status, 501);
+    let e = c
+        .repo
+        .log(pb::LogRequest {
+            repo: "r".into(),
+            from: tip.0.0.to_vec(),
+            until: None,
+            paths: Vec::new(),
+            page: None,
+        })
+        .await
+        .expect_err("unimplemented");
+    assert_eq!(e.code(), tonic::Code::Unimplemented);
+    // ...and the server still serves afterwards.
+    assert_eq!(server.get("/healthz", None).status, 200);
+
+    let bad = server.get("/v1/repos/r/file/main?path=../x", Some(&token));
+    assert_eq!(bad.status, 400);
+    let missing = server.get("/v1/repos/r/refs/nope", Some(&token));
+    assert_eq!(missing.status, 404);
+
+    let metrics = server.get("/metrics", None).text();
+    assert!(
+        metrics.contains("graft_rpc_duration_seconds_count{op=\"CreateChangeset\",outcome=\"ok\",tier=\"server\"}"),
+        "{metrics}"
+    );
+    let side = common::http_get(server.metrics.expect("metrics listener"), "/metrics", None);
+    assert_eq!(side.status, 200);
+    assert!(side.text().contains("graft_rpc_duration_seconds"));
+    let side = common::http_get(server.metrics.expect("metrics listener"), "/readyz", None);
+    assert_eq!(side.status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn below_the_free_space_floor_writes_are_refused_and_reads_continue() {
+    let site = Site::new("server-full", "min_free_fraction = 1.0");
+    let token = site.mint(&["repo:r:admin"]);
+    let server = site.start();
+    let mut c = server.clients(Some(&token)).await;
+    let e = c.create_repo("r").await.expect_err("refused");
+    assert!(matches!(e, ApiError::Unavailable { .. }), "{e:?}");
+    let e = c
+        .repo
+        .resolve_ref(resolve("main"))
+        .await
+        .expect_err("no repo");
+    assert!(matches!(api(e), ApiError::NotFound { .. }));
+    let r = server.get("/v1/repos/r/refs", Some(&token));
+    assert_eq!(r.status, 404);
+}
+
+#[test]
+fn graceful_shutdown_drains_and_readiness_drops() {
+    let site = Site::new("server-stop", "");
+    let server = site.start();
+    let addr = server.addr;
+    let started = Instant::now();
+    let status = server.stop();
+    assert!(status.success(), "{status:?}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+        std::net::TcpStream::connect(addr).is_err(),
+        "still listening"
+    );
+}
+
+#[test]
+fn admin_commands_and_their_exit_codes() {
+    let site = Site::new("server-admin", "");
+    let out = site.admin(&["repo", "create", "r"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Idempotent.
+    assert!(site.admin(&["repo", "create", "r"]).status.success());
+    let out = site.admin(&["repo", "create", "bad/name"]);
+    assert_eq!(out.status.code(), Some(1));
+    let out = site.admin(&["fsck", "r"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(site.admin(&["fsck", "nope"]).status.code(), Some(1));
+    assert_eq!(site.admin(&["gc", "r"]).status.code(), Some(2));
+    assert_eq!(site.admin(&["bogus"]).status.code(), Some(64));
+    assert_eq!(
+        site.admin(&["token", "mint", "--subject", "x"])
+            .status
+            .code(),
+        Some(64)
+    );
+    // A token is printed once, to stdout, and never echoed to stderr.
+    let out = site.admin(&["token", "mint", "--subject", "x", "--scope", "repo:r:read"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("v4.public."));
+    assert!(out.stderr.is_empty());
+
+    // The repository made offline is served.
+    let token = stdout.trim().to_owned();
+    let server = site.start();
+    let r = server.get("/v1/repos/r/refs", Some(&token));
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json()["refs"], serde_json::json!([]));
+    drop(server);
+
+    let out = std::process::Command::new(common::bin())
+        .args(["--config", "/nonexistent/graft.toml", "serve"])
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(78));
+}

@@ -23,6 +23,7 @@ todo = "allow"
 # (docs/plan.md, "Crate ownership and parallelism"). External dependencies are
 # added by the work item that first needs them.
 [workspace.dependencies]
+axum = { version = "0.8", default-features = false }
 base64 = "0.22"
 blake3 = "1.8"
 ed25519-dalek = "2.2"
@@ -56,6 +57,8 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled", 
 rustix = { version = "1.1", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = "1.54"
+toml = "0.9"
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
