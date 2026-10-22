@@ -26,7 +26,7 @@ use crate::app::{App, PutBudget};
 use crate::config::ServerConfig;
 use crate::grpc::{self, Services};
 use crate::watch::Watches;
-use crate::{http, keys};
+use crate::{http, keys, mcp};
 
 /// Runs the server until a shutdown signal.
 pub(crate) fn serve(config: ServerConfig) -> Result<(), String> {
@@ -115,7 +115,8 @@ async fn run(
 
     let router = grpc::stamp_version(Services::new(app.clone()).routes().into_axum_router())
         .merge(http::ops_router(app.clone()))
-        .merge(http::facade_router(app.clone()));
+        .merge(http::facade_router(app.clone()))
+        .merge(mcp::router(app.clone()));
     let mut servers = tokio::task::JoinSet::new();
     servers.spawn(
         tonic::transport::Server::builder()

@@ -1,9 +1,9 @@
 //! `graft-server`: the authoritative graft server (`docs/design.md` §5.1).
 //!
 //! `serve` runs the gRPC services over the SQLite and filesystem stores,
-//! with bearer-token auth, `/metrics`, `/healthz`, `/readyz` and the
-//! read-only JSON facade on the same listener. `admin` holds the operator
-//! commands. The config file is `--config <file>`, else
+//! with bearer-token auth, `/metrics`, `/healthz`, `/readyz`, the read-only
+//! JSON facade and the MCP endpoint `/mcp` on the same listener. `admin`
+//! holds the operator commands. The config file is `--config <file>`, else
 //! `$GRAFT_SERVER_CONFIG`, else `/etc/graft/server.toml`.
 
 mod admin;
@@ -15,6 +15,7 @@ mod fsck;
 mod grpc;
 mod http;
 mod keys;
+mod mcp;
 mod mint;
 mod serve;
 mod watch;

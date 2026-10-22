@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 graft-model.workspace = true
 graft-proto.workspace = true
+http.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -22,4 +23,8 @@ tokio.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+graft-auth.workspace = true
+graft-engine.workspace = true
+graft-store = { workspace = true, features = ["testkit"] }
+graft-testkit.workspace = true
 rmcp = { workspace = true, features = ["client"] }
