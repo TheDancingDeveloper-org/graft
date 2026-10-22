@@ -33,12 +33,15 @@ FROM debian:${DEBIAN_VERSION}-slim AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git \
  && rm -rf /var/lib/apt/lists/*
+# The volume mount points (meta, objects, mirror) exist here, owned by graft,
+# so a fresh named volume mounted on one is seeded with that owner rather than
+# root (the pilot stack, ops repo personal/graft).
 # /opt/graft-dev/bin is writable by graft, so `docker compose watch` can sync
 # host binaries there. /usr/local/bin stays root-owned. It is first on PATH.
 RUN groupadd --system --gid 10001 graft \
  && useradd --system --uid 10001 --gid graft \
       --home-dir /var/lib/graft --shell /usr/sbin/nologin graft \
- && mkdir -p /var/lib/graft/mirror /var/cache/graft /run/graft /work /etc/graft \
+ && mkdir -p /var/lib/graft/meta /var/lib/graft/objects /var/lib/graft/mirror /var/cache/graft /run/graft /work /etc/graft \
  && mkdir -p /opt/graft-dev/bin \
  && chown -R graft:graft /var/lib/graft /var/cache/graft /run/graft /work /opt/graft-dev
 
