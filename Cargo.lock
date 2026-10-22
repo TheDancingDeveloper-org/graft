@@ -1409,10 +1409,18 @@ dependencies = [
 name = "graft-client"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
  "graft-model",
  "graft-proto",
  "graft-store",
  "graft-store-fs",
+ "graft-testkit",
+ "hyper-util",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower",
 ]
 
 [[package]]
@@ -1573,9 +1581,13 @@ dependencies = [
 name = "graft-testkit"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
  "graft-model",
  "graft-proto",
  "graft-store",
+ "tokio",
+ "tokio-stream",
+ "tonic",
 ]
 
 [[package]]
@@ -3155,6 +3167,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "h2",
  "http",
  "http-body",
