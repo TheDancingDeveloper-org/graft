@@ -16,8 +16,7 @@ use graft_model::{ChangesetId, ObjectId};
 use graft_proto::pb;
 use graft_proto::types::*;
 use graft_proto::{
-    AdminApi as _, ApiError, Frame, ObjectApi as _, PROTOCOL_VERSION, RepoApi as _,
-    VERSION_HEADER,
+    AdminApi as _, ApiError, Frame, ObjectApi as _, PROTOCOL_VERSION, RepoApi as _, VERSION_HEADER,
 };
 use graft_proto::{WireError, WorkspaceApi as _};
 use graft_store::MetaStore as _;
@@ -416,10 +415,7 @@ impl Services {
             self.app.refused("PutObjects", &e);
             Status::from(e)
         };
-        self.app
-            .check_not_revoked(&cx.jti)
-            .await
-            .map_err(refuse)?;
+        self.app.check_not_revoked(&cx.jti).await.map_err(refuse)?;
         let scope = Scope::Write {
             repo: repo.to_owned(),
             prefix: None,

@@ -126,11 +126,7 @@ async fn a_minted_token_never_outlives_its_caller() {
 
     // Both die together.
     tokio::time::sleep(Duration::from_millis(2_600)).await;
-    let e = k
-        .repo
-        .resolve_ref(main_ref())
-        .await
-        .expect_err("expired");
+    let e = k.repo.resolve_ref(main_ref()).await.expect_err("expired");
     assert_eq!(api(e), ApiError::Unauthenticated);
 }
 

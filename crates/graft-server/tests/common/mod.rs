@@ -323,7 +323,12 @@ impl Clients {
 
     /// Uploads blobs in batches.
     /// Creates or moves the line `name` to `tip`, from nothing.
-    pub async fn set_line(&mut self, repo: &str, name: &str, tip: ChangesetId) -> Result<(), ApiError> {
+    pub async fn set_line(
+        &mut self,
+        repo: &str,
+        name: &str,
+        tip: ChangesetId,
+    ) -> Result<(), ApiError> {
         self.repo
             .update_ref(pb::UpdateRefRequest::from(graft_proto::types::UpdateRef {
                 repo: repo.into(),

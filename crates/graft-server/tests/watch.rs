@@ -179,7 +179,11 @@ async fn a_watch_resumes_from_its_lsn_across_a_restart() {
     c.create_repo("r").await.expect("create");
     let mut parent = None;
     for n in 0..3u8 {
-        let before = if n == 0 { BTreeMap::new() } else { snapshot(n - 1) };
+        let before = if n == 0 {
+            BTreeMap::new()
+        } else {
+            snapshot(n - 1)
+        };
         let created = c
             .commit("r", parent, &before, &snapshot(n), n as usize)
             .await

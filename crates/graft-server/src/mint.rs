@@ -139,8 +139,15 @@ mod tests {
     fn mints_no_broader_than_the_caller() {
         let key = SigningKey::from_seed(&[7; 32]);
         let vogt = caller(&["repo:r:admin"]);
-        let token = mint_for(&key, &vogt, 1_000 + 3600, ask(&["repo:r:write:src"], 60), 3600, 1_000)
-            .expect("narrower scopes mint");
+        let token = mint_for(
+            &key,
+            &vogt,
+            1_000 + 3600,
+            ask(&["repo:r:write:src"], 60),
+            3600,
+            1_000,
+        )
+        .expect("narrower scopes mint");
         let claims =
             graft_auth::verify(&key.verifying_key(), &token, 1_000, &NoDenylist).expect("valid");
         assert_eq!(claims.exp, 1_060);
@@ -149,11 +156,25 @@ mod tests {
 
         let writer = caller(&["repo:r:write:src"]);
         assert!(matches!(
-            mint_for(&key, &writer, 4_600, ask(&["repo:r:write"], 60), 3600, 1_000),
+            mint_for(
+                &key,
+                &writer,
+                4_600,
+                ask(&["repo:r:write"], 60),
+                3600,
+                1_000
+            ),
             Err(ApiError::PermissionDenied { .. })
         ));
         assert!(matches!(
-            mint_for(&key, &vogt, 4_600, ask(&["repo:other:read"], 60), 3600, 1_000),
+            mint_for(
+                &key,
+                &vogt,
+                4_600,
+                ask(&["repo:other:read"], 60),
+                3600,
+                1_000
+            ),
             Err(ApiError::PermissionDenied { .. })
         ));
         assert!(matches!(
