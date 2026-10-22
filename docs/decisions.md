@@ -24,6 +24,8 @@ Already decided by the operator (2026-10-22):
 - **D11, D12, D13, D14** (operator, 2026-10-22): reject and report bad
   paths on import; a separate object namespace per repository; a Komodo stack
   on Node B; rustTorrent as the pilot. Each was the recommendation below.
+- **D8, D10** (operator, 2026-10-22): a GitHub App on the org for the mirror;
+  Vogt mints a graft token per session. Each was the recommendation below.
 
 | # | Decision | Recommendation | Blocks |
 | --- | --- | --- | --- |
@@ -34,9 +36,9 @@ Already decided by the operator (2026-10-22):
 | D5 | At-rest codec | **Decided:** store the gzip wire frame (zero transcode); benchmark zstd in the pilot | — |
 | D6 | Landing gate on `main` | `attested` (pre-land CI on the draft) plus post-land CI and auto-revert | Phase 3 |
 | D7 | Hash function | **Decided:** BLAKE3 | — |
-| D8 | GitHub mirror identity | A GitHub App with ruleset bypass on `main` | Phase 2 (PR bridge), Phase 3 (export) |
+| D8 | GitHub mirror identity | **Decided:** a GitHub App on the org, with ruleset bypass on `main`; key in Infisical | — |
 | D9 | GitHub change notification | Poll every 15 s in phase 1; add webhooks in phase 2 if lag matters | Phase 1 (G1.12) |
-| D10 | Agent token issuance | Vogt mints per-session graft tokens | Phase 2 |
+| D10 | Agent token issuance | **Decided:** Vogt mints a session-scoped graft token, renews the lease, closes the workspace at stop | — |
 | D11 | Path rules on import | **Decided:** reject non-UTF-8 and non-portable paths, with a report | — |
 | D12 | Repository namespaces | **Decided:** one server, many repos, a separate object namespace per repo | — |
 | D13 | Deployment | **Decided:** a Komodo stack on Node B; the node daemon as a systemd unit per host | — |
@@ -200,19 +202,23 @@ rewriting every id.
 
 ## D8. GitHub mirror identity
 
+**Decided (operator, 2026-10-22): a GitHub App installed on the org.**
+
 The mirror pushes PR branches (phase 2) and, in graft-primary mode, `main`
 itself (phase 3), which needs to bypass the merge-queue ruleset.
 
-- **A GitHub App installed on the org** (**Recommended**). Short-lived
-  installation tokens, its own identity in audit logs, and it can be a
-  ruleset bypass actor without being a person.
-- A machine user with a PAT. Simpler, but a long-lived credential tied to a
-  seat.
-- The existing `thedancingdeveloper` token. It mixes the operator's identity
-  with automation. Not recommended.
+- **Chosen:** a GitHub App installed on the org. Short-lived installation
+  tokens, its own identity in audit logs, and it can be a ruleset bypass
+  actor without being a person.
+- **Rejected:**
+  - a machine user with a PAT (simpler, but a long-lived credential tied to a
+    seat);
+  - the existing `thedancingdeveloper` token (it mixes the operator's identity
+    with automation).
 
-The App's private key goes in Infisical. Creating the App is an operator
-action.
+The operator creates the App and stores its private key in Infisical. The
+mirror reads the key from there and mints installation tokens itself. No
+graft code holds a long-lived GitHub credential.
 
 ## D9. GitHub change notification
 
@@ -225,15 +231,28 @@ action.
 
 ## D10. Agent token issuance
 
-- **Vogt mints per-session graft tokens** (**Recommended**). Vogt already
-  knows the session, its work item and its repos. The token carries
-  `session` and `work_item`, so every changeset is attributable. It needs a
-  small Vogt-side change, plus a manifest entry (`GRAFT_TOKEN … ondemand`).
-- One static token per repo in Infisical. Phase 1 only. No per-session
-  attribution.
-- OIDC from an estate IdP. There is no estate IdP for agents today.
+**Decided (operator, 2026-10-22): Vogt mints per-session graft tokens.**
 
-Phase 1 (read pilot) uses a static read token per repo. Phase 2 needs D10.
+- **Chosen:** Vogt mints per-session graft tokens. Vogt already knows the
+  session, its work item and its repos. The token carries `session` and
+  `work_item`, so every changeset is attributable. It needs a small
+  Vogt-side change, plus a manifest entry (`GRAFT_TOKEN … ondemand`).
+- **Rejected:**
+  - one static token per repo in Infisical (phase 1 only; no per-session
+    attribution);
+  - OIDC from an estate IdP (there is no estate IdP for agents today).
+
+What Vogt does:
+
+- At session start it mints a session-scoped token through `MintToken`. The
+  token is never broader than Vogt's own token: its scopes are a subset, and
+  its expiry is no later.
+- While the session lives, it renews the session's workspace lease.
+- When the session stops, it closes the workspace. The drafts become
+  abandoned and are kept for the retention window (design §8.6).
+
+Phase 1 (read pilot) uses a static read token per repo. The Vogt-side work is
+the second half of G2.9.
 
 ## D11. Path rules on import
 

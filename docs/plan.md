@@ -574,18 +574,6 @@ server ships.
 - Test: concurrency tests with real threads against the SQLite store; a
   model-based property test of racing lands; a benchmark.
 
-**G3.2 GC: sweep.**
-- Crates: `graft-gc`
-- Needs: G2.9
-- Deliver: mark, doom, grace, delete and revive as in design §8.6; batched
-  and rate-limited; journalled; metrics.
-- Accept: a property test over random interleavings of create, upload,
-  land, close and GC never deletes a held or landed object. Revival during
-  the grace period works. A delete followed by a reference yields
-  `MissingObjects` and a successful re-upload. Reclaimed bytes match the
-  model.
-- Test: model-based concurrency tests; the crash harness during a sweep.
-
 **G3.3 Mirror: export mode.**
 - Crates: `graft-mirror`
 - Needs: G2.2, G2.4
@@ -636,7 +624,65 @@ server ships.
   manual smoke test, recorded with screenshots in the PR.
 - Test: a scripted LSP client (`tower-lsp` test utilities or an equivalent).
 
+**G3.11 Store and engine: GC protection records.**
+- Crates: `graft-store`, `graft-store-sqlite`, `graft-engine`
+- Needs: G2.9. It runs after G3.1, because both edit `graft-engine`.
+- Deliver: the protection records in design §8.6. In `graft-store`: parent
+  pins and `expires_at` on records, rows read by holder, the `deleting` mark,
+  and index reads for expiry, lapsed leases and old doomed rows, all paged,
+  with conformance cases. In `graft-store-sqlite`: the schema migration and
+  its backfill (pins, `expires_at`, the row check, the `gc_protection`
+  marker). In `graft-engine`: `CreateChangeset` writes rows for every tree
+  on its changed paths and pins each non-landed parent in its transaction,
+  with the parent precondition; state transitions set and clear
+  `expires_at`, and land-attempt candidates get it when written; landing sets
+  `pins` to 0, and collection skips landed parents; writes claim doomed
+  objects before the commit and refuse or wait on `deleting` ones. No
+  deletion.
+- Accept: after any random sequence of writes, rebases, syncs, lands and
+  closes, the §8.6 invariant holds when checked by brute force. On every
+  non-landed record, pins equal the number of non-collected children. On
+  every landed record, pins are 0. A tree that was doomed before a create
+  derives it is claimed, and a delete cannot remove it before the commit.
+  Every land-attempt candidate has `expires_at` until it lands. A create
+  racing a parent's collection either pins the parent or fails `Collected`. The migration on a
+  repository written by today's code adds pins and no rows, and reads no
+  landed record. A write adds O(parents) pin writes, asserted by counting.
+- Test: proptest against a brute-force reachability model; conformance on
+  memory and SQLite; a migration test from a v3 database.
+
+Wave 3.B has four items. Their crates are still disjoint, so the four can
+run at once.
+
 ### Wave 3.C
+
+**G3.2 GC: sweep.**
+- Crates: `graft-gc`
+- Needs: G2.9, G3.11 (protection records). Real deletion is not safe without
+  them. Under [D20](decisions.md#d20-no-pilot-period) it starts as soon as
+  both are done, with no phase 2 gate. It sits in wave 3.C because G3.11 is
+  in 3.B.
+- Deliver: the sweep in design §8.6: lapse, collect (with the successor
+  rule and parent pins), uploads and claims, doom, grace, delete with the
+  `deleting` mark, and revival; batched and rate-limited, under a per-repo lease;
+  journalled; metrics, including `graft_orphans{state="pinned"}`. The dry run
+  reads protection records, and `--verify` checks it against the G2.9
+  ancestry walk. This changes the retention basis: the G2.9 dry run counts
+  from `received_at`, and the sweep from `expires_at` (the close, lapse or
+  supersede time plus the window), so the two can disagree on young records
+  and `--verify` compares only what both call collectable. Deletion is off
+  per repository until the operator turns it on.
+- Accept: a property test over random interleavings of create, upload,
+  land, close, adopt and GC never deletes an object a non-collected changeset
+  can reach, nor a landed one. Revival during the grace period works. A
+  delete followed by a reference yields `MissingObjects` and a successful
+  re-upload. A parent with a live child is never collected. Reclaimed bytes
+  match the model. A land candidate left by a crashed server is collected
+  after its lease. Collection reads are proportional to the changes
+  collected (asserted by counting reads), not to history depth. The sweep
+  refuses a repository without the `gc_protection` marker.
+- Test: model-based concurrency tests; the crash harness during a sweep,
+  including a crash between the `deleting` mark and the frame delete.
 
 **G3.7 Engine: Revert, stack ops, line merge.**
 - Crates: `graft-engine`
@@ -673,7 +719,7 @@ server ships.
 
 **G3.10 Cutover of rustTorrent.**
 - Crates: none (operations)
-- Needs: G3.1–G3.9, D6, D8
+- Needs: G3.1–G3.9, G3.11, D6, D8 (decided)
 - Deliver: rustTorrent `main` flipped to graft-primary in a scheduled window;
   the merge-queue rule replaced by the line policy; delivery-process docs
   updated for the repository.
@@ -738,15 +784,16 @@ publish decisions (D1, D2).
 | G2.8 | 2.C | graft-mcp |
 | G2.9 | 2.C | graft-gc, vogt |
 | G3.1 | 3.A | graft-engine |
-| G3.2 | 3.A | graft-gc |
 | G3.3 | 3.A | graft-mirror |
 | G3.4 | 3.B | graft-model |
 | G3.5 | 3.B | graft-client, graft-cli |
 | G3.6 | 3.B | graft-lsp, graft-cli (one file) |
+| G3.2 | 3.C | graft-gc |
 | G3.7 | 3.C | graft-engine |
 | G3.8 | 3.C | graft-auth, ci/ |
 | G3.9 | 3.C | graft-mirror |
 | G3.10 | 3.D | operations |
+| G3.11 | 3.B | graft-store, graft-store-sqlite, graft-engine |
 
 Note: G3.6 touches one file in `graft-cli` (`src/cmd/lsp.rs`) while G3.5 owns
 `graft-cli`. The skeleton already has that file as a stub, and G3.5 must not
