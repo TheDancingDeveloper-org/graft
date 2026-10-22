@@ -8,6 +8,7 @@
 //! travel gzip-compressed; object messages do not, since frames are already
 //! compressed (`docs/design.md` §6.3), but the client accepts either.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
@@ -16,6 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use graft_model::{ChangesetId, ObjectId};
 use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::error::ApiResult;
+use graft_proto::frame::{HEADER_LEN, MAX_FRAME_PAYLOAD};
 use graft_proto::pb;
 use graft_proto::pb::object_service_client::ObjectServiceClient;
 use graft_proto::pb::repo_service_client::RepoServiceClient;
@@ -42,6 +44,11 @@ pub const MAX_MESSAGE_BYTES: usize = 72 * 1024 * 1024;
 /// The most frame bytes sent in one `PutObjects` stream message.
 pub const PUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
+/// The most frame bytes one `GetObjects` answer may carry: the server's
+/// 64 MiB response bound (`docs/design.md` §7.2) plus one largest frame,
+/// which may straddle it.
+pub const MAX_GET_OBJECTS_BYTES: u64 = 64 * 1024 * 1024 + MAX_FRAME_PAYLOAD + HEADER_LEN as u64;
+
 /// The request header carrying the client's request id.
 pub const REQUEST_ID_HEADER: &str = "graft-request-id";
 
@@ -55,6 +62,7 @@ pub struct Remote {
     token: Option<String>,
     protocol: ProtocolVersion,
     timeout: Duration,
+    max_response_bytes: u64,
 }
 
 impl fmt::Debug for Remote {
@@ -103,6 +111,7 @@ impl Remote {
             token: None,
             protocol: PROTOCOL_VERSION,
             timeout: DEFAULT_TIMEOUT,
+            max_response_bytes: MAX_GET_OBJECTS_BYTES,
         })
     }
 
@@ -122,6 +131,13 @@ impl Remote {
     /// compatibility tests).
     pub fn with_protocol_version(mut self, version: ProtocolVersion) -> Self {
         self.protocol = version;
+        self
+    }
+
+    /// Caps the frame bytes of one `GetObjects` answer below
+    /// [`MAX_GET_OBJECTS_BYTES`] (never above it).
+    pub fn with_max_response_bytes(mut self, bytes: u64) -> Self {
+        self.max_response_bytes = bytes.min(MAX_GET_OBJECTS_BYTES);
         self
     }
 
@@ -176,10 +192,14 @@ impl Remote {
         Ok(req)
     }
 
-    /// Refuses a server that advertises a version this client can't bind to.
+    /// Refuses a response that advertises no version (a peer that is not
+    /// graft, or one that strips the header) or a version this client can't
+    /// bind to.
     fn check_version(&self, md: &MetadataMap) -> ApiResult<()> {
         let Some(v) = md.get(VERSION_HEADER) else {
-            return Ok(());
+            return Err(ApiError::IncompatibleProtocol {
+                server: "none".to_owned(),
+            });
         };
         let text = v.to_str().unwrap_or("?");
         match text.parse::<ProtocolVersion>() {
@@ -189,6 +209,10 @@ impl Remote {
             }),
         }
     }
+}
+
+fn raw_id(b: &[u8]) -> Option<ObjectId> {
+    <[u8; 32]>::try_from(b).ok().map(ObjectId)
 }
 
 fn now_ms() -> i64 {
@@ -245,9 +269,16 @@ macro_rules! unary {
 }
 
 impl ObjectApi for Remote {
-    /// Collects every page of the stream. A dropped stream is an error; the
-    /// caller asks again for what it still lacks.
+    /// Collects every page of the stream, keeping only ids that were asked
+    /// for, each once, as the pages arrive. The answer is bounded: at most
+    /// one page per requested id plus one, and at most
+    /// [`MAX_GET_OBJECTS_BYTES`] of frames (or less, see
+    /// [`Remote::with_max_response_bytes`]); past either the call fails with
+    /// `LimitExceeded`. A dropped stream is an error; the caller asks again
+    /// for what it still lacks.
     async fn get_objects(&self, cx: &CallContext, req: GetObjects) -> ApiResult<Objects> {
+        let mut asked: HashSet<ObjectId> = req.ids.iter().copied().collect();
+        let max_pages = req.ids.len() as u64 + 1;
         let req = self.request(cx, pb::GetObjectsRequest::from(req))?;
         let resp = self
             .objects()
@@ -257,7 +288,28 @@ impl ObjectApi for Remote {
         self.check_version(resp.metadata())?;
         let mut stream = resp.into_inner();
         let mut out = Objects::default();
-        while let Some(page) = stream.message().await.map_err(status_error)? {
+        let (mut pages, mut bytes) = (0u64, 0u64);
+        while let Some(mut page) = stream.message().await.map_err(status_error)? {
+            pages += 1;
+            if pages > max_pages {
+                return Err(ApiError::LimitExceeded {
+                    limit: "get-objects-pages".to_owned(),
+                    max: max_pages,
+                });
+            }
+            bytes += page.found.iter().map(|f| f.frame.len() as u64).sum::<u64>();
+            if bytes > self.max_response_bytes {
+                return Err(ApiError::LimitExceeded {
+                    limit: "get-objects-bytes".to_owned(),
+                    max: self.max_response_bytes,
+                });
+            }
+            // Unrequested or repeated ids are dropped before they are parsed.
+            page.found
+                .retain(|f| raw_id(&f.id).is_some_and(|id| asked.remove(&id)));
+            let requested = |b: &Vec<u8>| raw_id(b).is_some_and(|id| asked.contains(&id));
+            page.missing.retain(requested);
+            page.deferred.retain(requested);
             let page = Objects::try_from(page).map_err(wire_error)?;
             out.found.extend(page.found);
             out.missing.extend(page.missing);

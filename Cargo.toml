@@ -76,3 +76,4 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-opentelemetry = { version = "0.32", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+unicode-normalization = "0.1"

@@ -105,6 +105,9 @@ pub enum Error {
     State(String),
     /// These paths have local changes an update would overwrite.
     Dirty(Vec<RepoPath>),
+    /// Writing or removing this path would go through a symlink or a file:
+    /// a parent component is not a real directory, on disk or in the base.
+    UnsafePath(RepoPath),
 }
 
 /// Result alias for client calls.
@@ -119,6 +122,9 @@ impl fmt::Display for Error {
             Error::Endpoint(what) => write!(f, "endpoint: {what}"),
             Error::State(what) => write!(f, "working copy state: {what}"),
             Error::Dirty(paths) => write!(f, "{} paths have local changes", paths.len()),
+            Error::UnsafePath(path) => {
+                write!(f, "refusing {path:?}: a parent is a symlink or a file")
+            }
         }
     }
 }

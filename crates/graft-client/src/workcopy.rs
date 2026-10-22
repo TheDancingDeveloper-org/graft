@@ -17,14 +17,17 @@
 //! timestamp tick as the index write could hide behind an equal stat. Files
 //! outside the slice are never read or written.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, Metadata};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use graft_model::{BlobId, Change, ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, TreeId};
+use graft_model::{
+    BlobId, Change, ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Tree, TreeId,
+};
 use graft_proto::api::{ObjectApi, RepoApi};
 use graft_proto::types::{Diff, Page, ResolveRef};
 use graft_proto::{ApiError, CallContext};
@@ -32,7 +35,8 @@ use graft_store::ObjectStore;
 use graft_store_fs::{FsMode, FsObjectStore};
 
 use crate::fetch::{
-    FetchOptions, FetchStats, fetch_objects, fetch_slice, load_blob, load_tree, resolve_root,
+    FetchOptions, FetchStats, fetch_objects, fetch_slice, load_blob, load_tree, over_budget,
+    resolve_root,
 };
 use crate::sparse::{escape, unescape};
 use crate::{Error, Result, Sparse};
@@ -315,19 +319,44 @@ impl WorkingCopy {
         let repo = self.config.repo.clone();
         let root = resolve_root(api, cx, &repo, self.state.base).await?;
         let mut stats = fetch_slice(api, cache, cx, &repo, root, &self.sparse, opts).await?;
+        let budget = opts.budget;
         let mut entries = BTreeMap::new();
+        // Each distinct tree is loaded and verified once, however many paths
+        // name it; the budget bounds the paths.
+        let mut trees: HashMap<TreeId, Arc<Tree>> = HashMap::new();
+        let (mut examined, mut written) = (0u64, 0u64);
         let mut dirs = vec![(root, None::<RepoPath>)];
         while let Some((id, dir)) = dirs.pop() {
-            let tree = match load_tree(cache, id).await? {
-                Some(t) => t,
+            let tree = match trees.get(&id) {
+                Some(t) => t.clone(),
                 None => {
-                    // Evicted since the fetch: ask again.
-                    let s = fetch_objects(api, cache, cx, &repo, &[(id.0, ObjectKind::Tree)], opts)
-                        .await?;
-                    stats.add(&s);
-                    load_tree(cache, id).await?.ok_or(missing(id.0))?
+                    let t = match load_tree(cache, id).await? {
+                        Some(t) => t,
+                        None => {
+                            // Evicted since the fetch: ask again.
+                            let s = fetch_objects(
+                                api,
+                                cache,
+                                cx,
+                                &repo,
+                                &[(id.0, ObjectKind::Tree)],
+                                opts,
+                            )
+                            .await?;
+                            stats.add(&s);
+                            load_tree(cache, id).await?.ok_or(missing(id.0))?
+                        }
+                    };
+                    let t = Arc::new(t);
+                    trees.insert(id, t.clone());
+                    t
                 }
             };
+            examined += tree.entries.len() as u64;
+            if examined > budget.max_entries {
+                return Err(over_budget("max_entries", budget.max_entries));
+            }
+            let depth = dir.as_ref().map_or(0, |d| d.components().count());
             let mut files = Vec::new();
             for e in &tree.entries {
                 let path = match &dir {
@@ -337,6 +366,9 @@ impl WorkingCopy {
                 .map_err(|_| ApiError::CorruptObject { id: id.0 })?;
                 if e.kind.is_tree() {
                     if self.sparse.descends(&path) {
+                        if depth >= budget.max_depth {
+                            return Err(over_budget("max_depth", budget.max_depth as u64));
+                        }
                         dirs.push((TreeId(e.id), Some(path)));
                     }
                 } else if e.kind != EntryKind::Submodule && self.sparse.includes(&path) {
@@ -350,6 +382,10 @@ impl WorkingCopy {
             stats.add(&s);
             for (path, kind, id) in files {
                 let data = load_blob(cache, id.0).await?.ok_or(missing(id.0))?;
+                written += data.len() as u64;
+                if written > budget.max_bytes {
+                    return Err(over_budget("max_bytes", budget.max_bytes));
+                }
                 let stat = write_entry(&self.root, &path, kind, &data)?;
                 entries.insert(path, IndexEntry { kind, id, stat });
             }
@@ -363,8 +399,9 @@ impl WorkingCopy {
     /// racily clean entry. Sorted by path.
     pub fn status(&self) -> io::Result<Vec<FileStatus>> {
         let mut out = Vec::new();
+        let mut dirs = RealDirs::default();
         for (path, entry) in &self.index.entries {
-            if let Some(change) = self.check(path, entry)? {
+            if let Some(change) = self.check(path, entry, &mut dirs)? {
                 out.push(change);
             }
         }
@@ -377,8 +414,18 @@ impl WorkingCopy {
         Ok(out)
     }
 
-    /// One indexed file's status, or `None` when it is clean.
-    fn check(&self, path: &RepoPath, entry: &IndexEntry) -> io::Result<Option<FileStatus>> {
+    /// One indexed file's status, or `None` when it is clean. A file whose
+    /// parent is no longer a real directory is deleted: nothing is read
+    /// through a symlink.
+    fn check(
+        &self,
+        path: &RepoPath,
+        entry: &IndexEntry,
+        dirs: &mut RealDirs,
+    ) -> io::Result<Option<FileStatus>> {
+        if !dirs.parent_is_real(&self.root, path)? {
+            return Ok(Some(FileStatus::Deleted(path.clone())));
+        }
         let file = self.root.join(path.as_str());
         let meta = match fs::symlink_metadata(&file) {
             Ok(m) if !m.is_dir() => m,
@@ -402,7 +449,12 @@ impl WorkingCopy {
             walk(&self.root, None, &mut out)?;
             return Ok(out);
         }
+        let mut dirs = RealDirs::default();
         for prefix in &self.sparse.prefixes {
+            // Never list through a symlinked parent.
+            if !dirs.parent_is_real(&self.root, prefix)? {
+                continue;
+            }
             match fs::symlink_metadata(self.root.join(prefix.as_str())) {
                 Ok(m) if m.is_dir() => {
                     walk(&self.root.join(prefix.as_str()), Some(prefix), &mut out)?
@@ -447,6 +499,7 @@ impl WorkingCopy {
         let repo = self.config.repo.clone();
         let mut changes = Vec::new();
         let mut token = None;
+        let mut pages = 0u64;
         loop {
             let page = api
                 .diff(
@@ -470,6 +523,10 @@ impl WorkingCopy {
                     .map(|f| f.change)
                     .filter(|c| self.sparse.includes(c.path())),
             );
+            pages += 1;
+            if changes.len() as u64 > opts.budget.max_entries || pages > opts.budget.max_entries {
+                return Err(over_budget("max_entries", opts.budget.max_entries));
+            }
             match page.next {
                 Some(next) => token = Some(next),
                 None => break,
@@ -478,6 +535,7 @@ impl WorkingCopy {
         for c in &changes {
             check_reserved(c.path())?;
         }
+        self.check_routes(&changes)?;
 
         let dirty = self.dirty(&changes)?;
         if !dirty.is_empty() {
@@ -496,6 +554,7 @@ impl WorkingCopy {
             .collect();
         let fetch = fetch_objects(api, cache, cx, &repo, &wanted, opts).await?;
 
+        let mut written = 0u64;
         // Deletes first, so a directory replaced by a file (or the reverse)
         // is out of the way before the puts.
         for c in &changes {
@@ -510,6 +569,10 @@ impl WorkingCopy {
                     continue;
                 }
                 let data = load_blob(cache, *id).await?.ok_or(missing(*id))?;
+                written += data.len() as u64;
+                if written > opts.budget.max_bytes {
+                    return Err(over_budget("max_bytes", opts.budget.max_bytes));
+                }
                 let stat = write_entry(&self.root, path, *kind, &data)?;
                 self.index.entries.insert(
                     path.clone(),
@@ -530,20 +593,87 @@ impl WorkingCopy {
         })
     }
 
+    /// Refuses, before anything is written, a change whose path passes
+    /// through something that is not a directory: an indexed file or symlink
+    /// of the base, or a symlink or file on disk. The one exception is a
+    /// parent this same diff deletes (a file replaced by a directory), which
+    /// the deletes remove first. `write_entry` and `remove_entry` check each
+    /// component again as they go.
+    fn check_routes(&self, changes: &[Change]) -> Result<()> {
+        // A diff that puts a symlink at P and also touches a path under P
+        // is not a tree; refusing it here keeps an update from stopping
+        // half applied.
+        let symlinks: HashSet<&RepoPath> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::Put {
+                    path,
+                    kind: EntryKind::Symlink,
+                    ..
+                } => Some(path),
+                _ => None,
+            })
+            .collect();
+        for c in changes {
+            let mut parent = c.path().parent();
+            while let Some(p) = parent {
+                if symlinks.contains(&p) {
+                    return Err(Error::UnsafePath(c.path().clone()));
+                }
+                parent = p.parent();
+            }
+        }
+        let deleted: HashSet<&RepoPath> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::Delete { path } => Some(path),
+                _ => None,
+            })
+            .collect();
+        for c in changes {
+            let path = c.path();
+            let mut parent = path.parent();
+            while let Some(p) = parent {
+                let replaced = deleted.contains(&p) && self.index.entries.contains_key(&p);
+                if !replaced {
+                    if self.index.entries.contains_key(&p) {
+                        return Err(Error::UnsafePath(path.clone()));
+                    }
+                    match fs::symlink_metadata(self.root.join(p.as_str())) {
+                        Ok(m) if !m.file_type().is_dir() => {
+                            return Err(Error::UnsafePath(path.clone()));
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.kind() == ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                parent = p.parent();
+            }
+        }
+        Ok(())
+    }
+
     /// The changed paths whose working files differ from the base: modified
     /// or deleted indexed files, and unindexed files a put would overwrite.
     fn dirty(&self, changes: &[Change]) -> io::Result<Vec<RepoPath>> {
         let mut out = Vec::new();
+        let mut dirs = RealDirs::default();
         for c in changes {
             let path = c.path();
             match self.index.entries.get(path) {
-                Some(entry) => match self.check(path, entry)? {
+                Some(entry) => match self.check(path, entry, &mut dirs)? {
                     None => {}
                     Some(FileStatus::Deleted(_)) if matches!(c, Change::Delete { .. }) => {}
                     Some(_) => out.push(path.clone()),
                 },
                 None => {
-                    if fs::symlink_metadata(self.root.join(path.as_str())).is_ok() {
+                    // A parent that is not a real directory is one this
+                    // diff replaces (`check_routes` refused the rest), so
+                    // nothing of ours is in the way.
+                    if dirs.parent_is_real(&self.root, path)?
+                        && fs::symlink_metadata(self.root.join(path.as_str())).is_ok()
+                    {
                         out.push(path.clone());
                     }
                 }
@@ -601,9 +731,40 @@ fn missing(id: ObjectId) -> Error {
     Error::Api(ApiError::MissingObjects { ids: vec![id] })
 }
 
-/// Refuses a path that would write into `.graft/`.
+/// Whether a top-level name could reach `.graft` on some filesystem: equal
+/// to it after Unicode compatibility normalization (NFKC, which covers the
+/// NFC and NFD forms), full case folding, and dropping the default-ignorable
+/// code points that HFS+ and APFS ignore in names. Case-insensitive (NTFS,
+/// default APFS and HFS+) and normalizing filesystems would otherwise let
+/// `.GRAFT/config` or a look-alike overwrite the working copy's own state.
+pub fn is_reserved_name(name: &str) -> bool {
+    use unicode_normalization::UnicodeNormalization;
+    let ignorable = |c: &char| {
+        matches!(*c as u32,
+            0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
+            | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
+            | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFF8 | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A
+            | 0xE0000..=0xE0FFF)
+    };
+    if name.eq_ignore_ascii_case(GRAFT_DIR) {
+        return true;
+    }
+    if name.is_ascii() {
+        return false;
+    }
+    let folded: String = name
+        .nfkc()
+        .filter(|c| !ignorable(c))
+        .collect::<String>()
+        .to_lowercase();
+    let folded: String = folded.nfkc().collect();
+    folded == GRAFT_DIR
+}
+
+/// Refuses a path that would write into `.graft/`, in any spelling a
+/// filesystem might treat as the same name ([`is_reserved_name`]).
 fn check_reserved(path: &RepoPath) -> Result<()> {
-    if path.components().next() == Some(GRAFT_DIR) {
+    if path.components().next().is_some_and(is_reserved_name) {
         return Err(Error::Api(ApiError::InvalidPath {
             path: path.as_str().to_owned(),
             reason: "reserved for the working copy state".to_owned(),
@@ -649,11 +810,77 @@ fn hash_file(file: &Path, meta: &Metadata) -> io::Result<(EntryKind, BlobId)> {
     Ok((kind, BlobId::hash(&data)))
 }
 
-/// Writes one file (or symlink) and returns its stat.
-fn write_entry(root: &Path, path: &RepoPath, kind: EntryKind, data: &[u8]) -> io::Result<Stat> {
-    let target = root.join(path.as_str());
-    let parent = target.parent().expect("a repository path has a parent");
-    fs::create_dir_all(parent)?;
+/// Directories under the root already checked to be real (not symlinks),
+/// so a status pass stats each directory once rather than once per file.
+#[derive(Default)]
+struct RealDirs(HashSet<RepoPath>);
+
+impl RealDirs {
+    /// Whether every parent of `path` under `root` exists and is a real
+    /// directory.
+    fn parent_is_real(&mut self, root: &Path, path: &RepoPath) -> io::Result<bool> {
+        let Some(parent) = path.parent() else {
+            return Ok(true);
+        };
+        if self.0.contains(&parent) {
+            return Ok(true);
+        }
+        if !self.parent_is_real(root, &parent)? {
+            return Ok(false);
+        }
+        match fs::symlink_metadata(root.join(parent.as_str())) {
+            Ok(m) if m.file_type().is_dir() => {
+                self.0.insert(parent);
+                Ok(true)
+            }
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// The directory that holds `path` under `root`, checked one component at
+/// a time with `symlink_metadata`: every existing parent must be a real
+/// directory, never a symlink or a file, so nothing is written or removed
+/// outside the root. With `create`, missing parents are created one level
+/// at a time; without it, a missing parent gives `None`.
+fn parent_dir(root: &Path, path: &RepoPath, create: bool) -> Result<Option<PathBuf>> {
+    let components: Vec<&str> = path.components().collect();
+    let mut dir = root.to_owned();
+    for c in &components[..components.len() - 1] {
+        dir.push(c);
+        match fs::symlink_metadata(&dir) {
+            Ok(m) if m.file_type().is_dir() => {}
+            Ok(_) => return Err(Error::UnsafePath(path.clone())),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                if !create {
+                    return Ok(None);
+                }
+                match fs::create_dir(&dir) {
+                    Ok(()) => {}
+                    // Raced with another creator: check what is there now.
+                    Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                        if !fs::symlink_metadata(&dir)?.file_type().is_dir() {
+                            return Err(Error::UnsafePath(path.clone()));
+                        }
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(Some(dir))
+}
+
+/// Writes one file (or symlink) and returns its stat. Refuses a path whose
+/// parent is not a real directory ([`parent_dir`]). The leaf itself is
+/// replaced, never followed: a rename or unlink acts on a symlink, not its
+/// target.
+fn write_entry(root: &Path, path: &RepoPath, kind: EntryKind, data: &[u8]) -> Result<Stat> {
+    let parent = parent_dir(root, path, true)?.expect("created");
+    let target = parent.join(path.name());
     match kind {
         EntryKind::Symlink => {
             match fs::symlink_metadata(&target) {
@@ -669,8 +896,14 @@ fn write_entry(root: &Path, path: &RepoPath, kind: EntryKind, data: &[u8]) -> io
             } else {
                 0o644
             };
+            // A stale temp file (or a symlink planted under its name) goes
+            // first; `create_new` then refuses anything put back.
+            match fs::remove_file(&tmp) {
+                Err(e) if e.kind() != ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
             {
-                let mut f = File::create(&tmp)?;
+                let mut f = File::options().write(true).create_new(true).open(&tmp)?;
                 f.write_all(data)?;
                 f.set_permissions(fs::Permissions::from_mode(mode))?;
             }
@@ -680,15 +913,19 @@ fn write_entry(root: &Path, path: &RepoPath, kind: EntryKind, data: &[u8]) -> io
     Ok(Stat::of(&fs::symlink_metadata(&target)?))
 }
 
-/// Removes one file and any directories it leaves empty.
-fn remove_entry(root: &Path, path: &RepoPath) -> io::Result<()> {
-    let target = root.join(path.as_str());
-    match fs::remove_file(&target) {
+/// Removes one file and any directories it leaves empty. Refuses a path
+/// whose parent is not a real directory; a missing parent means there is
+/// nothing to remove.
+fn remove_entry(root: &Path, path: &RepoPath) -> Result<()> {
+    let Some(parent) = parent_dir(root, path, false)? else {
+        return Ok(());
+    };
+    match fs::remove_file(parent.join(path.name())) {
         Ok(()) => {}
         Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     }
-    let mut dir = target.parent();
+    let mut dir = Some(parent.as_path());
     while let Some(d) = dir {
         if d == root || fs::remove_dir(d).is_err() {
             break;
@@ -847,6 +1084,24 @@ mod tests {
     }
 
     #[test]
+    fn reserved_names_cover_case_and_unicode_forms() {
+        for name in [
+            ".graft",
+            ".GRAFT",
+            ".Graft",
+            ".gRaFt",
+            "\u{FF0E}\u{FF47}\u{FF52}\u{FF41}\u{FF46}\u{FF54}", // fullwidth
+            ".gr\u{200D}aft",                                   // zero-width joiner
+            ".GR\u{00AD}AFT",                                   // soft hyphen
+        ] {
+            assert!(is_reserved_name(name), "{name:?}");
+        }
+        for name in [".graf", ".grafts", "graft", ".gräft", "src"] {
+            assert!(!is_reserved_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
     fn rehash_on_stat_change_or_racy_clean() {
         let index_written = 1_000;
         // Equal stat, strictly older than the index: trusted.
@@ -858,6 +1113,45 @@ mod tests {
         let mut other = stat(999);
         other.ino = 8;
         assert!(needs_rehash(&stat(999), &other, index_written));
+    }
+
+    #[test]
+    fn writes_and_removes_refuse_a_parent_that_is_not_a_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("x"), b"precious").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("l")).unwrap();
+        std::fs::write(root.path().join("file"), b"f").unwrap();
+        for path in ["l/x", "l/new", "l/deep/new", "file/x"] {
+            let path = RepoPath::new(path).unwrap();
+            assert!(matches!(
+                write_entry(root.path(), &path, EntryKind::File, b"evil"),
+                Err(Error::UnsafePath(_))
+            ));
+            assert!(matches!(
+                remove_entry(root.path(), &path),
+                Err(Error::UnsafePath(_))
+            ));
+        }
+        let names: Vec<_> = std::fs::read_dir(outside.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("x")]);
+        assert_eq!(
+            std::fs::read(outside.path().join("x")).unwrap(),
+            b"precious"
+        );
+
+        // A leaf symlink is replaced, not followed.
+        let leaf = RepoPath::new("leaf").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("x"), root.path().join("leaf")).unwrap();
+        write_entry(root.path(), &leaf, EntryKind::File, b"mine").unwrap();
+        assert_eq!(
+            std::fs::read(outside.path().join("x")).unwrap(),
+            b"precious"
+        );
+        assert_eq!(std::fs::read(root.path().join("leaf")).unwrap(), b"mine");
     }
 
     #[test]

@@ -11,12 +11,12 @@
 //! put behind it: [`FakeApi`] for objects and changesets, plus lines and a
 //! `Diff` computed with graft-model's id-pruned tree diff.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 
@@ -170,6 +170,12 @@ impl TestServer {
     pub fn set_protocol_version(&self, version: ProtocolVersion) {
         *self.shared.protocol.lock().expect("protocol") = version;
     }
+
+    /// Whether responses carry the protocol-version header (on by default;
+    /// off imitates a peer that is not graft, or one that strips it).
+    pub fn advertise_version(&self, on: bool) {
+        self.shared.advertise.store(on, Ordering::SeqCst);
+    }
 }
 
 fn spawn<A, I, IO>(api: Arc<A>, shared: Arc<Shared>, incoming: I) -> JoinHandle<()>
@@ -203,6 +209,7 @@ struct Shared {
     drops: AtomicU64,
     conns: Mutex<Vec<Weak<ConnState>>>,
     protocol: Mutex<ProtocolVersion>,
+    advertise: AtomicBool,
 }
 
 impl Default for Shared {
@@ -214,6 +221,7 @@ impl Default for Shared {
             drops: AtomicU64::new(0),
             conns: Mutex::default(),
             protocol: Mutex::new(PROTOCOL_VERSION),
+            advertise: AtomicBool::new(true),
         }
     }
 }
@@ -359,6 +367,9 @@ impl<A> Svc<A> {
     fn reply<T>(&self, msg: T) -> Response<T> {
         let version = self.shared.protocol.lock().expect("protocol").to_string();
         let mut r = Response::new(msg);
+        if !self.shared.advertise.load(Ordering::SeqCst) {
+            return r;
+        }
         r.metadata_mut().insert(
             VERSION_HEADER,
             MetadataValue::try_from(version).expect("version is ASCII"),
@@ -622,17 +633,26 @@ impl<A: ObjectApi + RepoApi + 'static> RepoService for Svc<A> {
 struct Line {
     tip: ChangesetId,
     version: u64,
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, (EntryKind, Vec<u8>)>,
 }
 
 /// A small in-memory repository to serve: [`FakeApi`] holds the objects and
 /// changesets; this adds lines (`ResolveRef`, `ListRefs`) and `Diff`. Other
 /// repository operations answer `Rejected { policy: "fake" }`. Like
 /// [`FakeApi`], it ignores the repository name.
+///
+/// For hostile-server tests it can also serve unvalidated objects and
+/// changesets ([`SnapshotRepo::insert_raw`]), a canned `Diff`
+/// ([`SnapshotRepo::lie_about_diff`]), and unrequested objects in every
+/// `GetObjects` answer ([`SnapshotRepo::pad_get_objects`]).
 #[derive(Default)]
 pub struct SnapshotRepo {
     api: FakeApi,
     lines: Mutex<BTreeMap<String, Line>>,
+    raw_objects: Mutex<HashMap<ObjectId, Frame>>,
+    raw_changesets: Mutex<HashMap<ChangesetId, Changeset>>,
+    diff_lie: Mutex<Option<DiffResult>>,
+    padding: AtomicUsize,
 }
 
 /// Reads trees from a [`FakeApi`] through `GetObjects`.
@@ -692,7 +712,43 @@ impl SnapshotRepo {
 
     /// A changeset's root tree.
     pub fn root(&self, id: ChangesetId) -> Option<TreeId> {
+        if let Some(c) = self.raw_changesets.lock().expect("raw").get(&id) {
+            return Some(c.root);
+        }
         self.api.changeset(id).map(|c| c.root)
+    }
+
+    /// Serves `changeset` and `objects` as given, unvalidated, and moves
+    /// `line` to the changeset (a hostile server). The line can't take
+    /// [`SnapshotRepo::commit`] afterwards.
+    pub fn insert_raw(&self, line: &str, changeset: Changeset, objects: Vec<(ObjectId, Frame)>) {
+        let id = changeset.id();
+        self.raw_objects.lock().expect("raw").extend(objects);
+        self.raw_changesets
+            .lock()
+            .expect("raw")
+            .insert(id, changeset);
+        let mut lines = self.lines.lock().expect("lines");
+        let version = lines.get(line).map_or(0, |l| l.version);
+        lines.insert(
+            line.to_owned(),
+            Line {
+                tip: id,
+                version: version + 1,
+                files: BTreeMap::new(),
+            },
+        );
+    }
+
+    /// Answers every `Diff` with `result` (a lying server), or truthfully
+    /// again with `None`.
+    pub fn lie_about_diff(&self, result: Option<DiffResult>) {
+        *self.diff_lie.lock().expect("diff") = result;
+    }
+
+    /// Appends `n` objects nobody asked for to every `GetObjects` answer.
+    pub fn pad_get_objects(&self, n: usize) {
+        self.padding.store(n, Ordering::SeqCst);
     }
 
     /// Commits `files` (path → bytes, all regular files) as the next
@@ -700,6 +756,20 @@ impl SnapshotRepo {
     /// with its tip as the parent. Moves the line and returns the id; with
     /// no changes, returns the current tip.
     pub async fn commit(&self, line: &str, files: &BTreeMap<String, Vec<u8>>) -> ChangesetId {
+        let entries = files
+            .iter()
+            .map(|(p, b)| (p.clone(), (EntryKind::File, b.clone())))
+            .collect();
+        self.commit_entries(line, &entries).await
+    }
+
+    /// [`SnapshotRepo::commit`] with each entry's kind given (file, exec or
+    /// symlink, whose bytes are the target).
+    pub async fn commit_entries(
+        &self,
+        line: &str,
+        files: &BTreeMap<String, (EntryKind, Vec<u8>)>,
+    ) -> ChangesetId {
         let (parent, prev, version) = match self.lines.lock().expect("lines").get(line) {
             Some(l) => (Some(l.tip), l.files.clone(), l.version),
             None => (None, BTreeMap::new(), 0),
@@ -712,11 +782,11 @@ impl SnapshotRepo {
         for path in paths {
             let repo_path = RepoPath::new(path).expect("valid path");
             match (prev.get(path), files.get(path)) {
-                (old, Some(new)) if old != Some(new) => {
+                (old, Some((kind, new))) if old != Some(&(*kind, new.clone())) => {
                     blobs.push(Frame::encode(ObjectKind::Blob, new));
                     changes.push(Change::Put {
                         path: repo_path,
-                        kind: EntryKind::File,
+                        kind: *kind,
                         id: BlobId::hash(new).0,
                     });
                 }
@@ -793,8 +863,32 @@ impl SnapshotRepo {
 }
 
 impl ObjectApi for SnapshotRepo {
-    async fn get_objects(&self, cx: &CallContext, req: GetObjects) -> ApiResult<Objects> {
-        self.api.get_objects(cx, req).await
+    async fn get_objects(&self, cx: &CallContext, mut req: GetObjects) -> ApiResult<Objects> {
+        let mut raw_found = Vec::new();
+        {
+            let raw = self.raw_objects.lock().expect("raw");
+            req.ids.retain(|id| match raw.get(id) {
+                Some(f) => {
+                    raw_found.push((*id, f.clone()));
+                    false
+                }
+                None => true,
+            });
+        }
+        let mut out = if req.ids.is_empty() {
+            Objects::default()
+        } else {
+            self.api.get_objects(cx, req).await?
+        };
+        out.found.extend(raw_found);
+        for i in 0..self.padding.load(Ordering::SeqCst) {
+            let bytes = format!("unrequested {i}").into_bytes();
+            out.found.push((
+                BlobId::hash(&bytes).0,
+                Frame::encode(ObjectKind::Blob, &bytes),
+            ));
+        }
+        Ok(out)
     }
 
     async fn has_objects(&self, cx: &CallContext, req: HasObjects) -> ApiResult<Vec<ObjectId>> {
@@ -815,8 +909,34 @@ impl RepoApi for SnapshotRepo {
         rejected()
     }
 
-    async fn get_changesets(&self, cx: &CallContext, req: GetChangesets) -> ApiResult<Changesets> {
-        self.api.get_changesets(cx, req).await
+    async fn get_changesets(
+        &self,
+        cx: &CallContext,
+        mut req: GetChangesets,
+    ) -> ApiResult<Changesets> {
+        let mut raw_found = Vec::new();
+        {
+            let raw = self.raw_changesets.lock().expect("raw");
+            req.ids.retain(|id| match raw.get(id) {
+                Some(c) => {
+                    raw_found.push(ChangesetView {
+                        changeset: c.clone(),
+                        lsn: 0,
+                        state: DraftState::Landed,
+                        superseded_by: None,
+                    });
+                    false
+                }
+                None => true,
+            });
+        }
+        let mut out = if req.ids.is_empty() {
+            Changesets::default()
+        } else {
+            self.api.get_changesets(cx, req).await?
+        };
+        out.found.extend(raw_found);
+        Ok(out)
     }
 
     async fn resolve_ref(&self, _cx: &CallContext, req: ResolveRef) -> ApiResult<RefView> {
@@ -882,6 +1002,9 @@ impl RepoApi for SnapshotRepo {
     /// The id-pruned tree diff, restricted to `paths`, paged by offset
     /// (fine for a fake; the engine pages by path).
     async fn diff(&self, _cx: &CallContext, req: Diff) -> ApiResult<DiffResult> {
+        if let Some(lie) = self.diff_lie.lock().expect("diff").clone() {
+            return Ok(lie);
+        }
         let from = non_empty(self.root_of(req.from)?);
         let to = non_empty(self.root_of(req.to)?);
         let source = FakeSource(&self.api);
