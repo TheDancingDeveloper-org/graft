@@ -1,0 +1,612 @@
+// The graft wire protocol (docs/design.md §7, decision D4).
+//
+// Ids travel as 32 raw bytes; the field says which kind. Object frames travel
+// as their serialized bytes (docs/design.md §6.3), byte for byte as stored.
+// Paths are strings, validated at the boundary when converted to Rust types.
+// The protocol version travels in the `graft-protocol` request header.
+
+syntax = "proto3";
+
+package graft.v1;
+
+// ---- shared ---------------------------------------------------------------
+
+message Page {
+  uint32 limit = 1;
+  optional string token = 2;
+}
+
+message Timestamp {
+  int64 ms = 1;
+  sint32 offset_min = 2;
+}
+
+enum AuthorKind {
+  AUTHOR_KIND_UNSPECIFIED = 0;
+  AUTHOR_KIND_HUMAN = 1;
+  AUTHOR_KIND_AGENT = 2;
+  AUTHOR_KIND_BOT = 3;
+  AUTHOR_KIND_CI = 4;
+}
+
+message Author {
+  string name = 1;
+  string email = 2;
+  AuthorKind kind = 3;
+}
+
+enum EntryKind {
+  ENTRY_KIND_UNSPECIFIED = 0;
+  ENTRY_KIND_FILE = 1;
+  ENTRY_KIND_EXEC = 2;
+  ENTRY_KIND_SYMLINK = 3;
+  ENTRY_KIND_TREE = 4;
+  ENTRY_KIND_SUBMODULE = 5;
+}
+
+message Change {
+  message Put {
+    string path = 1;
+    EntryKind kind = 2;
+    bytes id = 3;
+  }
+  message Delete {
+    string path = 1;
+  }
+  oneof change {
+    Put put = 1;
+    Delete delete = 2;
+  }
+}
+
+message Changeset {
+  repeated bytes parents = 1;
+  bytes root = 2;
+  repeated Change changes = 3;
+  Author author = 4;
+  Timestamp authored_at = 5;
+  string message = 6;
+  map<string, string> metadata = 7;
+}
+
+message ChangesetIds {
+  repeated bytes ids = 1;
+}
+
+message ObjectIds {
+  repeated bytes ids = 1;
+}
+
+message ChangesetRef {
+  bytes id = 1;
+}
+
+message OptionalChangeset {
+  optional bytes id = 1;
+}
+
+message Bool {
+  bool value = 1;
+}
+
+message Empty {}
+
+// ---- objects --------------------------------------------------------------
+
+message GetObjectsRequest {
+  string repo = 1;
+  repeated bytes ids = 2;
+}
+
+message FoundObject {
+  bytes id = 1;
+  bytes frame = 2;
+}
+
+message Objects {
+  repeated FoundObject found = 1;
+  repeated bytes missing = 2;
+  repeated bytes deferred = 3;
+}
+
+message HasObjectsRequest {
+  string repo = 1;
+  repeated bytes ids = 2;
+}
+
+message PutObjectsRequest {
+  string repo = 1;
+  repeated bytes blobs = 2;
+}
+
+// ---- changesets -----------------------------------------------------------
+
+message CreateChangesetRequest {
+  string repo = 1;
+  repeated bytes parents = 2;
+  repeated Change changes = 3;
+  Author author = 4;
+  Timestamp authored_at = 5;
+  string message = 6;
+  map<string, string> metadata = 7;
+  repeated bytes inline_blobs = 8;
+  optional string workspace = 9;
+}
+
+enum DraftState {
+  DRAFT_STATE_UNSPECIFIED = 0;
+  DRAFT_STATE_DRAFT = 1;
+  DRAFT_STATE_LANDED = 2;
+  DRAFT_STATE_SUPERSEDED = 3;
+  DRAFT_STATE_ABANDONED = 4;
+}
+
+message Created {
+  bytes id = 1;
+  bytes root = 2;
+  uint64 lsn = 3;
+  DraftState state = 4;
+}
+
+message CreatedList {
+  repeated Created created = 1;
+}
+
+message GetChangesetsRequest {
+  string repo = 1;
+  repeated bytes ids = 2;
+}
+
+message ChangesetView {
+  Changeset changeset = 1;
+  uint64 lsn = 2;
+  DraftState state = 3;
+  optional bytes superseded_by = 4;
+}
+
+message Changesets {
+  repeated ChangesetView found = 1;
+  repeated bytes missing = 2;
+  repeated bytes collected = 3;
+}
+
+// ---- refs -----------------------------------------------------------------
+
+enum RefKind {
+  REF_KIND_UNSPECIFIED = 0;
+  REF_KIND_LINE = 1;
+  REF_KIND_TAG = 2;
+  REF_KIND_TOOL = 3;
+}
+
+message RefView {
+  string name = 1;
+  bytes target = 2;
+  uint64 version = 3;
+  RefKind kind = 4;
+}
+
+message RefViews {
+  repeated RefView refs = 1;
+}
+
+message ResolveRefRequest {
+  string repo = 1;
+  string name = 2;
+}
+
+message ListRefsRequest {
+  string repo = 1;
+  optional string prefix = 2;
+  Page page = 3;
+}
+
+message UpdateRefRequest {
+  string repo = 1;
+  string name = 2;
+  optional bytes expected = 3;
+  bytes new = 4;
+  RefKind kind = 5;
+}
+
+// ---- snapshot reads -------------------------------------------------------
+
+message PathAt {
+  string repo = 1;
+  bytes at = 2;
+  string path = 3;
+}
+
+message EntryView {
+  string path = 1;
+  EntryKind kind = 2;
+  bytes id = 3;
+}
+
+message FileContent {
+  EntryKind kind = 1;
+  bytes id = 2;
+  bytes data = 3;
+}
+
+message ListTreeRequest {
+  string repo = 1;
+  bytes at = 2;
+  optional string path = 3;
+  bool recursive = 4;
+  Page page = 5;
+}
+
+message Entries {
+  repeated EntryView entries = 1;
+  optional string next = 2;
+}
+
+// ---- history --------------------------------------------------------------
+
+message LogRequest {
+  string repo = 1;
+  bytes from = 2;
+  optional bytes until = 3;
+  repeated string paths = 4;
+  Page page = 5;
+}
+
+message ChangesetSummary {
+  bytes id = 1;
+  Author author = 2;
+  Timestamp authored_at = 3;
+  string subject = 4;
+  optional uint64 line_pos = 5;
+}
+
+message History {
+  repeated ChangesetSummary changesets = 1;
+  optional string next = 2;
+}
+
+message Pair {
+  string repo = 1;
+  bytes a = 2;
+  bytes b = 3;
+}
+
+message PatchOptions {
+  uint32 context = 1;
+  uint64 max_bytes_per_file = 2;
+}
+
+message DiffRequest {
+  string repo = 1;
+  bytes from = 2;
+  bytes to = 3;
+  repeated string paths = 4;
+  optional PatchOptions patch = 5;
+  Page page = 6;
+}
+
+message FileDiff {
+  Change change = 1;
+  optional string patch = 2;
+  bool truncated = 3;
+}
+
+message DiffResult {
+  repeated FileDiff files = 1;
+  optional string next = 2;
+}
+
+message LineRange {
+  uint32 start = 1;
+  uint32 end = 2;
+}
+
+message BlameRequest {
+  string repo = 1;
+  bytes at = 2;
+  string path = 3;
+  optional LineRange lines = 4;
+}
+
+message BlameRange {
+  uint32 start = 1;
+  uint32 end = 2;
+  ChangesetSummary origin = 3;
+}
+
+message BlameResult {
+  repeated BlameRange ranges = 1;
+}
+
+// ---- rebase, revert, land -------------------------------------------------
+
+enum MergeMode {
+  MERGE_MODE_UNSPECIFIED = 0;
+  MERGE_MODE_FILE = 1;
+  MERGE_MODE_LINE = 2;
+}
+
+message RebaseRequest {
+  string repo = 1;
+  bytes changeset = 2;
+  bytes onto = 3;
+  MergeMode merge = 4;
+}
+
+message RevertRequest {
+  string repo = 1;
+  bytes changeset = 2;
+  bytes onto = 3;
+  optional string workspace = 4;
+}
+
+message LandRequest {
+  string repo = 1;
+  bytes head = 2;
+  string line = 3;
+  bool squash = 4;
+  MergeMode merge = 5;
+  optional uint64 deadline_ms = 6;
+}
+
+message Landed {
+  message OnLine {
+    bytes landed = 1;
+    uint64 line_version = 2;
+    uint64 pos = 3;
+    bool rebased = 4;
+    repeated string merged_paths = 5;
+  }
+  message Queued {
+    string pr_url = 1;
+  }
+  oneof outcome {
+    OnLine landed = 1;
+    Queued queued = 2;
+  }
+}
+
+message AttestRequest {
+  string repo = 1;
+  bytes changeset = 2;
+  string check = 3;
+  bool passed = 4;
+  string url = 5;
+}
+
+message WatchRequest {
+  string repo = 1;
+  uint64 from_lsn = 2;
+  repeated string kinds = 3;
+  uint32 limit = 4;
+  uint32 wait_ms = 5;
+}
+
+message JournalEntry {
+  uint64 lsn = 1;
+  string kind = 2;
+  string body = 3;
+}
+
+message JournalPage {
+  repeated JournalEntry entries = 1;
+  uint64 next_lsn = 2;
+}
+
+// ---- workspaces -----------------------------------------------------------
+
+message WorkspaceView {
+  string name = 1;
+  string owner = 2;
+  optional string session = 3;
+  string line = 4;
+  bytes base = 5;
+  optional bytes head = 6;
+  int64 lease_until_ms = 7;
+}
+
+message WorkspaceViews {
+  repeated WorkspaceView workspaces = 1;
+}
+
+message OpenWorkspaceRequest {
+  string repo = 1;
+  optional string name = 2;
+  string line = 3;
+  optional bytes at = 4;
+  uint64 lease_ms = 5;
+}
+
+message WorkspaceRef {
+  string repo = 1;
+  string name = 2;
+}
+
+message ListWorkspacesRequest {
+  string repo = 1;
+  Page page = 2;
+}
+
+message RenewLeaseRequest {
+  WorkspaceRef workspace = 1;
+  uint64 lease_ms = 2;
+}
+
+message SetHeadRequest {
+  WorkspaceRef workspace = 1;
+  optional bytes expected = 2;
+  optional bytes new = 3;
+}
+
+message SyncRequest {
+  WorkspaceRef workspace = 1;
+  optional bytes onto = 2;
+}
+
+message Synced {
+  WorkspaceView workspace = 1;
+  repeated string changed_paths = 2;
+}
+
+message PathGroup {
+  repeated string paths = 1;
+}
+
+message StackOp {
+  message Split {
+    bytes draft = 1;
+    repeated PathGroup groups = 2;
+  }
+  oneof op {
+    ChangesetIds reorder = 1;
+    ChangesetIds squash = 2;
+    Split split = 3;
+    bytes drop = 4;
+  }
+}
+
+message StackRequest {
+  WorkspaceRef workspace = 1;
+  StackOp op = 2;
+}
+
+message CloseWorkspaceRequest {
+  WorkspaceRef workspace = 1;
+  bool keep_drafts = 2;
+}
+
+// ---- admin ----------------------------------------------------------------
+
+message CreateRepoRequest {
+  string name = 1;
+}
+
+message ImportChangesetsRequest {
+  string repo = 1;
+  repeated Changeset changesets = 2;
+}
+
+message GcRequest {
+  string repo = 1;
+  bool dry_run = 2;
+}
+
+message GcReport {
+  uint64 changesets = 1;
+  uint64 objects = 2;
+  uint64 bytes = 3;
+}
+
+message MintTokenRequest {
+  string subject = 1;
+  repeated string scopes = 2;
+  uint64 ttl_s = 3;
+  optional string session = 4;
+  optional string work_item = 5;
+}
+
+// A bearer token. Its generated `Debug` is replaced by one that redacts it.
+message Token {
+  string token = 1;
+}
+
+// ---- errors (docs/design.md §7.10) ----------------------------------------
+
+// Carried in the `details` of a gRPC status, so errors round-trip losslessly.
+message ConflictPath {
+  string path = 1;
+  optional bytes base = 2;
+  optional bytes ours = 3;
+  optional bytes theirs = 4;
+}
+
+message ApiError {
+  message NotFound { string what = 1; }
+  message Collected { bytes id = 1; }
+  message InvalidPath { string path = 1; string reason = 2; }
+  message InvalidChange { string path = 1; string rule = 2; }
+  message UnknownParent { bytes id = 1; }
+  message MissingObjects { repeated bytes ids = 1; }
+  message RefConflict { string name = 1; optional bytes actual = 2; }
+  message Conflict { repeated ConflictPath paths = 1; bytes onto = 2; }
+  message Contended { string line = 1; bytes tip = 2; }
+  message Rejected { string policy = 1; string detail = 2; }
+  message PermissionDenied { string scope = 1; optional string path = 2; }
+  message LeaseExpired { string workspace = 1; }
+  message LimitExceeded { string limit = 1; uint64 max = 2; }
+  message CorruptObject { bytes id = 1; }
+  message Obliterated { bytes id = 1; }
+  message Unavailable { uint64 retry_after_ms = 1; }
+  message Unauthenticated {}
+  message IncompatibleProtocol { string server = 1; }
+  oneof error {
+    NotFound not_found = 1;
+    Collected collected = 2;
+    InvalidPath invalid_path = 3;
+    InvalidChange invalid_change = 4;
+    UnknownParent unknown_parent = 5;
+    MissingObjects missing_objects = 6;
+    RefConflict ref_conflict = 7;
+    Conflict conflict = 8;
+    Contended contended = 9;
+    Rejected rejected = 10;
+    PermissionDenied permission_denied = 11;
+    LeaseExpired lease_expired = 12;
+    LimitExceeded limit_exceeded = 13;
+    CorruptObject corrupt_object = 14;
+    Obliterated obliterated = 15;
+    Unavailable unavailable = 16;
+    Unauthenticated unauthenticated = 17;
+    IncompatibleProtocol incompatible_protocol = 18;
+  }
+}
+
+// ---- services -------------------------------------------------------------
+
+// Answered identically by every tier.
+service ObjectService {
+  // Frames arrive in pages; the last page carries `missing` and `deferred`.
+  rpc GetObjects(GetObjectsRequest) returns (stream Objects);
+  rpc HasObjects(HasObjectsRequest) returns (ObjectIds);
+  rpc PutObjects(stream PutObjectsRequest) returns (ObjectIds);
+}
+
+// Answered by the server; the node forwards it.
+service RepoService {
+  rpc CreateChangeset(CreateChangesetRequest) returns (Created);
+  rpc GetChangesets(GetChangesetsRequest) returns (Changesets);
+  rpc ResolveRef(ResolveRefRequest) returns (RefView);
+  rpc ListRefs(ListRefsRequest) returns (RefViews);
+  rpc UpdateRef(UpdateRefRequest) returns (RefView);
+  rpc Stat(PathAt) returns (EntryView);
+  rpc ListTree(ListTreeRequest) returns (Entries);
+  rpc ReadFile(PathAt) returns (FileContent);
+  rpc Log(LogRequest) returns (History);
+  rpc IsAncestor(Pair) returns (Bool);
+  rpc MergeBase(Pair) returns (OptionalChangeset);
+  rpc Diff(DiffRequest) returns (DiffResult);
+  rpc Blame(BlameRequest) returns (BlameResult);
+  rpc Rebase(RebaseRequest) returns (ChangesetRef);
+  rpc Revert(RevertRequest) returns (ChangesetRef);
+  rpc Land(LandRequest) returns (Landed);
+  rpc Attest(AttestRequest) returns (Empty);
+  rpc Watch(WatchRequest) returns (stream JournalPage);
+}
+
+service WorkspaceService {
+  rpc OpenWorkspace(OpenWorkspaceRequest) returns (WorkspaceView);
+  rpc GetWorkspace(WorkspaceRef) returns (WorkspaceView);
+  rpc ListWorkspaces(ListWorkspacesRequest) returns (WorkspaceViews);
+  rpc RenewLease(RenewLeaseRequest) returns (WorkspaceView);
+  rpc SetHead(SetHeadRequest) returns (WorkspaceView);
+  rpc Sync(SyncRequest) returns (Synced);
+  rpc Stack(StackRequest) returns (WorkspaceView);
+  rpc CloseWorkspace(CloseWorkspaceRequest) returns (Empty);
+}
+
+service AdminService {
+  rpc CreateRepo(CreateRepoRequest) returns (Empty);
+  rpc ImportChangesets(ImportChangesetsRequest) returns (CreatedList);
+  rpc Gc(GcRequest) returns (GcReport);
+  rpc MintToken(MintTokenRequest) returns (Token);
+}

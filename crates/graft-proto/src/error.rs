@@ -1,6 +1,8 @@
 //! The closed set of API errors (`docs/design.md` §7.10). An error never
 //! carries file contents or tokens.
 
+use std::fmt;
+
 use graft_model::{BlobId, ChangesetId, ObjectId};
 
 /// A path that conflicted in a rebase, sync or land, by id only.
@@ -137,3 +139,92 @@ impl ApiError {
 
 /// Result alias for API calls.
 pub type ApiResult<T> = Result<T, ApiError>;
+
+impl ApiError {
+    /// The gRPC status code this error travels under. The code is for
+    /// generic gRPC tooling; graft clients read the typed error from the
+    /// status details.
+    pub fn grpc_code(&self) -> tonic::Code {
+        use tonic::Code;
+        match self {
+            ApiError::NotFound { .. } | ApiError::Collected { .. } => Code::NotFound,
+            ApiError::Obliterated { .. } => Code::NotFound,
+            ApiError::InvalidPath { .. } | ApiError::InvalidChange { .. } => Code::InvalidArgument,
+            ApiError::UnknownParent { .. }
+            | ApiError::MissingObjects { .. }
+            | ApiError::Rejected { .. }
+            | ApiError::LeaseExpired { .. }
+            | ApiError::IncompatibleProtocol { .. } => Code::FailedPrecondition,
+            ApiError::RefConflict { .. }
+            | ApiError::Conflict { .. }
+            | ApiError::Contended { .. } => Code::Aborted,
+            ApiError::PermissionDenied { .. } => Code::PermissionDenied,
+            ApiError::LimitExceeded { .. } => Code::ResourceExhausted,
+            ApiError::CorruptObject { .. } => Code::DataLoss,
+            ApiError::Unavailable { .. } => Code::Unavailable,
+            ApiError::Unauthenticated => Code::Unauthenticated,
+        }
+    }
+
+    /// Reads the typed error from a status produced by `Status::from`.
+    /// Returns `None` for a status that carries no graft error (a transport
+    /// failure, or a peer that is not graft).
+    pub fn from_status(status: &tonic::Status) -> Option<ApiError> {
+        use prost::Message;
+        let wire = crate::pb::ApiError::decode(status.details()).ok()?;
+        ApiError::try_from(wire).ok()
+    }
+}
+
+impl From<ApiError> for tonic::Status {
+    fn from(e: ApiError) -> Self {
+        use prost::Message;
+        let code = e.grpc_code();
+        let message = e.to_string();
+        let details = crate::pb::ApiError::from(e).encode_to_vec();
+        tonic::Status::with_details(code, message, details.into())
+    }
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ApiError::NotFound { what } => write!(f, "not found: {what}"),
+            ApiError::Collected { id } => write!(f, "changeset {id} was collected"),
+            ApiError::InvalidPath { path, reason } => write!(f, "invalid path {path:?}: {reason}"),
+            ApiError::InvalidChange { path, rule } => {
+                write!(f, "invalid change at {path:?}: {rule}")
+            }
+            ApiError::UnknownParent { id } => write!(f, "unknown parent {id}"),
+            ApiError::MissingObjects { ids } => write!(f, "{} objects are missing", ids.len()),
+            ApiError::RefConflict { name, .. } => write!(f, "ref {name} moved"),
+            ApiError::Conflict { paths, onto } => {
+                write!(f, "{} paths conflict onto {onto}", paths.len())
+            }
+            ApiError::Contended { line, .. } => write!(f, "line {line} is contended"),
+            ApiError::Rejected { policy, detail } => write!(f, "rejected by {policy}: {detail}"),
+            ApiError::PermissionDenied { scope, path: None } => {
+                write!(f, "permission denied: needs {scope}")
+            }
+            ApiError::PermissionDenied {
+                scope,
+                path: Some(p),
+            } => write!(f, "permission denied: needs {scope} on {p:?}"),
+            ApiError::LeaseExpired { workspace } => {
+                write!(f, "workspace {workspace} lease expired")
+            }
+            ApiError::LimitExceeded { limit, max } => write!(f, "limit {limit} ({max}) exceeded"),
+            ApiError::CorruptObject { id } => write!(f, "object {} is corrupt", id.to_hex()),
+            ApiError::Obliterated { id } => write!(f, "blob {id} was obliterated"),
+            ApiError::Unavailable { retry_after_ms } => {
+                write!(f, "unavailable; retry after {retry_after_ms} ms")
+            }
+            ApiError::Unauthenticated => f.write_str("unauthenticated"),
+            ApiError::IncompatibleProtocol { server } => {
+                write!(f, "incompatible protocol; server speaks {server}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ApiError {}

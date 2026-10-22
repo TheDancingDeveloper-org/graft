@@ -1,0 +1,22 @@
+[package]
+name = "graft-proto-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+graft-proto = { path = ".." }
+libfuzzer-sys = "0.4"
+
+# Not a member of the graft workspace: built only by `cargo fuzz`.
+[workspace]
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+bench = false
