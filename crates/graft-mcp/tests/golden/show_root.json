@@ -1,0 +1,28 @@
+{
+  "changeset": {
+    "author": {
+      "email": "a1@example.test",
+      "kind": "agent",
+      "name": "author 1"
+    },
+    "authored_at": {
+      "ms": 1700000060000,
+      "offset_min": 0
+    },
+    "id": "c0101010101010101010101010101010101010101010101010101010101010101",
+    "lsn": 1,
+    "message": {
+      "text": "short subject\n\nbody 1",
+      "truncated": false
+    },
+    "metadata": {
+      "graft.test": "run 1"
+    },
+    "parent_count": 0,
+    "parents": [],
+    "state": "landed",
+    "superseded_by": null
+  },
+  "files": [],
+  "next": null
+}

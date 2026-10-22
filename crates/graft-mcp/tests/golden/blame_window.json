@@ -1,0 +1,70 @@
+{
+  "at": "c0303030303030303030303030303030303030303030303030303030303030303",
+  "next_start_line": null,
+  "path": "README.md",
+  "ranges": [
+    {
+      "end": 2,
+      "origin": {
+        "author": {
+          "email": "a1@example.test",
+          "kind": "agent",
+          "name": "author 1"
+        },
+        "authored_at": {
+          "ms": 1700000060000,
+          "offset_min": 0
+        },
+        "id": "c0101010101010101010101010101010101010101010101010101010101010101",
+        "line_pos": null,
+        "subject": {
+          "text": "short subject",
+          "truncated": false
+        }
+      },
+      "start": 0
+    },
+    {
+      "end": 4,
+      "origin": {
+        "author": {
+          "email": "a2@example.test",
+          "kind": "agent",
+          "name": "author 2"
+        },
+        "authored_at": {
+          "ms": 1700000120000,
+          "offset_min": 0
+        },
+        "id": "c0202020202020202020202020202020202020202020202020202020202020202",
+        "line_pos": null,
+        "subject": {
+          "text": "short subject",
+          "truncated": false
+        }
+      },
+      "start": 2
+    },
+    {
+      "end": 6,
+      "origin": {
+        "author": {
+          "email": "a3@example.test",
+          "kind": "agent",
+          "name": "author 3"
+        },
+        "authored_at": {
+          "ms": 1700000180000,
+          "offset_min": 0
+        },
+        "id": "c0303030303030303030303030303030303030303030303030303030303030303",
+        "line_pos": null,
+        "subject": {
+          "text": "short subject",
+          "truncated": false
+        }
+      },
+      "start": 4
+    }
+  ]
+}
