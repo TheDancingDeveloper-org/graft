@@ -1641,6 +1641,8 @@ dependencies = [
  "graft-model",
  "graft-proto",
  "graft-store",
+ "graft-testkit",
+ "rustix",
 ]
 
 [[package]]
