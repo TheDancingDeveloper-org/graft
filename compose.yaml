@@ -1,0 +1,191 @@
+# Local dev stack for graft. Read docs/dev-stack.md first.
+#
+# No service bind-mounts a host path. Configs are baked into the image, and the
+# obs images are built from this repository, so the stack works with a Docker
+# daemon on another host (the build context and file syncs go over the API).
+#
+# Services without a profile are the default stack: graft-server and graft-node
+# from the image. Profiles:
+#   dev         graft-server-dev, graft-node-dev, graft-mirror-dev: the same
+#               services. Load host binaries with scripts/dev/reload.sh (docker cp,
+#               works with a remote daemon); develop.watch may not work there.
+#               scripts/dev/up.sh --dev scales the default server and node to 0.
+#   mirror      graft-mirror following a local fixture git repo
+#   rusttorrent graft-mirror-rusttorrent cloning the rustTorrent repository
+#   obs         prometheus and grafana scraping /metrics
+#   tools       client, the graft CLI toolbox: docker compose run --rm client graft ...
+#
+# Host ports bind to 127.0.0.1 and default to values free on the dev host (7878,
+# 3000 and 9090 are taken there); override with GRAFT_DEV_SERVER_PORT,
+# GRAFT_DEV_PROMETHEUS_PORT and GRAFT_DEV_GRAFANA_PORT. Images and named volumes
+# are prefixed graft-dev. Nothing here holds a secret.
+name: graft-dev
+
+x-build: &build
+  image: graft-dev:local
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+    args:
+      CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-4}
+
+# A stub binary exits once with its "not implemented yet" line. Retry a few
+# times, then stop, so the stack never crash-loops silently.
+x-retry: &retry
+  restart: "on-failure:3"
+
+# Fast loop: copy the host debug binary into the running container and restart it.
+# The target is /opt/graft-dev/bin (writable by graft, first on PATH); the image
+# binary in /usr/local/bin is the fallback when no dev copy exists.
+x-watch-server: &watch-server
+  develop:
+    watch:
+      - action: sync+restart
+        path: ./target/debug/graft-server
+        target: /opt/graft-dev/bin/graft-server
+
+x-watch-node: &watch-node
+  develop:
+    watch:
+      - action: sync+restart
+        path: ./target/debug/graft-node
+        target: /opt/graft-dev/bin/graft-node
+
+x-watch-mirror: &watch-mirror
+  develop:
+    watch:
+      - action: sync+restart
+        path: ./target/debug/graft-mirror
+        target: /opt/graft-dev/bin/graft-mirror
+
+services:
+  # ---- default stack (no profile) -----------------------------------------
+
+  graft-server:
+    <<: [*build, *retry, *watch-server]
+    # init: PID 1 is a small init that exits when the server exits, so a killed
+    # server ends the container with a non-zero status and on-failure restarts it.
+    init: true
+    command: ["graft-server", "serve", "--config", "/etc/graft/server.toml"]
+    ports:
+      - "127.0.0.1:${GRAFT_DEV_SERVER_PORT:-17878}:7878"
+    volumes:
+      - graft-dev-server-objects:/var/lib/graft/objects
+      - graft-dev-server-meta:/var/lib/graft/meta
+    # healthcheck: add once the server serves /healthz (docs/dev-stack.md).
+
+  graft-node:
+    <<: [*build, *retry, *watch-node]
+    command: ["graft-node"]
+    volumes:
+      - graft-dev-run:/run/graft
+      - graft-dev-node-cache:/var/cache/graft
+
+  # ---- dev profile: the fast loop (same names and aliases) ----------------
+
+  graft-server-dev:
+    <<: [*build, *retry, *watch-server]
+    profiles: [dev]
+    init: true
+    command: ["graft-server", "serve", "--config", "/etc/graft/server.toml"]
+    ports:
+      - "127.0.0.1:${GRAFT_DEV_SERVER_PORT:-17878}:7878"
+    volumes:
+      - graft-dev-server-objects:/var/lib/graft/objects
+      - graft-dev-server-meta:/var/lib/graft/meta
+    networks:
+      default:
+        aliases: [graft-server]
+
+  graft-node-dev:
+    <<: [*build, *retry, *watch-node]
+    profiles: [dev]
+    command: ["graft-node"]
+    volumes:
+      - graft-dev-run:/run/graft
+      - graft-dev-node-cache:/var/cache/graft
+    networks:
+      default:
+        aliases: [graft-node]
+
+  graft-mirror-dev:
+    <<: [*build, *retry, *watch-mirror]
+    profiles: [dev]
+    entrypoint: ["sh", "/etc/graft-dev/mirror/fixture-entrypoint.sh"]
+    command: ["graft-mirror", "follow", "--config", "/etc/graft-dev/mirror/fixture.toml"]
+    volumes:
+      - graft-dev-mirror-fixture:/var/lib/graft/mirror
+    networks:
+      default:
+        aliases: [graft-mirror]
+
+  # ---- mirror profiles -----------------------------------------------------
+
+  graft-mirror:
+    <<: [*build, *retry, *watch-mirror]
+    profiles: [mirror]
+    entrypoint: ["sh", "/etc/graft-dev/mirror/fixture-entrypoint.sh"]
+    command: ["graft-mirror", "follow", "--config", "/etc/graft-dev/mirror/fixture.toml"]
+    volumes:
+      - graft-dev-mirror-fixture:/var/lib/graft/mirror
+
+  graft-mirror-rusttorrent:
+    <<: [*build, *retry, *watch-mirror]
+    profiles: [rusttorrent]
+    command: ["graft-mirror", "follow", "--config", "/etc/graft-dev/mirror/rusttorrent.toml"]
+    volumes:
+      - graft-dev-mirror-rusttorrent:/var/lib/graft/mirror
+
+  # ---- tools profile -------------------------------------------------------
+
+  client:
+    <<: *build
+    profiles: [tools]
+    command: ["graft", "version"]
+    working_dir: /work
+    volumes:
+      - graft-dev-run:/run/graft
+      - graft-dev-client-work:/work
+
+  # ---- obs profile ---------------------------------------------------------
+
+  prometheus:
+    build:
+      context: docker/dev/prometheus
+    image: graft-dev-prometheus:local
+    profiles: [obs]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.listen-address=0.0.0.0:9090
+    ports:
+      - "127.0.0.1:${GRAFT_DEV_PROMETHEUS_PORT:-19090}:9090"
+    volumes:
+      - graft-dev-prometheus:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    build:
+      context: docker/dev/grafana
+    image: graft-dev-grafana:local
+    profiles: [obs]
+    environment:
+      # Local, loopback-only dev dashboards: no login, editor role.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+    ports:
+      - "127.0.0.1:${GRAFT_DEV_GRAFANA_PORT:-13100}:3000"
+    volumes:
+      - graft-dev-grafana:/var/lib/grafana
+    restart: unless-stopped
+
+volumes:
+  graft-dev-server-objects:
+  graft-dev-server-meta:
+  graft-dev-run:
+  graft-dev-node-cache:
+  graft-dev-mirror-fixture:
+  graft-dev-mirror-rusttorrent:
+  graft-dev-client-work:
+  graft-dev-prometheus:
+  graft-dev-grafana:

@@ -1,0 +1,11 @@
+# graft-mirror dev configuration following a local fixture git repository.
+# Created by fixture-entrypoint.sh on first start. Key names are provisional
+# until the mirror crate's config lands (G1.14).
+[source]
+url = "file:///var/lib/graft/mirror/fixtures/graft-fixture.git"
+branch = "main"
+
+[graft]
+server = "http://graft-server:7878"
+repo = "graft-dev"
+line = "main"

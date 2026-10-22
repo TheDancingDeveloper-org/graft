@@ -1,0 +1,22 @@
+{
+  "changesets": [
+    {
+      "author": {
+        "email": "a1@example.test",
+        "kind": "agent",
+        "name": "author 1"
+      },
+      "authored_at": {
+        "ms": 1700000060000,
+        "offset_min": 0
+      },
+      "id": "c0101010101010101010101010101010101010101010101010101010101010101",
+      "line_pos": null,
+      "subject": {
+        "text": "short subject",
+        "truncated": false
+      }
+    }
+  ],
+  "next": null
+}
