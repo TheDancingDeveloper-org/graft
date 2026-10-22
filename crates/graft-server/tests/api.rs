@@ -398,6 +398,28 @@ fn admin_commands_and_their_exit_codes() {
     assert!(stdout.starts_with("v4.public."));
     assert!(out.stderr.is_empty());
 
+    // A key file others can read is refused by mint and by serve.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let key = site.dir.path().join("meta/signing.key");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let out = site.admin(&["token", "mint", "--subject", "x", "--scope", "repo:r:read"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("chmod 600"), "{stderr}");
+        let out = std::process::Command::new(common::bin())
+            .arg("--config")
+            .arg(&site.config)
+            .arg("serve")
+            .output()
+            .expect("run");
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("chmod 600"));
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+
     // The repository made offline is served.
     let token = stdout.trim().to_owned();
     let server = site.start();

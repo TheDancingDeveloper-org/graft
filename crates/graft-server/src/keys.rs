@@ -3,6 +3,10 @@
 //! The key file holds the raw 32-byte Ed25519 seed, mode 0600. It is created
 //! on first use, so a fresh server and `admin token mint` agree on one key
 //! without a separate setup step.
+//!
+//! An existing key file is refused unless it is a regular file owned by the
+//! user running the server with no group or other permission bits: a
+//! restored or copied key left at 0644 would let any local user mint tokens.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read as _, Write as _};
@@ -23,6 +27,7 @@ pub(crate) fn load_or_create(path: &Path) -> io::Result<SigningKey> {
 
 fn load(path: &Path) -> io::Result<SigningKey> {
     let mut file = fs::File::open(path)?;
+    check_private(path, &file.metadata()?)?;
     let mut seed = [0u8; SEED_LEN];
     file.read_exact(&mut seed)
         .map_err(|_| invalid(path, "must hold exactly 32 bytes"))?;
@@ -56,6 +61,50 @@ fn create(path: &Path) -> io::Result<SigningKey> {
     }
 }
 
+/// Refuses a key file that is not a private regular file of this user.
+#[cfg(unix)]
+fn check_private(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    if !meta.is_file() {
+        return Err(insecure(path, "is not a regular file"));
+    }
+    let mode = meta.mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(insecure(
+            path,
+            &format!("has mode {mode:03o}; run `chmod 600 {}`", path.display()),
+        ));
+    }
+    let me = rustix::process::geteuid().as_raw();
+    if meta.uid() != me {
+        return Err(insecure(
+            path,
+            &format!(
+                "is owned by uid {}, not uid {me} running graft-server; run `chown {me} {}`",
+                meta.uid(),
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_private(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    if meta.is_file() {
+        Ok(())
+    } else {
+        Err(insecure(path, "is not a regular file"))
+    }
+}
+
+fn insecure(path: &Path, why: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("refusing signing key file {}: it {why}", path.display()),
+    )
+}
+
 fn invalid(path: &Path, why: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -82,5 +131,36 @@ mod tests {
         }
         fs::write(&path, b"short").expect("write");
         assert!(load_or_create(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_or_world_readable_keys_are_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = graft_testkit::crash::TempDir::new("server-key-mode");
+        let path = dir.path().join("signing.key");
+        load_or_create(&path).expect("create");
+        for mode in [0o644, 0o640, 0o604, 0o660, 0o620, 0o602] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
+            let e = load_or_create(&path).expect_err("refused");
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+            let msg = e.to_string();
+            if mode & 0o077 != 0 {
+                assert!(msg.contains("chmod 600"), "{msg}");
+                assert!(msg.contains(&path.display().to_string()), "{msg}");
+            }
+        }
+        for mode in [0o600, 0o400, 0o700] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
+            load_or_create(&path).expect("private key loads");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_is_not_a_key() {
+        let dir = graft_testkit::crash::TempDir::new("server-key-dir");
+        let e = load(dir.path()).expect_err("refused");
+        assert!(e.to_string().contains("regular file"), "{e}");
     }
 }
