@@ -273,6 +273,23 @@ fn read_err(e: impl std::fmt::Display) -> GitError {
     GitError::Read(e.to_string())
 }
 
+/// Writes `data` as the object `kind` (gix hashes and stores it).
+struct Raw<'a>(gix::objs::Kind, &'a [u8]);
+
+impl gix::objs::WriteTo for Raw<'_> {
+    fn write_to(&self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+        out.write_all(self.1)
+    }
+
+    fn kind(&self) -> gix::objs::Kind {
+        self.0
+    }
+
+    fn size(&self) -> u64 {
+        self.1.len() as u64
+    }
+}
+
 impl Repo {
     /// Opens the repository at `path` (bare or not).
     pub(crate) fn open(path: &Path) -> Result<Repo, GitError> {
@@ -281,6 +298,62 @@ impl Repo {
             inner,
             trees: HashMap::new(),
         })
+    }
+
+    /// Opens the bare repository at `path`, creating it when there is none.
+    pub(crate) fn open_or_init(path: &Path) -> Result<Repo, GitError> {
+        let inner = match gix::open(path) {
+            Ok(inner) => inner,
+            Err(_) => gix::init_bare(path).map_err(read_err)?,
+        };
+        Ok(Repo {
+            inner,
+            trees: HashMap::new(),
+        })
+    }
+
+    /// Whether the object is stored here.
+    pub(crate) fn has(&self, sha: GitSha) -> bool {
+        self.inner
+            .has_object(gix::ObjectId::from_bytes_or_panic(&sha.0))
+    }
+
+    /// Stores an object and returns its sha, which is checked against the
+    /// hash of the bytes.
+    pub(crate) fn write(&self, kind: Kind, data: &[u8]) -> Result<GitSha, GitError> {
+        let id = self
+            .inner
+            .write_object(Raw(kind.gix(), data))
+            .map_err(|e| GitError::Write(e.to_string()))?
+            .detach();
+        let sha = to_sha(id);
+        if sha != hash(kind, data) {
+            return Err(GitError::Write(format!(
+                "stored {sha}, not the hash of its bytes"
+            )));
+        }
+        Ok(sha)
+    }
+
+    /// Points `name` (a full ref name) at `sha`.
+    pub(crate) fn set_ref(&self, name: &str, sha: GitSha) -> Result<(), GitError> {
+        let id = gix::ObjectId::from_bytes_or_panic(&sha.0);
+        self.inner
+            .reference(
+                name,
+                id,
+                gix::refs::transaction::PreviousValue::Any,
+                "graft export",
+            )
+            .map_err(|e| GitError::Write(format!("{name}: {e}")))?;
+        Ok(())
+    }
+
+    /// The root tree of a stored commit.
+    pub(crate) fn commit_tree(&self, sha: GitSha) -> Result<GitSha, GitError> {
+        let raw = parse_commit(&self.read(sha, Kind::Commit)?)
+            .ok_or_else(|| GitError::Read(format!("commit {sha} has an unexpected shape")))?;
+        Ok(raw.tree)
     }
 
     /// Resolves a full ref name to the commit it (after peeling tags) names.
