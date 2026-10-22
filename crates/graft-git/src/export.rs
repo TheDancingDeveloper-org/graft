@@ -1,7 +1,8 @@
 //! Deterministic export of graft changesets as git objects
 //! (`docs/design.md` §11.2).
 //!
-//! G1.8 needs only the sha recomputation, to verify import fidelity:
+//! The sha recomputation, which the import uses to verify fidelity and the
+//! exporter uses to write commits:
 //!
 //! - **blob:** `sha1("blob <len>\0" ‖ bytes)` ([`blob_sha`]);
 //! - **tree:** path copying from the parent commit's git tree
@@ -12,18 +13,17 @@
 //! - **commit:** the tree and parent lines, then the recorded raw headers and
 //!   message ([`commit_object`]).
 //!
-//! Writing the objects into a repository is G2.2.
+//! Writing the objects is [`crate::exporter`]: this module only computes
+//! shas, and reports each new tree through [`GitSource::put_tree`].
 
 use std::collections::BTreeMap;
 
-use graft_model::{BlobId, Change, ChangesetId, EntryKind};
-use graft_proto::CallContext;
-use graft_proto::api::{ObjectApi, RepoApi};
+use graft_model::{BlobId, Change, EntryKind};
 
 use crate::git::{
     self, Kind, RawEntry, canonical_mode, encode_tree, parse_tree, sort_entries, submodule_sha,
 };
-use crate::map::{ImportedCommit, MirrorMap, RawTree};
+use crate::map::{ImportedCommit, RawTree};
 use crate::{GitError, GitSha};
 
 /// Where the export reads git-side data: the parent's git trees and the git
@@ -33,6 +33,12 @@ pub trait GitSource {
     fn raw_tree(&mut self, sha: GitSha) -> Result<Vec<u8>, GitError>;
     /// The git sha of a graft blob.
     fn blob_sha(&mut self, id: BlobId) -> Result<GitSha, GitError>;
+    /// Receives each tree the export builds, raw. The default drops them:
+    /// the import only needs the shas.
+    fn put_tree(&mut self, raw: &[u8]) -> Result<(), GitError> {
+        let _ = raw;
+        Ok(())
+    }
 }
 
 /// The git sha of a blob with these bytes.
@@ -100,7 +106,11 @@ pub fn export_tree<S: GitSource>(
         root.at(r.dir.as_ref().map(|d| d.as_str())).raw = Some(r.tree.clone());
     }
     let (sha, _) = build(&root, "", parent_tree, src, &mut Learn::default())?;
-    Ok(sha.unwrap_or_else(empty_tree_sha))
+    let sha = sha.unwrap_or_else(empty_tree_sha);
+    if sha == empty_tree_sha() {
+        src.put_tree(b"")?;
+    }
+    Ok(sha)
 }
 
 /// The raw trees an import must record so that [`export_tree`] reproduces
@@ -215,6 +225,9 @@ fn build<S: GitSource>(
 ) -> Result<(Option<GitSha>, bool), GitError> {
     let is_root = path.is_empty();
     if let Some(raw) = &node.raw {
+        if let Some(raw) = raw {
+            src.put_tree(raw)?;
+        }
         return Ok((raw.as_deref().map(tree_sha), true));
     }
     let mut entries: Vec<RawEntry> = match base {
@@ -269,7 +282,9 @@ fn build<S: GitSource>(
         None
     } else {
         sort_entries(&mut entries);
-        Some(tree_sha(&encode_tree(&entries)))
+        let raw = encode_tree(&entries);
+        src.put_tree(&raw)?;
+        Some(tree_sha(&raw))
     };
     if is_root {
         predicted = Some(predicted.unwrap_or_else(empty_tree_sha));
@@ -301,21 +316,7 @@ fn build<S: GitSource>(
     Ok((predicted, dirty))
 }
 
-/// Computes (and records in `map`) the git commit for `changeset`, writing
-/// objects into `git_dir`. Repeatable: the same inputs give the same sha.
-pub async fn export<A: RepoApi + ObjectApi, M: MirrorMap>(
-    _api: &A,
-    _cx: &CallContext,
-    _map: &M,
-    _repo: &str,
-    _changeset: ChangesetId,
-    _committer: &Committer,
-    _git_dir: &std::path::Path,
-) -> Result<GitSha, GitError> {
-    todo!("G2.2 (full export)")
-}
-
-/// Committer identity for native changesets.
+/// Committer identity for native changesets (`docs/design.md` §11.2).
 #[derive(Clone, Debug)]
 pub struct Committer {
     /// Name.

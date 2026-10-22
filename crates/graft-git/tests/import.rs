@@ -5,13 +5,11 @@ mod common;
 
 use std::process::Command;
 
-use common::{Git, TempDir, check_every_commit};
+use common::{EMPTY_TREE, Git, TempDir, check_every_commit, varied_repo};
 use graft_git::import::{ImportConfig, ImportReport, SHA_KEY, import};
 use graft_git::map::{MemoryMirrorMap, MirrorMap};
 use graft_git::{GitError, GitSha};
 use graft_testkit::fake_api::{Call, FakeApi, admin_cx, block_on};
-
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 fn config(git: &Git, lines: &[&str]) -> ImportConfig {
     let mut c = ImportConfig::new(git.git_dir(), "r");
@@ -36,88 +34,6 @@ fn import_all(git: &Git, lines: &[&str]) -> (FakeApi, MemoryMirrorMap, ImportRep
     let report = run(&api, &map, &config(git, lines)).expect("import succeeds");
     check_every_commit(git, &api, &map);
     (api, map, report)
-}
-
-/// Merges, a side branch reached only through a merge, a second root,
-/// symlinks, executables, a submodule, an empty merge, tags, and a file that
-/// turns into a directory.
-fn varied_repo() -> Git {
-    let mut git = Git::init("varied");
-    git.write("README.md", b"hello\n");
-    git.write("src/lib.rs", b"pub fn a() {}\n");
-    git.write("bin/run.sh", b"#!/bin/sh\necho run\n");
-    git.chmod_x("bin/run.sh");
-    git.symlink("src/lib.rs", "link");
-    git.commit("initial");
-    git.run(&["tag", "-a", "v0.1", "-m", "first release"]);
-
-    git.run(&["checkout", "-q", "-b", "side"]);
-    git.write("src/side.rs", b"side\n");
-    git.commit("side work");
-    git.write("src/lib.rs", b"pub fn a() {}\npub fn side() {}\n");
-    git.commit("more side work");
-
-    git.run(&["checkout", "-q", "main"]);
-    git.write("docs/guide.md", b"guide\n");
-    git.chmod_x("README.md");
-    git.commit("docs, and README becomes executable");
-    git.tick();
-    git.run(&["merge", "-q", "--no-ff", "side", "-m", "merge side"]);
-
-    // A second root, merged in.
-    git.run(&["checkout", "-q", "--orphan", "other"]);
-    git.run(&["rm", "-rq", "--cached", "."]);
-    git.run(&["clean", "-fdq"]);
-    git.write("other/notes.txt", b"unrelated history\n");
-    git.commit("other root");
-    git.run(&["checkout", "-q", "-f", "main"]);
-    git.tick();
-    git.run(&[
-        "merge",
-        "-q",
-        "--no-ff",
-        "--allow-unrelated-histories",
-        "other",
-        "-m",
-        "merge other root",
-    ]);
-
-    // An empty merge: the tree is the first parent's.
-    git.run(&["checkout", "-q", "-b", "discarded"]);
-    git.write("discarded.txt", b"never merged\n");
-    git.commit("discarded work");
-    git.run(&["checkout", "-q", "main"]);
-    git.tick();
-    git.run(&[
-        "merge",
-        "-q",
-        "-s",
-        "ours",
-        "discarded",
-        "-m",
-        "empty merge",
-    ]);
-
-    // A submodule (gitlink) entry, file → directory, symlink retarget.
-    let sub = git.commit_tree(EMPTY_TREE, &[], "submodule target");
-    git.write(
-        ".gitmodules",
-        b"[submodule \"vendor/dep\"]\n\tpath = vendor/dep\n\turl = ../dep\n",
-    );
-    git.run(&[
-        "update-index",
-        "--add",
-        "--cacheinfo",
-        &format!("160000,{sub},vendor/dep"),
-    ]);
-    git.run(&["rm", "-q", "--cached", "link"]);
-    std::fs::remove_file(git.path().join("link")).unwrap();
-    git.symlink("README.md", "link");
-    std::fs::remove_file(git.path().join("docs/guide.md")).unwrap();
-    git.write("docs/guide.md/index.md", b"now a directory\n");
-    git.commit("submodule, retarget, file to directory");
-    git.run(&["tag", "light"]);
-    git
 }
 
 #[test]

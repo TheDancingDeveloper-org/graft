@@ -1791,6 +1791,7 @@ dependencies = [
  "graft-model",
  "graft-proto",
  "graft-testkit",
+ "proptest",
 ]
 
 [[package]]
