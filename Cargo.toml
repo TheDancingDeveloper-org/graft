@@ -40,6 +40,7 @@ graft-store-fs = { path = "crates/graft-store-fs" }
 graft-store-sqlite = { path = "crates/graft-store-sqlite" }
 graft-telemetry = { path = "crates/graft-telemetry" }
 graft-testkit = { path = "crates/graft-testkit" }
+imara-diff = "0.2"
 proptest = "1.7"
 prost = "0.14"
 protox = "0.9"
