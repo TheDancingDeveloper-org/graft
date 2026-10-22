@@ -48,6 +48,7 @@ where
     case!(derived_values_are_keyed_by_kind_version_and_key);
     case!(line_positions_are_per_line);
     case!(pagination_is_bounded);
+    case!(index_reads_page_in_order);
 }
 
 fn cs(n: u8) -> ChangesetId {
@@ -1205,4 +1206,114 @@ async fn counts_follow_states_and_leases<O: ObjectStore, M: MetaStore>(_objects:
     assert_eq!(workspaces(Some(1000)).await.expect("count"), 0);
     assert_eq!(workspaces(Some(1001)).await.expect("count"), 1);
     assert_eq!(workspaces(Some(i64::MAX)).await.expect("count"), 2);
+}
+
+async fn index_reads_page_in_order<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "index").await;
+    let other = new_repo(meta, "index-other").await;
+    let mut writes = Vec::new();
+    for (n, state) in [
+        (5, RecordState::Draft),
+        (1, RecordState::Abandoned),
+        (3, RecordState::Draft),
+        (2, RecordState::Draft),
+        (4, RecordState::Superseded),
+    ] {
+        writes.push(Write::PutChangeset {
+            id: cs(n),
+            content: vec![n],
+            record: record(state),
+        });
+    }
+    run_txn(meta, repo, txn(vec![], writes)).await;
+    run_txn(
+        meta,
+        other,
+        txn(
+            vec![],
+            vec![Write::PutChangeset {
+                id: cs(9),
+                content: vec![9],
+                record: record(RecordState::Draft),
+            }],
+        ),
+    )
+    .await;
+
+    // Drafts in id order, two at a time, resuming after the last id.
+    let first = meta
+        .list_records(repo, RecordState::Draft, None, 2)
+        .await
+        .expect("page");
+    assert_eq!(
+        first.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [cs(2), cs(3)]
+    );
+    let second = meta
+        .list_records(repo, RecordState::Draft, Some(cs(3)), 2)
+        .await
+        .expect("page");
+    assert_eq!(
+        second.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [cs(5)]
+    );
+    assert_eq!(second[0].1.state, RecordState::Draft);
+    let rest = meta
+        .list_records(repo, RecordState::Draft, Some(cs(5)), 2)
+        .await
+        .expect("page");
+    assert!(rest.is_empty());
+    let abandoned = meta
+        .list_records(repo, RecordState::Abandoned, None, 10)
+        .await
+        .expect("page");
+    assert_eq!(
+        abandoned.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [cs(1)]
+    );
+    let superseded = meta
+        .list_records(repo, RecordState::Superseded, None, 10)
+        .await
+        .expect("page");
+    assert_eq!(
+        superseded.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [cs(4)]
+    );
+
+    // Holder names of one object, in name order, resumable.
+    let object = oid(7);
+    let add = |holder: &str| Write::AddHolder {
+        object,
+        holder: holder.to_owned(),
+    };
+    run_txn(
+        meta,
+        repo,
+        txn(
+            vec![],
+            vec![add("upload:9:a"), add("c1"), add("ws:b"), add("ws:a")],
+        ),
+    )
+    .await;
+    let page = meta.holder_rows(repo, object, None, 2).await.expect("rows");
+    assert_eq!(page, ["c1", "upload:9:a"]);
+    let page = meta
+        .holder_rows(repo, object, Some("upload:9:a".to_owned()), 2)
+        .await
+        .expect("rows");
+    assert_eq!(page, ["ws:a", "ws:b"]);
+    let all = meta
+        .holder_rows(repo, object, None, 100)
+        .await
+        .expect("rows");
+    assert_eq!(
+        all.len() as u32,
+        meta.holders(repo, object).await.expect("count")
+    );
+    assert!(
+        meta.holder_rows(repo, oid(8), None, 10)
+            .await
+            .expect("rows")
+            .is_empty()
+    );
 }
