@@ -12,6 +12,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+futures-util.workspace = true
 graft-model.workspace = true
 graft-proto.workspace = true
 graft-store.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic = { workspace = true, features = ["gzip"] }

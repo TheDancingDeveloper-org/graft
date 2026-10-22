@@ -6,4 +6,5 @@
 pub mod clock;
 pub mod crash;
 pub mod fake_api;
+pub mod server;
 pub mod synth;
