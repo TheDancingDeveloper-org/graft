@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    ChangesetRecord, Lsn, MetaStore, MetaTxn, RefRecord, RepoId, StoreError, StoreResult,
-    TxnOutcome, WorkspaceRecord,
+    ChangesetRecord, Lsn, MetaStore, MetaTxn, RecordState, RefRecord, RepoId, StoreError,
+    StoreResult, TxnOutcome, WorkspaceRecord,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -245,6 +245,28 @@ impl MetaStore for SqliteMetaStore {
         limit: u32,
     ) -> StoreResult<Vec<WorkspaceRecord>> {
         self.read(move |c| reader::expired_workspaces(c, repo, before_ms, limit))
+            .await
+    }
+
+    async fn list_workspaces(
+        &self,
+        repo: RepoId,
+        owner: &str,
+        after: &str,
+        limit: u32,
+    ) -> StoreResult<Vec<WorkspaceRecord>> {
+        let (owner, after) = (owner.to_owned(), after.to_owned());
+        self.read(move |c| reader::list_workspaces(c, repo, &owner, &after, limit))
+            .await
+    }
+
+    async fn count_records(&self, repo: RepoId, state: RecordState) -> StoreResult<u64> {
+        self.read(move |c| reader::count_records(c, repo, state))
+            .await
+    }
+
+    async fn count_workspaces(&self, repo: RepoId, before_ms: Option<i64>) -> StoreResult<u64> {
+        self.read(move |c| reader::count_workspaces(c, repo, before_ms))
             .await
     }
 

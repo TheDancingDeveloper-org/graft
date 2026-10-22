@@ -5,6 +5,10 @@
 //! G2.7 (rebase and sync), G3.1 (land and policies), G3.7 (revert, stacks,
 //! line merge).
 //!
+//! G2.1 adds the workspace API (`OpenWorkspace`, `GetWorkspace`,
+//! `ListWorkspaces`, `RenewLease`, `SetHead`, `CloseWorkspace`), drafts held
+//! by workspaces, [`Engine::expire_leases`] and [`Engine::gauges`].
+//!
 //! Phase 1 (G1.7) answers `CreateRepo`, the object API, `CreateChangeset`,
 //! `ImportChangesets`, `GetChangesets`, `ResolveRef`, `ListRefs`,
 //! `UpdateRef`, `Stat`, `ListTree`, `ReadFile`, `Diff` and `Watch`; G1.10
@@ -34,10 +38,12 @@ pub mod policy;
 mod read;
 mod refs;
 mod source;
+mod workspace;
 mod write;
 
 pub use diff::MAX_CONTEXT;
 pub use refs::MAX_REF_NAME;
+pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
 pub use write::MAX_REPO_NAME;
 
 /// Engine limits and defaults (`docs/design.md` §4, §7, §8).
@@ -53,6 +59,10 @@ pub struct EngineConfig {
     pub land_attempts: u32,
     /// Default workspace lease, ms.
     pub default_lease_ms: u64,
+    /// Longest workspace lease a request may ask for, ms.
+    pub max_lease_ms: u64,
+    /// Most drafts in one workspace stack (between its base and head).
+    pub max_stack: u32,
     /// Reject paths a common filesystem cannot hold (`portable_paths`).
     pub portable_paths: bool,
     /// Most ids per `GetObjects`, `HasObjects`, `PutObjects` or
@@ -92,6 +102,8 @@ impl Default for EngineConfig {
             max_inline_bytes: 4 << 20,
             land_attempts: 16,
             default_lease_ms: 2 * 3600 * 1000,
+            max_lease_ms: 24 * 3600 * 1000,
+            max_stack: 1000,
             portable_paths: false,
             max_ids: 1024,
             max_get_bytes: 64 << 20,
@@ -251,36 +263,32 @@ where
 {
     async fn open_workspace(
         &self,
-        _cx: &CallContext,
-        _req: OpenWorkspace,
+        cx: &CallContext,
+        req: OpenWorkspace,
     ) -> ApiResult<WorkspaceView> {
-        todo!("G2.1")
+        self.do_open_workspace(cx, req).await
     }
-    async fn get_workspace(
-        &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-    ) -> ApiResult<WorkspaceView> {
-        todo!("G2.1")
+    async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
+        self.do_get_workspace(cx, req).await
     }
     async fn list_workspaces(
         &self,
-        _cx: &CallContext,
-        _repo: String,
-        _page: Page,
+        cx: &CallContext,
+        repo: String,
+        page: Page,
     ) -> ApiResult<Vec<WorkspaceView>> {
-        todo!("G2.1")
+        self.do_list_workspaces(cx, repo, page).await
     }
     async fn renew_lease(
         &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-        _lease_ms: u64,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        lease_ms: u64,
     ) -> ApiResult<WorkspaceView> {
-        todo!("G2.1")
+        self.do_renew_lease(cx, req, lease_ms).await
     }
-    async fn set_head(&self, _cx: &CallContext, _req: SetHead) -> ApiResult<WorkspaceView> {
-        todo!("G2.1")
+    async fn set_head(&self, cx: &CallContext, req: SetHead) -> ApiResult<WorkspaceView> {
+        self.do_set_head(cx, req).await
     }
     async fn sync(
         &self,
@@ -300,11 +308,11 @@ where
     }
     async fn close_workspace(
         &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-        _keep_drafts: bool,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        keep_drafts: bool,
     ) -> ApiResult<()> {
-        todo!("G2.1")
+        self.do_close_workspace(cx, req, keep_drafts).await
     }
 }
 

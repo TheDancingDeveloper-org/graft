@@ -16,6 +16,7 @@ use graft_store::{
 };
 
 use crate::access::{Need, require};
+use crate::workspace::{CAS_RETRIES, contended};
 use crate::{Engine, errors, journal};
 
 /// The longest ref name, in bytes.
@@ -154,50 +155,62 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         // The target exists here (and is not collected).
         self.changeset(repo, req.new).await?;
 
-        let mut writes = Vec::new();
-        if kind == StoredKind::Line && actual != Some(req.new) {
-            writes = self.line_rows(repo, &req.name, actual, req.new).await?;
-        }
         let version = current.as_ref().map_or(1, |r| r.version + 1);
-        writes.push(Write::SetRef(RefRecord {
-            name: req.name.clone(),
-            target: req.new,
-            version,
-            kind,
-        }));
-        writes.push(journal::ref_moved(
-            &req.name,
-            actual,
-            req.new,
-            version,
-            &cx.principal.subject,
-        ));
-        let txn = MetaTxn {
-            preconditions: vec![Precondition::RefIs {
+        // Records the move lands are guarded by their state, so a concurrent
+        // workspace transition cannot be overwritten; losing that race
+        // (and only that) is retried.
+        for _ in 0..CAS_RETRIES {
+            let mut preconditions = vec![Precondition::RefIs {
                 name: req.name.clone(),
                 expected: current.as_ref().map(|r| (r.target, r.version)),
-            }],
-            writes,
-        };
-        match self.meta.commit(repo, txn).await.map_err(errors::store)? {
-            TxnOutcome::Committed(_) => Ok(RefView {
-                name: req.name,
+            }];
+            let mut writes = Vec::new();
+            if kind == StoredKind::Line && actual != Some(req.new) {
+                writes = self
+                    .line_rows(repo, &req.name, actual, req.new, &mut preconditions)
+                    .await?;
+            }
+            writes.push(Write::SetRef(RefRecord {
+                name: req.name.clone(),
                 target: req.new,
                 version,
-                kind: to_api(kind),
-            }),
-            TxnOutcome::PreconditionFailed(_) => {
-                let now = self
-                    .meta
-                    .get_ref(repo, &req.name)
-                    .await
-                    .map_err(errors::store)?;
-                Err(ApiError::RefConflict {
-                    name: req.name,
-                    actual: now.map(|r| r.target),
-                })
+                kind,
+            }));
+            writes.push(journal::ref_moved(
+                &req.name,
+                actual,
+                req.new,
+                version,
+                &cx.principal.subject,
+            ));
+            let txn = MetaTxn {
+                preconditions,
+                writes,
+            };
+            match self.meta.commit(repo, txn).await.map_err(errors::store)? {
+                TxnOutcome::Committed(_) => {
+                    return Ok(RefView {
+                        name: req.name,
+                        target: req.new,
+                        version,
+                        kind: to_api(kind),
+                    });
+                }
+                TxnOutcome::PreconditionFailed(0) => {
+                    let now = self
+                        .meta
+                        .get_ref(repo, &req.name)
+                        .await
+                        .map_err(errors::store)?;
+                    return Err(ApiError::RefConflict {
+                        name: req.name,
+                        actual: now.map(|r| r.target),
+                    });
+                }
+                TxnOutcome::PreconditionFailed(_) => {}
             }
         }
+        Err(contended())
     }
 
     /// The repository id for an `UpdateRef`. Without any scope on the
@@ -217,6 +230,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         line: &str,
         old: Option<ChangesetId>,
         new: ChangesetId,
+        guards: &mut Vec<Precondition>,
     ) -> Result<Vec<Write>, ApiError> {
         let mut writes = Vec::new();
         let new_skips = self.skips(repo, new, &mut writes).await?;
@@ -256,6 +270,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         );
         for (cs, mut record) in chain {
             if record.state != RecordState::Landed {
+                guards.push(Precondition::RecordStateIs {
+                    id: cs.id(),
+                    state: record.state,
+                });
                 record.state = RecordState::Landed;
                 record.holder = None;
                 writes.push(Write::SetRecord {
@@ -269,7 +287,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 
     /// A changeset's skip list, adding rows for any values the walk had to
     /// compute (after a kind version bump).
-    async fn skips(
+    pub(crate) async fn skips(
         &self,
         repo: RepoId,
         id: ChangesetId,
@@ -285,7 +303,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     /// The first-parent ancestor of `id` at `distance`, by skip-list jumps.
-    async fn ancestor_at(
+    pub(crate) async fn ancestor_at(
         &self,
         repo: RepoId,
         id: ChangesetId,

@@ -106,6 +106,22 @@ pub enum Precondition {
     /// The changeset is not stored yet. This makes an insert idempotent: a
     /// retry fails this precondition and writes nothing.
     ChangesetAbsent(ChangesetId),
+    /// The workspace is exactly `expected`, or absent for `None`. This is the
+    /// compare in a whole-record workspace CAS (open, renew, close).
+    WorkspaceIs {
+        /// Workspace name.
+        name: String,
+        /// Expected record.
+        expected: Option<WorkspaceRecord>,
+    },
+    /// The changeset is stored and its record is in `state`. This guards a
+    /// record transition against a concurrent one.
+    RecordStateIs {
+        /// Changeset.
+        id: ChangesetId,
+        /// Expected state.
+        state: RecordState,
+    },
 }
 
 /// One write inside a transaction.
@@ -267,6 +283,30 @@ pub trait MetaStore: Send + Sync {
         before_ms: i64,
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send;
+    /// Lists `owner`'s workspaces in name order, names after `after` (all
+    /// from the start for `""`), up to `limit`.
+    fn list_workspaces(
+        &self,
+        repo: RepoId,
+        owner: &str,
+        after: &str,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send;
+    /// Counts the changesets whose record is in `state`. The cost follows
+    /// that population (drafts, superseded, abandoned), so it is not for
+    /// `Landed`.
+    fn count_records(
+        &self,
+        repo: RepoId,
+        state: RecordState,
+    ) -> impl Future<Output = StoreResult<u64>> + Send;
+    /// Counts workspaces: all of them, or with `Some(before_ms)` those whose
+    /// lease ends before it.
+    fn count_workspaces(
+        &self,
+        repo: RepoId,
+        before_ms: Option<i64>,
+    ) -> impl Future<Output = StoreResult<u64>> + Send;
     /// Reads a derived value.
     fn derived(
         &self,
@@ -363,6 +403,29 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
         (**self).expired_workspaces(repo, before_ms, limit)
+    }
+    fn list_workspaces(
+        &self,
+        repo: RepoId,
+        owner: &str,
+        after: &str,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        (**self).list_workspaces(repo, owner, after, limit)
+    }
+    fn count_records(
+        &self,
+        repo: RepoId,
+        state: RecordState,
+    ) -> impl Future<Output = StoreResult<u64>> + Send {
+        (**self).count_records(repo, state)
+    }
+    fn count_workspaces(
+        &self,
+        repo: RepoId,
+        before_ms: Option<i64>,
+    ) -> impl Future<Output = StoreResult<u64>> + Send {
+        (**self).count_workspaces(repo, before_ms)
     }
     fn derived(
         &self,

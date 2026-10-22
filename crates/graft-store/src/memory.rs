@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 
 use crate::meta::{
-    ChangesetRecord, Lsn, MetaStore, MetaTxn, Precondition, RefRecord, TxnOutcome, WorkspaceRecord,
-    Write,
+    ChangesetRecord, Lsn, MetaStore, MetaTxn, Precondition, RecordState, RefRecord, TxnOutcome,
+    WorkspaceRecord, Write,
 };
 use crate::object::{ObjectStore, StoreStats};
 use crate::{RepoId, StoreError, StoreResult, page_limit};
@@ -69,6 +69,13 @@ impl Repo {
                 self.workspaces.get(name).is_some_and(|ws| ws.head == *head)
             }
             Precondition::ChangesetAbsent(id) => !self.changesets.contains_key(id),
+            Precondition::WorkspaceIs { name, expected } => {
+                self.workspaces.get(name) == expected.as_ref()
+            }
+            Precondition::RecordStateIs { id, state } => self
+                .changesets
+                .get(id)
+                .is_some_and(|(_, record)| record.state == *state),
         }
     }
 }
@@ -375,6 +382,57 @@ impl MetaStore for MemoryStore {
                 .take(page_limit(limit))
                 .cloned()
                 .collect())
+        }))
+    }
+
+    fn list_workspaces(
+        &self,
+        repo: RepoId,
+        owner: &str,
+        after: &str,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        ready(self.with(|st| {
+            use std::ops::Bound;
+            Ok(st
+                .repo(repo)?
+                .workspaces
+                .range::<str, _>((Bound::Excluded(after), Bound::Unbounded))
+                .map(|(_, ws)| ws)
+                .filter(|ws| ws.owner == owner)
+                .take(page_limit(limit))
+                .cloned()
+                .collect())
+        }))
+    }
+
+    fn count_records(
+        &self,
+        repo: RepoId,
+        state: RecordState,
+    ) -> impl Future<Output = StoreResult<u64>> + Send {
+        ready(self.with(|st| {
+            Ok(st
+                .repo(repo)?
+                .changesets
+                .values()
+                .filter(|(_, record)| record.state == state)
+                .count() as u64)
+        }))
+    }
+
+    fn count_workspaces(
+        &self,
+        repo: RepoId,
+        before_ms: Option<i64>,
+    ) -> impl Future<Output = StoreResult<u64>> + Send {
+        ready(self.with(|st| {
+            Ok(st
+                .repo(repo)?
+                .workspaces
+                .values()
+                .filter(|ws| before_ms.is_none_or(|b| ws.lease_until_ms < b))
+                .count() as u64)
         }))
     }
 
