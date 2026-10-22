@@ -548,7 +548,7 @@ journal entry*. That scope is what lets it move later to a sharded store.
 | journal | append (inside the write transactions above), `read(from_lsn, limit)`, `tail` notifications |
 | derived | get/put by `(kind, version, key)` |
 | line index | append rows on land (same transaction as the ref CAS); range scans |
-| holders | add/remove `(object, holder)` rows, read by object or by holder; parent pins; uploads with expiry; doomed and deleting marks (§8.6) |
+| holders | add/remove `(object, holder)` rows, read by object or by holder; parent pins; uploads and claims with expiry; doomed and deleting marks (§8.6) |
 | lands | idempotency records `(draft, ref) → landed` |
 
 Every port ships with the **conformance suite** in `graft-store`. Each
@@ -617,8 +617,9 @@ metadata transaction is the commit point.**
 
 1. Blobs are uploaded (`PutObjects`) and are durable when acknowledged. Each is
    recorded as an *upload* with an expiry and the uploader.
-2. `CreateChangeset` derives trees, writes them to the object store, and then
-   runs one metadata transaction: content, record, holders, eager derived
+2. `CreateChangeset` derives trees, writes them to the object store, claims
+   any referenced object that is doomed (§8.6), and then runs one metadata
+   transaction: content, record, holders, eager derived
    data, journal entry.
 3. `Land` writes its rebased candidate as in step 2, then runs one transaction:
    ref CAS, line index rows, record states, land record, journal entry.
@@ -850,7 +851,9 @@ return Contended{ line, tip }
 - A lost race costs one rebase on the server, with no client round trip. Two
   lands on disjoint files both succeed, and the line ends with both changes.
 - The loser's rejected candidates are drafts held only by a land-attempt
-  lease. They lapse in minutes and are collected (§8.6).
+  lease. Each gets `expires_at` when written, so they are collected minutes
+  later even if the server crashes (§8.6). The CAS transaction clears
+  `expires_at` and sets `pins` to 0 on the candidates that land.
 - **Per-line combining (phase 4):** under heavy contention, each line gets a
   single in-process sequencer per server, which batches the queued lands. It
   rebases each onto the previous one and does one CAS for the batch, moving the
@@ -916,14 +919,24 @@ land-attempt lease. A changeset that is abandoned or superseded has none and
 waits out its retention window.
 
 **Expiry.** A record gets `expires_at` when it stops being a draft. Drafts
-and landed changesets have none.
+held by a workspace and landed changesets have none. A draft held by a
+land-attempt lease is the exception: it gets `expires_at` when it is
+written, because no other step would ever end its lease.
 
 | What | `expires_at` |
 | --- | --- |
-| land-attempt candidates that lost | 10 minutes after the attempt |
-| drafts in a closed workspace, or one whose lease lapsed | the close (or lapse) time plus the draft retention window (7 days by default) |
+| land-attempt candidates | set when written: the end of the land-attempt lease (10 minutes). The land transaction clears it for the candidates that land |
+| drafts in a closed workspace, or one whose lease lapsed | the close time, or `lease_until` for a lapse, plus the draft retention window (7 days by default) |
 | superseded drafts | the supersede time plus the same window |
 | uploads never claimed by a changeset | 1 hour after upload (on the upload row) |
+
+A candidate whose server crashed before the outcome is never written again.
+Its `expires_at` from creation still passes, so it is collected like any
+loser. The lease is longer than any land deadline, so a live land never
+races it. The land transaction also preconditions that the candidate is not
+collected, so a stalled server fails its CAS (`Contended`) instead of landing
+a collected record. The G2.9 dry run never treats a `land:` holder as gone;
+the sweep reads `expires_at` and does not have that gap.
 
 Adopting an abandoned changeset (`SetHead`) makes it a draft again and
 clears `expires_at`. Workspace leases are short (default 2 hours, renewed by
@@ -945,11 +958,16 @@ changeset:
   derives, including the root). An upload lease holds a row for each object
   it uploaded until it expires. Rows are a set, indexed both by object and by
   holder.
-- **Parent pins** `pins` on the changeset record: the number of
-  non-collected changesets that name it as a parent. A changeset with
-  `pins > 0` is never collected. Only non-landed parents are pinned. A landed
-  changeset is never collected, so a pin on it would only add a hot row at
-  the line tip.
+- **Parent pins** `pins` on the changeset record: on a non-landed record,
+  the number of non-collected changesets that name it as a parent. A
+  changeset with `pins > 0` is never collected. Only non-landed parents are
+  pinned. A landed changeset is never collected, so a pin on it would only
+  add a hot row at the line tip. When a pinned record lands, the land
+  transaction sets its `pins` to 0, and collection takes no pin off a parent
+  that has landed. It decides by the parent's state inside its own
+  transaction. So `pins` is 0 on every landed record. A landed changeset's
+  parents are all landed (§8.1 lands a whole chain whose bottom's first
+  parent is the tip), so every pin comes from a non-landed child.
 
 **The invariant.** Every object in a non-collected changeset's snapshot has
 a row whose holder is not collected. The argument is short. An object in
@@ -967,12 +985,14 @@ although it writes rows only for its own changes.
 | --- | --- |
 | `CreateChangeset`, and everything that writes through it (`Rebase`, `Sync`, land candidates, `Revert`, `commit --amend`, stack operations, import) | rows for its changed paths; one pin on each non-landed parent |
 | `PutObjects` | an upload row with its expiry |
-| a write that references a doomed object | clears the doomed mark (revival) |
+| a write that references or re-puts a doomed object | a claim row with its expiry, and clears the doomed mark, before its commit (revival) |
+| the commit of a write that references a doomed object | clears the doomed mark (revival) |
 
 **Paths that remove protection:** only the sweep, when it collects a record
-(its rows, and one pin on each non-landed parent) or an expired upload (its
-row). A state change (draft to landed, superseded or abandoned) touches no
-row. A landed changeset's rows stay forever.
+(its rows, and one pin on each non-landed parent) or an expired upload or
+claim (its row). A state change (draft to landed, superseded or abandoned)
+touches no row. Landing zeroes the record's own `pins`, which then mean
+nothing (above). A landed changeset's rows stay forever.
 
 **Successors keep their objects.** When a superseded record `A` expires and
 its successor `S = A.superseded_by` is not collected, every row of `A` for an
@@ -994,7 +1014,11 @@ metadata transaction with its journal entry.
 0. **Lapse.** Workspaces whose lease ended are found by a range scan on
    `lease_until`. Each is closed: its drafts become abandoned with
    `expires_at = lease_until + retention`, and `WorkspaceClosed` is
-   journalled. The workspace CAS guards against a concurrent renewal.
+   journalled. The drafts are found from the workspace's head, by walking
+   first parents while the parent is a draft held by that workspace, so the
+   cost is the stack's length. The workspace CAS guards against a concurrent
+   renewal. Land-attempt drafts need no lapse step: their `expires_at` was
+   set when they were written.
 1. **Collect.** Records with `expires_at ≤ now` and `pins = 0` are found by a
    range scan on an index of exactly those records. For each record `R`:
    1. read its content (parents and changes) and its rows by the holder
@@ -1008,27 +1032,48 @@ metadata transaction with its journal entry.
 
    A parent that reaches `pins = 0` and is already expired enters the scan
    range, and the same pass collects it. A long stack unwinds from the top.
-2. **Uploads.** Expired upload rows are found by a range scan on `expires`
-   and removed, with the same doom rule.
+2. **Uploads and claims.** Expired upload and claim rows are found by a
+   range scan on `expires` and removed, with the same doom rule.
 3. **Delete.** Doomed objects older than the grace period (longer than the
    longest request deadline, by default 15 minutes) are found by a range scan
    on `since`. For each: one transaction marks it `deleting`, with the
    precondition that it is still doomed and has no row; the frame is deleted
    from the object store; a second transaction removes the doomed row.
-4. **Revival.** A write that references a doomed object clears the mark in
-   its own transaction, so the object is kept. A write that references an
-   object in `deleting` fails that precondition. `CreateChangeset` then
-   returns `MissingObjects` for blobs named by id, and waits and retries for
-   the trees it derives (it puts the frame again once the delete is done).
-   `PutObjects` returns `Unavailable { retry_after }` until the delete is
-   done, and then stores the frame again. Either way nothing that is held is
-   ever deleted, and nothing acknowledged points at a deleted frame.
+4. **Revival.** A put of a frame that already exists does not touch the
+   marks, so revival cannot wait for the commit alone. A tree derived and
+   put before the commit can be doomed long before the write starts, and be
+   deleted between the put and the commit. Revival has two parts.
+   1. **Claim, before the commit.** A write reads the doomed and `deleting`
+      marks of every object it references or puts: the blobs it names by id
+      and the trees it derives. This read is O(change). If one is doomed, a
+      transaction clears the mark and adds a *claim row*
+      `claim:<expires>:<request_id>` that expires after the request
+      deadline. Its precondition is that the object is still doomed and not
+      `deleting`. If one is `deleting`, `CreateChangeset` returns
+      `MissingObjects` for a blob named by id. For a tree it derives, it
+      waits for the delete to finish and puts the frame again. `PutObjects`
+      returns `Unavailable { retry_after }` until the delete is done, and
+      then stores the frame again. Only after the claim does the write check
+      that every frame it references exists.
+   2. **Commit.** The commit transaction clears the doomed mark of any object
+      it references, for objects doomed after the claim read.
+
+   This holds because an object is deleted only after it has been doomed for
+   the grace period, which is longer than any request deadline. An object
+   doomed when the write read it has a claim row, so step 3's precondition
+   fails. An object doomed after that read cannot reach its delete before the
+   write commits, and the commit clears the mark. An object deleted before
+   the read has no frame, and the existence check catches it. So nothing that
+   is held is ever deleted, and nothing acknowledged points at a deleted
+   frame. A claim row left by a write that never commits expires, and step 2
+   dooms the object again.
 
 **Cost.** Collecting a record costs O(changes × depth) tree reads (the
 successor check), one row write per row it held, and one pin write per
 parent. Each object costs O(1) per doom, revival or delete. Every scan is an
 index range over what is collectable now. Writes gain one pin per non-landed
-parent and one `deleting` check per object they reference. Nothing reads the
+parent, and one mark read per object they reference or put. They write a
+claim only for an object that is doomed. Nothing reads the
 journal, walks ancestry, or opens a snapshot, so the cost follows the change
 being collected, not the size of the history.
 
@@ -1042,9 +1087,13 @@ being collected, not the size of the history.
 - **Adoption racing collection.** `SetHead` changes the record (draft,
   `expires_at` cleared), so the collection's precondition fails.
 - **Revival racing a delete.** The `deleting` mark is set in a transaction
-  that checks for rows, and every write checks for it. A write either keeps
-  the object (it commits first) or waits for the delete and puts the frame
-  again.
+  that checks the object is doomed and has no row. A claim clears the doomed
+  mark and adds a row in a transaction that checks the object is not
+  `deleting`. One of them commits first. If the claim wins, the delete skips
+  the object. If the delete wins, the write waits for it and puts the frame
+  again, or returns `MissingObjects`. A tree put before the claim read cannot
+  slip through: the claim reads the marks after the put, and the frame check
+  comes after the claim.
 - **Crash mid-sweep.** Every step is one transaction, so a crash leaves a
   consistent state. A `deleting` row found at start-up is finished: the
   frame delete is idempotent, then the row is removed. Objects are durable
@@ -1065,9 +1114,11 @@ before the server serves:
    mark on doomed rows; and the `expires` index on uploads;
 2. reads only non-landed records, through the state index, never landed
    history. For each draft, abandoned or superseded record it adds one pin to
-   each non-landed parent. For each abandoned or superseded record it sets
-   `expires_at` to the migration time plus the retention window, because the
-   end time was never stored;
+   each non-landed parent. Landed records keep `pins = 0`. For each abandoned
+   or superseded record it sets `expires_at` to the migration time plus the
+   retention window, because the end time was never stored. For each draft
+   held by a land-attempt lease it sets `expires_at` to the migration time
+   plus that lease;
 3. recomputes the objects on each non-landed record's changed paths and adds
    any missing row. This should add none, and the count is reported;
 4. sets the repository's `gc_protection` marker in the last batch's
@@ -1082,7 +1133,9 @@ dry run works either way.
 | Failure | Effect | Handling |
 | --- | --- | --- |
 | A write path misses a row or a pin (a bug) | A held object could be doomed and deleted | The grace period and revival catch a live reference. Deletion is off per repository until the operator turns it on. `graft admin gc --dry-run --verify` checks the plan against the G2.9 ancestry walk and refuses to sweep on a mismatch. The G3.2 property test checks the invariant over random interleavings |
-| Pin leak (a count too high) | An expired record is never collected | `graft_orphans{state="pinned"}` shows it. `fsck` recomputes pins from non-landed records and repairs them |
+| Pin leak (a count too high) | An expired record is never collected | `graft_orphans{state="pinned"}` shows it. `fsck` recomputes each non-landed record's pins from the non-landed records that name it as a parent, sets landed records to 0, and repairs any difference. It reads no landed history, because only non-landed records pin |
+| A land server crashes after writing candidates | Its drafts have no live holder | They carry `expires_at` from creation and are collected like any loser |
+| A write crashes after claiming | The claim row keeps the object | The claim expires after the request deadline, and step 2 dooms the object again |
 | Successor already collected | No rows move | Safe: a live changeset never depends on a collected one |
 | Server clock jumps forward | Records expire early | Bounded by the retention window. Only the server's clock is used, never a client's |
 | A long stack expires at once | Many collections in one pass | The batch limit stops the pass. The next pass continues from the index |
