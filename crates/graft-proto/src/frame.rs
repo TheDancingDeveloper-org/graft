@@ -26,6 +26,11 @@ pub const GZIP_MIN_SAVING_PERCENT: usize = 10;
 /// The gzip level used for frame bodies.
 pub const GZIP_LEVEL: u32 = 6;
 
+/// The largest payload a frame may declare: 64 MiB, the default blob limit
+/// (`docs/design.md` §4.3). The decoder rejects a larger header before it
+/// reads or allocates anything, so a forged length can't exhaust memory.
+pub const MAX_FRAME_PAYLOAD: u64 = 64 * 1024 * 1024;
+
 /// How a frame body is encoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Codec {
@@ -69,6 +74,8 @@ pub enum FrameError {
     LengthMismatch,
     /// The payload does not hash to the expected id.
     HashMismatch,
+    /// The header declares more than [`MAX_FRAME_PAYLOAD`] bytes.
+    TooLarge(u64),
     /// The body failed to decompress.
     Codec(String),
 }
@@ -133,6 +140,9 @@ impl Frame {
         let mut len = [0u8; 8];
         len.copy_from_slice(&bytes[6..HEADER_LEN]);
         let uncompressed_len = u64::from_be_bytes(len);
+        if uncompressed_len > MAX_FRAME_PAYLOAD {
+            return Err(FrameError::TooLarge(uncompressed_len));
+        }
         let body = &bytes[HEADER_LEN..];
         if codec == Codec::Raw && body.len() as u64 != uncompressed_len {
             return Err(FrameError::LengthMismatch);
@@ -146,8 +156,13 @@ impl Frame {
     }
 
     /// Decompresses the payload and checks its length against the header.
-    /// Never reads more than `uncompressed_len + 1` bytes from a gzip body.
+    /// Never reads more than `uncompressed_len + 1` bytes from a gzip body,
+    /// so a body that expands past its header (a gzip bomb) fails after at
+    /// most that many bytes, and never allocates up front from the header.
     pub fn decode(&self) -> Result<Vec<u8>, FrameError> {
+        if self.uncompressed_len > MAX_FRAME_PAYLOAD {
+            return Err(FrameError::TooLarge(self.uncompressed_len));
+        }
         let payload = match self.codec {
             Codec::Raw => self.body.clone(),
             Codec::Gzip => {
@@ -313,7 +328,42 @@ mod tests {
         gz.uncompressed_len = 1001;
         assert_eq!(gz.decode(), Err(FrameError::LengthMismatch));
         gz.uncompressed_len = u64::MAX;
-        assert_eq!(gz.decode(), Err(FrameError::LengthMismatch));
+        assert_eq!(gz.decode(), Err(FrameError::TooLarge(u64::MAX)));
+    }
+
+    #[test]
+    fn rejects_oversize_header() {
+        let mut b = b"GRF1b\x01".to_vec();
+        b.extend_from_slice(&(MAX_FRAME_PAYLOAD + 1).to_be_bytes());
+        assert_eq!(
+            Frame::from_bytes(&b),
+            Err(FrameError::TooLarge(MAX_FRAME_PAYLOAD + 1))
+        );
+        // At the limit the header itself is accepted.
+        let mut b = b"GRF1b\x01".to_vec();
+        b.extend_from_slice(&MAX_FRAME_PAYLOAD.to_be_bytes());
+        assert!(Frame::from_bytes(&b).is_ok());
+    }
+
+    #[test]
+    fn rejects_gzip_bomb_without_full_expansion() {
+        // 32 MiB of zeros gzips to ~32 KiB; it claims to be 16 bytes long.
+        let mut enc = GzEncoder::new(Vec::new(), Compression::best());
+        let chunk = vec![0u8; 1 << 20];
+        for _ in 0..32 {
+            enc.write_all(&chunk).unwrap();
+        }
+        let body = enc.finish().unwrap();
+        assert!(body.len() < 1 << 20);
+        let mut bytes = b"GRF1b\x01".to_vec();
+        bytes.extend_from_slice(&16u64.to_be_bytes());
+        bytes.extend_from_slice(&body);
+        let f = Frame::from_bytes(&bytes).unwrap();
+        // The bounded reader stops at 17 bytes; the 32 MiB expansion is
+        // never materialized, so this returns at once.
+        let start = std::time::Instant::now();
+        assert_eq!(f.decode(), Err(FrameError::LengthMismatch));
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]
