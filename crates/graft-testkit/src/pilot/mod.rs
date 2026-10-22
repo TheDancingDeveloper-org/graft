@@ -41,11 +41,12 @@ use std::time::{Duration, Instant};
 
 use graft_model::ChangesetId;
 use graft_proto::frame::Frame;
+use imara_diff::{Algorithm, Diff, InternedInput};
 use serde_json::Value;
 
 use crate::bench::{Results, Samples, Spread, spread, spread_markdown};
 use fixture::FixtureSpec;
-use proc::{Bins, Ran, STEP_TIMEOUT, Site, Token, git, run, run_with};
+use proc::{Bins, Ran, Site, Token, git, run};
 use verify::{Fidelity, Mapped};
 
 /// Why the harness stopped.
@@ -525,6 +526,16 @@ fn all_pages(cli: &Cli<'_>, args: &[&str], key: &str) -> Result<Vec<Value>, Pilo
 
 /// Per-line origin shas from `git blame`.
 fn git_blame(bare: &Path, tip: &str, path: &str) -> Result<Vec<String>, PilotError> {
+    git_blame_with(bare, tip, path, "--diff-algorithm=myers")
+}
+
+/// Per-line origin shas from `git blame`, diffing with `algorithm`.
+fn git_blame_with(
+    bare: &Path,
+    tip: &str,
+    path: &str,
+    algorithm: &str,
+) -> Result<Vec<String>, PilotError> {
     Ok(git_text(
         bare,
         &[
@@ -533,6 +544,7 @@ fn git_blame(bare: &Path, tip: &str, path: &str) -> Result<Vec<String>, PilotErr
             "-l",
             "--root",
             "--first-parent",
+            algorithm,
             tip,
             "--",
             path,
@@ -548,77 +560,56 @@ fn git_blame(bare: &Path, tip: &str, path: &str) -> Result<Vec<String>, PilotErr
 ///
 /// Identical lines (blank lines, `}`, the same dependency line in a
 /// lock file) can be matched by a diff to any of their copies, so two
-/// valid attributions can name different commits. An attribution of line
-/// `L` to commit `C` is valid when both hold:
+/// correct blames can name different commits for one line. The check does
+/// not reason about contents. It runs the blames a correct tool gives,
+/// one per diff, and accepts an origin only if one of them names it:
 ///
-/// 1. `C` introduced `L`'s exact content: `C` is a version on `path`'s
-///    first-parent history and some diff of it against its first parent
-///    adds a line with those bytes. Both the default (Myers) diff and the
-///    histogram diff count, since git blame uses the first and graft the
-///    second.
-/// 2. The content is present in every version of `path` from `C` to the
-///    tip, along the first-parent path. A content deleted and re-added
-///    after `C` was last written by the re-adding commit, so `C` is a
-///    stale origin and is rejected.
+/// - `git blame --first-parent` with Myers diff (git's default),
+/// - the same with histogram diff,
+/// - graft's own rule replayed here: histogram diff with line
+///   postprocessing (`imara-diff`, as `graft-index` runs it), carried
+///   along the file's first-parent versions.
 ///
-/// Two origins are equivalent when both are valid. The path is the
-/// first-parent one because both blames are first-parent blames (git's
-/// runs `--first-parent`, graft's index carries lines along first-parent
-/// versions). A line that arrives from a merge's second parent is
-/// attributed to the merge commit, whose first-parent diff adds it; the
-/// side-branch commit that wrote it is never an origin, and accepting the
-/// line's full ancestry would let such a commit through.
+/// Two differing origins agree only if both are valid. Each blame is a
+/// whole-file blame that uses one diff throughout, so every accepted origin
+/// is one a real blame gives. A line moved, reordered, or deleted and
+/// re-added is added by the later commit's diff under all three, so an
+/// earlier commit that also wrote that content is never accepted. The path
+/// is the first-parent one because both blames under test are first-parent
+/// blames: a line that arrives from a merge's second parent is added by
+/// the merge's first-parent diff, so the merge is its origin and the
+/// side-branch commit never is.
 ///
-/// The cost is bounded by the file's first-parent versions, the same ones
-/// blame walks: each is read at most once, and only when a line
-/// disagrees.
+/// Graft's coarse fallback (a diff over the work budget blames the middle
+/// on the newer version) is not replayed: a coarse attribution is an
+/// approximation, not a tie, and still counts as a disagreement.
+///
+/// The cost is two git blames and the file's first-parent versions, the
+/// same ones blame walks, each read once and diffed once, and only when
+/// some line disagrees.
 struct TieCheck<'a> {
     bare: &'a Path,
+    tip: &'a str,
     path: &'a str,
-    /// The file's first-parent versions, newest first (index 0 is the
-    /// version the tip holds).
-    history: Vec<String>,
-    /// Position of each version in `history`.
-    position: BTreeMap<String, usize>,
-    /// The file at the tip, one entry per line.
-    content: Vec<Vec<u8>>,
-    /// Per version, the line contents it holds; read on first use.
-    held: Vec<Option<BTreeSet<Vec<u8>>>>,
-    /// Per commit, the line contents its diffs add.
-    introduced: BTreeMap<String, BTreeSet<Vec<u8>>>,
+    /// The reference blames, per tip line; filled on first use.
+    blames: Option<Vec<Vec<String>>>,
+}
+
+/// One first-parent version of a file: the commit that wrote it and the
+/// blob it holds (`None` where the commit left no file there).
+struct FileVersion {
+    commit: String,
+    blob: Option<String>,
 }
 
 impl<'a> TieCheck<'a> {
-    fn new(bare: &'a Path, tip: &str, path: &'a str) -> Result<Self, PilotError> {
-        let history: Vec<String> = git_text(
+    fn new(bare: &'a Path, tip: &'a str, path: &'a str) -> Self {
+        Self {
             bare,
-            &["log", "--first-parent", "--format=%H", tip, "--", path],
-        )?
-        .lines()
-        .map(str::to_owned)
-        .collect();
-        let position = history
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.clone(), i))
-            .collect();
-        let shown = run(git(None)
-            .arg("--git-dir")
-            .arg(bare)
-            .args(["show", &format!("{tip}:{path}")]))?;
-        let content = split_lines(&shown.stdout)
-            .into_iter()
-            .map(<[u8]>::to_vec)
-            .collect();
-        Ok(Self {
-            bare,
+            tip,
             path,
-            held: vec![None; history.len()],
-            history,
-            position,
-            content,
-            introduced: BTreeMap::new(),
-        })
+            blames: None,
+        }
     }
 
     /// Whether `git` and `graft` (commit shas) are equivalent origins for
@@ -627,82 +618,110 @@ impl<'a> TieCheck<'a> {
         Ok(self.valid(line, git)? && self.valid(line, graft)?)
     }
 
-    /// Whether `sha` is a valid origin for line `line`: rules 1 and 2.
+    /// Whether one of the reference blames attributes line `line` to `sha`.
     fn valid(&mut self, line: usize, sha: &str) -> Result<bool, PilotError> {
-        let Some(content) = self.content.get(line).cloned() else {
-            return Ok(false);
-        };
-        let Some(&at) = self.position.get(sha) else {
-            return Ok(false);
-        };
-        if !self.introduced.contains_key(sha) {
-            let lines = self.added_by(sha)?;
-            self.introduced.insert(sha.to_owned(), lines);
+        if self.blames.is_none() {
+            self.blames = Some(vec![
+                git_blame_with(self.bare, self.tip, self.path, "--diff-algorithm=myers")?,
+                git_blame_with(self.bare, self.tip, self.path, "--histogram")?,
+                self.graft_blame()?,
+            ]);
         }
-        if !self.introduced[sha].contains(&content) {
-            return Ok(false);
-        }
-        // Rule 2: every version from the tip back to `sha` holds it.
-        for v in 0..=at {
-            if !self.held(v)?.contains(&content) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        Ok(self
+            .blames
+            .iter()
+            .flatten()
+            .any(|b| b.get(line).is_some_and(|o| o == sha)))
     }
 
-    /// The line contents of version `v` (an index into `history`).
-    fn held(&mut self, v: usize) -> Result<&BTreeSet<Vec<u8>>, PilotError> {
-        if self.held[v].is_none() {
-            let spec = format!("{}:{}", self.history[v], self.path);
-            let ran = run_with(
-                git(None)
-                    .arg("--git-dir")
-                    .arg(self.bare)
-                    .args(["show", &spec]),
-                STEP_TIMEOUT,
-                true,
-            )?;
-            // A version that deletes the file holds nothing.
-            let lines = if ran.status.success() {
-                split_lines(&ran.stdout)
-                    .into_iter()
-                    .map(<[u8]>::to_vec)
-                    .collect()
-            } else {
-                BTreeSet::new()
-            };
-            self.held[v] = Some(lines);
-        }
-        Ok(self.held[v].get_or_insert_default())
-    }
-
-    /// The lines `sha` adds to the file, under each diff algorithm.
-    fn added_by(&self, sha: &str) -> Result<BTreeSet<Vec<u8>>, PilotError> {
-        let mut out = BTreeSet::new();
-        for algorithm in ["--diff-algorithm=myers", "--histogram"] {
-            let ran = run(git(None).arg("--git-dir").arg(self.bare).args([
+    /// The file's first-parent versions, oldest first.
+    fn versions(&self) -> Result<Vec<FileVersion>, PilotError> {
+        let log = git_text(
+            self.bare,
+            &[
                 "log",
-                "-1",
-                "-p",
-                "-U0",
-                "--format=",
-                "--no-renames",
                 "--first-parent",
-                algorithm,
-                sha,
+                "--no-renames",
+                "--raw",
+                "--no-abbrev",
+                "--reverse",
+                "--format=commit %H",
+                self.tip,
                 "--",
                 self.path,
-            ]))?;
-            for line in ran.stdout.split(|&b| b == b'\n') {
-                // File headers are `+++ b/<path>`; content lines start `+`.
-                if line.first() == Some(&b'+') && !line.starts_with(b"+++ ") {
-                    out.insert(line[1..].to_vec());
+            ],
+        )?;
+        let mut out: Vec<FileVersion> = Vec::new();
+        for l in log.lines() {
+            if let Some(sha) = l.strip_prefix("commit ") {
+                out.push(FileVersion {
+                    commit: sha.to_owned(),
+                    blob: None,
+                });
+            } else if let Some(raw) = l.strip_prefix(':') {
+                // `:<old mode> <new mode> <old> <new> <status>\t<path>`.
+                let (meta, p) = raw.split_once('\t').unwrap_or((raw, ""));
+                let fields: Vec<&str> = meta.split(' ').collect();
+                if p != self.path || fields.len() < 5 {
+                    continue;
+                }
+                let (mode, blob) = (fields[1], fields[3]);
+                if let Some(v) = out.last_mut() {
+                    // A regular file or symlink has lines; a deletion
+                    // (mode 000000) or a submodule has none.
+                    let file = mode.starts_with("100") || mode == "120000";
+                    v.blob = file.then(|| blob.to_owned());
                 }
             }
         }
         Ok(out)
     }
+
+    /// Graft's blame rule, replayed: per tip line, its origin when every
+    /// version is diffed against the one before it as `graft-index` does.
+    fn graft_blame(&self) -> Result<Vec<String>, PilotError> {
+        let mut origins: Vec<String> = Vec::new();
+        let mut old: Option<Vec<u8>> = None;
+        for v in self.versions()? {
+            let Some(blob) = &v.blob else {
+                (origins, old) = (Vec::new(), None);
+                continue;
+            };
+            let mut c = git(None);
+            c.arg("--git-dir")
+                .arg(self.bare)
+                .args(["cat-file", "blob", blob]);
+            let new = run(&mut c)?.stdout;
+            origins = match &old {
+                Some(old) => graft_alignment(old, &new)
+                    .into_iter()
+                    .map(|kept| kept.map_or_else(|| v.commit.clone(), |o| origins[o].clone()))
+                    .collect(),
+                None => vec![v.commit.clone(); split_lines(&new).len()],
+            };
+            old = Some(new);
+        }
+        Ok(origins)
+    }
+}
+
+/// For each line of `new`, the line of `old` graft's diff keeps it as:
+/// histogram diff with line postprocessing, as `graft-index` blame runs it.
+fn graft_alignment(old: &[u8], new: &[u8]) -> Vec<Option<usize>> {
+    let input = InternedInput::new(old, new);
+    let mut diff = Diff::compute(Algorithm::Histogram, &input);
+    diff.postprocess_lines(&input);
+    let mut out = Vec::with_capacity(input.after.len());
+    let mut kept = 0;
+    for hunk in diff.hunks() {
+        let unchanged = hunk.after.start as usize - out.len();
+        out.extend((kept..kept + unchanged).map(Some));
+        out.extend(hunk.after.map(|_| None));
+        kept = hunk.before.end as usize;
+    }
+    let rest = input.after.len() - out.len();
+    out.extend((kept..kept + rest).map(Some));
+    out
 }
 
 /// A file's lines, without the empty piece after a final newline.
@@ -835,7 +854,7 @@ fn check_agreement(
     for f in &files {
         let g = graft_blame(cli, f, &sha_of)?;
         let want = git_blame(bare, &shape.tip, f)?;
-        let mut ties = TieCheck::new(bare, &shape.tip, f)?;
+        let mut ties = TieCheck::new(bare, &shape.tip, f);
         let (mut same, mut tie) = (0, 0);
         for (i, (x, y)) in g.iter().zip(&want).enumerate() {
             if x == y {
@@ -1229,7 +1248,7 @@ mod tests {
 
     /// A bare repo built by `git fast-import`. `commits` are, in order,
     /// `(branch, from, merge, content of f.txt)`; `from` and `merge` are
-    /// indices of earlier commits. Returns the repo's temp dir.
+    /// indices of earlier commits, and the file gets a final newline. Returns the repo's temp dir.
     fn tie_repo(
         name: &str,
         commits: &[(&str, Option<usize>, Option<usize>, &str)],
@@ -1242,10 +1261,10 @@ mod tests {
             let msg = format!("c{i}");
             let _ = write!(
                 stream,
-                "blob\nmark :{}\ndata {}\n{content}\n\
+                "blob\nmark :{}\ndata {}\n{content}\n\n\
 commit refs/heads/{branch}\nmark :{}\ncommitter t <t@example.com> {} +0000\ndata {}\n{msg}\n",
                 1000 + i,
-                content.len(),
+                content.len() + 1,
                 i + 1,
                 i + 1,
                 msg.len(),
@@ -1288,31 +1307,114 @@ commit refs/heads/{branch}\nmark :{}\ncommitter t <t@example.com> {} +0000\ndata
         }
     }
 
-    /// Two commits on `f.txt`: `x y x`, then `x y x x`. The last line is
-    /// `x`, which both commits wrote and which never left the file, so
-    /// git's `c2` and an attribution to `c1` are equivalent. The middle
-    /// `y` only `c1` wrote.
+    /// Graft's alignment pairs each kept line with an equal old line, in
+    /// order, over many small files built from three repeated lines.
+    #[test]
+    fn graft_alignment_keeps_equal_lines_in_order() {
+        let mut seed = 0x2222_u64;
+        let mut file = |n: u64| {
+            let mut out = Vec::new();
+            for _ in 0..n {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                out.extend_from_slice([b"x\n", b"y\n", b"z\n"][(seed >> 33) as usize % 3]);
+            }
+            out
+        };
+        for i in 0..500 {
+            let (old, new) = (file(i % 9), file(i % 7 + 1));
+            let (a, b) = (split_lines(&old), split_lines(&new));
+            let kept = graft_alignment(&old, &new);
+            assert_eq!(kept.len(), b.len());
+            let mut last = None;
+            for (j, o) in kept.iter().enumerate() {
+                if let Some(o) = *o {
+                    assert_eq!(a[o], b[j]);
+                    assert!(last < Some(o));
+                    last = Some(o);
+                }
+            }
+        }
+    }
+
+    /// `z x y z`, then `x x z x`. Both diffs keep a `z` and one `x`, but
+    /// not the same `x`: Myers keeps the first and adds the last,
+    /// histogram adds the first and keeps the last. So lines 0 and 3 are
+    /// genuine ties, each validly c1's or c2's. Line 1 only c2 wrote, and
+    /// line 2 (`z`) every diff keeps from c1.
     #[test]
     fn equivalent_tie_breaks_agree_and_wrong_origins_do_not() {
         let dir = tie_repo(
             "tie-check",
             &[
-                ("main", None, None, "x\ny\nx"),
-                ("main", Some(0), None, "x\ny\nx\nx"),
+                ("main", None, None, "z\nx\ny\nz"),
+                ("main", Some(0), None, "x\nx\nz\nx"),
             ],
         );
         let bare = dir.path().join("repo.git");
         let (c2, c1) = (sha(&bare, "main"), sha(&bare, "main~1"));
 
-        let mut ties = TieCheck::new(&bare, "main", "f.txt").expect("tie check");
+        let mut ties = TieCheck::new(&bare, "main", "f.txt");
         git_blame_is_valid(&mut ties, &bare);
-        // Line 3 (`x`): git says c2, graft says c1.
+        assert!(ties.equivalent(0, &c2, &c1).expect("check"));
         assert!(ties.equivalent(3, &c2, &c1).expect("check"));
-        // Line 1 (`y`): c2 never wrote `y`, so c2 is not a valid origin.
         assert!(!ties.equivalent(1, &c2, &c1).expect("check"));
+        assert!(!ties.equivalent(2, &c1, &c2).expect("check"));
         // A commit outside the file's history is never equivalent.
         let other = "0".repeat(40);
         assert!(!ties.equivalent(3, &c2, &other).expect("check"));
+    }
+
+    /// Fixtures where a later commit rewrites a line whose content an
+    /// earlier commit also wrote, and the content never leaves the file.
+    /// `(commits, line, its only origin, a stale one)`; commits are
+    /// first-parent, `c<i>` is commit `i`.
+    #[test]
+    fn a_moved_line_belongs_to_the_commit_that_moved_it() {
+        let cases: [(&str, &[&str], usize, usize, usize); 4] = [
+            // The reviewer's case: `a` moved to the end.
+            ("move", &["a\nb\nc", "b\nc\na"], 2, 1, 0),
+            // A reorder: `p q r s` reversed. Each diff keeps one line, and
+            // none keeps `p` (now last).
+            ("reorder", &["p\nq\nr\ns", "s\nr\nq\np"], 3, 1, 0),
+            // A move across hunks: `a` leaves the top, `b` changes in the
+            // middle, `a` lands at the end.
+            (
+                "across-hunks",
+                &["a\nm1\nm2\nb\nn1\nn2", "m1\nm2\nB\nn1\nn2\na"],
+                5,
+                1,
+                0,
+            ),
+            // `a` in two hunks; the later commit drops the first and moves
+            // the second past `n`, so the count drops but `a` stays.
+            (
+                "net-move",
+                &["a\nm1\nm2\nm3\na\nn1\nn2\nn3", "m1\nm2\nm3\nn1\nn2\nn3\na"],
+                6,
+                1,
+                0,
+            ),
+        ];
+        for (name, contents, line, origin, stale) in cases {
+            let commits: Vec<(&str, Option<usize>, Option<usize>, &str)> = contents
+                .iter()
+                .enumerate()
+                .map(|(i, c)| ("main", i.checked_sub(1), None, *c))
+                .collect();
+            let dir = tie_repo(&format!("tie-{name}"), &commits);
+            let bare = dir.path().join("repo.git");
+            let at = |i: usize| sha(&bare, &format!("main~{}", contents.len() - 1 - i));
+            let (origin, stale) = (at(origin), at(stale));
+
+            let mut ties = TieCheck::new(&bare, "main", "f.txt");
+            git_blame_is_valid(&mut ties, &bare);
+            assert!(ties.valid(line, &origin).expect("check"), "{name}");
+            assert!(!ties.valid(line, &stale).expect("check"), "{name}");
+            assert!(
+                !ties.equivalent(line, &origin, &stale).expect("check"),
+                "{name}"
+            );
+        }
     }
 
     /// `a x`, then `a` (x deleted), then `a x` again. c1 wrote `x`, but the
@@ -1330,7 +1432,7 @@ commit refs/heads/{branch}\nmark :{}\ncommitter t <t@example.com> {} +0000\ndata
         let bare = dir.path().join("repo.git");
         let (c3, c1) = (sha(&bare, "main"), sha(&bare, "main~2"));
 
-        let mut ties = TieCheck::new(&bare, "main", "f.txt").expect("tie check");
+        let mut ties = TieCheck::new(&bare, "main", "f.txt");
         git_blame_is_valid(&mut ties, &bare);
         assert!(ties.valid(1, &c3).expect("check"));
         assert!(!ties.equivalent(1, &c3, &c1).expect("check"));
@@ -1338,10 +1440,11 @@ commit refs/heads/{branch}\nmark :{}\ncommitter t <t@example.com> {} +0000\ndata
         assert!(ties.valid(0, &c1).expect("check"));
     }
 
-    /// main has `x`; a side branch makes it `x x`; main merges the side.
-    /// Under first-parent blame the second `x` arrives with the merge, so
-    /// the merge and c1 (which wrote `x`, never removed) are equivalent,
-    /// and the side commit is not an origin.
+    /// main has `x`; a side branch makes it `x x y`; main merges the side.
+    /// Under first-parent blame the merge's diff keeps the first `x` (c1's)
+    /// and adds the second `x` and `y`, so those are the merge's. The side
+    /// commit that wrote them is never an origin, and c1, which wrote the
+    /// same content, is not one for the second `x`.
     #[test]
     fn a_line_from_a_merges_second_parent_belongs_to_the_merge() {
         let dir = tie_repo(
@@ -1355,9 +1458,12 @@ commit refs/heads/{branch}\nmark :{}\ncommitter t <t@example.com> {} +0000\ndata
         let bare = dir.path().join("repo.git");
         let (m, c1, s1) = (sha(&bare, "main"), sha(&bare, "main^1"), sha(&bare, "side"));
 
-        let mut ties = TieCheck::new(&bare, "main", "f.txt").expect("tie check");
+        let mut ties = TieCheck::new(&bare, "main", "f.txt");
         git_blame_is_valid(&mut ties, &bare);
-        assert!(ties.equivalent(1, &m, &c1).expect("check"));
+        assert!(ties.valid(0, &c1).expect("check"));
+        assert!(!ties.valid(0, &s1).expect("check"));
+        assert!(ties.valid(1, &m).expect("check"));
+        assert!(!ties.equivalent(1, &m, &c1).expect("check"));
         assert!(!ties.equivalent(1, &m, &s1).expect("check"));
         // `y` only the merge brought in on the first-parent path.
         assert!(ties.valid(2, &m).expect("check"));
