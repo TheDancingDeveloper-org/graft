@@ -399,3 +399,186 @@ async fn a_response_without_a_version_header_is_refused() {
         none
     );
 }
+
+/// A clone of `files` with the server's blob for `evil` uploaded.
+async fn cloned_with_evil(
+    files: &Entries,
+    evil: &[u8],
+) -> (
+    Arc<SnapshotRepo>,
+    TestServer,
+    Remote,
+    tempfile::TempDir,
+    graft_client::workcopy::WorkingCopy,
+) {
+    let repo = Arc::new(SnapshotRepo::new());
+    repo.commit_entries("main", files).await;
+    let (server, remote) = serve(&repo).await;
+    let dest = tempfile::tempdir().unwrap();
+    let (wc, _) = clone(
+        &remote,
+        &cx(),
+        dest.path(),
+        config(),
+        "main",
+        None,
+        Sparse::full(),
+        &FetchOptions::default(),
+    )
+    .await
+    .unwrap();
+    repo.fake()
+        .put_objects(
+            &cx(),
+            PutObjects {
+                repo: REPO.into(),
+                blobs: vec![Frame::encode(ObjectKind::Blob, evil)],
+            },
+        )
+        .await
+        .unwrap();
+    (repo, server, remote, dest, wc)
+}
+
+#[tokio::test]
+async fn a_diff_cannot_reach_the_state_directory_in_any_spelling() {
+    let mut files: Entries = [("f".to_owned(), (EntryKind::File, b"f".to_vec()))].into();
+    let evil = b"repo = attacker\n".to_vec();
+    let (repo, _server, remote, dest, mut wc) = cloned_with_evil(&files, &evil).await;
+    files.insert("g".into(), (EntryKind::File, b"g".to_vec()));
+    let b = repo.commit_entries("main", &files).await;
+    let cache = wc.open_cache(DEFAULT_CACHE_BYTES).unwrap();
+    let state_before = contents(&dest.path().join(".graft"));
+
+    for path in [
+        ".GRAFT/config",
+        ".Graft/index",
+        // Fullwidth ".graft": NFKC-equal to it.
+        "\u{FF0E}\u{FF47}\u{FF52}\u{FF41}\u{FF46}\u{FF54}/state",
+        // A zero-width joiner, ignored in names by HFS+ and APFS.
+        ".gr\u{200D}aft/sparse",
+    ] {
+        repo.lie_about_diff(lie(vec![Change::Put {
+            path: p(path),
+            kind: EntryKind::File,
+            id: BlobId::hash(&evil).0,
+        }]));
+        let err = wc
+            .update(&remote, &cache, &cx(), b, &FetchOptions::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Api(ApiError::InvalidPath { path: q, .. }) if q == path),
+            "{path:?}: {err:?}"
+        );
+        let top = path.split('/').next().unwrap();
+        assert!(!dest.path().join(top).exists() || top == ".graft");
+    }
+    assert_eq!(contents(&dest.path().join(".graft")), state_before);
+    assert_eq!(wc.state().base, repo.fake().changesets_in_order()[0].id());
+}
+
+#[tokio::test]
+async fn a_diff_putting_a_symlink_and_a_path_under_it_is_refused_whole() {
+    let outside = tempfile::tempdir().unwrap();
+    let mut files: Entries = [("a/keep".to_owned(), (EntryKind::File, b"k".to_vec()))].into();
+    let evil = b"evil".to_vec();
+    let (repo, _server, remote, dest, mut wc) = cloned_with_evil(&files, &evil).await;
+    let a = wc.state().base;
+    files.insert("z".into(), (EntryKind::File, b"z".to_vec()));
+    let b = repo.commit_entries("main", &files).await;
+    let target = outside.path().as_os_str().as_bytes().to_vec();
+    repo.fake()
+        .put_objects(
+            &cx(),
+            PutObjects {
+                repo: REPO.into(),
+                blobs: vec![Frame::encode(ObjectKind::Blob, &target)],
+            },
+        )
+        .await
+        .unwrap();
+    repo.lie_about_diff(lie(vec![
+        Change::Put {
+            path: p("a/s"),
+            kind: EntryKind::Symlink,
+            id: BlobId::hash(&target).0,
+        },
+        Change::Put {
+            path: p("a/s/x"),
+            kind: EntryKind::File,
+            id: BlobId::hash(&evil).0,
+        },
+    ]));
+    let cache = wc.open_cache(DEFAULT_CACHE_BYTES).unwrap();
+    let err = wc
+        .update(&remote, &cache, &cx(), b, &FetchOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::UnsafePath(q) if *q == p("a/s/x")),
+        "{err:?}"
+    );
+    // Refused before anything was written: no half-applied update.
+    assert!(std::fs::symlink_metadata(dest.path().join("a/s")).is_err());
+    assert!(contents(outside.path()).is_empty());
+    assert_eq!(wc.state().base, a);
+    assert!(wc.status().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn get_objects_caps_the_bytes_of_one_answer() {
+    // 40 incompressible 1 KiB blobs: three pages of frames.
+    let mut files = BTreeMap::new();
+    for i in 0..40u32 {
+        let mut bytes = Vec::new();
+        let mut seed = BlobId::hash(&i.to_le_bytes()).0.0;
+        while bytes.len() < 1024 {
+            bytes.extend_from_slice(&seed);
+            seed = BlobId::hash(&seed).0.0;
+        }
+        files.insert(format!("f{i:02}"), bytes);
+    }
+    let repo = Arc::new(SnapshotRepo::new());
+    repo.commit("main", &files).await;
+    let (server, _remote) = serve(&repo).await;
+    let ids: Vec<ObjectId> = files.values().map(|b| BlobId::hash(b).0).collect();
+    let ask = || GetObjects {
+        repo: REPO.into(),
+        ids: ids.clone(),
+    };
+
+    let capped = Remote::connect(Endpoint::parse(server.url()))
+        .await
+        .unwrap()
+        .with_max_response_bytes(16 * 1024);
+    let err = capped.get_objects(&cx(), ask()).await.unwrap_err();
+    assert!(
+        matches!(&err, ApiError::LimitExceeded { limit, max } if limit == "get-objects-bytes" && *max == 16 * 1024),
+        "{err:?}"
+    );
+
+    // Under the cap (and at the default) the same answer is whole.
+    let roomy = Remote::connect(Endpoint::parse(server.url()))
+        .await
+        .unwrap()
+        .with_max_response_bytes(64 * 1024);
+    assert_eq!(
+        roomy.get_objects(&cx(), ask()).await.unwrap().found.len(),
+        40
+    );
+    let default = Remote::connect(Endpoint::parse(server.url()))
+        .await
+        .unwrap();
+    assert_eq!(
+        default.get_objects(&cx(), ask()).await.unwrap().found.len(),
+        40
+    );
+
+    assert_eq!(
+        graft_client::remote::MAX_GET_OBJECTS_BYTES,
+        64 * 1024 * 1024
+            + graft_proto::frame::MAX_FRAME_PAYLOAD
+            + graft_proto::frame::HEADER_LEN as u64
+    );
+}
