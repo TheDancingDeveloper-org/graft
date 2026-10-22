@@ -5,6 +5,7 @@ mod common;
 
 use std::cell::RefCell;
 use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use common::{Objects, TempDir, block_on};
 use graft_model::{ChangesetId, ObjectId};
@@ -87,6 +88,7 @@ fn a_full_writer_queue_is_busy() {
     config.retry_after_ms = 25;
     let store = open_with(config);
     let repo = block_on(store.create_repo("r")).expect("create");
+    let taken_before = store.writer_batches_taken();
 
     // Hold the database's write lock, so the writer stalls on its first job
     // and the queue behind it fills.
@@ -99,9 +101,16 @@ fn a_full_writer_queue_is_busy() {
         .map(|n| Box::pin(store.commit(repo, cas(n, None, cs(1)))))
         .collect();
     let mut cx = Context::from_waker(Waker::noop());
+
+    // The first job goes to the writer, which takes it off the queue before
+    // it stalls. Only then is the queue empty, so fill it after that: the
+    // second job queues and the third is refused.
+    assert!(futures[0].as_mut().poll(&mut cx).is_pending());
+    wait_until_taken(&store, taken_before + 1);
+
     let mut busy = 0;
-    let mut pending = Vec::new();
-    for (i, f) in futures.iter_mut().enumerate() {
+    let mut pending = vec![0];
+    for (i, f) in futures.iter_mut().enumerate().skip(1) {
         match f.as_mut().poll(&mut cx) {
             Poll::Ready(Err(StoreError::Busy(ms))) => {
                 assert_eq!(ms, 25, "the configured retry hint");
@@ -124,6 +133,15 @@ fn a_full_writer_queue_is_busy() {
 
 fn open_with(config: SqliteConfig) -> SqliteMetaStore {
     SqliteMetaStore::open(config).expect("open store")
+}
+
+/// Waits until the writer has taken at least `count` batches off its queue.
+fn wait_until_taken(store: &SqliteMetaStore, count: u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while store.writer_batches_taken() < count {
+        assert!(Instant::now() < deadline, "the writer never took the job");
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[test]
