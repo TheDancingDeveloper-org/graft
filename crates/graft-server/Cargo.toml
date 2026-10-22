@@ -16,6 +16,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+axum = { workspace = true, features = ["json"] }
 graft-auth.workspace = true
 graft-engine.workspace = true
 graft-gc.workspace = true
@@ -26,3 +27,16 @@ graft-store.workspace = true
 graft-store-fs.workspace = true
 graft-store-sqlite.workspace = true
 graft-telemetry.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+toml.workspace = true
+tonic = { workspace = true, features = ["gzip"] }
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+
+[dev-dependencies]
+graft-testkit.workspace = true

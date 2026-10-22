@@ -7,7 +7,8 @@
 //!
 //! Phase 1 (G1.7) answers `CreateRepo`, the object API, `CreateChangeset`,
 //! `ImportChangesets`, `GetChangesets`, `ResolveRef`, `ListRefs`,
-//! `UpdateRef`, `Stat`, `ListTree`, `ReadFile`, `Diff` and `Watch`. Every
+//! `UpdateRef`, `Stat`, `ListTree`, `ReadFile`, `Diff` and `Watch`; G1.10
+//! adds `Log`, `IsAncestor`, `MergeBase` and `Blame` over `graft-index`. Every
 //! operation checks the caller's scopes first ([`access`]), then resolves
 //! the repository, then validates, and writes only through one metadata
 //! transaction per logical write, after the objects it references are
@@ -26,6 +27,7 @@ use graft_store::{MAX_PAGE, MetaStore, ObjectStore};
 mod access;
 mod diff;
 mod errors;
+mod history;
 pub mod journal;
 mod objects;
 pub mod policy;
@@ -210,20 +212,20 @@ where
     async fn read_file(&self, cx: &CallContext, req: PathAt) -> ApiResult<FileContent> {
         self.do_read_file(cx, req).await
     }
-    async fn log(&self, _cx: &CallContext, _req: Log) -> ApiResult<History> {
-        todo!("G1.10 via graft-index")
+    async fn log(&self, cx: &CallContext, req: Log) -> ApiResult<History> {
+        self.do_log(cx, req).await
     }
-    async fn is_ancestor(&self, _cx: &CallContext, _req: Pair) -> ApiResult<bool> {
-        todo!("G1.10 via graft-index")
+    async fn is_ancestor(&self, cx: &CallContext, req: Pair) -> ApiResult<bool> {
+        self.do_is_ancestor(cx, req).await
     }
-    async fn merge_base(&self, _cx: &CallContext, _req: Pair) -> ApiResult<Option<ChangesetId>> {
-        todo!("G1.10 via graft-index")
+    async fn merge_base(&self, cx: &CallContext, req: Pair) -> ApiResult<Option<ChangesetId>> {
+        self.do_merge_base(cx, req).await
     }
     async fn diff(&self, cx: &CallContext, req: Diff) -> ApiResult<DiffResult> {
         self.do_diff(cx, req).await
     }
-    async fn blame(&self, _cx: &CallContext, _req: Blame) -> ApiResult<BlameResult> {
-        todo!("G1.10 via graft-index")
+    async fn blame(&self, cx: &CallContext, req: Blame) -> ApiResult<BlameResult> {
+        self.do_blame(cx, req).await
     }
     async fn rebase(&self, _cx: &CallContext, _req: Rebase) -> ApiResult<ChangesetId> {
         todo!("G2.7")

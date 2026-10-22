@@ -423,6 +423,64 @@ fn permission_denied() {
     denied(block_on(e.stat(&node, path_at("r", a, "src/f"))));
 }
 
+/// The history reads check the read scope before touching the index.
+#[test]
+fn history_reads_are_scoped() {
+    let f = memory();
+    let repo = Repo::new(&f, "r");
+    let a = repo.commit(vec![], &[("src/f", b"a")], &[]).id;
+    let e = &f.engine;
+    for who in [cx(&[]), cx(&["repo:other:read"]), cx(&["objects:read"])] {
+        let log = block_on(e.log(
+            &who,
+            Log {
+                repo: "r".to_owned(),
+                from: a,
+                until: None,
+                paths: Vec::new(),
+                page: Page {
+                    limit: 10,
+                    token: None,
+                },
+            },
+        ));
+        assert_eq!(denied(log).0, "repo:r:read");
+        let blame = block_on(e.blame(
+            &who,
+            Blame {
+                repo: "r".to_owned(),
+                at: a,
+                path: p("src/f"),
+                lines: None,
+            },
+        ));
+        assert_eq!(denied(blame).0, "repo:r:read");
+        let pair = Pair {
+            repo: "r".to_owned(),
+            a,
+            b: a,
+        };
+        assert_eq!(
+            denied(block_on(e.is_ancestor(&who, pair.clone()))).0,
+            "repo:r:read"
+        );
+        assert_eq!(denied(block_on(e.merge_base(&who, pair))).0, "repo:r:read");
+    }
+    let reader = cx(&["repo:r:read"]);
+    let page = Page {
+        limit: 10,
+        token: None,
+    };
+    let log = Log {
+        repo: "r".to_owned(),
+        from: a,
+        until: None,
+        paths: Vec::new(),
+        page,
+    };
+    block_on(e.log(&reader, log)).expect("a reader reads the log");
+}
+
 #[test]
 fn limit_exceeded() {
     let f = memory_with(EngineConfig {

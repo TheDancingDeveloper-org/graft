@@ -1885,6 +1885,7 @@ dependencies = [
 name = "graft-server"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "graft-auth",
  "graft-engine",
  "graft-gc",
@@ -1895,6 +1896,15 @@ dependencies = [
  "graft-store-fs",
  "graft-store-sqlite",
  "graft-telemetry",
+ "graft-testkit",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]
