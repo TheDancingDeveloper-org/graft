@@ -10,8 +10,8 @@ mod write;
 
 pub use render::{MAX_RESULT_BYTES, PATCH_MAX_BYTES};
 pub use server::{
-    BlameArgs, Caller, DiffArgs, LogArgs, LsArgs, MAX_REQUEST_BYTES, McpServer, ReadArgs, ShowArgs,
-    StatusArgs, http_config, streamable_http_service,
+    Auth, BlameArgs, Caller, DiffArgs, LogArgs, LsArgs, MAX_REQUEST_BYTES, McpServer, ReadArgs,
+    ShowArgs, StatusArgs, http_config, request_auth, streamable_http_service,
 };
 pub use write::{
     COMMIT_MAX_BYTES, COMMIT_MAX_FILES, COMMIT_MESSAGE_MAX_BYTES, CommitArgs, Encoding, FileChange,

@@ -2,7 +2,8 @@
 //! HTTP service (`docs/design.md` §10.1).
 
 use std::{
-    io,
+    any::Any,
+    fmt, io,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -21,11 +22,12 @@ use graft_proto::{
 };
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
-        CallToolResult, Implementation, ListResourceTemplatesResult, PaginatedRequestParams,
-        ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ResourceContents,
-        ResourceTemplate, ServerCapabilities, ServerConfig,
+        CallToolRequestParams, CallToolResponse, CallToolResult, Implementation,
+        ListResourceTemplatesResult, PaginatedRequestParams, ReadResourceRequestParams,
+        ReadResourceResponse, ReadResourceResult, ResourceContents, ResourceTemplate,
+        ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router,
@@ -185,6 +187,38 @@ pub struct StatusArgs {
 /// one is refused as `unauthenticated`.
 #[derive(Clone, Debug)]
 pub struct Caller(pub CallContext);
+
+/// What the mounting server knows about one HTTP request's credential
+/// beyond its [`Caller`], such as the token id it checks against a
+/// denylist. Opaque to graft-mcp: the server inserts it into the request's
+/// extensions beside the [`Caller`], and its API implementation reads it
+/// back with [`request_auth`] while that request's tool call or resource
+/// read runs.
+#[derive(Clone)]
+pub struct Auth(pub Arc<dyn Any + Send + Sync>);
+
+impl fmt::Debug for Auth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Auth(..)")
+    }
+}
+
+tokio::task_local! {
+    static AUTH: Option<Auth>;
+}
+
+/// The [`Auth`] of the HTTP request whose tool call or resource read is
+/// running on this task, if the mounting server set one.
+pub fn request_auth() -> Option<Auth> {
+    AUTH.try_with(Clone::clone).ok().flatten()
+}
+
+/// The [`Auth`] in a request's HTTP extensions.
+fn http_auth(ctx: &RequestContext<RoleServer>) -> Option<Auth> {
+    ctx.extensions
+        .get::<http::request::Parts>()
+        .and_then(|parts| parts.extensions.get::<Auth>().cloned())
+}
 
 /// An MCP server over an API implementation `A`.
 ///
@@ -796,6 +830,16 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> ServerHandler for McpSer
         )
     }
 
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let auth = http_auth(&context);
+        let tcc = ToolCallContext::new(self, request, context);
+        AUTH.scope(auth, self.tool_router.call(tcc)).await
+    }
+
     async fn list_resource_templates(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -818,7 +862,10 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> ServerHandler for McpSer
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         let read = match self.call_context(&context) {
-            Ok(cx) => self.read_uri(&cx, &request.uri).await,
+            Ok(cx) => {
+                AUTH.scope(http_auth(&context), self.read_uri(&cx, &request.uri))
+                    .await
+            }
             Err(e) => Err(e),
         };
         match read {

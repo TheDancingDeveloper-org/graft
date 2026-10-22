@@ -2,7 +2,9 @@
 //! checkout (`docs/design.md` §10.1, decision D17).
 //!
 //! Every request is authenticated here with the same bearer token as gRPC,
-//! and its caller is handed to `graft-mcp` in the request's extensions. The
+//! and its caller is handed to `graft-mcp` in the request's extensions: the
+//! call context as a [`graft_mcp::Caller`], and the whole server [`Caller`]
+//! (with the token's `jti`) as an opaque [`graft_mcp::Auth`]. The
 //! tools reach the engine through [`McpApi`], which runs each operation
 //! through [`App::call`] exactly as the gRPC services do: the same scopes,
 //! the same free-space floor for writes, and the same metrics and spans.
@@ -14,13 +16,13 @@ use axum::Router;
 use axum::extract::{Request, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use graft_mcp::Caller;
+use graft_mcp::Auth;
 use graft_model::ChangesetId;
 use graft_proto::error::ApiResult;
 use graft_proto::types::*;
 use graft_proto::{ApiError, CallContext, RepoApi, WorkspaceApi};
 
-use crate::app::{App, CallError, ServerEngine};
+use crate::app::{App, CallError, Caller, ServerEngine};
 
 /// The `/mcp` route, behind bearer-token authentication.
 pub(crate) fn router(app: Arc<App>) -> Router {
@@ -37,13 +39,15 @@ pub(crate) fn router(app: Arc<App>) -> Router {
 /// Refuses a request without a valid token; otherwise records its caller.
 async fn authenticate(State(app): State<Arc<App>>, mut request: Request, next: Next) -> Response {
     let headers = request.headers();
-    let cx = app.authenticate(
+    let caller = app.authenticate(
         |name| headers.get(name).and_then(|v| v.to_str().ok()),
         false,
     );
-    match cx {
-        Ok(cx) => {
-            request.extensions_mut().insert(Caller(cx));
+    match caller {
+        Ok(caller) => {
+            let extensions = request.extensions_mut();
+            extensions.insert(graft_mcp::Caller(caller.cx.clone()));
+            extensions.insert(Auth(Arc::new(caller)));
             next.run(request).await
         }
         Err(e) => {
@@ -70,8 +74,18 @@ impl McpApi {
         F: FnOnce(Arc<ServerEngine>, CallContext) -> Fut,
         Fut: Future<Output = ApiResult<T>> + Send + 'static,
     {
+        // The request's server caller, set by `authenticate`: writes check
+        // its `jti` against the denylist, as on gRPC.
+        let auth = graft_mcp::request_auth()
+            .and_then(|Auth(auth)| auth.downcast::<Caller>().ok())
+            .ok_or(ApiError::Unauthenticated)?;
+        let caller = Caller {
+            cx: cx.clone(),
+            exp_s: auth.exp_s,
+            jti: auth.jti.clone(),
+        };
         self.0
-            .call(op, repo, cx.clone(), write, f)
+            .call(op, repo, caller, write, f)
             .await
             .map_err(|e| match e {
                 CallError::Api(e) => e,

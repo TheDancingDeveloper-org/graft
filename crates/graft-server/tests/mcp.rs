@@ -236,3 +236,69 @@ async fn mcp_refuses_an_oversized_body_from_an_authenticated_caller() {
     let (status, _, _) = post(server.addr, Some(&session.id), Some(&writer), &body);
     assert_eq!(status, 413);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_refuses_writes_by_a_revoked_token_and_still_serves_its_reads() {
+    let site = Site::new("server-mcp-revoke", "");
+    let admin = site.mint(&["repo:r:admin"]);
+    let target = site.mint_as("ses_target", &["repo:r:write"], 3600);
+    let server = site.start();
+
+    let mut c = server.clients(Some(&admin)).await;
+    c.create_repo("r").await.expect("create");
+    let files = BTreeMap::from([("README.md".to_owned(), b"hello\n".to_vec())]);
+    let root = c
+        .commit("r", None, &BTreeMap::new(), &files, 0)
+        .await
+        .expect("root");
+    c.repo
+        .update_ref(pb::UpdateRefRequest::from(UpdateRef {
+            repo: "r".into(),
+            name: "main".into(),
+            expected: None,
+            new: root.id,
+            kind: RefKind::Line,
+        }))
+        .await
+        .expect("main");
+
+    let session = Session::open(server.addr, &target);
+    let (failed, opened) = session.call(
+        "graft_workspace",
+        json!({"repo": "r", "action": "open", "line": "main"}),
+    );
+    assert!(!failed, "writes before revocation: {opened}");
+    let ws = opened["workspace"]["name"].as_str().unwrap().to_owned();
+
+    let out = site.admin_stdin(&["token", "revoke"], &target);
+    assert!(
+        out.status.success(),
+        "revoke: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Refused on the next write, in the same MCP session, as on gRPC.
+    let (failed, refused) = session.call(
+        "graft_commit",
+        json!({
+            "repo": "r", "workspace": ws, "message": "after revocation",
+            "files": [{"path": "README.md", "content": "revoked\n"}],
+        }),
+    );
+    assert!(failed);
+    assert_eq!(refused["kind"], "unauthenticated", "{refused}");
+    let (failed, refused) = session.call(
+        "graft_workspace",
+        json!({"repo": "r", "action": "open", "line": "main"}),
+    );
+    assert!(failed);
+    assert_eq!(refused["kind"], "unauthenticated", "{refused}");
+
+    // Reads are not on the denylist's path, as on gRPC.
+    let (failed, file) = session.call(
+        "graft_read",
+        json!({"repo": "r", "at": "main", "path": "README.md"}),
+    );
+    assert!(!failed, "{file}");
+    assert_eq!(file["content"], "hello\n");
+}
