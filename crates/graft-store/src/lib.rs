@@ -20,6 +20,17 @@ pub use meta::{
 };
 pub use object::{ObjectStore, StoreStats};
 
+/// The largest page any list call returns. Every list takes a `limit`, and
+/// implementations clamp it to `1..=MAX_PAGE` (see [`page_limit`]).
+pub const MAX_PAGE: u32 = 1000;
+
+/// The number of rows a list call returns for a requested `limit`: the limit
+/// clamped to `1..=MAX_PAGE`. Every implementation uses it, so the bound is
+/// the same for every store.
+pub fn page_limit(limit: u32) -> usize {
+    limit.clamp(1, MAX_PAGE) as usize
+}
+
 /// A repository's internal id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RepoId(pub u32);
@@ -33,9 +44,27 @@ pub enum StoreError {
     Full,
     /// Stored bytes failed verification.
     Corrupt(String),
+    /// A name that must be unique is taken (for example a repository).
+    Exists,
+    /// The caller broke a port rule, such as a write to an unknown repository
+    /// or a ref version that is not the next one. Nothing was written.
+    Invalid(String),
     /// Any other backend failure, described.
     Backend(String),
 }
 
 /// Result alias for store calls.
 pub type StoreResult<T> = Result<T, StoreError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_limit_clamps_to_one_through_the_maximum() {
+        assert_eq!(page_limit(0), 1);
+        assert_eq!(page_limit(1), 1);
+        assert_eq!(page_limit(MAX_PAGE), MAX_PAGE as usize);
+        assert_eq!(page_limit(u32::MAX), MAX_PAGE as usize);
+    }
+}

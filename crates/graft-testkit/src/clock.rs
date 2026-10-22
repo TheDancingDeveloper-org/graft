@@ -32,3 +32,17 @@ impl Clock for FakeClock {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moves_only_when_advanced() {
+        let clock = FakeClock::at(1_000);
+        assert_eq!(clock.now().ms, 1_000);
+        assert_eq!(clock.now().ms, 1_000, "reading does not move it");
+        clock.advance(250);
+        assert_eq!(clock.now().ms, 1_250);
+    }
+}

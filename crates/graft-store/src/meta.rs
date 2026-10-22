@@ -83,31 +83,36 @@ pub struct WorkspaceRecord {
     pub lease_until_ms: i64,
 }
 
-/// A condition a transaction checks before writing.
+/// A condition a transaction checks before writing. The first failing
+/// precondition aborts the transaction, and nothing is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Precondition {
-    /// The ref holds this target (or is absent, for `None`).
+    /// The ref is at this `(target, version)`, or absent for `None`. This is
+    /// the compare in ref CAS: a stale target or version fails.
     RefIs {
         /// Ref name.
         name: String,
-        /// Expected target.
-        target: Option<ChangesetId>,
+        /// Expected `(target, version)`.
+        expected: Option<(ChangesetId, u64)>,
     },
-    /// The workspace head is this (or none).
+    /// The workspace exists and its head is this. An absent workspace never
+    /// satisfies it, whatever `head` is.
     WorkspaceHeadIs {
         /// Workspace name.
         name: String,
-        /// Expected head.
+        /// Expected head (`None` means no head).
         head: Option<ChangesetId>,
     },
-    /// The changeset does not exist yet (idempotent insert reports Exists).
+    /// The changeset is not stored yet. This makes an insert idempotent: a
+    /// retry fails this precondition and writes nothing.
     ChangesetAbsent(ChangesetId),
 }
 
 /// One write inside a transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Write {
-    /// Insert content and its record.
+    /// Insert content and its record. Stores set `record.lsn` to the LSN of
+    /// the transaction's first `Journal` write, when there is one.
     PutChangeset {
         /// Id.
         id: ChangesetId,
@@ -116,20 +121,23 @@ pub enum Write {
         /// Record.
         record: ChangesetRecord,
     },
-    /// Update a changeset's record.
+    /// Update a changeset's record (`record.lsn` is handled as for
+    /// `PutChangeset`).
     SetRecord {
         /// Id.
         id: ChangesetId,
         /// New record.
         record: ChangesetRecord,
     },
-    /// Set a ref (after a `RefIs` precondition).
+    /// Set a ref. It must follow a `RefIs` precondition on the same name,
+    /// and its `version` must be the current version plus one (1 for a new
+    /// ref). Anything else is `StoreError::Invalid`.
     SetRef(RefRecord),
     /// Upsert a workspace.
     PutWorkspace(WorkspaceRecord),
-    /// Delete a workspace.
+    /// Delete a workspace. Deleting an absent one is a no-op.
     DeleteWorkspace(String),
-    /// Store a derived value.
+    /// Store a derived value (overwrites an existing one for the same key).
     PutDerived {
         /// Kind name.
         kind: String,
@@ -140,7 +148,7 @@ pub enum Write {
         /// Value bytes.
         value: Vec<u8>,
     },
-    /// Append a line-position row.
+    /// Sets a changeset's position on a line (overwrites).
     PutLinePos {
         /// Line.
         line: String,
@@ -149,7 +157,8 @@ pub enum Write {
         /// Position.
         pos: u64,
     },
-    /// Append a line path index row.
+    /// Adds a line path index row for a path or directory prefix. The
+    /// engine writes one row per prefix of each changed path.
     PutLinePath {
         /// Line.
         line: String,
@@ -157,22 +166,26 @@ pub enum Write {
         path: RepoPath,
         /// Position.
         pos: u64,
+        /// The changeset at that position that touched `path`.
+        changeset: ChangesetId,
     },
-    /// Add an object holder row.
+    /// Adds an object holder row. A holder is a set member, so adding the
+    /// same `(object, holder)` twice counts once.
     AddHolder {
         /// Object.
         object: ObjectId,
         /// Holder (a changeset id or an upload lease).
         holder: String,
     },
-    /// Remove an object holder row.
+    /// Removes an object holder row. Removing an absent row is a no-op.
     RemoveHolder {
         /// Object.
         object: ObjectId,
         /// Holder.
         holder: String,
     },
-    /// Record an idempotent land.
+    /// Records a land. The first record for `(draft, line)` is kept, so a
+    /// retried land returns the same result.
     PutLand {
         /// Draft head.
         draft: ChangesetId,
@@ -181,7 +194,8 @@ pub enum Write {
         /// Result.
         landed: ChangesetId,
     },
-    /// Append a journal entry; the store assigns the LSN.
+    /// Append a journal entry. The store assigns the next LSN of the
+    /// repository (LSNs start at 1 and have no gaps).
     Journal {
         /// Entry kind.
         kind: String,
@@ -210,7 +224,8 @@ pub enum TxnOutcome {
 
 /// Metadata storage.
 pub trait MetaStore: Send + Sync {
-    /// Creates a repository namespace, returning its id.
+    /// Creates a repository namespace, returning its id. A name that is
+    /// already taken is `StoreError::Exists`.
     fn create_repo(&self, name: &str) -> impl Future<Output = StoreResult<RepoId>> + Send;
     /// Looks up a repository by name.
     fn repo(&self, name: &str) -> impl Future<Output = StoreResult<Option<RepoId>>> + Send;
