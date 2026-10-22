@@ -14,7 +14,12 @@
 //!   lines use it; graft always writes `\n`.
 //! - Regions whose every common line repeats more than 64 times: git falls
 //!   back to its tuned Myers diff (`xdl_do_diff` with heuristics), graft to a
-//!   plain Myers diff, which can pick a different alignment.
+//!   minimal linear-space Myers diff, which can pick a different alignment.
+//! - Work budget: when git's histogram diff of one side runs over its share
+//!   of the budget (many scattered hunks), graft first anchors on lines unique
+//!   to both files, which can align differently; and a diff that runs over
+//!   the whole budget is `Merge3::TooComplex` where git would still merge.
+//!   Neither happens below a million units of work, so not in this corpus.
 //! - git's `xhistogram` also falls back when more than 64 distinct lines
 //!   collide in one bucket of its hash table; graft has no such limit.
 //!
@@ -177,6 +182,7 @@ fn agrees_with_git_merge_file() {
                 conflicted += 1;
             }
             Merge3::NotText => panic!("generated text is text"),
+            Merge3::TooComplex => panic!("a small case is never too complex\n{}", ctx()),
         }
     }
     // The corpus must exercise both outcomes.
