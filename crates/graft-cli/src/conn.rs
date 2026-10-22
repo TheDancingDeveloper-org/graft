@@ -8,12 +8,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use graft_client::workcopy::GRAFT_DIR;
-use graft_client::workcopy::WorkingCopy;
+use graft_client::workcopy::{Begun, Recovered, WorkingCopy};
+use graft_client::workspace::DEFAULT_LEASE_MS;
 use graft_client::{Endpoint, Remote, discover};
 use graft_model::ChangesetId;
 use graft_proto::api::RepoApi;
 use graft_proto::context::{CallContext, Principal, PrincipalKind};
-use graft_proto::types::ResolveRef;
+use graft_proto::types::{ResolveRef, WorkspaceRef};
 
 use crate::cli::{DEFAULT_LINE, Global};
 use crate::error::Failure;
@@ -156,6 +157,65 @@ impl Conn {
             )
             .await?;
         Ok(view.target)
+    }
+}
+
+/// A write command's session: the working copy, connected, its workspace
+/// renewed (or opened) and any interrupted commit finished
+/// (`WorkingCopy::begin`).
+pub(crate) struct Session {
+    pub(crate) wc: WorkingCopy,
+    pub(crate) conn: Conn,
+    pub(crate) cx: CallContext,
+    pub(crate) begun: Begun,
+}
+
+/// Opens the write session for the working copy around the current
+/// directory.
+pub(crate) async fn begin(g: &Global) -> Result<Session, Failure> {
+    let mut wc = require_working_copy()?;
+    let conn = connect(g, Some(&wc)).await?;
+    let cx = call_context();
+    let begun = wc.begin(&conn.remote, &cx, DEFAULT_LEASE_MS).await?;
+    Ok(Session {
+        wc,
+        conn,
+        cx,
+        begun,
+    })
+}
+
+impl Session {
+    /// The workspace, for a heartbeat.
+    pub(crate) fn workspace_ref(&self) -> WorkspaceRef {
+        WorkspaceRef {
+            repo: self.conn.repo.clone(),
+            name: self.begun.workspace.name.clone(),
+        }
+    }
+
+    /// How an interrupted commit ended, for JSON: `"finished"`,
+    /// `"rolled_back"`, or null.
+    pub(crate) fn recovered_json(&self) -> serde_json::Value {
+        match self.begun.recovered {
+            None => serde_json::Value::Null,
+            Some(Recovered::Finished(_)) => "finished".into(),
+            Some(Recovered::RolledBack) => "rolled_back".into(),
+        }
+    }
+
+    /// Tells people on standard error what happened to an interrupted
+    /// commit (the JSON carries it as `recovered`).
+    pub(crate) fn note_recovery(&self) {
+        match self.begun.recovered {
+            None => {}
+            Some(Recovered::Finished(id)) => {
+                eprintln!("graft: finished an interrupted commit: {id}")
+            }
+            Some(Recovered::RolledBack) => eprintln!(
+                "graft: dropped an interrupted commit that could not complete; its changes are uncommitted"
+            ),
+        }
     }
 }
 

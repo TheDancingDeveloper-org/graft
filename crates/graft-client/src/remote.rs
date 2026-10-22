@@ -21,6 +21,7 @@ use graft_proto::frame::{HEADER_LEN, MAX_FRAME_PAYLOAD};
 use graft_proto::pb;
 use graft_proto::pb::object_service_client::ObjectServiceClient;
 use graft_proto::pb::repo_service_client::RepoServiceClient;
+use graft_proto::pb::workspace_service_client::WorkspaceServiceClient;
 use graft_proto::types::*;
 use graft_proto::{
     ApiError, CallContext, PROTOCOL_VERSION, ProtocolVersion, VERSION_HEADER, WireError,
@@ -148,6 +149,14 @@ impl Remote {
 
     fn objects(&self) -> ObjectServiceClient<Channel> {
         ObjectServiceClient::new(self.channel.clone())
+            .accept_compressed(CompressionEncoding::Gzip)
+            .max_decoding_message_size(MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_MESSAGE_BYTES)
+    }
+
+    fn workspaces(&self) -> WorkspaceServiceClient<Channel> {
+        WorkspaceServiceClient::new(self.channel.clone())
+            .send_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Gzip)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES)
@@ -522,59 +531,108 @@ fn changeset_ref(r: pb::ChangesetRef) -> ApiResult<ChangesetId> {
 impl WorkspaceApi for Remote {
     async fn open_workspace(
         &self,
-        _cx: &CallContext,
-        _req: OpenWorkspace,
+        cx: &CallContext,
+        req: OpenWorkspace,
     ) -> ApiResult<WorkspaceView> {
-        todo!("G2.5")
+        let r = unary!(
+            self,
+            cx,
+            workspaces,
+            open_workspace,
+            pb::OpenWorkspaceRequest::from(req)
+        );
+        WorkspaceView::try_from(r).map_err(wire_error)
     }
-    async fn get_workspace(
-        &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-    ) -> ApiResult<WorkspaceView> {
-        todo!("G2.5")
+
+    async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
+        let r = unary!(
+            self,
+            cx,
+            workspaces,
+            get_workspace,
+            pb::WorkspaceRef::from(req)
+        );
+        WorkspaceView::try_from(r).map_err(wire_error)
     }
+
     async fn list_workspaces(
         &self,
-        _cx: &CallContext,
-        _repo: String,
-        _page: Page,
+        cx: &CallContext,
+        repo: String,
+        page: Page,
     ) -> ApiResult<Vec<WorkspaceView>> {
-        todo!("G2.5")
+        let msg = pb::ListWorkspacesRequest {
+            repo,
+            page: Some(page.into()),
+        };
+        let r = unary!(self, cx, workspaces, list_workspaces, msg);
+        Vec::<WorkspaceView>::try_from(r).map_err(wire_error)
     }
+
     async fn renew_lease(
         &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-        _lease_ms: u64,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        lease_ms: u64,
     ) -> ApiResult<WorkspaceView> {
-        todo!("G2.5")
+        let msg = pb::RenewLeaseRequest {
+            workspace: Some(req.into()),
+            lease_ms,
+        };
+        let r = unary!(self, cx, workspaces, renew_lease, msg);
+        WorkspaceView::try_from(r).map_err(wire_error)
     }
-    async fn set_head(&self, _cx: &CallContext, _req: SetHead) -> ApiResult<WorkspaceView> {
-        todo!("G2.5")
+
+    async fn set_head(&self, cx: &CallContext, req: SetHead) -> ApiResult<WorkspaceView> {
+        let r = unary!(
+            self,
+            cx,
+            workspaces,
+            set_head,
+            pb::SetHeadRequest::from(req)
+        );
+        WorkspaceView::try_from(r).map_err(wire_error)
     }
+
     async fn sync(
         &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-        _onto: Option<ChangesetId>,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        onto: Option<ChangesetId>,
     ) -> ApiResult<Synced> {
-        todo!("G2.5")
+        let msg = pb::SyncRequest {
+            workspace: Some(req.into()),
+            onto: onto.map(|id| id.0.0.to_vec()),
+        };
+        let r = unary!(self, cx, workspaces, sync, msg);
+        Synced::try_from(r).map_err(wire_error)
     }
+
     async fn stack(
         &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-        _op: StackOp,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        op: StackOp,
     ) -> ApiResult<WorkspaceView> {
-        todo!("G3.5")
+        let msg = pb::StackRequest {
+            workspace: Some(req.into()),
+            op: Some(op.into()),
+        };
+        let r = unary!(self, cx, workspaces, stack, msg);
+        WorkspaceView::try_from(r).map_err(wire_error)
     }
+
     async fn close_workspace(
         &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-        _keep_drafts: bool,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        keep_drafts: bool,
     ) -> ApiResult<()> {
-        todo!("G2.5")
+        let msg = pb::CloseWorkspaceRequest {
+            workspace: Some(req.into()),
+            keep_drafts,
+        };
+        unary!(self, cx, workspaces, close_workspace, msg);
+        Ok(())
     }
 }

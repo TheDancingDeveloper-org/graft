@@ -46,7 +46,7 @@ pub(crate) struct Global {
 pub(crate) enum Command {
     /// Open a workspace and lay out a sparse working copy
     Clone(CloneArgs),
-    /// Working-copy changes against the base (no server needed)
+    /// Working-copy changes against the head draft, else the base (no server needed)
     Status,
     /// Diff the working copy, or two changesets
     Diff(DiffArgs),
@@ -62,6 +62,16 @@ pub(crate) enum Command {
     Ls(LsArgs),
     /// List, add or remove the slice's path prefixes
     Sparse(SparseArgs),
+    /// Upload the slice's changes and create a draft on the server
+    Commit(CommitArgs),
+    /// Show, list, open, renew or close workspaces
+    Workspace(WorkspaceArgs),
+    /// List the drafts between the base and the head
+    Stack(StackArgs),
+    /// Move the base to the line tip (fast-forward with no stack; the server rebases a stack)
+    Sync,
+    /// Land the stack on the line, or hand it to the PR bridge
+    Land(LandArgs),
     /// Call a read operation of the API, with JSON in and out
     Api(ApiArgs),
     /// Print versions
@@ -204,6 +214,97 @@ pub(crate) enum SparseAction {
         #[arg(required = true)]
         prefixes: Vec<String>,
     },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CommitArgs {
+    /// The message (required, unless --amend keeps the old one)
+    #[arg(short, long, value_name = "MESSAGE")]
+    pub(crate) message: Option<String>,
+    /// Replace the head draft instead of adding one; the old head is superseded
+    #[arg(long)]
+    pub(crate) amend: bool,
+    /// The author as `Name <email>` (default: GRAFT_AUTHOR_NAME and GRAFT_AUTHOR_EMAIL, else the user)
+    #[arg(long, value_name = "AUTHOR")]
+    pub(crate) author: Option<String>,
+    /// What kind of author this is: human, agent, bot or ci (default: GRAFT_AUTHOR_KIND, else human)
+    #[arg(long, value_name = "KIND")]
+    pub(crate) author_kind: Option<String>,
+    /// Metadata `KEY=VALUE` for tools, for example `vogt.work_item=WI-1` (repeatable)
+    #[arg(long = "meta", value_name = "KEY=VALUE")]
+    pub(crate) meta: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceArgs {
+    /// What to do (default: show)
+    #[command(subcommand)]
+    pub(crate) action: Option<WorkspaceAction>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum WorkspaceAction {
+    /// Show a workspace (default: the working copy's)
+    Show {
+        /// The workspace
+        name: Option<String>,
+    },
+    /// List your workspaces
+    List {
+        /// Workspaces per page
+        #[arg(long, default_value_t = PAGE_DEFAULT)]
+        limit: u32,
+        /// Resume token from a previous page
+        #[arg(long, value_name = "TOKEN")]
+        cursor: Option<String>,
+    },
+    /// Open a workspace: for the working copy at its base, or on a line's tip
+    Open {
+        /// The name (default: one the server picks)
+        name: Option<String>,
+        /// Outside a working copy, the line to track
+        #[arg(long, default_value = DEFAULT_LINE)]
+        line: String,
+    },
+    /// Renew a workspace's lease
+    Renew {
+        /// The workspace (default: the working copy's)
+        name: Option<String>,
+        /// Lease length in seconds (default: 2 hours)
+        #[arg(long, value_name = "SECONDS")]
+        lease: Option<u64>,
+    },
+    /// Close a workspace; its drafts become abandoned
+    Close {
+        /// The workspace (default: the working copy's)
+        name: Option<String>,
+        /// Ask the server to keep the drafts
+        #[arg(long)]
+        keep_drafts: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct StackArgs {
+    /// What to do (default: list)
+    #[command(subcommand)]
+    pub(crate) action: Option<StackAction>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum StackAction {
+    /// List the drafts, oldest first
+    List,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LandArgs {
+    /// Wait up to this many seconds: for a contended land (default 60), and for a queued pull request to merge (default: don't wait)
+    #[arg(long, value_name = "SECONDS")]
+    pub(crate) wait: Option<u64>,
+    /// Land the stack as one changeset
+    #[arg(long)]
+    pub(crate) squash: bool,
 }
 
 #[derive(Debug, Args)]
