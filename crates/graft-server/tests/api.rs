@@ -111,16 +111,17 @@ async fn unauthenticated_and_out_of_scope_calls_are_refused() {
         .expect_err("refused");
     assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
 
-    // MintToken within the caller's scopes works, and the token is usable.
+    // MintToken within the caller's scopes, for itself, works, and the
+    // token is usable.
     let mut c = server.clients(Some(&admin)).await;
     let minted = c
         .admin
         .mint_token(pb::MintTokenRequest {
-            subject: "ses_1".into(),
+            subject: String::new(),
             scopes: vec!["repo:r:read".into()],
             ttl_s: 60,
-            session: Some("ses_1".into()),
-            work_item: Some("WI-2188".into()),
+            session: None,
+            work_item: None,
         })
         .await
         .expect("mint")

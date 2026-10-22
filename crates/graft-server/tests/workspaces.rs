@@ -102,6 +102,26 @@ async fn a_workspace_belongs_to_its_owner() {
     );
     refused(
         bo.workspaces
+            .sync(pb::SyncRequest {
+                workspace: Some(ws("ws-a")),
+                onto: None,
+            })
+            .await
+            .expect_err("not bob's"),
+    );
+    refused(
+        bo.workspaces
+            .stack(pb::StackRequest {
+                workspace: Some(ws("ws-a")),
+                op: Some(pb::StackOp {
+                    op: Some(pb::stack_op::Op::Drop(view.base.clone())),
+                }),
+            })
+            .await
+            .expect_err("not bob's"),
+    );
+    refused(
+        bo.workspaces
             .close_workspace(pb::CloseWorkspaceRequest {
                 workspace: Some(ws("ws-a")),
                 keep_drafts: false,
@@ -251,4 +271,135 @@ async fn oversized_workspace_requests_are_refused_and_the_server_carries_on() {
         .expect("still serving")
         .into_inner();
     assert_eq!(ok.name, "ws-after");
+}
+
+fn mint_req(subject: &str, session: Option<&str>, work_item: Option<&str>) -> pb::MintTokenRequest {
+    pb::MintTokenRequest {
+        subject: subject.into(),
+        scopes: vec!["repo:r:write".into()],
+        ttl_s: 600,
+        session: session.map(Into::into),
+        work_item: work_item.map(Into::into),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_writer_cannot_mint_its_way_into_another_workspace() {
+    let (_site, server, [alice, bob, _reader]) = setup("server-ws-mint-takeover").await;
+    let mut al = server.clients(Some(&alice)).await;
+    al.workspaces
+        .open_workspace(open("ws-a", 60_000))
+        .await
+        .expect("alice opens");
+
+    // Bob holds the same scopes as alice, but cannot become her, nor stamp
+    // his tokens with a session or work item that is not his.
+    let mut bo = server.clients(Some(&bob)).await;
+    for req in [
+        mint_req("alice", None, None),
+        mint_req("", Some("ses_alice"), None),
+        mint_req("bob", None, Some("WI-1")),
+    ] {
+        let e = bo
+            .admin
+            .mint_token(req.clone())
+            .await
+            .expect_err("another identity");
+        assert!(
+            matches!(api(e), ApiError::PermissionDenied { .. }),
+            "{req:?}"
+        );
+    }
+
+    // What he can mint is his own: it reaches only his workspaces.
+    let own = bo
+        .admin
+        .mint_token(mint_req("", None, None))
+        .await
+        .expect("for himself")
+        .into_inner()
+        .token;
+    let mut b2 = server.clients(Some(&own)).await;
+    for e in [
+        b2.workspaces
+            .get_workspace(ws("ws-a"))
+            .await
+            .expect_err("not bob's"),
+        b2.workspaces
+            .renew_lease(renew("ws-a", 60_000))
+            .await
+            .expect_err("not bob's"),
+    ] {
+        assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
+    }
+    let view = b2
+        .workspaces
+        .open_workspace(open("ws-b", 60_000))
+        .await
+        .expect("bob opens his own")
+        .into_inner();
+    assert_eq!(view.owner, "bob");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vogt_delegates_a_session_that_owns_its_workspaces() {
+    let (site, server, [alice, _bob, _reader]) = setup("server-ws-vogt").await;
+    let mut al = server.clients(Some(&alice)).await;
+    al.workspaces
+        .open_workspace(open("ws-a", 60_000))
+        .await
+        .expect("alice opens");
+
+    let vogt = site.mint_kind("vogt", "service", &["repo:r:write"], 3600);
+    let session = server
+        .clients(Some(&vogt))
+        .await
+        .admin
+        .mint_token(mint_req("ses_1", Some("ses_1"), Some("WI-1")))
+        .await
+        .expect("vogt delegates")
+        .into_inner()
+        .token;
+    let mut s = server.clients(Some(&session)).await;
+    let view = s
+        .workspaces
+        .open_workspace(open("ws-s", 60_000))
+        .await
+        .expect("the session opens")
+        .into_inner();
+    assert_eq!(
+        (view.owner.as_str(), view.session.as_deref()),
+        ("ses_1", Some("ses_1"))
+    );
+    let e = s
+        .workspaces
+        .get_workspace(ws("ws-a"))
+        .await
+        .expect_err("not the session's");
+    assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
+
+    // The session token is an agent's: it delegates no further.
+    let e = s
+        .admin
+        .mint_token(mint_req("alice", None, None))
+        .await
+        .expect_err("agents do not delegate");
+    assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
+    // A token it mints for itself keeps its identity and its workspaces.
+    let own = s
+        .admin
+        .mint_token(mint_req("", None, None))
+        .await
+        .expect("for itself")
+        .into_inner()
+        .token;
+    let got = server
+        .clients(Some(&own))
+        .await
+        .workspaces
+        .get_workspace(ws("ws-s"))
+        .await
+        .expect("same owner")
+        .into_inner();
+    assert_eq!(got.session.as_deref(), Some("ses_1"));
 }

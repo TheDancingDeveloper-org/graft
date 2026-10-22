@@ -39,8 +39,8 @@ async fn a_minted_token_is_no_broader_than_its_caller() {
         .await
         .expect("create");
 
-    // Vogt's own token: write under `src/` only.
-    let vogt = site.mint_as("vogt", &["repo:r:write:src"], 3600);
+    // Vogt's own token: a service, writing under `src/` only.
+    let vogt = site.mint_kind("vogt", "service", &["repo:r:write:src"], 3600);
     let mut c = server.clients(Some(&vogt)).await;
 
     // Narrower than the caller: minted, and usable.
@@ -99,7 +99,7 @@ async fn a_minted_token_never_outlives_its_caller() {
         .await
         .expect("create");
 
-    let short = site.mint_as("short", &["repo:r:admin"], 2);
+    let short = site.mint_kind("short", "service", &["repo:r:admin"], 2);
     let mut c = server.clients(Some(&short)).await;
     let e = c
         .admin
@@ -224,4 +224,187 @@ async fn revoking_takes_a_live_token_of_this_server_only() {
         .put_blobs("r", &[b"still good".to_vec()])
         .await
         .expect("refused revocations change nothing");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_scope_form_is_held_exactly_or_refused() {
+    let site = Site::new("server-mint-forms", "");
+    let admin = site.mint(&["repo:r:admin"]);
+    let server = site.start();
+    server
+        .clients(Some(&admin))
+        .await
+        .create_repo("r")
+        .await
+        .expect("create");
+    let vogt = site.mint_kind("vogt", "service", &["repo:r:write:src"], 3600);
+    let mut c = server.clients(Some(&vogt)).await;
+
+    // No wildcards, no case folding, no trimming, no path tricks: each of
+    // these is either not a scope or not one the caller holds.
+    for scope in [
+        "repo:*:read",
+        "repo:*:write",
+        "repo:r:*",
+        "repo:r:write:*",
+        "*",
+        "repo:R:read",
+        "REPO:r:read",
+        "repo:r:READ",
+        "repo:r:write:SRC",
+        " repo:r:read",
+        "repo:r:read ",
+        "repo: r:read",
+        "repo:r:write: src",
+        "repo:r:write:src ",
+        "repo:r:read\n",
+        "repo:r:write:src/../docs",
+        "repo:r:write:./src",
+        "repo:r:write:src/",
+        "repo:r:write:/src",
+        "repo:r:write:srcx",
+        "repo:r:write:sr",
+        "repo:r:write:",
+        "repo:r:read:extra",
+        "repo:r:land:*",
+        "objects:read",
+        "objects:*",
+        "",
+    ] {
+        let e = c
+            .admin
+            .mint_token(mint_req(&[scope], 60))
+            .await
+            .expect_err("not held");
+        assert!(
+            matches!(
+                api(e),
+                ApiError::PermissionDenied { .. } | ApiError::InvalidChange { .. }
+            ),
+            "scope {scope:?}"
+        );
+    }
+    // One bad scope among good ones spoils the request.
+    let e = c
+        .admin
+        .mint_token(mint_req(&["repo:r:read", "repo:r:write"], 60))
+        .await
+        .expect_err("one broader scope");
+    assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
+    // A token with no scopes is refused rather than minted empty.
+    let e = c
+        .admin
+        .mint_token(mint_req(&[], 60))
+        .await
+        .expect_err("no scopes");
+    assert!(matches!(api(e), ApiError::InvalidChange { .. }));
+    // The exact forms the caller holds do mint.
+    for scope in ["repo:r:read", "repo:r:write:src", "repo:r:write:src/a/b"] {
+        c.admin
+            .mint_token(mint_req(&[scope], 60))
+            .await
+            .unwrap_or_else(|e| panic!("{scope}: {e:?}"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_token_minted_from_a_minted_token_is_no_broader_and_no_longer() {
+    let site = Site::new("server-mint-chain", "");
+    let admin = site.mint(&["repo:r:admin"]);
+    let server = site.start();
+    server
+        .clients(Some(&admin))
+        .await
+        .create_repo("r")
+        .await
+        .expect("create");
+    let vogt = site.mint_kind("vogt", "service", &["repo:r:write"], 3600);
+    let mut v = server.clients(Some(&vogt)).await;
+
+    // Vogt delegates a short-lived session token.
+    let session = v
+        .admin
+        .mint_token(mint_req(&["repo:r:write:src"], 3))
+        .await
+        .expect("delegated")
+        .into_inner()
+        .token;
+    let mut s = server.clients(Some(&session)).await;
+
+    // The session token cannot widen, outlive itself, or name anyone else.
+    for scopes in [
+        &["repo:r:write"][..],
+        &["repo:r:write:docs"],
+        &["repo:r:admin"],
+    ] {
+        let e = s
+            .admin
+            .mint_token(self_req(scopes, 0))
+            .await
+            .expect_err("broader");
+        assert!(
+            matches!(api(e), ApiError::PermissionDenied { .. }),
+            "{scopes:?}"
+        );
+    }
+    let e = s
+        .admin
+        .mint_token(self_req(&["repo:r:read"], 60))
+        .await
+        .expect_err("outlives its caller");
+    assert!(matches!(api(e), ApiError::LimitExceeded { .. }));
+    for req in [
+        pb::MintTokenRequest {
+            subject: "ses_other".into(),
+            ..self_req(&["repo:r:read"], 0)
+        },
+        pb::MintTokenRequest {
+            session: Some("ses_other".into()),
+            ..self_req(&["repo:r:read"], 0)
+        },
+        pb::MintTokenRequest {
+            work_item: Some("WI-other".into()),
+            ..self_req(&["repo:r:read"], 0)
+        },
+    ] {
+        let e = s
+            .admin
+            .mint_token(req.clone())
+            .await
+            .expect_err("another identity");
+        assert!(
+            matches!(api(e), ApiError::PermissionDenied { .. }),
+            "{req:?}"
+        );
+    }
+
+    // Narrower, for itself: minted, with the default life capped at what is
+    // left, and so it dies with its caller.
+    let grandchild = s
+        .admin
+        .mint_token(self_req(&["repo:r:read"], 0))
+        .await
+        .expect("narrower, for itself")
+        .into_inner()
+        .token;
+    let mut g = server.clients(Some(&grandchild)).await;
+    let e = g
+        .repo
+        .resolve_ref(main_ref())
+        .await
+        .expect_err("no ref yet");
+    assert!(matches!(api(e), ApiError::NotFound { .. }));
+    tokio::time::sleep(Duration::from_millis(3_600)).await;
+    let e = g.repo.resolve_ref(main_ref()).await.expect_err("expired");
+    assert_eq!(api(e), ApiError::Unauthenticated);
+}
+
+/// A request that names no identity: the token is the caller's own.
+fn self_req(scopes: &[&str], ttl_s: u64) -> pb::MintTokenRequest {
+    pb::MintTokenRequest {
+        subject: String::new(),
+        session: None,
+        work_item: None,
+        ..mint_req(scopes, ttl_s)
+    }
 }

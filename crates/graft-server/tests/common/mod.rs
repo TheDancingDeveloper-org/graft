@@ -132,8 +132,14 @@ impl Site {
         self.mint_as("tester", scopes, 3600)
     }
 
-    /// Mints a token for `subject` with `scopes`, valid for `ttl_s`.
+    /// Mints an agent token for `subject` with `scopes`, valid for `ttl_s`.
     pub fn mint_as(&self, subject: &str, scopes: &[&str], ttl_s: u64) -> String {
+        self.mint_kind(subject, "agent", scopes, ttl_s)
+    }
+
+    /// Mints a token of `kind` (`human`, `agent`, `ci` or `service`) for
+    /// `subject` with `scopes`, valid for `ttl_s`.
+    pub fn mint_kind(&self, subject: &str, kind: &str, scopes: &[&str], ttl_s: u64) -> String {
         let ttl = ttl_s.to_string();
         let mut args = vec![
             "token",
@@ -141,7 +147,7 @@ impl Site {
             "--subject",
             subject,
             "--kind",
-            "agent",
+            kind,
             "--ttl",
             &ttl,
         ];

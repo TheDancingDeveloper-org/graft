@@ -18,14 +18,14 @@ use graft_proto::types::*;
 use graft_proto::{
     AdminApi as _, ApiError, Frame, ObjectApi as _, PROTOCOL_VERSION, RepoApi as _, VERSION_HEADER,
 };
-use graft_proto::{WireError, WorkspaceApi as _};
+use graft_proto::{CallContext, WireError, WorkspaceApi as _};
 use graft_store::MetaStore as _;
 use tokio::sync::mpsc;
 use tonic::codec::CompressionEncoding;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::app::{App, CallError, Caller};
+use crate::app::{App, CallError, Caller, ServerEngine};
 use crate::mint;
 
 /// Frame bytes per `GetObjects` stream message. A single frame larger than
@@ -95,6 +95,34 @@ fn req_cid(b: Vec<u8>, field: &'static str) -> Result<ChangesetId, Status> {
         })
     })?;
     Ok(ChangesetId(graft_model::ObjectId(bytes)))
+}
+
+/// A workspace is its owner's (`docs/design.md` §7.2): a caller that neither
+/// owns `ws` nor administers its repository is refused before the operation
+/// runs, and learns nothing of it. A workspace that does not exist is left
+/// to the operation to answer.
+async fn own_workspace(
+    e: &ServerEngine,
+    cx: &CallContext,
+    ws: &WorkspaceRef,
+) -> Result<(), ApiError> {
+    let view = match e.get_workspace(cx, ws.clone()).await {
+        Ok(view) => view,
+        Err(ApiError::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let admin = Scope::Admin {
+        repo: ws.repo.clone(),
+    };
+    if view.owner != cx.principal.subject
+        && graft_auth::authorize(&cx.principal, &admin, None).is_err()
+    {
+        return Err(ApiError::PermissionDenied {
+            scope: admin.to_string(),
+            path: None,
+        });
+    }
+    Ok(())
 }
 
 fn workspace_ref(w: Option<pb::WorkspaceRef>) -> Result<WorkspaceRef, Status> {
@@ -842,23 +870,11 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let cx = self.cx(&request, "GetWorkspace")?;
         let req: WorkspaceRef = wire(request.into_inner())?;
         let repo = req.repo.clone();
-        let admin = Scope::Admin { repo: repo.clone() };
-        let admin_scope = format!("repo:{repo}:admin");
         let out = self
             .app
             .call("GetWorkspace", &repo, cx, false, move |e, cx| async move {
-                let view = e.get_workspace(&cx, req).await?;
-                // A workspace is its owner's: anyone else learns nothing of
-                // it, read access to the repository notwithstanding.
-                if view.owner != cx.principal.subject
-                    && graft_auth::authorize(&cx.principal, &admin, None).is_err()
-                {
-                    return Err(ApiError::PermissionDenied {
-                        scope: admin_scope,
-                        path: None,
-                    });
-                }
-                Ok(view)
+                own_workspace(&e, &cx, &req).await?;
+                e.get_workspace(&cx, req).await
             })
             .await
             .map_err(Status::from)?;
@@ -899,6 +915,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let out = self
             .app
             .call("RenewLease", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &ws).await?;
                 e.renew_lease(&cx, ws, lease_ms).await
             })
             .await
@@ -916,6 +933,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let out = self
             .app
             .call("SetHead", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &req.workspace).await?;
                 e.set_head(&cx, req).await
             })
             .await
@@ -935,6 +953,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let out = self
             .app
             .call("Sync", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &ws).await?;
                 e.sync(&cx, ws, onto).await
             })
             .await
@@ -959,6 +978,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let out = self
             .app
             .call("Stack", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &ws).await?;
                 e.stack(&cx, ws, op).await
             })
             .await
@@ -977,6 +997,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         let repo = ws.repo.clone();
         self.app
             .call("CloseWorkspace", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &ws).await?;
                 e.close_workspace(&cx, ws, keep).await
             })
             .await
