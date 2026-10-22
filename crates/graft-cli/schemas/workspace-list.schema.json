@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft workspace list --json",
+  "type": "object",
+  "required": [
+    "workspaces",
+    "next"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "workspaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "owner",
+          "session",
+          "line",
+          "base",
+          "head",
+          "lease_until_ms"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "session": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "type": "string"
+          },
+          "base": {
+            "type": "string",
+            "pattern": "^[a-z][0-9a-f]{64}$",
+            "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+          },
+          "head": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z][0-9a-f]{64}$",
+                "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lease_until_ms": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "next": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

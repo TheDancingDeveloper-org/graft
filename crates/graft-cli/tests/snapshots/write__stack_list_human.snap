@@ -1,0 +1,7 @@
+---
+source: crates/graft-cli/tests/write.rs
+expression: text(&out)
+---
+base ceb9d51a431ef
+c5fdc21b36163 draft      first
+c7682385f43f5 draft      second

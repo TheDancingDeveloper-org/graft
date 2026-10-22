@@ -21,6 +21,7 @@ hyper-util.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic = { workspace = true, features = ["gzip"] }
+rustix.workspace = true
 tower.workspace = true
 unicode-normalization.workspace = true
 

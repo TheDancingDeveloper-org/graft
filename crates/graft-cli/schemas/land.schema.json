@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft land --json",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "outcome",
+        "line",
+        "landed",
+        "rebased",
+        "changed",
+        "pr_url",
+        "recovered"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "const": "landed"
+        },
+        "line": {
+          "type": "string"
+        },
+        "landed": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "rebased": {
+          "type": "boolean"
+        },
+        "changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pr_url": {
+          "type": "null"
+        },
+        "recovered": {
+          "description": "An interrupted commit the command found first: finished, rolled back, or none.",
+          "enum": [
+            "finished",
+            "rolled_back",
+            null
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "outcome",
+        "line",
+        "landed",
+        "rebased",
+        "changed",
+        "pr_url",
+        "recovered"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "const": "queued"
+        },
+        "line": {
+          "type": "string"
+        },
+        "landed": {
+          "type": "null"
+        },
+        "rebased": {
+          "type": "null"
+        },
+        "changed": {
+          "type": "null"
+        },
+        "pr_url": {
+          "type": "string"
+        },
+        "recovered": {
+          "description": "An interrupted commit the command found first: finished, rolled back, or none.",
+          "enum": [
+            "finished",
+            "rolled_back",
+            null
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use assert_cmd::Command;
 use graft_model::{BlobId, Changeset, ChangesetId, EntryKind, ObjectId, RepoPath, Tree, TreeId};
 use graft_proto::ApiError;
-use graft_proto::api::{ObjectApi, RepoApi};
+use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::context::{CallContext, Principal, PrincipalKind};
 use graft_proto::error::ApiResult;
 use graft_proto::types::*;
@@ -89,6 +89,12 @@ impl Fixture {
                 third,
             },
         )
+    }
+
+    /// The repository behind the fixture (workspaces, drafts, the fake PR
+    /// bridge).
+    pub fn repo(&self) -> &SnapshotRepo {
+        &self.repo
     }
 
     /// The tree of `id`, from the object store.
@@ -375,9 +381,73 @@ impl RepoApi for Fixture {
     }
 }
 
+impl WorkspaceApi for Fixture {
+    async fn open_workspace(
+        &self,
+        cx: &CallContext,
+        req: OpenWorkspace,
+    ) -> ApiResult<WorkspaceView> {
+        self.repo.open_workspace(cx, req).await
+    }
+
+    async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
+        self.repo.get_workspace(cx, req).await
+    }
+
+    async fn list_workspaces(
+        &self,
+        cx: &CallContext,
+        repo: String,
+        page: Page,
+    ) -> ApiResult<Vec<WorkspaceView>> {
+        self.repo.list_workspaces(cx, repo, page).await
+    }
+
+    async fn renew_lease(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        lease_ms: u64,
+    ) -> ApiResult<WorkspaceView> {
+        self.repo.renew_lease(cx, req, lease_ms).await
+    }
+
+    async fn set_head(&self, cx: &CallContext, req: SetHead) -> ApiResult<WorkspaceView> {
+        self.repo.set_head(cx, req).await
+    }
+
+    async fn sync(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        onto: Option<ChangesetId>,
+    ) -> ApiResult<Synced> {
+        self.repo.sync(cx, req, onto).await
+    }
+
+    async fn stack(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        op: StackOp,
+    ) -> ApiResult<WorkspaceView> {
+        self.repo.stack(cx, req, op).await
+    }
+
+    async fn close_workspace(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        keep_drafts: bool,
+    ) -> ApiResult<()> {
+        self.repo.close_workspace(cx, req, keep_drafts).await
+    }
+}
+
 /// A runtime, a served fixture, and the history it holds.
 pub struct Served {
     pub rt: Runtime,
+    pub fixture: Arc<Fixture>,
     pub server: TestServer,
     pub url: String,
     pub commits: Commits,
@@ -392,10 +462,12 @@ pub fn serve() -> Served {
         .build()
         .expect("runtime");
     let (fixture, commits) = rt.block_on(Fixture::build());
-    let server = rt.block_on(TestServer::tcp(Arc::new(fixture)));
+    let fixture = Arc::new(fixture);
+    let server = rt.block_on(TestServer::tcp_workspaces(fixture.clone()));
     let url = server.url().to_owned();
     Served {
         rt,
+        fixture,
         server,
         url,
         commits,

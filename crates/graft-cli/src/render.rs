@@ -9,7 +9,7 @@ use base64::Engine;
 use graft_model::{Author, AuthorKind, Change, ChangesetId, EntryKind, Timestamp};
 use graft_proto::types::{
     BlameResult, ChangesetSummary, ChangesetView, DiffResult, DraftState, Entries, EntryView,
-    FileContent, FileDiff, History, JournalPage, RefKind, RefView,
+    FileContent, FileDiff, History, JournalPage, RefKind, RefView, WorkspaceView,
 };
 use serde_json::{Value, json};
 
@@ -150,6 +150,19 @@ pub(crate) fn changeset_view(v: &ChangesetView) -> Value {
         "lsn": v.lsn,
         "state": state_name(v.state),
         "superseded_by": v.superseded_by.map(|id| id.to_string()),
+    })
+}
+
+/// A workspace.
+pub(crate) fn workspace_view(w: &WorkspaceView) -> Value {
+    json!({
+        "name": w.name,
+        "owner": w.owner,
+        "session": w.session,
+        "line": w.line,
+        "base": w.base.to_string(),
+        "head": w.head.map(|h| h.to_string()),
+        "lease_until_ms": w.lease_until_ms,
     })
 }
 
