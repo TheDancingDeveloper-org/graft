@@ -1,10 +1,14 @@
-# graft-mirror variant that clones the rustTorrent pilot repository (D14).
-# Needs outbound HTTPS to github.com. Key names are provisional (see fixture.toml).
-[source]
-url = "https://github.com/TheDancingDeveloper-org/rustTorrent.git"
-branch = "main"
-
-[graft]
+# graft-mirror variant that follows the rustTorrent pilot repository (D14).
+# Parsed by graft_mirror::config::FileConfig; a test in crates/graft-mirror
+# checks this file, so keep it to the crate's schema.
+# Needs outbound HTTPS to github.com. Nothing here is secret: no [github]
+# section, so the mirror follows and imports but does not bridge.
 server = "http://graft-server:7878"
 repo = "rusttorrent"
+upstream = "https://github.com/TheDancingDeveloper-org/rustTorrent.git"
+mirror_dir = "/var/lib/graft/mirror/rusttorrent.git"
+db = "/var/lib/graft/mirror/rusttorrent.sqlite"
+
+[[lines]]
+branch = "main"
 line = "main"
