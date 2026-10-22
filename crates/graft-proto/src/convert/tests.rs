@@ -1,9 +1,5 @@
 //! Every API type round-trips through protobuf bytes, and the boundary
 //! rejects malformed messages.
-//!
-//! Types that carry a `RepoPath` need `RepoPath::new`, which arrives with
-//! G1.1. Until then their round-trips are skipped (with a note on stderr)
-//! and start running by themselves when it lands.
 
 use std::fmt::Debug;
 
@@ -20,23 +16,14 @@ use crate::frame::Frame;
 use crate::pb;
 use crate::types::*;
 
-/// Whether graft-model can build paths yet (G1.1).
-fn paths_ready() -> bool {
-    std::panic::catch_unwind(|| RepoPath::new("a")).is_ok_and(|r| r.is_ok())
-}
-
 /// Rust → protobuf → bytes → protobuf → Rust gives back the same value.
-fn check<T, P, S>(name: &str, needs_paths: bool, strategy: S)
+fn check<T, P, S>(name: &str, strategy: S)
 where
     S: Strategy<Value = T>,
     T: Clone + Debug + PartialEq + TryFrom<P>,
     <T as TryFrom<P>>::Error: Debug,
     P: From<T> + prost::Message + Default,
 {
-    if needs_paths && !paths_ready() {
-        eprintln!("skipped {name}: RepoPath::new is not implemented yet (G1.1)");
-        return;
-    }
     let mut runner = TestRunner::new(Config {
         cases: 128,
         ..Config::default()
@@ -267,23 +254,21 @@ fn api_error() -> impl Strategy<Value = ApiError> {
 
 #[test]
 fn shared_types_round_trip() {
-    check::<Page, pb::Page, _>("Page", false, page());
-    check::<Timestamp, pb::Timestamp, _>("Timestamp", false, ts());
-    check::<Author, pb::Author, _>("Author", false, author());
-    check::<Change, pb::Change, _>("Change", true, change());
-    check::<Changeset, pb::Changeset, _>("Changeset", true, changeset());
+    check::<Page, pb::Page, _>("Page", page());
+    check::<Timestamp, pb::Timestamp, _>("Timestamp", ts());
+    check::<Author, pb::Author, _>("Author", author());
+    check::<Change, pb::Change, _>("Change", change());
+    check::<Changeset, pb::Changeset, _>("Changeset", changeset());
 }
 
 #[test]
 fn object_types_round_trip() {
     check::<GetObjects, pb::GetObjectsRequest, _>(
         "GetObjects",
-        false,
         (text(), oids()).prop_map(|(repo, ids)| GetObjects { repo, ids }),
     );
     check::<Objects, pb::Objects, _>(
         "Objects",
-        false,
         (
             prop::collection::vec((oid(), frame()), 0..3),
             oids(),
@@ -297,22 +282,19 @@ fn object_types_round_trip() {
     );
     check::<HasObjects, pb::HasObjectsRequest, _>(
         "HasObjects",
-        false,
         (text(), oids()).prop_map(|(repo, ids)| HasObjects { repo, ids }),
     );
     check::<PutObjects, pb::PutObjectsRequest, _>(
         "PutObjects",
-        false,
         (text(), frames()).prop_map(|(repo, blobs)| PutObjects { repo, blobs }),
     );
-    check::<Vec<ObjectId>, pb::ObjectIds, _>("ObjectIds", false, oids());
+    check::<Vec<ObjectId>, pb::ObjectIds, _>("ObjectIds", oids());
 }
 
 #[test]
 fn changeset_types_round_trip() {
     check::<CreateChangeset, pb::CreateChangesetRequest, _>(
         "CreateChangeset",
-        true,
         (
             text(),
             cids(),
@@ -348,21 +330,18 @@ fn changeset_types_round_trip() {
                 },
             ),
     );
-    check::<Created, pb::Created, _>("Created", false, created());
+    check::<Created, pb::Created, _>("Created", created());
     check::<Vec<Created>, pb::CreatedList, _>(
         "CreatedList",
-        false,
         prop::collection::vec(created(), 0..3),
     );
     check::<GetChangesets, pb::GetChangesetsRequest, _>(
         "GetChangesets",
-        false,
         (text(), cids()).prop_map(|(repo, ids)| GetChangesets { repo, ids }),
     );
-    check::<ChangesetView, pb::ChangesetView, _>("ChangesetView", true, changeset_view());
+    check::<ChangesetView, pb::ChangesetView, _>("ChangesetView", changeset_view());
     check::<Changesets, pb::Changesets, _>(
         "Changesets",
-        true,
         (
             prop::collection::vec(changeset_view(), 0..3),
             cids(),
@@ -376,7 +355,6 @@ fn changeset_types_round_trip() {
     );
     check::<ImportChangesets, pb::ImportChangesetsRequest, _>(
         "ImportChangesets",
-        true,
         (text(), prop::collection::vec(changeset(), 0..3))
             .prop_map(|(repo, changesets)| ImportChangesets { repo, changesets }),
     );
@@ -384,25 +362,18 @@ fn changeset_types_round_trip() {
 
 #[test]
 fn ref_types_round_trip() {
-    check::<RefView, pb::RefView, _>("RefView", false, ref_view());
-    check::<Vec<RefView>, pb::RefViews, _>(
-        "RefViews",
-        false,
-        prop::collection::vec(ref_view(), 0..3),
-    );
+    check::<RefView, pb::RefView, _>("RefView", ref_view());
+    check::<Vec<RefView>, pb::RefViews, _>("RefViews", prop::collection::vec(ref_view(), 0..3));
     check::<ResolveRef, pb::ResolveRefRequest, _>(
         "ResolveRef",
-        false,
         (text(), text()).prop_map(|(repo, name)| ResolveRef { repo, name }),
     );
     check::<ListRefs, pb::ListRefsRequest, _>(
         "ListRefs",
-        false,
         (text(), otext(), page()).prop_map(|(repo, prefix, page)| ListRefs { repo, prefix, page }),
     );
     check::<UpdateRef, pb::UpdateRefRequest, _>(
         "UpdateRef",
-        false,
         (text(), text(), ocid(), cid(), ref_kind()).prop_map(
             |(repo, name, expected, new, kind)| UpdateRef {
                 repo,
@@ -419,13 +390,11 @@ fn ref_types_round_trip() {
 fn snapshot_types_round_trip() {
     check::<PathAt, pb::PathAt, _>(
         "PathAt",
-        true,
         (text(), cid(), path()).prop_map(|(repo, at, path)| PathAt { repo, at, path }),
     );
-    check::<EntryView, pb::EntryView, _>("EntryView", true, entry_view());
+    check::<EntryView, pb::EntryView, _>("EntryView", entry_view());
     check::<FileContent, pb::FileContent, _>(
         "FileContent",
-        false,
         (
             entry_kind(),
             oid(),
@@ -439,7 +408,6 @@ fn snapshot_types_round_trip() {
     );
     check::<ListTree, pb::ListTreeRequest, _>(
         "ListTree",
-        true,
         (
             text(),
             cid(),
@@ -457,7 +425,6 @@ fn snapshot_types_round_trip() {
     );
     check::<Entries, pb::Entries, _>(
         "Entries",
-        true,
         (prop::collection::vec(entry_view(), 0..3), otext())
             .prop_map(|(entries, next)| Entries { entries, next }),
     );
@@ -467,7 +434,6 @@ fn snapshot_types_round_trip() {
 fn history_types_round_trip() {
     check::<Log, pb::LogRequest, _>(
         "Log",
-        true,
         (text(), cid(), ocid(), paths(), page()).prop_map(|(repo, from, until, paths, page)| Log {
             repo,
             from,
@@ -476,16 +442,14 @@ fn history_types_round_trip() {
             page,
         }),
     );
-    check::<ChangesetSummary, pb::ChangesetSummary, _>("ChangesetSummary", false, summary());
+    check::<ChangesetSummary, pb::ChangesetSummary, _>("ChangesetSummary", summary());
     check::<History, pb::History, _>(
         "History",
-        false,
         (prop::collection::vec(summary(), 0..3), otext())
             .prop_map(|(changesets, next)| History { changesets, next }),
     );
     check::<Pair, pb::Pair, _>(
         "Pair",
-        false,
         (text(), cid(), cid()).prop_map(|(repo, a, b)| Pair { repo, a, b }),
     );
     let patch =
@@ -495,7 +459,6 @@ fn history_types_round_trip() {
         });
     check::<Diff, pb::DiffRequest, _>(
         "Diff",
-        true,
         (
             text(),
             cid(),
@@ -513,16 +476,14 @@ fn history_types_round_trip() {
                 page,
             }),
     );
-    check::<FileDiff, pb::FileDiff, _>("FileDiff", true, file_diff());
+    check::<FileDiff, pb::FileDiff, _>("FileDiff", file_diff());
     check::<DiffResult, pb::DiffResult, _>(
         "DiffResult",
-        true,
         (prop::collection::vec(file_diff(), 0..3), otext())
             .prop_map(|(files, next)| DiffResult { files, next }),
     );
     check::<Blame, pb::BlameRequest, _>(
         "Blame",
-        true,
         (
             text(),
             cid(),
@@ -538,7 +499,6 @@ fn history_types_round_trip() {
     );
     check::<BlameResult, pb::BlameResult, _>(
         "BlameResult",
-        false,
         prop::collection::vec(
             (any::<u32>(), any::<u32>(), summary()).prop_map(|(start, end, origin)| BlameRange {
                 start,
@@ -555,7 +515,6 @@ fn history_types_round_trip() {
 fn land_types_round_trip() {
     check::<Rebase, pb::RebaseRequest, _>(
         "Rebase",
-        false,
         (text(), cid(), cid(), merge_mode()).prop_map(|(repo, changeset, onto, merge)| Rebase {
             repo,
             changeset,
@@ -565,7 +524,6 @@ fn land_types_round_trip() {
     );
     check::<Revert, pb::RevertRequest, _>(
         "Revert",
-        false,
         (text(), cid(), cid(), otext()).prop_map(|(repo, changeset, onto, workspace)| Revert {
             repo,
             changeset,
@@ -575,7 +533,6 @@ fn land_types_round_trip() {
     );
     check::<Land, pb::LandRequest, _>(
         "Land",
-        false,
         (
             text(),
             cid(),
@@ -595,7 +552,6 @@ fn land_types_round_trip() {
     );
     check::<Landed, pb::Landed, _>(
         "Landed",
-        true,
         prop_oneof![
             (cid(), any::<u64>(), any::<u64>(), any::<bool>(), paths()).prop_map(
                 |(landed, line_version, pos, rebased, merged_paths)| Landed::Landed {
@@ -611,7 +567,6 @@ fn land_types_round_trip() {
     );
     check::<Attest, pb::AttestRequest, _>(
         "Attest",
-        false,
         (text(), cid(), text(), any::<bool>(), text()).prop_map(
             |(repo, changeset, check, passed, url)| Attest {
                 repo,
@@ -624,7 +579,6 @@ fn land_types_round_trip() {
     );
     check::<Watch, pb::WatchRequest, _>(
         "Watch",
-        false,
         (
             text(),
             any::<u64>(),
@@ -642,7 +596,6 @@ fn land_types_round_trip() {
     );
     check::<JournalPage, pb::JournalPage, _>(
         "JournalPage",
-        false,
         (
             prop::collection::vec(
                 (any::<u64>(), text(), text()).prop_map(|(lsn, kind, body)| JournalEntry {
@@ -660,15 +613,13 @@ fn land_types_round_trip() {
 
 #[test]
 fn workspace_types_round_trip() {
-    check::<WorkspaceView, pb::WorkspaceView, _>("WorkspaceView", false, workspace_view());
+    check::<WorkspaceView, pb::WorkspaceView, _>("WorkspaceView", workspace_view());
     check::<Vec<WorkspaceView>, pb::WorkspaceViews, _>(
         "WorkspaceViews",
-        false,
         prop::collection::vec(workspace_view(), 0..3),
     );
     check::<OpenWorkspace, pb::OpenWorkspaceRequest, _>(
         "OpenWorkspace",
-        false,
         (text(), otext(), text(), ocid(), any::<u64>()).prop_map(
             |(repo, name, line, at, lease_ms)| OpenWorkspace {
                 repo,
@@ -679,10 +630,9 @@ fn workspace_types_round_trip() {
             },
         ),
     );
-    check::<WorkspaceRef, pb::WorkspaceRef, _>("WorkspaceRef", false, workspace_ref());
+    check::<WorkspaceRef, pb::WorkspaceRef, _>("WorkspaceRef", workspace_ref());
     check::<SetHead, pb::SetHeadRequest, _>(
         "SetHead",
-        false,
         (workspace_ref(), ocid(), ocid()).prop_map(|(workspace, expected, new)| SetHead {
             workspace,
             expected,
@@ -691,7 +641,6 @@ fn workspace_types_round_trip() {
     );
     check::<Synced, pb::Synced, _>(
         "Synced",
-        true,
         (workspace_view(), paths()).prop_map(|(workspace, changed_paths)| Synced {
             workspace,
             changed_paths,
@@ -699,7 +648,6 @@ fn workspace_types_round_trip() {
     );
     check::<StackOp, pb::StackOp, _>(
         "StackOp (no split)",
-        false,
         prop_oneof![
             cids().prop_map(StackOp::Reorder),
             cids().prop_map(StackOp::Squash),
@@ -708,7 +656,6 @@ fn workspace_types_round_trip() {
     );
     check::<StackOp, pb::StackOp, _>(
         "StackOp::Split",
-        true,
         (cid(), prop::collection::vec(paths(), 0..3))
             .prop_map(|(draft, groups)| StackOp::Split { draft, groups }),
     );
@@ -718,12 +665,10 @@ fn workspace_types_round_trip() {
 fn admin_types_round_trip() {
     check::<Gc, pb::GcRequest, _>(
         "Gc",
-        false,
         (text(), any::<bool>()).prop_map(|(repo, dry_run)| Gc { repo, dry_run }),
     );
     check::<GcReport, pb::GcReport, _>(
         "GcReport",
-        false,
         (any::<u64>(), any::<u64>(), any::<u64>()).prop_map(|(changesets, objects, bytes)| {
             GcReport {
                 changesets,
@@ -734,7 +679,6 @@ fn admin_types_round_trip() {
     );
     check::<MintToken, pb::MintTokenRequest, _>(
         "MintToken",
-        false,
         (
             text(),
             prop::collection::vec(text(), 0..3),
@@ -754,7 +698,7 @@ fn admin_types_round_trip() {
 
 #[test]
 fn errors_round_trip_through_protobuf() {
-    check::<ApiError, pb::ApiError, _>("ApiError", false, api_error());
+    check::<ApiError, pb::ApiError, _>("ApiError", api_error());
 }
 
 #[test]

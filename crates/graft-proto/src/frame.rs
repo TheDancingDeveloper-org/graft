@@ -367,6 +367,33 @@ mod tests {
     }
 
     #[test]
+    fn decode_verified_checks_the_id() {
+        for payload in [b"hello".to_vec(), compressible(1000)] {
+            let id = ObjectId::hash(ObjectKind::Blob, &payload);
+            let f = Frame::encode(ObjectKind::Blob, &payload);
+            assert_eq!(f.decode_verified(id), Ok(payload.clone()));
+
+            // A wrong id, or the same bytes under another kind, fails.
+            let mut other = payload.clone();
+            other[0] ^= 1;
+            let wrong = ObjectId::hash(ObjectKind::Blob, &other);
+            assert_eq!(f.decode_verified(wrong), Err(FrameError::HashMismatch));
+            let as_tree = ObjectId::hash(ObjectKind::Tree, &payload);
+            assert_eq!(f.decode_verified(as_tree), Err(FrameError::HashMismatch));
+        }
+    }
+
+    #[test]
+    fn decode_verified_rejects_a_flipped_payload_byte() {
+        let payload = b"hello".to_vec();
+        let id = ObjectId::hash(ObjectKind::Blob, &payload);
+        let mut f = Frame::encode(ObjectKind::Blob, &payload);
+        assert_eq!(f.codec, Codec::Raw);
+        f.body[2] ^= 0x20;
+        assert_eq!(f.decode_verified(id), Err(FrameError::HashMismatch));
+    }
+
+    #[test]
     fn rejects_corrupt_gzip() {
         let mut gz = Frame::encode(ObjectKind::Blob, &compressible(1000));
         let n = gz.body.len();
