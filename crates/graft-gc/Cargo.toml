@@ -16,5 +16,10 @@ graft-model.workspace = true
 graft-store.workspace = true
 
 [dev-dependencies]
+graft-engine.workspace = true
+graft-proto.workspace = true
 graft-store = { workspace = true, features = ["testkit"] }
+graft-store-fs.workspace = true
+graft-store-sqlite.workspace = true
+graft-testkit.workspace = true
 proptest.workspace = true
