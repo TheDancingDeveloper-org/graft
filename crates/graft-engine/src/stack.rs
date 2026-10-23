@@ -20,7 +20,8 @@
 //! `graft.` metadata, which describes how their predecessors were made.
 //!
 //! New changesets are stored abandoned first, then one transaction guarded
-//! by the workspace adopts them, marks each replaced draft superseded by its
+//! by the workspace adopts them (reviving one that an earlier edit
+//! abandoned or superseded), marks each replaced draft superseded by its
 //! successor (a dropped draft abandoned), and moves the head. A crash in
 //! between leaves only collectable orphans. A retried operation that already
 //! committed names drafts no longer in the stack, and fails with
@@ -337,15 +338,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             }
 
             // Adopt the new drafts; supersede (or abandon) the ones they
-            // replace.
+            // replace. The server chose their content, so one can be an
+            // earlier draft rebuilt exactly (a reorder that undoes itself,
+            // then a squash that strips `graft.` metadata): it is revived,
+            // superseded or not.
             for id in adopt {
                 let (_, record) = self.changeset(repo, id).await?;
                 let rule = match record.state {
-                    RecordState::Abandoned => None,
+                    RecordState::Abandoned | RecordState::Superseded => None,
                     RecordState::Draft if held_by(&record, &ws.name) => continue,
                     RecordState::Draft => Some("draft-held"),
                     RecordState::Landed => Some("draft-landed"),
-                    RecordState::Superseded => Some("draft-superseded"),
                     RecordState::Collected => return Err(ApiError::Collected { id }),
                 };
                 if let Some(rule) = rule {

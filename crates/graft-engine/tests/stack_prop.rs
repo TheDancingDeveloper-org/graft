@@ -230,71 +230,101 @@ proptest! {
         order in Just([2usize, 0, 1]).prop_shuffle(),
         drop_at in 0usize..3,
     ) {
-        let f = memory();
-        let p = P::new(&f, &base);
-        p.open();
-        let s1 = edit(&p.base, &e1);
-        let s2 = edit(&s1, &e2);
-        let s3 = edit(&s2, &e3);
-        let Some(d1) = p.commit(p.root, &p.base, &s1, Some("w")) else {
-            return Err(TestCaseError::reject("no first change"));
-        };
-        let Some(d2) = p.commit(d1, &s1, &s2, Some("w")) else {
-            return Err(TestCaseError::reject("no second change"));
-        };
-        let Some(d3) = p.commit(d2, &s2, &s3, Some("w")) else {
-            return Err(TestCaseError::reject("no third change"));
-        };
-        let drafts = [d1, d2, d3];
-        let top = p.top();
-        prop_assert_eq!(p.drafts(), drafts.to_vec());
+        check_stack_ops(&base, &e1, &e2, &e3, order, drop_at)?;
+    }
+}
 
-        let paths = |a: &Snapshot, b: &Snapshot| -> Vec<String> {
-            changes(a, b).iter().map(|c| c.path().to_string()).collect()
-        };
-        let touched = [paths(&p.base, &s1), paths(&s1, &s2), paths(&s2, &s3)];
-        let disjoint = (0..3).all(|i| {
-            (0..3).all(|j| i == j || touched[i].iter().all(|t| !touched[j].contains(t)))
-        });
-        let reordered: Vec<ChangesetId> = order.iter().map(|&i| drafts[i]).collect();
-        match p.stack(StackOp::Reorder(reordered)) {
-            Ok(_) => {
-                if disjoint {
-                    prop_assert_eq!(p.top(), top);
-                }
-                prop_assert!(p.drafts().len() <= 3);
+/// The body of [`stack_ops_keep_the_snapshot`], callable from named cases.
+fn check_stack_ops(
+    base: &Edits,
+    e1: &Edits,
+    e2: &Edits,
+    e3: &Edits,
+    order: [usize; 3],
+    drop_at: usize,
+) -> Result<(), TestCaseError> {
+    let f = memory();
+    let p = P::new(&f, base);
+    p.open();
+    let s1 = edit(&p.base, e1);
+    let s2 = edit(&s1, e2);
+    let s3 = edit(&s2, e3);
+    let Some(d1) = p.commit(p.root, &p.base, &s1, Some("w")) else {
+        return Err(TestCaseError::reject("no first change"));
+    };
+    let Some(d2) = p.commit(d1, &s1, &s2, Some("w")) else {
+        return Err(TestCaseError::reject("no second change"));
+    };
+    let Some(d3) = p.commit(d2, &s2, &s3, Some("w")) else {
+        return Err(TestCaseError::reject("no third change"));
+    };
+    let drafts = [d1, d2, d3];
+    let top = p.top();
+    prop_assert_eq!(p.drafts(), drafts.to_vec());
+
+    let paths = |a: &Snapshot, b: &Snapshot| -> Vec<String> {
+        changes(a, b).iter().map(|c| c.path().to_string()).collect()
+    };
+    let touched = [paths(&p.base, &s1), paths(&s1, &s2), paths(&s2, &s3)];
+    let disjoint = (0..3)
+        .all(|i| (0..3).all(|j| i == j || touched[i].iter().all(|t| !touched[j].contains(t))));
+    let reordered: Vec<ChangesetId> = order.iter().map(|&i| drafts[i]).collect();
+    match p.stack(StackOp::Reorder(reordered)) {
+        Ok(_) => {
+            if disjoint {
+                prop_assert_eq!(p.top(), top);
             }
-            Err(ApiError::Conflict { .. }) => prop_assert_eq!(p.drafts(), drafts.to_vec()),
-            Err(e) => prop_assert!(false, "reorder failed: {e:?}"),
+            prop_assert!(p.drafts().len() <= 3);
         }
+        Err(ApiError::Conflict { .. }) => prop_assert_eq!(p.drafts(), drafts.to_vec()),
+        Err(e) => prop_assert!(false, "reorder failed: {e:?}"),
+    }
 
-        // Squash everything: one draft (or none) with the same top.
-        let now_top = p.top();
-        let all = p.drafts();
-        p.stack(StackOp::Squash(all)).expect("squash all");
-        prop_assert_eq!(p.top(), now_top);
-        prop_assert!(p.drafts().len() <= 1);
+    // Squash everything: one draft (or none) with the same top.
+    let now_top = p.top();
+    let all = p.drafts();
+    p.stack(StackOp::Squash(all)).expect("squash all");
+    prop_assert_eq!(p.top(), now_top);
+    prop_assert!(p.drafts().len() <= 1);
 
-        // Empty the stack, rebuild the three drafts, and drop one: the
-        // drafts below it are untouched, and the stack shrinks by one or
-        // the drop conflicts and changes nothing.
-        if let Some(squashed) = p.drafts().first().copied() {
-            p.stack(StackOp::Drop(squashed)).expect("drop the squashed draft");
+    // Empty the stack, rebuild the three drafts, and drop one: the
+    // drafts below it are untouched, and the stack shrinks by one or
+    // the drop conflicts and changes nothing.
+    if let Some(squashed) = p.drafts().first().copied() {
+        p.stack(StackOp::Drop(squashed))
+            .expect("drop the squashed draft");
+    }
+    prop_assert_eq!(p.ws().head, None);
+    // New messages: the first drafts' ids are superseded.
+    let d1 = p
+        .commit_as(p.root, &p.base, &s1, Some("w"), "again")
+        .expect("again 1");
+    let d2 = p
+        .commit_as(d1, &s1, &s2, Some("w"), "again")
+        .expect("again 2");
+    let d3 = p
+        .commit_as(d2, &s2, &s3, Some("w"), "again")
+        .expect("again 3");
+    let drafts = [d1, d2, d3];
+    match p.stack(StackOp::Drop(drafts[drop_at])) {
+        Ok(_) => {
+            let now = p.drafts();
+            prop_assert!(now.len() <= 2);
+            prop_assert_eq!(&now[..drop_at], &drafts[..drop_at]);
         }
-        prop_assert_eq!(p.ws().head, None);
-        // New messages: the first drafts' ids are superseded.
-        let d1 = p.commit_as(p.root, &p.base, &s1, Some("w"), "again").expect("again 1");
-        let d2 = p.commit_as(d1, &s1, &s2, Some("w"), "again").expect("again 2");
-        let d3 = p.commit_as(d2, &s2, &s3, Some("w"), "again").expect("again 3");
-        let drafts = [d1, d2, d3];
-        match p.stack(StackOp::Drop(drafts[drop_at])) {
-            Ok(_) => {
-                let now = p.drafts();
-                prop_assert!(now.len() <= 2);
-                prop_assert_eq!(&now[..drop_at], &drafts[..drop_at]);
-            }
-            Err(ApiError::Conflict { .. }) => prop_assert_eq!(p.drafts(), drafts.to_vec()),
-            Err(e) => prop_assert!(false, "drop failed: {e:?}"),
-        }
+        Err(ApiError::Conflict { .. }) => prop_assert_eq!(p.drafts(), drafts.to_vec()),
+        Err(e) => prop_assert!(false, "drop failed: {e:?}"),
+    }
+    Ok(())
+}
+
+/// WI-2283: `d` put, deleted and put back, reordered to delete-put-put,
+/// then the rebuilt bottom draft dropped.
+#[test]
+fn stack_ops_put_delete_put_reorder_then_drop_the_bottom() {
+    let put = vec![(6, Some((2, 2)))];
+    let delete = vec![(6, None)];
+    for base in [vec![(0, None)], vec![(6, None)], vec![(6, Some((0, 0)))]] {
+        check_stack_ops(&base, &put, &delete, &put, [1, 2, 0], 0).expect("holds");
     }
 }
