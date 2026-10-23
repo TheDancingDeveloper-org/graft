@@ -17,9 +17,9 @@ on:
       - .github/workflows/deploy-dev.yml
   workflow_dispatch:
 
+# The image is public on GHCR, so the pull needs no registry login.
 permissions:
   contents: read
-  packages: read
 
 # One deploy at a time, in order; never cancel one half-way.
 concurrency:
@@ -33,15 +33,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The job's own short-lived token, on stdin; logged out again below.
-      - name: Log in to GHCR
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-
       - name: Deploy
         run: deploy/up.sh
-
-      - name: Log out of GHCR
-        if: always()
-        run: docker logout ghcr.io

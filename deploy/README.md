@@ -15,7 +15,8 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 
 The workflow is `.github/workflows/deploy-dev.yml`: on a push to `main` that
 touches `deploy/**`, and on `workflow_dispatch`, it runs `deploy/up.sh` on the
-runner labelled `[self-hosted, graft-dev]`. It is not a required check.
+runner labelled `[self-hosted, graft-dev]`. It is not a required check. The image is public on GHCR, so the job does
+not log in to a registry.
 
 ## Ports
 
@@ -25,6 +26,9 @@ VM's Tailscale address in `/etc/graft/deploy.env`, which `up.sh` reads:
 ```sh
 echo "GRAFT_BIND_IP=$(tailscale ip -4)" | sudo tee /etc/graft/deploy.env
 ```
+
+The runner user must be able to read it (on the VM: 0640 root:runner). If it
+exists but is unreadable, `up.sh` stops rather than falling back to loopback.
 
 - `17888` graft-server: gRPC, the `/v1` JSON facade, `/healthz`, `/readyz`, `/metrics`
 - `17889` graft-server metrics listener: `/metrics`, `/healthz`, `/readyz`

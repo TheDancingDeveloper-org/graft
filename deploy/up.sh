@@ -25,6 +25,12 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 secrets=${GRAFT_SECRETS_DIR:-/etc/graft}
 export GRAFT_SECRETS_DIR=$secrets
 
+# An unreadable deploy.env is an error, not a skip: skipping it would move the
+# ports between the tailnet address and loopback depending on who runs this.
+if [ -e "$secrets/deploy.env" ] && [ ! -r "$secrets/deploy.env" ]; then
+  printf 'up.sh: error: %s exists but is not readable by %s\n' "$secrets/deploy.env" "$(id -un)" >&2
+  exit 1
+fi
 if [ -r "$secrets/deploy.env" ]; then
   set -a
   # shellcheck source=/dev/null
