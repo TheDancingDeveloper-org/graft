@@ -14,12 +14,8 @@ async fn the_handshake_and_tool_list_match_the_design() {
     let tools = client.list_all_tools().await.expect("tools/list");
 
     let served: BTreeSet<String> = tools.iter().map(|t| t.name.to_string()).collect();
-    // Every design tool but `graft_revert`, which comes with `Revert` (G3.7).
-    let designed: BTreeSet<String> = TOOLS
-        .iter()
-        .map(|t| t.name.to_owned())
-        .filter(|name| name != "graft_revert")
-        .collect();
+    // Every design tool, `graft_revert` included.
+    let designed: BTreeSet<String> = TOOLS.iter().map(|t| t.name.to_owned()).collect();
     assert_eq!(served, designed, "the read and write tools are served");
 
     for tool in &tools {

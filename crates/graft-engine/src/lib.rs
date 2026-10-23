@@ -56,6 +56,7 @@ mod protect;
 mod read;
 mod rebase;
 mod refs;
+mod resolve;
 mod revert;
 mod source;
 mod stack;
@@ -68,7 +69,7 @@ pub use land::{
 };
 pub use policy::{LandHooks, LineConfig};
 pub use protect::{CLAIM_HOLDER, ProtectReport};
-pub use rebase::{MERGED_PATHS, REBASED_FROM};
+pub use rebase::{MERGED_PATHS, REBASED_FROM, RESOLVED_PATHS};
 pub use refs::MAX_REF_NAME;
 pub use revert::REVERTS;
 pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
@@ -393,18 +394,18 @@ where
 
     async fn get_conflicts(
         &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::GetConflicts,
+        cx: &graft_proto::CallContext,
+        req: graft_proto::types::GetConflicts,
     ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
-        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
+        self.do_get_conflicts(cx, req).await
     }
 
     async fn resolve(
         &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::Resolve,
+        cx: &graft_proto::CallContext,
+        req: graft_proto::types::Resolve,
     ) -> graft_proto::error::ApiResult<graft_proto::types::Resolved> {
-        Err(graft_proto::ApiError::unimplemented("Resolve"))
+        self.do_resolve(cx, req).await
     }
 }
 

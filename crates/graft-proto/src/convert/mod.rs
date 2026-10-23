@@ -1696,5 +1696,220 @@ impl TryFrom<pb::ApiError> for ApiError {
     }
 }
 
+// ---- conflict resolution (WI-2312) ---------------------------------------
+
+impl From<GetConflicts> for pb::GetConflictsRequest {
+    fn from(r: GetConflicts) -> Self {
+        pb::GetConflictsRequest {
+            workspace: Some(r.workspace.into()),
+            onto: r.onto.map(cb),
+            page: Some(r.page.into()),
+        }
+    }
+}
+
+impl TryFrom<pb::GetConflictsRequest> for GetConflicts {
+    type Error = WireError;
+    fn try_from(r: pb::GetConflictsRequest) -> R<Self> {
+        Ok(GetConflicts {
+            workspace: req(r.workspace, "workspace")?.into(),
+            onto: opt_cid(r.onto, "onto")?,
+            page: page_from(r.page),
+        })
+    }
+}
+
+fn conflict_reason(r: Option<ConflictReason>) -> i32 {
+    (match r {
+        None => pb::ConflictReason::Unspecified,
+        Some(ConflictReason::Binary) => pb::ConflictReason::Binary,
+        Some(ConflictReason::TooLarge) => pb::ConflictReason::TooLarge,
+        Some(ConflictReason::Kind) => pb::ConflictReason::Kind,
+        Some(ConflictReason::Clash) => pb::ConflictReason::Clash,
+    }) as i32
+}
+
+fn conflict_reason_from(v: i32) -> R<Option<ConflictReason>> {
+    match pb::ConflictReason::try_from(v) {
+        Ok(pb::ConflictReason::Unspecified) => Ok(None),
+        Ok(pb::ConflictReason::Binary) => Ok(Some(ConflictReason::Binary)),
+        Ok(pb::ConflictReason::TooLarge) => Ok(Some(ConflictReason::TooLarge)),
+        Ok(pb::ConflictReason::Kind) => Ok(Some(ConflictReason::Kind)),
+        Ok(pb::ConflictReason::Clash) => Ok(Some(ConflictReason::Clash)),
+        Err(_) => Err(bad("reason", "unknown conflict reason")),
+    }
+}
+
+fn side(s: ConflictSide) -> pb::ConflictSide {
+    pb::ConflictSide {
+        id: ob(s.id),
+        kind: entry_kind(s.kind),
+    }
+}
+
+fn side_from(s: Option<pb::ConflictSide>, field: &'static str) -> R<Option<ConflictSide>> {
+    s.map(|s| {
+        Ok(ConflictSide {
+            id: oid(s.id, field)?,
+            kind: entry_kind_from(s.kind, field)?,
+        })
+    })
+    .transpose()
+}
+
+impl From<ConflictView> for pb::ConflictView {
+    fn from(r: ConflictView) -> Self {
+        pb::ConflictView {
+            path: r.path.as_str().to_owned(),
+            base: r.base.map(side),
+            ours: r.ours.map(side),
+            theirs: r.theirs.map(side),
+            text_mergeable: r.text_mergeable,
+            markers: r.markers,
+            reason: conflict_reason(r.reason),
+        }
+    }
+}
+
+impl TryFrom<pb::ConflictView> for ConflictView {
+    type Error = WireError;
+    fn try_from(r: pb::ConflictView) -> R<Self> {
+        if r.markers
+            .as_ref()
+            .is_some_and(|m| m.len() > MAX_CONFLICT_MARKER_BYTES)
+        {
+            return Err(bad("markers", "over the marker cap"));
+        }
+        Ok(ConflictView {
+            path: path(r.path, "path")?,
+            base: side_from(r.base, "base")?,
+            ours: side_from(r.ours, "ours")?,
+            theirs: side_from(r.theirs, "theirs")?,
+            text_mergeable: r.text_mergeable,
+            markers: r.markers,
+            reason: conflict_reason_from(r.reason)?,
+        })
+    }
+}
+
+impl From<Conflicts> for pb::Conflicts {
+    fn from(r: Conflicts) -> Self {
+        pb::Conflicts {
+            onto: cb(r.onto),
+            draft: r.draft.map(cb),
+            paths: r.paths.into_iter().map(Into::into).collect(),
+            next: r.next,
+        }
+    }
+}
+
+impl TryFrom<pb::Conflicts> for Conflicts {
+    type Error = WireError;
+    fn try_from(r: pb::Conflicts) -> R<Self> {
+        Ok(Conflicts {
+            onto: cid(r.onto, "onto")?,
+            draft: opt_cid(r.draft, "draft")?,
+            paths: r
+                .paths
+                .into_iter()
+                .map(ConflictView::try_from)
+                .collect::<R<_>>()?,
+            next: r.next,
+        })
+    }
+}
+
+impl From<PathResolution> for pb::PathResolution {
+    fn from(r: PathResolution) -> Self {
+        use pb::path_resolution::put::Content;
+        use pb::path_resolution::{Put, Resolution as Res};
+        pb::PathResolution {
+            path: r.path.as_str().to_owned(),
+            resolution: Some(match r.resolution {
+                Resolution::Put { kind, content } => Res::Put(Put {
+                    kind: entry_kind(kind),
+                    content: Some(match content {
+                        ResolvedContent::Blob(id) => Content::Blob(ob(id.0)),
+                        ResolvedContent::Inline(bytes) => Content::Inline(bytes),
+                    }),
+                }),
+                Resolution::Delete => Res::Delete(pb::Empty {}),
+            }),
+        }
+    }
+}
+
+impl TryFrom<pb::PathResolution> for PathResolution {
+    type Error = WireError;
+    fn try_from(r: pb::PathResolution) -> R<Self> {
+        use pb::path_resolution::Resolution as Res;
+        use pb::path_resolution::put::Content;
+        let resolution = match req(r.resolution, "resolution")? {
+            Res::Put(put) => Resolution::Put {
+                kind: entry_kind_from(put.kind, "resolution.kind")?,
+                content: match req(put.content, "resolution.content")? {
+                    Content::Blob(id) => ResolvedContent::Blob(BlobId(oid(id, "resolution.blob")?)),
+                    Content::Inline(bytes) => ResolvedContent::Inline(bytes),
+                },
+            },
+            Res::Delete(_) => Resolution::Delete,
+        };
+        Ok(PathResolution {
+            path: path(r.path, "resolution.path")?,
+            resolution,
+        })
+    }
+}
+
+impl From<Resolve> for pb::ResolveRequest {
+    fn from(r: Resolve) -> Self {
+        pb::ResolveRequest {
+            workspace: Some(r.workspace.into()),
+            onto: cb(r.onto),
+            expected_head: r.expected_head.map(cb),
+            resolutions: r.resolutions.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<pb::ResolveRequest> for Resolve {
+    type Error = WireError;
+    fn try_from(r: pb::ResolveRequest) -> R<Self> {
+        Ok(Resolve {
+            workspace: req(r.workspace, "workspace")?.into(),
+            onto: cid(r.onto, "onto")?,
+            expected_head: opt_cid(r.expected_head, "expected_head")?,
+            resolutions: r
+                .resolutions
+                .into_iter()
+                .map(PathResolution::try_from)
+                .collect::<R<_>>()?,
+        })
+    }
+}
+
+impl From<Resolved> for pb::Resolved {
+    fn from(r: Resolved) -> Self {
+        pb::Resolved {
+            workspace: Some(r.workspace.into()),
+            head: cb(r.head),
+            resolved_paths: ps(r.resolved_paths),
+            merged_paths: ps(r.merged_paths),
+        }
+    }
+}
+
+impl TryFrom<pb::Resolved> for Resolved {
+    type Error = WireError;
+    fn try_from(r: pb::Resolved) -> R<Self> {
+        Ok(Resolved {
+            workspace: req(r.workspace, "workspace")?.try_into()?,
+            head: cid(r.head, "head")?,
+            resolved_paths: paths(r.resolved_paths, "resolved_paths")?,
+            merged_paths: paths(r.merged_paths, "merged_paths")?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests;

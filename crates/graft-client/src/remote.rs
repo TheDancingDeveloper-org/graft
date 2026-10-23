@@ -650,19 +650,19 @@ impl WorkspaceApi for Remote {
         Ok(())
     }
 
-    async fn get_conflicts(
-        &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::GetConflicts,
-    ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
-        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
+    async fn get_conflicts(&self, cx: &CallContext, req: GetConflicts) -> ApiResult<Conflicts> {
+        let r = unary!(
+            self,
+            cx,
+            workspaces,
+            get_conflicts,
+            pb::GetConflictsRequest::from(req)
+        );
+        Conflicts::try_from(r).map_err(wire_error)
     }
 
-    async fn resolve(
-        &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::Resolve,
-    ) -> graft_proto::error::ApiResult<graft_proto::types::Resolved> {
-        Err(graft_proto::ApiError::unimplemented("Resolve"))
+    async fn resolve(&self, cx: &CallContext, req: Resolve) -> ApiResult<Resolved> {
+        let r = unary!(self, cx, workspaces, resolve, pb::ResolveRequest::from(req));
+        Resolved::try_from(r).map_err(wire_error)
     }
 }

@@ -56,7 +56,10 @@ use graft_model::{
 use graft_proto::error::ConflictPath;
 use graft_proto::types::{MergeMode, Rebase, Synced, WorkspaceRef};
 use graft_proto::{ApiError, CallContext, Frame};
-use graft_store::{MetaStore, ObjectStore, RecordState, RepoId, TxnOutcome, Write};
+use graft_store::{
+    ChangesetRecord, MetaStore, MetaTxn, ObjectStore, RecordState, RepoId, TxnOutcome,
+    WorkspaceRecord, Write,
+};
 
 use crate::access::{Need, require, require_changes};
 use crate::objects::Upload;
@@ -70,6 +73,56 @@ pub const REBASED_FROM: &str = "graft.rebased-from";
 /// The metadata key listing the paths a rebase resolved by line merge
 /// (decision D16): a JSON array of path strings, sorted by path bytes.
 pub const MERGED_PATHS: &str = "graft.merged-paths";
+
+/// The metadata key listing the paths whose content a `Resolve` caller
+/// supplied (WI-2312): a JSON array of path strings, sorted by path bytes.
+/// Only the draft that took the resolutions records it.
+pub const RESOLVED_PATHS: &str = "graft.resolved-paths";
+
+/// A `Resolve` caller's resolutions, as the planner applies them.
+#[derive(Clone, Default)]
+pub(crate) struct Overrides {
+    /// What each resolution leaves at its path: an entry, or nothing (a
+    /// delete).
+    pub(crate) entries: HashMap<RepoPath, Option<(EntryKind, ObjectId)>>,
+    /// The inline payloads, by id, stored with the first changeset that
+    /// puts them.
+    pub(crate) blobs: HashMap<ObjectId, Vec<u8>>,
+}
+
+/// One conflicting path's three sides, as entries (kind and id).
+pub(crate) struct Sides {
+    pub(crate) path: RepoPath,
+    pub(crate) base: Option<(EntryKind, ObjectId)>,
+    pub(crate) ours: Option<(EntryKind, ObjectId)>,
+    pub(crate) theirs: Option<(EntryKind, ObjectId)>,
+}
+
+/// Where a planned rebase stopped: the first draft that conflicts.
+pub(crate) struct Failed {
+    /// The draft whose rebase failed.
+    pub(crate) draft: ChangesetId,
+    /// Its conflicting paths, in change order.
+    pub(crate) sides: Vec<Sides>,
+    /// The merged blobs of the drafts below it, which a side may name.
+    pub(crate) blobs: HashMap<ObjectId, Vec<u8>>,
+}
+
+impl Failed {
+    pub(crate) fn into_error(self, onto: ChangesetId) -> ApiError {
+        let paths = self
+            .sides
+            .into_iter()
+            .map(|s| ConflictPath {
+                path: s.path.to_string(),
+                base: s.base.map(|(_, id)| id),
+                ours: s.ours.map(|(_, id)| id),
+                theirs: s.theirs.map(|(_, id)| id),
+            })
+            .collect();
+        conflict(paths, onto)
+    }
+}
 
 /// The [`MERGED_PATHS`] value for `paths` (sorted, each once).
 pub(crate) fn encode_paths<'a>(paths: impl IntoIterator<Item = &'a RepoPath>) -> String {
@@ -109,6 +162,8 @@ pub(crate) struct Plan {
     pub(crate) blobs: HashMap<ObjectId, Vec<u8>>,
     /// Every path resolved by line merge, sorted, each once.
     pub(crate) merged: Vec<RepoPath>,
+    /// Every path that took a caller's resolution, sorted, each once.
+    pub(crate) resolved: Vec<RepoPath>,
 }
 
 impl Plan {
@@ -262,6 +317,30 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         onto_root: TreeId,
         mode: MergeMode,
     ) -> Result<Plan, ApiError> {
+        match self
+            .plan_with(repo, stack, onto, onto_root, mode, &Overrides::default())
+            .await?
+        {
+            Ok(plan) => Ok(plan),
+            Err(failed) => Err(failed.into_error(onto)),
+        }
+    }
+
+    /// [`Engine::plan_onto`] with caller resolutions (`Resolve`): a path
+    /// in `overrides` that conflicts at a draft, after the line merge,
+    /// takes that entry instead, once. Returns
+    /// where it stopped instead of a `Conflict` error, so `GetConflicts`
+    /// can describe it. Every override must be used: one for a path that
+    /// does not conflict is refused.
+    pub(crate) async fn plan_with(
+        &self,
+        repo: RepoId,
+        stack: &[(ChangesetId, Changeset)],
+        onto: ChangesetId,
+        onto_root: TreeId,
+        mode: MergeMode,
+        overrides: &Overrides,
+    ) -> Result<Result<Plan, Failed>, ApiError> {
         let trees = Trees::new(&*self.objects, repo);
         let apply = ApplyOptions {
             case_clash: self.config.portable_paths,
@@ -271,10 +350,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             new: Vec::new(),
             head: onto,
             head_root: onto_root,
-            blobs: HashMap::new(),
+            blobs: overrides.blobs.clone(),
             merged: Vec::new(),
+            resolved: Vec::new(),
         };
         let mut merged_all: BTreeSet<RepoPath> = BTreeSet::new();
+        let mut resolved_all: BTreeSet<RepoPath> = BTreeSet::new();
         // The roots of the drafts below, so a stacked draft's base costs no
         // read.
         let mut roots: HashMap<ChangesetId, TreeId> = HashMap::new();
@@ -302,6 +383,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             let mut kept = Vec::with_capacity(c.changes.len());
             let mut conflicts = Vec::new();
             let mut merged = Vec::new();
+            let mut resolved = Vec::new();
             for change in &c.changes {
                 let path = change.path();
                 let b = self.entry(&trees, base_root, path).await?;
@@ -325,18 +407,41 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         plan.blobs.entry(id).or_insert(payload);
                     }
                     merged.push(path.clone());
+                } else if let Some(entry) = overrides
+                    .entries
+                    .get(path)
+                    .filter(|_| !resolved_all.contains(path))
+                {
+                    // The caller's resolution; one already on the target
+                    // is dropped.
+                    if *entry != o {
+                        kept.push(match entry {
+                            Some((kind, id)) => Change::Put {
+                                path: path.clone(),
+                                kind: *kind,
+                                id: *id,
+                            },
+                            None => Change::Delete { path: path.clone() },
+                        });
+                    }
+                    resolved.push(path.clone());
                 } else {
-                    conflicts.push(ConflictPath {
-                        path: path.to_string(),
-                        base: b.map(|(_, id)| id),
-                        ours: ours.map(|(_, id)| id),
-                        theirs: o.map(|(_, id)| id),
+                    conflicts.push(Sides {
+                        path: path.clone(),
+                        base: b,
+                        ours,
+                        theirs: o,
                     });
                 }
             }
             if !conflicts.is_empty() {
-                return Err(conflict(conflicts, onto));
+                return Ok(Err(Failed {
+                    draft: *id,
+                    sides: conflicts,
+                    blobs: plan.blobs,
+                }));
             }
+            resolved_all.extend(resolved.iter().cloned());
             merged_all.extend(merged.iter().cloned());
             if kept.is_empty() {
                 plan.steps.push(Step {
@@ -354,18 +459,20 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         let Some(path) = v.path else {
                             return Err(errors::violation(v));
                         };
-                        let b = self.entry(&trees, base_root, &path).await?;
-                        let ours = self.entry(&trees, c.root, &path).await?;
-                        let theirs = self.entry(&trees, plan.head_root, &path).await?;
-                        return Err(conflict(
-                            vec![ConflictPath {
-                                path: path.to_string(),
-                                base: b.map(|e| e.id),
-                                ours: ours.map(|e| e.id),
-                                theirs: theirs.map(|e| e.id),
+                        let entry = |e: Option<TreeEntry>| e.map(|e| (e.kind, e.id));
+                        let base = entry(self.entry(&trees, base_root, &path).await?);
+                        let ours = entry(self.entry(&trees, c.root, &path).await?);
+                        let theirs = entry(self.entry(&trees, plan.head_root, &path).await?);
+                        return Ok(Err(Failed {
+                            draft: *id,
+                            sides: vec![Sides {
+                                path,
+                                base,
+                                ours,
+                                theirs,
                             }],
-                            onto,
-                        ));
+                            blobs: plan.blobs,
+                        }));
                     }
                     Err(e) => return Err(errors::apply(e)),
                 };
@@ -386,6 +493,14 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             } else {
                 metadata.insert(MERGED_PATHS.to_owned(), encode_paths(&merged_all));
             }
+            // The paths this draft took from the caller; not a lower
+            // draft's, nor an earlier resolve's.
+            if resolved.is_empty() {
+                metadata.remove(RESOLVED_PATHS);
+            } else {
+                resolved.sort();
+                metadata.insert(RESOLVED_PATHS.to_owned(), encode_paths(&resolved));
+            }
             let cs = Changeset {
                 parents,
                 root,
@@ -404,8 +519,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             plan.head_root = root;
             plan.new.push(cs);
         }
+        if let Some(path) = overrides
+            .entries
+            .keys()
+            .filter(|p| !resolved_all.contains(*p))
+            .min()
+        {
+            return Err(errors::invalid(Some(path), "resolution-not-conflicting"));
+        }
         plan.merged = merged_all.into_iter().collect();
-        Ok(plan)
+        plan.resolved = resolved_all.into_iter().collect();
+        Ok(Ok(plan))
     }
 
     /// Stores a plan's new changesets, bottom first, each abandoned until a
@@ -471,9 +595,88 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         Ok(plan.head)
     }
 
+    /// Adds to `txn` the moves that put a stored plan in workspace `ws`:
+    /// the new drafts become its drafts, and the ones they replace are
+    /// superseded. A draft that disappeared is superseded by the successor
+    /// below it, or by `target` itself.
+    pub(crate) async fn adopt(
+        &self,
+        repo: RepoId,
+        ws: &WorkspaceRecord,
+        plan: &Plan,
+        mut records: HashMap<ChangesetId, ChangesetRecord>,
+        target: ChangesetId,
+        txn: &mut MetaTxn,
+    ) -> Result<(), ApiError> {
+        let mut below = target;
+        let expires = self.retained_until(self.clock.now().ms);
+        for step in &plan.steps {
+            let record = records.remove(&step.from).ok_or_else(contended)?;
+            match step.to {
+                Some(to) if to == step.from => {}
+                Some(to) => {
+                    let (_, new_record) = self.changeset(repo, to).await?;
+                    let rule = match new_record.state {
+                        RecordState::Abandoned => None,
+                        RecordState::Draft if held_by(&new_record, &ws.name) => None,
+                        RecordState::Draft => Some("draft-held"),
+                        RecordState::Landed => Some("draft-landed"),
+                        RecordState::Superseded => Some("draft-superseded"),
+                        RecordState::Collected => {
+                            return Err(ApiError::Collected { id: to });
+                        }
+                    };
+                    if let Some(rule) = rule {
+                        return Err(errors::invalid(None, rule));
+                    }
+                    if new_record.state == RecordState::Abandoned {
+                        transition(
+                            to,
+                            new_record,
+                            RecordState::Draft,
+                            Some(holder(&ws.name)),
+                            None,
+                            None,
+                            txn,
+                        );
+                    }
+                    if held_by(&record, &ws.name) {
+                        transition(
+                            step.from,
+                            record,
+                            RecordState::Superseded,
+                            None,
+                            Some(to),
+                            expires,
+                            txn,
+                        );
+                    }
+                }
+                None => {
+                    if held_by(&record, &ws.name) {
+                        transition(
+                            step.from,
+                            record,
+                            RecordState::Superseded,
+                            None,
+                            Some(below),
+                            expires,
+                            txn,
+                        );
+                    }
+                }
+            }
+            if let Some(to) = step.to {
+                below = to;
+            }
+        }
+
+        Ok(())
+    }
+
     /// The changeset a workspace syncs onto: `onto` when it is on the
     /// workspace's line, otherwise the line's tip.
-    async fn sync_target(
+    pub(crate) async fn sync_target(
         &self,
         repo: RepoId,
         line: &str,
@@ -562,71 +765,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             let changed_paths: Vec<RepoPath> =
                 changed.changes.iter().map(|c| c.path().clone()).collect();
 
-            // Adopt the new drafts; supersede the ones they replace. A
-            // draft that disappeared is superseded by the successor below
-            // it, or by the target itself.
-            let mut below = target;
-            let expires = self.retained_until(self.clock.now().ms);
-            for step in &plan.steps {
-                let record = records.remove(&step.from).ok_or_else(contended)?;
-                match step.to {
-                    Some(to) if to == step.from => {}
-                    Some(to) => {
-                        let (_, new_record) = self.changeset(repo, to).await?;
-                        let rule = match new_record.state {
-                            RecordState::Abandoned => None,
-                            RecordState::Draft if held_by(&new_record, &ws.name) => None,
-                            RecordState::Draft => Some("draft-held"),
-                            RecordState::Landed => Some("draft-landed"),
-                            RecordState::Superseded => Some("draft-superseded"),
-                            RecordState::Collected => {
-                                return Err(ApiError::Collected { id: to });
-                            }
-                        };
-                        if let Some(rule) = rule {
-                            return Err(errors::invalid(None, rule));
-                        }
-                        if new_record.state == RecordState::Abandoned {
-                            transition(
-                                to,
-                                new_record,
-                                RecordState::Draft,
-                                Some(holder(&ws.name)),
-                                None,
-                                None,
-                                &mut txn,
-                            );
-                        }
-                        if held_by(&record, &ws.name) {
-                            transition(
-                                step.from,
-                                record,
-                                RecordState::Superseded,
-                                None,
-                                Some(to),
-                                expires,
-                                &mut txn,
-                            );
-                        }
-                    }
-                    None => {
-                        if held_by(&record, &ws.name) {
-                            transition(
-                                step.from,
-                                record,
-                                RecordState::Superseded,
-                                None,
-                                Some(below),
-                                expires,
-                                &mut txn,
-                            );
-                        }
-                    }
-                }
-                if let Some(to) = step.to {
-                    below = to;
-                }
-            }
+            self.adopt(repo, &ws, &plan, records, target, &mut txn)
+                .await?;
 
             let mut next = ws.clone();
             next.base = target;

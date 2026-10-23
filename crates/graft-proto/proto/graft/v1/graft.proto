@@ -482,6 +482,74 @@ message CloseWorkspaceRequest {
   bool keep_drafts = 2;
 }
 
+// Conflict resolution without a working copy (WI-2312).
+
+message GetConflictsRequest {
+  WorkspaceRef workspace = 1;
+  optional bytes onto = 2;
+  Page page = 3;
+}
+
+enum ConflictReason {
+  CONFLICT_REASON_UNSPECIFIED = 0;
+  CONFLICT_REASON_BINARY = 1;
+  CONFLICT_REASON_TOO_LARGE = 2;
+  CONFLICT_REASON_KIND = 3;
+  CONFLICT_REASON_CLASH = 4;
+}
+
+message ConflictSide {
+  bytes id = 1;
+  EntryKind kind = 2;
+}
+
+message ConflictView {
+  string path = 1;
+  optional ConflictSide base = 2;
+  optional ConflictSide ours = 3;
+  optional ConflictSide theirs = 4;
+  bool text_mergeable = 5;
+  optional bytes markers = 6;
+  // UNSPECIFIED when markers are present.
+  ConflictReason reason = 7;
+}
+
+message Conflicts {
+  bytes onto = 1;
+  optional bytes draft = 2;
+  repeated ConflictView paths = 3;
+  optional string next = 4;
+}
+
+message PathResolution {
+  message Put {
+    EntryKind kind = 1;
+    oneof content {
+      bytes blob = 2;
+      bytes inline = 3;
+    }
+  }
+  string path = 1;
+  oneof resolution {
+    Put put = 2;
+    Empty delete = 3;
+  }
+}
+
+message ResolveRequest {
+  WorkspaceRef workspace = 1;
+  bytes onto = 2;
+  optional bytes expected_head = 3;
+  repeated PathResolution resolutions = 4;
+}
+
+message Resolved {
+  WorkspaceView workspace = 1;
+  bytes head = 2;
+  repeated string resolved_paths = 3;
+  repeated string merged_paths = 4;
+}
+
 // ---- admin ----------------------------------------------------------------
 
 message CreateRepoRequest {
@@ -636,6 +704,8 @@ service WorkspaceService {
   rpc Sync(SyncRequest) returns (Synced);
   rpc Stack(StackRequest) returns (WorkspaceView);
   rpc CloseWorkspace(CloseWorkspaceRequest) returns (Empty);
+  rpc GetConflicts(GetConflictsRequest) returns (Conflicts);
+  rpc Resolve(ResolveRequest) returns (Resolved);
 }
 
 service AdminService {
