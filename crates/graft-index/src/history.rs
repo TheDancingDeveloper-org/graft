@@ -18,6 +18,10 @@ use crate::{Index, LogQuery};
 /// position there.
 pub(crate) type Place = (usize, u64);
 
+/// One history result: its id, its line position (`None` above the line),
+/// and its changeset if the walk decoded it.
+pub(crate) type Entry = (ChangesetId, Option<u64>, Option<Changeset>);
+
 /// Whether `cs` changes anything at or beneath one of `paths` (every
 /// changeset matches no filter).
 pub(crate) fn touches(cs: &Changeset, paths: &[RepoPath]) -> bool {
@@ -34,16 +38,32 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
     /// `q.paths`, stopping at `q.until`. See [`LogQuery`] for paging.
     pub async fn log(&self, repo: RepoId, q: LogQuery) -> StoreResult<Vec<ChangesetId>> {
         let entries = self.history(repo, &q).await?;
-        Ok(entries.into_iter().map(|(id, _)| id).collect())
+        Ok(entries.into_iter().map(|(id, _, _)| id).collect())
+    }
+
+    /// [`Index::log`] with each changeset decoded: what a log page shows.
+    /// Changesets the walk already read are not read again, so a plain
+    /// page costs one changeset read per result.
+    pub async fn log_changesets(
+        &self,
+        repo: RepoId,
+        q: LogQuery,
+    ) -> StoreResult<Vec<(ChangesetId, Changeset)>> {
+        let entries = self.history(repo, &q).await?;
+        let mut out = Vec::with_capacity(entries.len());
+        for (id, _, cs) in entries {
+            let cs = match cs {
+                Some(cs) => cs,
+                None => self.load(repo, id).await?,
+            };
+            out.push((id, cs));
+        }
+        Ok(out)
     }
 
     /// [`Index::log`] with each result's line position (`None` above the
-    /// line).
-    pub(crate) async fn history(
-        &self,
-        repo: RepoId,
-        q: &LogQuery,
-    ) -> StoreResult<Vec<(ChangesetId, Option<u64>)>> {
+    /// line), and its decoded changeset when the walk read it anyway.
+    pub(crate) async fn history(&self, repo: RepoId, q: &LogQuery) -> StoreResult<Vec<Entry>> {
         let limit = graft_store::page_limit(q.limit);
         let lines = self.lines(repo).await?;
         let mut out = Vec::new();
@@ -61,10 +81,12 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
             }
             let cs = self.load(repo, id).await?;
             if q.after_pos.is_none() && touches(&cs, &q.paths) {
-                out.push((id, None));
+                cur = cs.first_parent();
+                out.push((id, None, Some(cs)));
                 if out.len() == limit {
                     return Ok(out);
                 }
+                continue;
             }
             cur = cs.first_parent();
         }
@@ -104,7 +126,7 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
         before: u64,
         floor: Option<u64>,
         need: usize,
-        out: &mut Vec<(ChangesetId, Option<u64>)>,
+        out: &mut Vec<Entry>,
     ) -> StoreResult<()> {
         // Positions are unique on a line; a changeset matching two filters
         // (or a path and its directory) is one result.
@@ -124,14 +146,14 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
             rows.into_iter()
                 .rev()
                 .take(need)
-                .map(|(pos, id)| (id, Some(pos))),
+                .map(|(pos, id)| (id, Some(pos), None)),
         );
         Ok(())
     }
 
     /// Pushes up to `need` first-parent ancestors of `tip` (at `tip_pos`)
     /// at positions in `(floor, before)`, newest first. One changeset read
-    /// per result after the first, which a skip-list jump finds.
+    /// per result (kept for the caller), the first found by skip list.
     #[allow(clippy::too_many_arguments)]
     async fn chain(
         &self,
@@ -141,7 +163,7 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
         before: u64,
         floor: Option<u64>,
         need: usize,
-        out: &mut Vec<(ChangesetId, Option<u64>)>,
+        out: &mut Vec<Entry>,
     ) -> StoreResult<()> {
         let Some(mut pos) = before.checked_sub(1) else {
             return Ok(());
@@ -151,11 +173,13 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
             if floor.is_some_and(|f| pos <= f) {
                 break;
             }
-            out.push((id, Some(pos)));
+            let cs = self.load(repo, id).await?;
+            let parent = cs.first_parent();
+            out.push((id, Some(pos), Some(cs)));
             if n + 1 == need || pos == 0 {
                 break;
             }
-            match self.load(repo, id).await?.first_parent() {
+            match parent {
                 Some(parent) => id = parent,
                 None => break,
             }

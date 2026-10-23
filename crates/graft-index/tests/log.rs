@@ -241,6 +241,27 @@ fn unfiltered_log_jumps_then_walks() {
     assert!(fx.reads.derived() <= 13, "{} derived", fx.reads.derived());
 }
 
+/// A plain page returns its changesets decoded, each read once: one
+/// changeset read per result, however long the line (WI-2303).
+#[test]
+fn log_changesets_reads_each_result_once() {
+    let (fx, ids) = long_line(4000, 1000);
+    let tip = *ids.last().unwrap();
+    fx.reads.reset();
+    let got = block_on(fx.index.log_changesets(fx.repo, query(tip, &[], 50))).unwrap();
+    let want: Vec<_> = ids.iter().rev().take(50).copied().collect();
+    assert_eq!(got.iter().map(|(id, _)| *id).collect::<Vec<_>>(), want);
+    assert!(got.iter().all(|(id, cs)| cs.id() == *id));
+    assert_eq!(fx.reads.changeset(), 50);
+    assert_eq!(fx.reads.derived(), 0);
+
+    // With paths, the rows come from the index and each result is read once.
+    fx.reads.reset();
+    let got = block_on(fx.index.log_changesets(fx.repo, query(tip, &["x"], 20))).unwrap();
+    assert!(!got.is_empty());
+    assert_eq!(fx.reads.changeset(), got.len());
+}
+
 /// A draft stack is filtered by walking it, then the walk switches to the
 /// index; `until` cuts both.
 #[test]
