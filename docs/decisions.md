@@ -26,6 +26,9 @@ Already decided by the operator (2026-10-22):
   on Node B; rustTorrent as the pilot. Each was the recommendation below.
 - **D8, D10** (operator, 2026-10-22): a GitHub App on the org for the mirror;
   Vogt mints a graft token per session. Each was the recommendation below.
+- **D21** (operator, 2026-10-23): batch PR export. Agents iterate on a
+  graft integration line, and each batch reaches GitHub as one squashed PR
+  that the operator merges.
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure; line-level merge in rebase for text
   files under 1 MiB. Each section below names the rejected options.
@@ -52,6 +55,7 @@ Already decided by the operator (2026-10-22):
 | D18 | Phase 1 kill criteria | **Decided:** as in plan.md, unchanged | — |
 | D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
 | D20 | Pilot period | **Decided:** none; G1.18 dropped, phase 2 not gated (replaces D18's gate) | — |
+| D21 | Batch PR export | **Decided:** agents land on a graft integration line; each batch goes to GitHub as one squashed PR the operator merges | — |
 
 ---
 
@@ -406,3 +410,39 @@ them can't be re-exported to its git sha.
 - Cost: the kill criteria no longer stop phase 2. If graft's reads turn out
   not to pay their way, phase 2 work may be wasted.
 
+## D21. Batch PR export
+
+**Decided (operator, 2026-10-23): the near-term way of working. Agents land
+on a graft integration line forked from the followed GitHub `main`; each
+batch reaches GitHub as one squashed PR, which the operator merges.**
+
+- `graft-mirror pr-batch <line> --base main` follows `main`, syncs the
+  integration line onto it, and exports the line's net change as one commit
+  on GitHub's current `main`. It pushes `graft/batch-<n>` with a lease and
+  opens a PR whose body lists every land in the batch (changeset, author,
+  session, work item, attestations) and ends with `Graft-Batch` trailers.
+  graft never merges or queues the PR.
+- Every land is listed. The squashed commit's message lists all of them.
+  The PR body stays under GitHub's 65,536-character limit (graft-mirror
+  caps it at 60,000): it lists as many lands as fit and says how many more
+  are in the commit message. Each cell is capped, and at most 8 checks are
+  shown per land. A batch listing is bounded at 5,000 lands (the newest);
+  a larger batch is still exported, and both texts say it has more.
+- Sync rebases the line's net change onto the moved base (line merge, D16)
+  and records it on the integration line as a fast-forward merge
+  changeset. A conflict is reported with its paths, and nothing moves or is
+  forced.
+- When follow imports the PR's merge commit, the batch is recorded as
+  merged and the next batch counts from its tip. A PR closed unmerged marks
+  the batch rejected, and the line is left as it is, so its lands go in the
+  next batch.
+- GitHub CI runs once per batch, not once per land. `main` stays
+  git-primary: graft does not write it (§11.3, mode A).
+- Cost: GitHub's history shows one commit per batch. The per-land detail
+  lives in graft and in the PR body.
+- The other options are rejected:
+  - One PR per land (the G2.6 bridge on every land). CI runs per land, and
+    the operator reviews each one.
+  - Graft-primary `main` with direct export (mode B). It needs the authority
+    switch and ruleset bypass first, and the operator gives up the merge
+    button.

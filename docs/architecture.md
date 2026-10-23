@@ -244,6 +244,47 @@ flowchart TB
   mir -- "land via graft; PR closes as merged" --> prs
 ```
 
+### 3c. Batch mode: an integration line, one squashed PR per batch (D21)
+
+The near-term way of working. `main` stays git-primary and graft follows it.
+Agents land on a graft integration line forked from graft's `main`.
+`graft-mirror pr-batch <line> --base main` sends the line's net change to
+GitHub as one squashed PR. The operator merges it, and GitHub CI runs once
+per batch.
+
+```mermaid
+sequenceDiagram
+  participant A as agents
+  participant S as graft-server
+  participant M as graft-mirror pr-batch
+  participant G as GitHub
+  participant O as operator
+  A->>S: land on integration (many times)
+  M->>G: follow main (ls-remote, fetch, import)
+  M->>S: sync: Rebase the line's net change onto main; CAS the line
+  M->>M: one squashed commit on GitHub's main (deterministic)
+  M->>G: push graft/batch-n (lease: must not exist)
+  M->>G: open the PR (lands, sessions, work items, attestations, Graft-Batch)
+  O->>G: review and merge (graft never merges or queues it)
+  M->>G: follow imports the merge commit
+  M->>S: batch recorded as merged; the next batch counts from its tip
+```
+
+- **Sync.** When `main` moved, the line's net change since the base it last
+  absorbed is rebased onto `main`'s tip (line merge, D16). A merge
+  changeset (first parent the line tip, second `main`'s tip) moves the line
+  by compare-and-swap, so the move is a fast-forward. A conflict is
+  reported with its paths, and nothing moves.
+- **Every land is listed.** The squashed commit's message lists every land.
+  The PR body lists as many as fit under GitHub's body limit, and names the
+  commit message for the rest. Listings stop at the newest 5,000 lands.
+- **One batch open per line.** While its PR is open, a run only reports it.
+  A PR closed unmerged marks the batch rejected, and its lands stay on the
+  line for the next batch.
+- **Retries are safe.** The squashed commit is built from recorded fields
+  and stored before it is pushed, so a re-run pushes the same sha and
+  adopts the PR already on the branch.
+
 ---
 
 ## 4. The attester, and GitHub with or without CI

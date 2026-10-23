@@ -110,6 +110,47 @@ async fn git_env(
     })
 }
 
+/// Runs `git` in `dir` with `input` on stdin; succeeds only on exit 0.
+async fn git_input(dir: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, GitCliError> {
+    use tokio::io::AsyncWriteExt;
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let what = args.first().copied().unwrap_or("git");
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| GitCliError(format!("git {what}: cannot run git: {e}")))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| GitCliError(format!("git {what}: no stdin")))?;
+    let run = async {
+        stdin.write_all(input).await?;
+        drop(stdin);
+        child.wait_with_output().await
+    };
+    let out = tokio::time::timeout(GIT_TIMEOUT, run)
+        .await
+        .map_err(|_| GitCliError(format!("git {what}: timed out")))?
+        .map_err(|e| GitCliError(format!("git {what}: {e}")))?;
+    let out = Output {
+        code: out.status.code(),
+        stdout: out.stdout,
+        stderr: out.stderr,
+    };
+    if out.code == Some(0) {
+        Ok(out.stdout)
+    } else {
+        Err(failed(what, &out))
+    }
+}
+
 fn failed(what: &str, out: &Output) -> GitCliError {
     let line = String::from_utf8_lossy(&out.stderr);
     let line: String = line
@@ -348,6 +389,20 @@ impl Mirror {
         .await?;
         GitSha::from_hex(String::from_utf8_lossy(&out).trim())
             .ok_or_else(|| GitCliError("git rev-parse: unexpected output".to_owned()))
+    }
+
+    /// Stores the raw commit object `raw` in the mirror and returns its sha.
+    /// The bytes are written as given, so the sha depends on nothing but
+    /// them (no git configuration, identity or signing).
+    pub async fn write_commit(&self, raw: &[u8]) -> Result<GitSha, GitCliError> {
+        let out = git_input(
+            &self.dir,
+            &["hash-object", "-t", "commit", "-w", "--stdin"],
+            raw,
+        )
+        .await?;
+        GitSha::from_hex(String::from_utf8_lossy(&out).trim())
+            .ok_or_else(|| GitCliError("git hash-object: unexpected output".to_owned()))
     }
 
     /// Whether the mirror holds `sha` as a commit.

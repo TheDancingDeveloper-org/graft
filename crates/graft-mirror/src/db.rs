@@ -15,6 +15,7 @@ use graft_git::map::{ImportedCommit, MirrorMap, RawTree};
 use graft_git::{GitError, GitSha};
 use graft_model::{BlobId, ChangesetId, ObjectId, RepoPath};
 
+use crate::batch::{BatchLine, BatchRecord, BatchState};
 use crate::bridge::{BridgeState, PullRecord};
 use crate::pulls::{ImportState, PrImport};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -75,6 +76,34 @@ CREATE TABLE IF NOT EXISTS exports (
     version INTEGER NOT NULL,
     diverged INTEGER NOT NULL,
     stray BLOB
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS batches (
+    number INTEGER PRIMARY KEY,
+    line TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    base BLOB NOT NULL,
+    base_sha BLOB NOT NULL,
+    start BLOB NOT NULL,
+    tip BLOB NOT NULL,
+    lands INTEGER NOT NULL,
+    created_ms INTEGER NOT NULL,
+    branch TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    squash_sha BLOB NOT NULL,
+    pr_number INTEGER,
+    pr_url TEXT,
+    state TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    merge_sha BLOB,
+    merged BLOB
+);
+CREATE INDEX IF NOT EXISTS batches_by_line ON batches (line, number);
+CREATE TABLE IF NOT EXISTS batch_lines (
+    line TEXT PRIMARY KEY,
+    synced BLOB NOT NULL,
+    sync_from BLOB NOT NULL,
+    start BLOB NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pr_imports (
     number INTEGER PRIMARY KEY,
@@ -614,6 +643,145 @@ impl MirrorDb {
             .map_err(db_err)
     }
 
+    /// Batch mode's record of the integration line `line`, once started.
+    pub fn batch_line(&self, line: &str) -> Result<Option<BatchLine>, GitError> {
+        let row = self
+            .conn()
+            .query_row(
+                "SELECT synced, sync_from, start FROM batch_lines WHERE line = ?1",
+                params![line],
+                |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db_err)?;
+        row.map(|(synced, sync_from, start)| {
+            Ok(BatchLine {
+                synced: id_col(synced).map(ChangesetId)?,
+                sync_from: id_col(sync_from).map(ChangesetId)?,
+                start: id_col(start).map(ChangesetId)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Replaces batch mode's record of `line`.
+    pub fn set_batch_line(&self, line: &str, state: &BatchLine) -> Result<(), GitError> {
+        put_batch_line(&self.conn(), line, state)
+    }
+
+    /// The number the next batch gets: one past the highest so far, across
+    /// every line, so branch names never repeat.
+    pub fn next_batch_number(&self) -> Result<u64, GitError> {
+        self.conn()
+            .query_row("SELECT coalesce(max(number), 0) FROM batches", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n as u64 + 1)
+            .map_err(db_err)
+    }
+
+    /// Records a new batch, in one transaction that refuses it when its
+    /// number is taken or its line already has a batch that is not final:
+    /// two runs never both open a batch for one line.
+    pub fn insert_batch(&self, rec: &BatchRecord) -> Result<bool, GitError> {
+        let mut conn = self.conn();
+        let txn = conn.transaction().map_err(db_err)?;
+        let busy: i64 = txn
+            .query_row(
+                "SELECT count(*) FROM batches
+                 WHERE number = ?1 OR (line = ?2 AND state NOT IN ('merged', 'rejected'))",
+                params![rec.number as i64, rec.line],
+                |r| r.get(0),
+            )
+            .map_err(db_err)?;
+        if busy > 0 {
+            return Ok(false);
+        }
+        write_batch(&txn, rec)?;
+        txn.commit().map_err(db_err)?;
+        Ok(true)
+    }
+
+    /// Replaces the record of batch `rec.number`.
+    pub fn put_batch(&self, rec: &BatchRecord) -> Result<(), GitError> {
+        write_batch(&self.conn(), rec)
+    }
+
+    /// Records batch `rec` as merged and the line state the next batch
+    /// starts from, in one transaction.
+    pub fn settle_batch(
+        &self,
+        rec: &BatchRecord,
+        line: &str,
+        state: &BatchLine,
+    ) -> Result<(), GitError> {
+        let mut conn = self.conn();
+        let txn = conn.transaction().map_err(db_err)?;
+        write_batch(&txn, rec)?;
+        put_batch_line(&txn, line, state)?;
+        txn.commit().map_err(db_err)
+    }
+
+    /// The newest batch of `line`, if it has one. One indexed read.
+    pub fn last_batch(&self, line: &str) -> Result<Option<BatchRecord>, GitError> {
+        let mut found = self.batches_where("WHERE line = ?1 ORDER BY number DESC LIMIT 1", line)?;
+        Ok(found.pop())
+    }
+
+    /// Batch `number`, if there is one.
+    pub fn batch(&self, number: u64) -> Result<Option<BatchRecord>, GitError> {
+        let mut found = self.batches_where("WHERE number = ?1", &number.to_string())?;
+        Ok(found.pop())
+    }
+
+    fn batches_where(&self, filter: &str, arg: &str) -> Result<Vec<BatchRecord>, GitError> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT number, line, base_branch, base, base_sha, start, tip, lands,
+                        created_ms, branch, title, body, squash_sha, pr_number, pr_url,
+                        state, detail, merge_sha, merged
+                 FROM batches {filter}"
+            ))
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![arg], |r| {
+                Ok(BatchRow {
+                    number: r.get(0)?,
+                    line: r.get(1)?,
+                    base_branch: r.get(2)?,
+                    base: r.get(3)?,
+                    base_sha: r.get(4)?,
+                    start: r.get(5)?,
+                    tip: r.get(6)?,
+                    lands: r.get(7)?,
+                    created_ms: r.get(8)?,
+                    branch: r.get(9)?,
+                    title: r.get(10)?,
+                    body: r.get(11)?,
+                    squash_sha: r.get(12)?,
+                    pr_number: r.get(13)?,
+                    pr_url: r.get(14)?,
+                    state: r.get(15)?,
+                    detail: r.get(16)?,
+                    merge_sha: r.get(17)?,
+                    merged: r.get(18)?,
+                })
+            })
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_err)?.into_record()?);
+        }
+        Ok(out)
+    }
+
     /// Replaces follow's record of `line`.
     pub fn set_line(&self, line: &str, state: &LineState) -> Result<(), GitError> {
         self.conn()
@@ -807,6 +975,109 @@ impl PullRow {
             merge_sha: sha_col(self.merge_sha)?,
             landed,
             attempts: self.attempts,
+        })
+    }
+}
+
+fn put_batch_line(conn: &Connection, line: &str, state: &BatchLine) -> Result<(), GitError> {
+    conn.execute(
+        "INSERT INTO batch_lines (line, synced, sync_from, start) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (line) DO UPDATE SET synced = ?2, sync_from = ?3, start = ?4",
+        params![
+            line,
+            &state.synced.0.0[..],
+            &state.sync_from.0.0[..],
+            &state.start.0.0[..],
+        ],
+    )
+    .map(drop)
+    .map_err(db_err)
+}
+
+fn write_batch(conn: &Connection, rec: &BatchRecord) -> Result<(), GitError> {
+    conn.execute(
+        "INSERT INTO batches (number, line, base_branch, base, base_sha, start, tip, lands,
+             created_ms, branch, title, body, squash_sha, pr_number, pr_url, state, detail,
+             merge_sha, merged)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+             ?18, ?19)
+         ON CONFLICT (number) DO UPDATE SET line = ?2, base_branch = ?3, base = ?4,
+             base_sha = ?5, start = ?6, tip = ?7, lands = ?8, created_ms = ?9, branch = ?10,
+             title = ?11, body = ?12, squash_sha = ?13, pr_number = ?14, pr_url = ?15,
+             state = ?16, detail = ?17, merge_sha = ?18, merged = ?19",
+        params![
+            rec.number as i64,
+            rec.line,
+            rec.base_branch,
+            &rec.base.0.0[..],
+            &rec.base_sha.0[..],
+            &rec.start.0.0[..],
+            &rec.tip.0.0[..],
+            rec.lands as i64,
+            rec.created_ms,
+            rec.branch,
+            rec.title,
+            rec.body,
+            &rec.squash_sha.0[..],
+            rec.pr_number.map(|n| n as i64),
+            rec.pr_url,
+            rec.state.as_str(),
+            rec.detail,
+            rec.merge_sha.map(|s| s.0.to_vec()),
+            rec.merged.map(|c| c.0.0.to_vec()),
+        ],
+    )
+    .map(drop)
+    .map_err(db_err)
+}
+
+/// A `batches` row as stored.
+struct BatchRow {
+    number: i64,
+    line: String,
+    base_branch: String,
+    base: Vec<u8>,
+    base_sha: Vec<u8>,
+    start: Vec<u8>,
+    tip: Vec<u8>,
+    lands: i64,
+    created_ms: i64,
+    branch: String,
+    title: String,
+    body: String,
+    squash_sha: Vec<u8>,
+    pr_number: Option<i64>,
+    pr_url: Option<String>,
+    state: String,
+    detail: String,
+    merge_sha: Option<Vec<u8>>,
+    merged: Option<Vec<u8>>,
+}
+
+impl BatchRow {
+    fn into_record(self) -> Result<BatchRecord, GitError> {
+        let bad = |what: &str| GitError::Map(format!("mirror db: malformed batch row ({what})"));
+        let id = |b: Vec<u8>| id_col(b).map(ChangesetId);
+        Ok(BatchRecord {
+            number: self.number as u64,
+            line: self.line,
+            base_branch: self.base_branch,
+            base: id(self.base)?,
+            base_sha: sha_col(Some(self.base_sha))?.ok_or_else(|| bad("base_sha"))?,
+            start: id(self.start)?,
+            tip: id(self.tip)?,
+            lands: self.lands as u64,
+            created_ms: self.created_ms,
+            branch: self.branch,
+            title: self.title,
+            body: self.body,
+            squash_sha: sha_col(Some(self.squash_sha))?.ok_or_else(|| bad("squash_sha"))?,
+            pr_number: self.pr_number.map(|n| n as u64),
+            pr_url: self.pr_url,
+            state: BatchState::parse(&self.state).ok_or_else(|| bad("state"))?,
+            detail: self.detail,
+            merge_sha: sha_col(self.merge_sha)?,
+            merged: self.merged.map(id).transpose()?,
         })
     }
 }
