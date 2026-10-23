@@ -26,6 +26,9 @@ Already decided by the operator (2026-10-22):
   on Node B; rustTorrent as the pilot. Each was the recommendation below.
 - **D8, D10** (operator, 2026-10-22): a GitHub App on the org for the mirror;
   Vogt mints a graft token per session. Each was the recommendation below.
+- **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
+  post-land CI and auto-revert on failure; line-level merge in rebase for text
+  files under 1 MiB. Each section below names the rejected options.
 
 | # | Decision | Recommendation | Blocks |
 | --- | --- | --- | --- |
@@ -34,7 +37,7 @@ Already decided by the operator (2026-10-22):
 | D3 | Storage backend | **Decided:** SQLite + filesystem through phase 3, Litestream for off-box WAL | — |
 | D4 | Wire protocol | **Decided:** gRPC (tonic, prost) plus a read-only JSON facade | — |
 | D5 | At-rest codec | **Decided:** store the gzip wire frame (zero transcode); benchmark zstd in the pilot | — |
-| D6 | Landing gate on `main` | `attested` (pre-land CI on the draft) plus post-land CI and auto-revert | Phase 3 |
+| D6 | Landing gate on `main` | **Decided:** `attested` (pre-land CI on the draft) plus post-land CI with auto-revert on failure | — |
 | D7 | Hash function | **Decided:** BLAKE3 | — |
 | D8 | GitHub mirror identity | **Decided:** a GitHub App on the org, with ruleset bypass on `main`; key in Infisical | — |
 | D9 | GitHub change notification | Poll every 15 s in phase 1; add webhooks in phase 2 if lag matters | Phase 1 (G1.12) |
@@ -44,7 +47,7 @@ Already decided by the operator (2026-10-22):
 | D13 | Deployment | **Decided:** a Komodo stack on Node B; the node daemon as a systemd unit per host | — |
 | D14 | Pilot repository | **Decided:** rustTorrent | — |
 | D15 | Where graft's source lives | **Decided:** GitHub `TheDancingDeveloper-org/graft`, public | — |
-| D16 | Line-level merge in rebase | On for text files under 1 MiB, recorded in metadata | Phase 3 |
+| D16 | Line-level merge in rebase | **Decided:** on for text files under 1 MiB, recorded in metadata; larger or binary files conflict at file level | — |
 | D17 | MCP hosting | Both: `graft mcp` (stdio) and the server's `/mcp` | Phase 1 (read tools), Phase 2 (write tools) |
 | D18 | Phase 1 kill criteria | **Decided:** as in plan.md, unchanged | — |
 | D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
@@ -171,19 +174,29 @@ measures decompression share of checkout time, and we revisit if it exceeds
 
 ## D6. Landing gate on `main`
 
+**Decided (operator, 2026-10-23): `attested` on `main`, with post-land CI and
+an auto-revert on failure.**
+
 Today every PR goes through a GitHub merge queue with required checks. Scion
 drops the global queue and relies on post-merge testing.
 
 | Option | Land latency | Safety | Fit |
 | --- | --- | --- | --- |
 | `direct` | ms | Post-land CI plus an auto-revert bot | Scion's model. A big change for the estate |
-| **`attested`** (**Recommended**) | ms after CI on the draft | Required checks pass on the draft's own tree. File-level rebases onto a newer tip are trusted. Line-merged files can require re-attesting | Keeps "required checks before land" without serializing |
+| **`attested`** (**Decided**) | ms after CI on the draft | Required checks pass on the draft's own tree. File-level rebases onto a newer tip are trusted. Line-merged files can require re-attesting | Keeps "required checks before land" without serializing |
 | `queued` | Minutes (batched) | Tests the rebased candidate, like today | Use for release lines only |
 
-Recommendation: `attested` on `main`, `queued` on `release/*`. Post-land CI
-runs on the GitHub mirror, and an auto-revert bot is added in phase 4. This
-changes the delivery process (the merge queue rule), so it needs the operator's
-explicit agreement before phase 3.
+- **Chosen:** `attested` on `main`. A land needs the required checks to pass
+  on the draft's own tree first. Post-land CI runs on the GitHub mirror, and a
+  failure triggers an automatic revert. The auto-revert is part of this
+  decision, not a later phase.
+- **Rejected:**
+  - `direct` alone. A broken change reaches `main` before any check has run
+    on it; the auto-revert only limits how long it stays.
+  - `queued` on `main`. It tests the rebased candidate, but it serializes
+    lands and adds minutes of latency.
+- **Not covered:** `release/*` lines. No decision is recorded for them.
+- The merge-queue rule for rustTorrent changes at cutover (G3.10).
 
 ## D7. Hash function
 
@@ -325,10 +338,15 @@ start on phase 1 it needs a home:
 
 ## D16. Line-level merge in rebase
 
+**Decided (operator, 2026-10-23): on for text files under 1 MiB, with merged
+paths recorded in `graft.merged-paths`. Larger or binary files conflict at the
+file level.**
+
 - **On for text files under 1 MiB; merged paths recorded in
-  `graft.merged-paths`** (**Recommended**). It cuts conflicts sharply for
+  `graft.merged-paths`** (**Decided**). It cuts conflicts sharply for
   agents editing the same file in different places. The metadata lets
   `attested` policy and review notice merged results.
+- The other two options are rejected.
 - File-level only (Scion's documented behaviour, and OpenScion's plan). The
   simplest, but every same-file pair conflicts.
 - Off by default, opt in per land. Safe, but agents rarely opt in.
