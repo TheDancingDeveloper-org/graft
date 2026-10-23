@@ -150,6 +150,7 @@ fn child_writer(store: &SqliteMetaStore, repo: RepoId, iter: u8, k: u8) {
                     base: id,
                     head: Some(id),
                     lease_until_ms: i64::MAX,
+                    work_item: None,
                 }),
                 journal(&body),
             ],

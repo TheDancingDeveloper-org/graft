@@ -902,3 +902,43 @@ fn conflict_types_round_trip() {
         ),
     );
 }
+
+#[test]
+fn draft_overlap_types_round_trip() {
+    check::<OverlappingDrafts, pb::OverlappingDraftsRequest, _>(
+        "OverlappingDrafts",
+        (text(), text(), paths(), any::<bool>(), page()).prop_map(
+            |(repo, line, paths, include_own, page)| OverlappingDrafts {
+                repo,
+                line,
+                paths,
+                include_own,
+                page,
+            },
+        ),
+    );
+    let hit = (path(), text()).prop_map(|(path, workspace)| DraftHit { path, workspace });
+    let ws = (text(), text(), otext(), otext(), any::<u64>(), any::<i64>()).prop_map(
+        |(workspace, owner, session, work_item, draft_age_ms, lease_until_ms)| DraftWorkspace {
+            workspace,
+            owner,
+            session,
+            work_item,
+            draft_age_ms,
+            lease_until_ms,
+        },
+    );
+    check::<DraftOverlap, pb::DraftOverlap, _>(
+        "DraftOverlap",
+        (
+            prop::collection::vec(hit, 0..3),
+            prop::collection::vec(ws, 0..3),
+            otext(),
+        )
+            .prop_map(|(hits, workspaces, next)| DraftOverlap {
+                hits,
+                workspaces,
+                next,
+            }),
+    );
+}

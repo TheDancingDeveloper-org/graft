@@ -761,6 +761,17 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi + 'static> pb::workspace_service_serv
         Ok(self.reply(out.into()))
     }
 
+    async fn overlapping_drafts(
+        &self,
+        req: Request<pb::OverlappingDraftsRequest>,
+    ) -> Result<Response<pb::DraftOverlap>, Status> {
+        let cx = self.bind(&req)?;
+        let r: OverlappingDrafts = conv(req.into_inner())?;
+        self.shared.record(Rpc::Workspace("OverlappingDrafts"));
+        let out = self.api.overlapping_drafts(&cx, r).await?;
+        Ok(self.reply(out.into()))
+    }
+
     async fn resolve(
         &self,
         req: Request<pb::ResolveRequest>,

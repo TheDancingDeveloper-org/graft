@@ -201,6 +201,7 @@ fn workspace_record(raw: RawWorkspace) -> StoreResult<WorkspaceRecord> {
         base: changeset_id(&base)?,
         head: head.as_deref().map(changeset_id).transpose()?,
         lease_until_ms,
+        work_item: None,
     })
 }
 

@@ -114,6 +114,7 @@ fn ws(name: &str, head: Option<ChangesetId>, lease_until_ms: i64) -> WorkspaceRe
         base: cs(1),
         head,
         lease_until_ms,
+        work_item: None,
     }
 }
 

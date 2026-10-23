@@ -498,6 +498,35 @@ enum ConflictReason {
   CONFLICT_REASON_CLASH = 4;
 }
 
+// Draft overlap (WI-2310, docs/notes/draft-overlap.md).
+message OverlappingDraftsRequest {
+  string repo = 1;
+  string line = 2;
+  repeated string paths = 3;
+  bool include_own = 4;
+  Page page = 5;
+}
+
+message DraftHit {
+  string path = 1;
+  string workspace = 2;
+}
+
+message DraftWorkspace {
+  string workspace = 1;
+  string owner = 2;
+  optional string session = 3;
+  optional string work_item = 4;
+  uint64 draft_age_ms = 5;
+  int64 lease_until_ms = 6;
+}
+
+message DraftOverlap {
+  repeated DraftHit hits = 1;
+  repeated DraftWorkspace workspaces = 2;
+  optional string next = 3;
+}
+
 message ConflictSide {
   bytes id = 1;
   EntryKind kind = 2;
@@ -706,6 +735,7 @@ service WorkspaceService {
   rpc CloseWorkspace(CloseWorkspaceRequest) returns (Empty);
   rpc GetConflicts(GetConflictsRequest) returns (Conflicts);
   rpc Resolve(ResolveRequest) returns (Resolved);
+  rpc OverlappingDrafts(OverlappingDraftsRequest) returns (DraftOverlap);
 }
 
 service AdminService {

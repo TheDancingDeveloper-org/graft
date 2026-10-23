@@ -81,6 +81,8 @@ pub struct WorkspaceRecord {
     pub head: Option<ChangesetId>,
     /// Lease expiry, ms.
     pub lease_until_ms: i64,
+    /// Vogt work item, from the opening token's claims.
+    pub work_item: Option<String>,
 }
 
 /// The GC protection kept beside a changeset's record (design §8.6). It is
@@ -225,8 +227,31 @@ pub enum Write {
     SetRef(RefRecord),
     /// Upsert a workspace.
     PutWorkspace(WorkspaceRecord),
-    /// Delete a workspace. Deleting an absent one is a no-op.
+    /// Delete a workspace, and its draft path rows. Deleting an absent one
+    /// is a no-op.
     DeleteWorkspace(String),
+    /// Replaces a workspace's draft path rows on `line` with `paths`: the
+    /// union of the paths its stack changes (`docs/notes/draft-overlap.md`
+    /// §3). Empty `paths` removes them. Cost follows the rows removed and
+    /// added.
+    SetDraftPaths {
+        /// Workspace.
+        workspace: String,
+        /// The line it tracks.
+        line: String,
+        /// Changed paths.
+        paths: Vec<RepoPath>,
+    },
+    /// Adds draft path rows for a workspace on `line` (a path already there
+    /// counts once).
+    AddDraftPaths {
+        /// Workspace.
+        workspace: String,
+        /// The line it tracks.
+        line: String,
+        /// Changed paths.
+        paths: Vec<RepoPath>,
+    },
     /// Store a derived value (overwrites an existing one for the same key).
     PutDerived {
         /// Kind name.
@@ -634,6 +659,30 @@ pub trait MetaStore: Send + Sync {
     ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
         async { Err(unsupported("lapsed_workspaces")) }
     }
+    /// Draft path rows `(path, workspace)` on `line` whose path is `prefix`
+    /// or lies beneath it, in `(path, workspace)` order after `after`, up to
+    /// `limit`. One index range: the cost follows the rows returned.
+    fn scan_draft_paths(
+        &self,
+        _repo: RepoId,
+        _line: &str,
+        _prefix: &RepoPath,
+        _after: Option<(RepoPath, String)>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(RepoPath, String)>>> + Send {
+        async { Err(unsupported("scan_draft_paths")) }
+    }
+    /// A workspace's draft path rows in path order after `after`, up to
+    /// `limit` (the reverse index; for `fsck` and tests).
+    fn workspace_draft_paths(
+        &self,
+        _repo: RepoId,
+        _workspace: &str,
+        _after: Option<RepoPath>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<RepoPath>>> + Send {
+        async { Err(unsupported("workspace_draft_paths")) }
+    }
     /// Whether the repository has the `gc_protection` marker. A repository
     /// created by a store with protection records has it from the start.
     fn gc_protection(&self, _repo: RepoId) -> impl Future<Output = StoreResult<bool>> + Send {
@@ -862,6 +911,25 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
         (**self).lapsed_workspaces(repo, before_ms, after, limit)
+    }
+    fn scan_draft_paths(
+        &self,
+        repo: RepoId,
+        line: &str,
+        prefix: &RepoPath,
+        after: Option<(RepoPath, String)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(RepoPath, String)>>> + Send {
+        (**self).scan_draft_paths(repo, line, prefix, after, limit)
+    }
+    fn workspace_draft_paths(
+        &self,
+        repo: RepoId,
+        workspace: &str,
+        after: Option<RepoPath>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<RepoPath>>> + Send {
+        (**self).workspace_draft_paths(repo, workspace, after, limit)
     }
     fn gc_protection(&self, repo: RepoId) -> impl Future<Output = StoreResult<bool>> + Send {
         (**self).gc_protection(repo)

@@ -507,6 +507,11 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                     .and_then(|mut s| s.execute(params![repo, name]))
                     .map_err(sql_err)?;
             }
+            // The draft_paths table arrives with migration v6 (WI-2310 step
+            // b); until then nothing writes these.
+            Write::SetDraftPaths { .. } | Write::AddDraftPaths { .. } => {
+                return Err(invalid("draft paths are not supported yet".into()));
+            }
             Write::PutDerived {
                 kind,
                 version,
