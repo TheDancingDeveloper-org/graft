@@ -99,13 +99,15 @@ What it does:
   stops reading, and the journal holds the rest.
 - It checks one draft at a time: it confirms the changeset is still a
   draft, checks its tree out into `/var/lib/graft-attester/work/<draft>`,
-  runs rustTorrent's Rust job in order (the commands come from D21):
+  runs rustTorrent's Rust job in order. The checks come from D21, scoped
+  as rustTorrent's CI scopes them: the Tauri crate `rtbit-desktop` (it
+  needs GTK) is excluded, and only the `default-tls` feature is on:
 
   | Check | Command |
   |---|---|
   | `ci/fmt` | `cargo fmt --all -- --check` |
-  | `ci/clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
-  | `ci/test` | `cargo test --workspace --locked` |
+  | `ci/clippy` | `cargo clippy --workspace --exclude rtbit-desktop --all-targets --no-default-features --features default-tls -- -D warnings` |
+  | `ci/test` | `cargo test --workspace --exclude rtbit-desktop --locked --no-default-features --features default-tls` |
 
   It posts `Attest` for each, passed or failed. As in a CI job, a check
   that fails makes the later ones fail without running (`--keep-going`

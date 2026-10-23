@@ -158,10 +158,11 @@ services:
       - --repo=${GRAFT_ATTESTER_REPO:-rusttorrent}
       - --line=${GRAFT_ATTESTER_LINE:-trial-1}
       - --token-file=/run/secrets/graft-attester-token
-      # rustTorrent's Rust job (D21). Edit here to change the checks.
+      # rustTorrent's Rust job (D21), scoped as its CI scopes it: without the
+      # Tauri desktop crate (GTK) and with only `default-tls`.
       - --check=ci/fmt=cargo fmt --all -- --check
-      - --check=ci/clippy=cargo clippy --workspace --all-targets -- -D warnings
-      - --check=ci/test=cargo test --workspace --locked
+      - --check=ci/clippy=cargo clippy --workspace --exclude rtbit-desktop --all-targets --no-default-features --features default-tls -- -D warnings
+      - --check=ci/test=cargo test --workspace --exclude rtbit-desktop --locked --no-default-features --features default-tls
       - --timeout-s=${GRAFT_ATTESTER_TIMEOUT_S:-2700}
       - --queue=16
       - --run-as=10001:10001

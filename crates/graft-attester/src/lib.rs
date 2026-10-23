@@ -64,11 +64,13 @@ pub const DEFAULT_REPO: &str = "rusttorrent";
 /// The line whose drafts are attested when none is configured (D21).
 pub const DEFAULT_LINE: &str = "trial-1";
 
-/// The checks run when none are configured: rustTorrent's Rust job (D21).
+/// The checks run when none are configured: rustTorrent's Rust job (D21),
+/// with its CI's scope: the workspace without the Tauri desktop crate (it
+/// needs GTK), and only the `default-tls` feature.
 pub const DEFAULT_CHECKS: [&str; 3] = [
     "ci/fmt=cargo fmt --all -- --check",
-    "ci/clippy=cargo clippy --workspace --all-targets -- -D warnings",
-    "ci/test=cargo test --workspace --locked",
+    "ci/clippy=cargo clippy --workspace --exclude rtbit-desktop --all-targets --no-default-features --features default-tls -- -D warnings",
+    "ci/test=cargo test --workspace --exclude rtbit-desktop --locked --no-default-features --features default-tls",
 ];
 
 /// Most workspace lines remembered; the cache starts over past it.
