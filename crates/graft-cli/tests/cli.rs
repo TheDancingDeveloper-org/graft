@@ -492,8 +492,8 @@ fn every_schema_file_compiles() {
         count += 1;
     }
     assert_eq!(
-        count, 22,
-        "one schema per command, plus error, api-list and workspace-list"
+        count, 24,
+        "one schema per command, plus error, api-list, line-list and workspace-list"
     );
 }
 
@@ -538,4 +538,29 @@ fn a_clap_error_under_json_prints_the_error_object() {
     let value = json_out(out.get_output());
     assert_valid("error", &value);
     assert_eq!(value["error"]["kind"], json!("usage"));
+}
+
+#[test]
+fn line_create_and_list_json_and_human() {
+    let s = serve();
+    let made = json_out(
+        run_on(&s, &["--json", "line", "create", "side", "--from", "main"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("line", &made);
+    insta::assert_json_snapshot!("line_create_json", made);
+    let list = json_out(
+        run_on(&s, &["--json", "line", "list"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("line-list", &list);
+    insta::assert_json_snapshot!("line_list_json", list);
+    let human = run_on(&s, &["line", "list"]).success();
+    insta::assert_snapshot!("line_list_human", text(human.get_output()));
+    let again = run_on(&s, &["--json", "line", "create", "side", "--from", "main"]).code(3);
+    let err = json_out(again.get_output());
+    assert_valid("error", &err);
+    assert_eq!(err["error"]["kind"], json!("ref_conflict"));
 }

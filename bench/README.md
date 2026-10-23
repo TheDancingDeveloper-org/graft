@@ -153,6 +153,52 @@ only on the counts: every copy exists and matches the model. Times are
 reported, not gated. graft-node is not started. See
 `docs/notes/many-working-copies.md`.
 
+## Live awareness (WI-2311)
+
+`--live-awareness` adds a deterministic scenario that measures whether
+checking the server before you finish cuts conflicts and rework when many
+agents edit similar code (`graftbench/livea.py`). It runs after the scales,
+on its own small module set:
+
+```sh
+python3 -m graftbench --scales 10 --live-awareness --overlap mid
+python3 -m graftbench --scales 10 --live-awareness --overlap low,mid,high --racing
+```
+
+- **Script.** From `--seed`, `--la-writers` (4) x `--la-steps` (6) edits.
+  Each step adds a distinct marker to one key: the writer's own file, its own
+  region of a shared file (a clean line merge), or a hot key of a shared
+  file (a true conflict). `--overlap low|mid|high` sets the shares. Conflicts
+  are resolved by the sorted union of every value in the block, so every
+  policy must end at the same tree.
+- **Scheduler.** One coordinator performs one action (edit, commit, sync,
+  land) for one writer per tick, round-robin with a seeded jitter. No client
+  calls overlap, so the same seed gives the same counts; each graft and git
+  policy runs twice and the counts must match.
+- **Policies.** graft `late` and `sync-early`; `preview` and `drafts` switch
+  on when `graft status --help` offers `--upstream` / `--drafts` (WI-2309,
+  WI-2310) and are reported as skipped until then. git `late` and
+  `fetch-rebase-early`.
+- **Oracle.** A pure-Python replay of the same schedule with `git merge-file`
+  as the three-way reference predicts the conflicting paths of every sync and
+  land, the counts and the final tree, and records each writer's open-draft
+  paths per tick. graft must match it event for event.
+- **Gates.** Same counts twice; graft equals the oracle; every final tree
+  equals the expected tree and graft equals git; no lost or duplicated
+  lands; the line never moves backwards; every path a refused land names
+  did conflict. Timings (probe p50/p95, wall) are reported only.
+  `--racing` reruns each graft policy with real threads, for correctness.
+- **MCP.** Two writers conflict on one key, over `/mcp` (urllib, the token
+  from the token file) and through the CLI; both must report the same
+  conflict and land the same file. It uses `graft_conflicts` and
+  `graft_resolve` when the server lists them; otherwise it reads the three
+  sides with `graft_read`, resolves locally and lands from a new workspace,
+  and says so.
+
+A refused `graft land` can name fewer paths than the `land --sync` that
+follows marks as conflicted: the summary counts those refusals
+("named fewer paths").
+
 ## Tests
 
 ```sh
@@ -175,6 +221,8 @@ conflict rule and the merge3 regions behave as the scenarios assume.
 | `graftbench/bench.py` | one scale: generate, import, replay, operations, verify |
 | `graftbench/conc.py` | the concurrent-writer scenarios and the tip poller |
 | `graftbench/copies.py` | the many-working-copies scenario (`--many-copies`) |
+| `graftbench/livea.py` | the live-awareness script, scheduler, policies and oracle |
+| `graftbench/mcp.py` | a minimal MCP client for `/mcp` |
 | `graftbench/report.py` | machine info and the Markdown summary |
 | `results/` | committed example runs |
 

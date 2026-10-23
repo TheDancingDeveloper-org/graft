@@ -209,6 +209,13 @@ message UpdateRefRequest {
   RefKind kind = 5;
 }
 
+// Forks a line: CAS from absent to `from`. Never overwrites a ref.
+message CreateLineRequest {
+  string repo = 1;
+  string name = 2;
+  bytes from = 3;
+}
+
 // ---- snapshot reads -------------------------------------------------------
 
 message PathAt {
@@ -685,6 +692,7 @@ service RepoService {
   rpc Land(LandRequest) returns (Landed);
   rpc Attest(AttestRequest) returns (Empty);
   rpc Watch(WatchRequest) returns (stream JournalPage);
+  rpc CreateLine(CreateLineRequest) returns (RefView);
 }
 
 service WorkspaceService {

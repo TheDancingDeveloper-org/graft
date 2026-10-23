@@ -1,4 +1,4 @@
-//! `ResolveRef`, `ListRefs` and admin `UpdateRef` (`docs/design.md` §4.6,
+//! `ResolveRef`, `ListRefs`, `CreateLine` and admin `UpdateRef` (`docs/design.md` §4.6,
 //! §7.9).
 //!
 //! A ref moves only by compare-and-swap, with its `RefMoved` journal entry
@@ -10,7 +10,7 @@ use std::collections::HashSet;
 
 use graft_index::kinds::Skips;
 use graft_model::{Changeset, ChangesetId};
-use graft_proto::types::{ListRefs, RefKind, RefView, ResolveRef, UpdateRef};
+use graft_proto::types::{CreateLine, ListRefs, RefKind, RefView, ResolveRef, UpdateRef};
 use graft_proto::{ApiError, CallContext};
 use graft_store::{
     ChangesetRecord, MAX_PAGE, MetaStore, MetaTxn, ObjectStore, Precondition, RecordState,
@@ -157,32 +157,77 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
         // The target exists here (and is not collected).
         self.changeset(repo, req.new).await?;
+        self.move_ref(cx, repo, req.name, current, kind, req.new)
+            .await
+    }
 
+    /// Forks line `req.name` at `req.from`: a CAS from absent that never
+    /// overwrites a ref (`docs/design.md` §4.6). `land:<name>` or `admin`
+    /// may create the line `<name>`. Its land policy is the server's
+    /// config for that name, `direct` by default (D22); nothing is stored
+    /// for it here.
+    pub(crate) async fn do_create_line(
+        &self,
+        cx: &CallContext,
+        req: CreateLine,
+    ) -> Result<RefView, ApiError> {
+        require(cx, &req.repo, Need::Read)?;
+        let repo = self.repo_id(&req.repo).await?;
+        require(cx, &req.repo, Need::Land(&req.name))?;
+        check_ref_name(&req.name)?;
+        if let Some(r) = self
+            .meta
+            .get_ref(repo, &req.name)
+            .await
+            .map_err(errors::store)?
+        {
+            return Err(ApiError::RefConflict {
+                name: req.name,
+                actual: Some(r.target),
+            });
+        }
+        self.changeset(repo, req.from).await?;
+        self.move_ref(cx, repo, req.name, None, StoredKind::Line, req.from)
+            .await
+    }
+
+    /// Moves ref `name` from `current` to `new` by CAS, with its journal
+    /// entry (and, for a line, its index rows) in the same transaction.
+    async fn move_ref(
+        &self,
+        cx: &CallContext,
+        repo: RepoId,
+        name: String,
+        current: Option<RefRecord>,
+        kind: StoredKind,
+        new: ChangesetId,
+    ) -> Result<RefView, ApiError> {
+        let actual = current.as_ref().map(|r| r.target);
         let version = current.as_ref().map_or(1, |r| r.version + 1);
         // Records the move lands are guarded by their state, so a concurrent
         // workspace transition cannot be overwritten; losing that race
         // (and only that) is retried.
         for _ in 0..CAS_RETRIES {
             let mut preconditions = vec![Precondition::RefIs {
-                name: req.name.clone(),
+                name: name.clone(),
                 expected: current.as_ref().map(|r| (r.target, r.version)),
             }];
             let mut writes = Vec::new();
-            if kind == StoredKind::Line && actual != Some(req.new) {
+            if kind == StoredKind::Line && actual != Some(new) {
                 writes = self
-                    .line_rows(repo, &req.name, actual, req.new, &mut preconditions)
+                    .line_rows(repo, &name, actual, new, &mut preconditions)
                     .await?;
             }
             writes.push(Write::SetRef(RefRecord {
-                name: req.name.clone(),
-                target: req.new,
+                name: name.clone(),
+                target: new,
                 version,
                 kind,
             }));
             writes.push(journal::ref_moved(
-                &req.name,
+                &name,
                 actual,
-                req.new,
+                new,
                 version,
                 &cx.principal.subject,
             ));
@@ -193,8 +238,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             match self.meta.commit(repo, txn).await.map_err(errors::store)? {
                 TxnOutcome::Committed(_) => {
                     return Ok(RefView {
-                        name: req.name,
-                        target: req.new,
+                        name,
+                        target: new,
                         version,
                         kind: to_api(kind),
                     });
@@ -202,11 +247,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 TxnOutcome::PreconditionFailed(0) => {
                     let now = self
                         .meta
-                        .get_ref(repo, &req.name)
+                        .get_ref(repo, &name)
                         .await
                         .map_err(errors::store)?;
                     return Err(ApiError::RefConflict {
-                        name: req.name,
+                        name,
                         actual: now.map(|r| r.target),
                     });
                 }
