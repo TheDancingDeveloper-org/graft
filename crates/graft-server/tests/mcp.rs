@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use common::Site;
 use graft_proto::pb;
-use graft_proto::types::{RefKind, UpdateRef};
+use graft_proto::types::{Attest, RefKind, UpdateRef};
 use serde_json::{Value, json};
 
 /// One POST to `/mcp`. Returns the status, the session id the server names,
@@ -141,6 +141,8 @@ async fn mcp_takes_the_bearer_token_and_the_engine_scopes() {
     let admin = site.mint(&["repo:r:admin"]);
     let writer = site.mint(&["repo:r:write"]);
     let reader = site.mint(&["repo:r:read"]);
+    let lander = site.mint(&["repo:r:write", "repo:r:land:main"]);
+    let ci = site.mint_kind("ci-bot", "ci", &["repo:r:write"], 3600);
     let server = site.start();
 
     let mut c = server.clients(Some(&admin)).await;
@@ -210,12 +212,47 @@ async fn mcp_takes_the_bearer_token_and_the_engine_scopes() {
     );
     assert_eq!(file["content"], "pub fn f() {}\n");
 
-    // Land is not built in this release's engine; it answers a typed refusal
-    // instead of failing the session.
+    // Landing needs `land:<line>` as well as write: the write token is
+    // refused, naming the scope.
     let (failed, refused) = write.call("graft_land", json!({"repo": "r", "workspace": ws}));
     assert!(failed);
+    assert_eq!(refused["kind"], "permission_denied");
+    assert_eq!(refused["scope"], "repo:r:land:main");
+
+    // With the land scope, `main`'s default gate (decision D6, `attested`)
+    // refuses a draft that CI has not attested, as a typed policy refusal.
+    let land = Session::open(server.addr, &lander);
+    let (failed, refused) = land.call("graft_land", json!({"repo": "r", "workspace": ws}));
+    assert!(failed);
     assert_eq!(refused["kind"], "rejected");
-    assert_eq!(refused["policy"], "unimplemented");
+    assert_eq!(refused["policy"], "attested");
+    assert!(
+        refused["detail"].as_str().unwrap().contains("ci/build"),
+        "{refused}"
+    );
+
+    // CI attests both checks on the draft; the land then succeeds.
+    let draft: graft_model::ChangesetId = committed["id"].as_str().unwrap().parse().unwrap();
+    let mut by_ci = server.clients(Some(&ci)).await;
+    for check in ["ci/build", "ci/test"] {
+        by_ci
+            .repo
+            .attest(pb::AttestRequest::from(Attest {
+                repo: "r".into(),
+                changeset: draft,
+                check: check.into(),
+                passed: true,
+                url: "https://ci.example/run/1".into(),
+            }))
+            .await
+            .expect("attest");
+    }
+    let (failed, landed) = land.call("graft_land", json!({"repo": "r", "workspace": ws}));
+    assert!(!failed, "{landed}");
+    assert_eq!(landed["outcome"], "landed");
+    assert_eq!(landed["landed"], committed["id"]);
+    assert_eq!(landed["rebased"], false);
+    assert_eq!(landed["line_version"], 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
