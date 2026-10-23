@@ -594,6 +594,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 "landing a stack as one changeset is not built yet (docs/plan.md, G3.7)".to_owned(),
             ));
         }
+        // Each attempt reads the tip before the land record. A record is
+        // written in the transaction of a line move (or guarded by the tip
+        // it was computed on), so an attempt that finds no record cannot be
+        // racing a land of the same head that already moved past its tip,
+        // and never overwrites another attempt's result.
+        let mut line = self.line_ref(repo, &req.line).await?;
         // A retry finds the earlier result, whatever has changed since.
         if let Some(done) = self.land_record(repo, req.head, &req.line).await? {
             return Ok(done);
@@ -612,7 +618,6 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         if head_record.state == RecordState::Landed {
             return Err(errors::invalid(None, "draft-landed"));
         }
-        let mut line = self.line_ref(repo, &req.line).await?;
         let mut stack = self.chain(repo, req.head, line.target).await?;
         for (_, cs) in &stack {
             require_changes(cx, &req.repo, &cs.changes)?;
@@ -635,11 +640,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let budget = self.config.land_attempts.max(1);
         for attempt in 0..budget {
             if attempt > 0 {
+                line = self.line_ref(repo, &req.line).await?;
                 // A concurrent land of the same head may have won.
                 if let Some(done) = self.land_record(repo, req.head, &req.line).await? {
                     return Ok(done);
                 }
-                line = self.line_ref(repo, &req.line).await?;
                 stack = self.chain(repo, req.head, line.target).await?;
             }
             let outcome = self
