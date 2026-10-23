@@ -1,0 +1,1 @@
+- Design note: grouping chained import commits into one SQLite commit per run (WI-2323).
