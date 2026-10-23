@@ -705,6 +705,27 @@ impl TryFrom<pb::UpdateRefRequest> for UpdateRef {
     }
 }
 
+impl From<CreateLine> for pb::CreateLineRequest {
+    fn from(r: CreateLine) -> Self {
+        pb::CreateLineRequest {
+            repo: r.repo,
+            name: r.name,
+            from: cb(r.from),
+        }
+    }
+}
+
+impl TryFrom<pb::CreateLineRequest> for CreateLine {
+    type Error = WireError;
+    fn try_from(r: pb::CreateLineRequest) -> R<Self> {
+        Ok(CreateLine {
+            repo: r.repo,
+            name: r.name,
+            from: cid(r.from, "from")?,
+        })
+    }
+}
+
 // ---- snapshot reads -------------------------------------------------------
 
 impl From<PathAt> for pb::PathAt {

@@ -92,6 +92,7 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         Command::Sparse(args) => cmd::sparse::run(g, args),
         Command::Commit(args) => cmd::commit::run(g, args),
         Command::Workspace(args) => cmd::workspace::run(g, args),
+        Command::Line(args) => cmd::line::run(g, args),
         Command::Stack(args) => cmd::stack::run(g, args),
         Command::Sync => cmd::sync::run(g),
         Command::Land(args) => cmd::land::run(g, args),

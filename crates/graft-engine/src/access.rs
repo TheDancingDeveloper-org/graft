@@ -4,7 +4,8 @@
 //! `repo:<name>:read`, `repo:<name>:write[:<path-prefix>]`,
 //! `repo:<name>:land:<line>`, `repo:<name>:attest`, `repo:<name>:admin` and
 //! `objects:read`. `admin` grants everything on its repository; `write` and
-//! `land` grant `read`; `land:<line>` grants landing on that line only;
+//! `land` grant `read`; `land:<line>` grants landing on that line only,
+//! and creating it (`CreateLine`) when it does not exist yet;
 //! `attest` grants `Attest` and nothing else, and only it and `admin` grant
 //! `Attest`. This is the engine's minimal reading of the text form until
 //! `graft_auth::authorize` (G1.9) replaces it.

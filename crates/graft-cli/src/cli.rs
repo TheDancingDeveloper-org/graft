@@ -71,6 +71,8 @@ pub(crate) enum Command {
     Commit(CommitArgs),
     /// Show, list, open, renew or close workspaces
     Workspace(WorkspaceArgs),
+    /// Create or list lines
+    Line(LineArgs),
     /// List, squash, reorder, split or drop the drafts between the base and the head
     Stack(StackArgs),
     /// Move the base to the line tip (the server rebases a stack; conflicts are written into the files)
@@ -314,6 +316,37 @@ pub(crate) enum WorkspaceAction {
         /// Ask the server to keep the drafts
         #[arg(long)]
         keep_drafts: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LineArgs {
+    /// What to do
+    #[command(subcommand)]
+    pub(crate) action: LineAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum LineAction {
+    /// Fork a new line at a changeset; an existing line is never overwritten
+    Create {
+        /// The new line's name
+        name: String,
+        /// Where it starts: a changeset id or ref
+        #[arg(long, value_name = "REV")]
+        from: String,
+    },
+    /// List the lines, in name order
+    List {
+        /// Only lines whose name starts with this
+        #[arg(long, value_name = "PREFIX")]
+        prefix: Option<String>,
+        /// Lines per page
+        #[arg(long, default_value_t = PAGE_DEFAULT)]
+        limit: u32,
+        /// Resume token from a previous page
+        #[arg(long, value_name = "TOKEN")]
+        cursor: Option<String>,
     },
 }
 

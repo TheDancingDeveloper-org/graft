@@ -46,6 +46,7 @@ pub const FORWARDED: &[(&str, &str)] = &[
     ("/graft.v1.RepoService/Land", "Land"),
     ("/graft.v1.RepoService/Attest", "Attest"),
     ("/graft.v1.RepoService/Watch", "Watch"),
+    ("/graft.v1.RepoService/CreateLine", "CreateLine"),
     ("/graft.v1.WorkspaceService/OpenWorkspace", "OpenWorkspace"),
     ("/graft.v1.WorkspaceService/GetWorkspace", "GetWorkspace"),
     (

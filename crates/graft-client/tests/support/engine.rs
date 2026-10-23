@@ -805,6 +805,12 @@ impl RepoApi for EngineRepo {
             .update_ref(&c, req)
             .await)
     }
+    async fn create_line(&self, cx: &CallContext, req: CreateLine) -> ApiResult<RefView> {
+        delegate!(self, "CreateLine", cx, |c| self
+            .engine
+            .create_line(&c, req)
+            .await)
+    }
     async fn stat(&self, cx: &CallContext, req: PathAt) -> ApiResult<EntryView> {
         delegate!(self, "Stat", cx, |c| self.engine.stat(&c, req).await)
     }
