@@ -85,8 +85,25 @@ The repository, the line and the checks are configuration:
 `GRAFT_ATTESTER_REPO` (default `rusttorrent`; `up.sh` creates it if the
 stack doesn't already serve it) and `GRAFT_ATTESTER_LINE` (default
 `trial-1`) in `/etc/graft/deploy.env`, and the `--check=name=command` lines
-of the service in `compose.yml`. `up.sh` does not create the line. The trial
-creates `trial-1` itself.
+of the service in `compose.yml`. `up.sh` does not create the line.
+
+To run the WI-2270 trial end to end:
+
+1. `deploy/server.toml` carries the `[[lines]]` entries: `trial-1` is
+   `attested` on `ci/fmt`, `ci/clippy` and `ci/test` (graft-primary), and
+   `main` keeps decision D6 but git-primary, so the mirror's `main` is
+   unchanged. The policy is global to the server (WI-2288), so every
+   repository gets these lines. A change to the file restarts the server on
+   the next `up.sh`.
+2. Put `GRAFT_ATTESTER=1` in `/etc/graft/deploy.env` (the defaults already
+   name repo `rusttorrent` and line `trial-1`; override with
+   `GRAFT_ATTESTER_REPO` and `GRAFT_ATTESTER_LINE`) and run `deploy/up.sh`.
+3. From a machine on the tailnet, `trial/create-trial-line.sh` creates
+   `trial-1` at the current tip of rustTorrent `main` (it leaves an existing
+   line alone), then `trial/mint-agent-tokens.sh N` mints the agents' tokens
+   (`read`, `write`, `land:trial-1`; never `main`).
+4. When the agents are done, `graft-mirror pr-batch trial-1` opens the one
+   squashed PR (D21).
 
 What it does:
 
