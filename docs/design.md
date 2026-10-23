@@ -403,6 +403,18 @@ It costs O(results), not O(history). For a draft (not on a line), the server
 walks first parents to the line (at most the stack depth), then switches to
 the index.
 
+**Fork points** ([D23](decisions.md#d23-line-fork-points)). A line created on
+existing history does not copy its parent's rows. Creating it indexes only the
+unlanded stretch it lands, and writes one `line_forks(line, parent, pos)` row
+pointing at a line that holds the first landed ancestor in its own rows. Reads
+below the fork fall through to the parent, bounded at `pos`: `line_pos` and
+the path scan try the line's own rows first, then follow the fork one hop at a
+time. Positions are first-parent depth, so a changeset has the same position
+on every line that holds it, and no renumbering is needed. Creating a line
+costs the unlanded stretch plus one indexed read; queries cost their results
+plus one fork read per hop. A forked line's `line_pos` and `line_paths` rows
+are only its own lands.
+
 ### 4.10 Invariants
 
 1. **Immutability:** the bytes behind an id never change. Only GC deletes
@@ -517,7 +529,7 @@ without touching the same files ([plan.md](plan.md#crate-ownership-and-paralleli
 | `graft-lsp` | lib | LSP server over the API traits and the working copy | proto, client |
 | `graft-cli` | bin `graft` | commands; `graft mcp` and `graft lsp` | client, mcp, lsp, proto, telemetry |
 | `graft-git` | lib | git import, export, and id mapping. The only crate that knows git | model, proto |
-| `graft-mirror` | bin | follow, PR bridge, export mirror, authority switch | git, proto, client, telemetry |
+| `graft-mirror` | bin | follow, batch PR export (D21), export mirror, authority switch (the per-land PR bridge was removed under D21/D22) | git, proto, client, telemetry |
 | `graft-testkit` | lib (dev only) | fake clock, synthetic repos, crash harness, pilot harness | model, store, proto |
 
 ## 6. Storage
@@ -547,7 +559,7 @@ journal entry*. That scope is what lets it move later to a sharded store.
 | workspaces | open, get, list(owner), cas head/base, renew lease, close |
 | journal | append (inside the write transactions above), `read(from_lsn, limit)`, `tail` notifications |
 | derived | get/put by `(kind, version, key)` |
-| line index | append rows on land (same transaction as the ref CAS); range scans |
+| line index | append rows on land (same transaction as the ref CAS); one fork row on line create; range scans that fall through forks |
 | holders | add/remove `(object, holder)` rows, read by object or by holder; parent pins; uploads and claims with expiry; doomed and deleting marks (§8.6) |
 | lands | idempotency records `(draft, ref) → landed` |
 
@@ -604,7 +616,8 @@ frame = magic "GRF1" ‖ u8 kind ‖ u8 codec (0 = raw, 1 = gzip) ‖ u64 uncomp
   `refs(repo, name, target, version, kind)`, `journal(repo, lsn, kind, body)`,
   `workspaces(repo, name, owner, session, base, head, lease_until)`,
   `derived(repo, kind, ver, key, value)`, `line_pos(repo, line, changeset, pos)`,
-  `line_paths(repo, line, path, pos)`, `holders(repo, object, holder)`,
+  `line_paths(repo, line, path, pos)`, `line_forks(repo, line, parent, pos)`
+  (schema version 5, one row per forked line), `holders(repo, object, holder)`,
   `uploads(repo, object, owner, expires)`, `doomed(repo, object, since, deleting)`,
   `lands(repo, draft, ref, landed, at)`, `tombstones(repo, id, at, reason)`.
 - Capacity: one writer handles thousands of small transactions a second on
@@ -1182,7 +1195,7 @@ the paths that changed.
 | Phase | Commands |
 | --- | --- |
 | 1 | `clone [--path P]… [--at REF\|ID]`, `status`, `diff`, `log`, `show`, `blame`, `cat`, `ls`, `sparse`, `api`, `mcp` (read tools), `version` |
-| 2 | `commit [--amend] [-m]`, `workspace`, `stack list`, `land` (GitHub PR bridge mode), `sync` |
+| 2 | `commit [--amend] [-m]`, `workspace`, `stack list`, `land`, `sync` (the GitHub PR bridge mode was removed under D21/D22) |
 | 3 | `land` (native), `revert`, `stack squash\|reorder\|split\|drop`, `lsp`, `attest` (for CI) |
 
 Every command has `--json`, with a stable schema per command, and no
@@ -1311,19 +1324,18 @@ at once. That is how the mirror avoids split-brain.
   ([D9](decisions.md#d9-github-change-notification)). It imports the new
   commits and moves graft `main` to match by admin CAS. Lag is a metric with
   an alert.
-- **Write path (phase 2), the PR bridge:** `graft land` on a git-primary line
-  does not move graft `main`. The server hands the stack to the mirror, which
-  exports it as commits on the current GitHub tip and pushes branch
-  `graft/<workspace>/<short-id>`. It opens a PR with the work item and
+- **Write path (phase 2), the PR bridge (removed under D21/D22; GitHub
+  delivery is the batch PR, D21. Kept here as history):** `graft land` on a
+  git-primary line does not move graft `main`. The server hands the stack to
+  the mirror, which exports it as commits on the current GitHub tip and pushes
+  branch `graft/<workspace>/<short-id>`. It opens a PR with the work item and
   session in the body and enqueues it in the GitHub merge queue. The CLI
   returns `Queued { pr_url }` (exit 0 with `--no-wait`), or waits on the
-  journal for the PR's outcome. When the merge queue lands it, the commit comes
-  back through follow. The trailer `Graft-Changeset` links it to the draft,
-  which becomes `landed` (mapped to the squashed or rebased commit GitHub
-  made). A PR that fails CI or is closed comes back as `Rejected`, with the
-  check URL.
-- What this buys: during the pilot, review, CI, and the merge queue do not
-  change at all. graft only changes how agents read and write.
+  journal for the PR's outcome. When the merge queue lands it, the commit
+  comes back through follow. The trailer `Graft-Changeset` links it to the
+  draft, which becomes `landed` (mapped to the squashed or rebased commit
+  GitHub made). A PR that fails CI or is closed comes back as `Rejected`, with
+  the check URL.
 
 **Mode B: `graft-primary` (phase 3 onward).** graft `main` is authoritative.
 
@@ -1455,7 +1467,7 @@ expiry, plus a `jti` denylist in the MetaStore checked on writes.
 | Server down | Writes and queries fail | `Unavailable`. Clients can still read cached objects for a known base; writes wait. During migration, git and GitHub remain usable for anything urgent (git-primary) |
 | Network partition, node ↔ server | As above | Strict tiering: the node sheds load with `Unavailable` and never stampedes the server when it returns (bounded concurrency, jittered retries) |
 | Thundering herd on `main` | Many retries | Backoff plus jitter. In phase 4 the per-line combiner batches lands, turning N racing retries into N rebases and one CAS |
-| GitHub outage (git-primary) | The PR bridge and follow stall | Lands queue (`Queued`). Follow catches up. No data at risk |
+| GitHub outage (git-primary) | Follow and batch PR export stall | Lands on graft lines continue. Follow and the next batch catch up. No data at risk |
 | GitHub outage (graft-primary) | Export lags | Landing is unaffected. Export resumes from the last exported sha (pushes are idempotent, shas are deterministic) |
 | Someone writes to GitHub `main` in graft-primary | The lease push fails | Export stops for that line, the divergence alert fires, and `reconcile` resolves it by hand. There is never an automatic force |
 | Mirror DB lost | Exact shas of imported commits cannot be reproduced | Rebuild from GitHub by re-import matching (trees are equal by construction). The DB is backed up with the server |
