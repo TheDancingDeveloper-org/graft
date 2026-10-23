@@ -208,7 +208,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     /// The workspace `name` as an overlap entry, or `None` when it does not
-    /// count: gone, lease lapsed, the caller's own (unless asked for), or
+    /// count: gone, lease lapsed (as `Engine::lapsed` reads it), the caller's own (unless asked for), or
     /// with no draft head (an empty stack, or a head already landed).
     async fn live_draft(
         &self,
@@ -226,7 +226,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         else {
             return Ok(None);
         };
-        if ws.lease_until_ms <= now || (!include_own && ws.owner == cx.principal.subject) {
+        if ws.lease_until_ms < now || (!include_own && ws.owner == cx.principal.subject) {
             return Ok(None);
         }
         let Some(head) = ws.head else {

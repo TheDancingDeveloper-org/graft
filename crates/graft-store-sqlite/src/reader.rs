@@ -792,6 +792,25 @@ pub(crate) fn gc_protection(conn: &Connection, repo: RepoId) -> StoreResult<bool
         .map_err(sql_err)
 }
 
+/// The draft path scan: `?3` itself, then `[max(?4, ?7), ?5)`, each resumed
+/// after `(?7, ?8)` when `?6` is set. The range starts at the cursor, so the
+/// index seek skips the rows before it: a late page costs no more than the
+/// first.
+const DRAFT_SCAN: &str = "SELECT path, workspace FROM (
+         SELECT path, workspace FROM draft_paths
+         WHERE repo = ?1 AND line = ?2 AND path = ?3
+             AND (?6 = 0 OR (path, workspace) > (?7, ?8))
+         ORDER BY path, workspace LIMIT ?9
+     )
+     UNION ALL
+     SELECT path, workspace FROM (
+         SELECT path, workspace FROM draft_paths
+         WHERE repo = ?1 AND line = ?2 AND path >= max(?4, ?7) AND path < ?5
+             AND (?6 = 0 OR (path, workspace) > (?7, ?8))
+         ORDER BY path, workspace LIMIT ?9
+     )
+     LIMIT ?9";
+
 pub(crate) fn scan_draft_paths(
     conn: &Connection,
     repo: RepoId,
@@ -812,24 +831,7 @@ pub(crate) fn scan_draft_paths(
     let has_after = after.is_some() as i64;
     let lo = format!("{prefix}/");
     let hi = format!("{prefix}0");
-    let mut stmt = conn
-        .prepare_cached(
-            "SELECT path, workspace FROM (
-                 SELECT path, workspace FROM draft_paths
-                 WHERE repo = ?1 AND line = ?2 AND path = ?3
-                     AND (?6 = 0 OR (path, workspace) > (?7, ?8))
-                 ORDER BY path, workspace LIMIT ?9
-             )
-             UNION ALL
-             SELECT path, workspace FROM (
-                 SELECT path, workspace FROM draft_paths
-                 WHERE repo = ?1 AND line = ?2 AND path >= ?4 AND path < ?5
-                     AND (?6 = 0 OR (path, workspace) > (?7, ?8))
-                 ORDER BY path, workspace LIMIT ?9
-             )
-             LIMIT ?9",
-        )
-        .map_err(sql_err)?;
+    let mut stmt = conn.prepare_cached(DRAFT_SCAN).map_err(sql_err)?;
     let rows = stmt
         .query_map(
             params![
@@ -881,4 +883,56 @@ pub(crate) fn workspace_draft_paths(
 
 fn path(s: &str) -> StoreResult<RepoPath> {
     RepoPath::new(s).map_err(|e| StoreError::Corrupt(format!("draft path: {}", e.reason())))
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, StatementStatus, params};
+
+    use super::DRAFT_SCAN;
+
+    /// A resumed page deep in one prefix costs about what the first page
+    /// does: the seek starts at the cursor (Review #115).
+    #[test]
+    fn a_late_draft_scan_page_seeks_past_the_cursor() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        crate::migrations::migrate(&mut conn).expect("migrate");
+        conn.execute("INSERT INTO repos (id, name) VALUES (1, 'r')", [])
+            .expect("repo");
+        let tx = conn.transaction().expect("tx");
+        for i in 0..10_000 {
+            tx.execute(
+                "INSERT INTO draft_paths (repo, line, path, workspace)
+                 VALUES (1, 'main', ?1, 'w')",
+                [format!("src/f{i:05}")],
+            )
+            .expect("row");
+        }
+        tx.commit().expect("commit");
+        let steps = |after: Option<&str>| {
+            let mut stmt = conn.prepare(DRAFT_SCAN).expect("prepare");
+            let n = stmt
+                .query_map(
+                    params![
+                        1,
+                        "main",
+                        "src",
+                        "src/",
+                        "src0",
+                        i64::from(after.is_some()),
+                        after.unwrap_or(""),
+                        "w",
+                        50
+                    ],
+                    |r| r.get::<_, String>(0),
+                )
+                .expect("query")
+                .count();
+            assert_eq!(n, 50);
+            stmt.get_status(StatementStatus::VmStep)
+        };
+        let first = steps(None);
+        let late = steps(Some("src/f09000"));
+        assert!(late < first * 3, "late page {late} steps, first {first}");
+    }
 }

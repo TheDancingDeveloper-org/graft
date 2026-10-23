@@ -252,6 +252,63 @@ fn stack_edits_replace_the_paths<M: MetaStore>(f: &Fixture<M>) {
     assert_eq!(d.all("alice", &["src"], false), hits(&[("src/a.rs", "wb")]));
 }
 
+/// Moves `main` on by a commit putting `files` with content "1" or "2".
+fn advance_main<M: MetaStore>(d: &Drafts<'_, M>, files: &[(&str, &[u8])]) -> ChangesetId {
+    let tip = d.repo.commit(vec![d.root], files, &[]).id;
+    d.repo
+        .update_ref("main", Some(d.root), tip, RefKind::Line)
+        .expect("advance main");
+    tip
+}
+
+fn sync_replaces_the_paths<M: MetaStore>(f: &Fixture<M>) {
+    let d = Drafts::new(f);
+    d.draft("bob", "wb", 0, &["src/a.rs", "src/b.rs"]);
+    // `main` gets the same src/b.rs, so the rebased draft no longer
+    // changes it.
+    advance_main(&d, &[("src/b.rs", b"1")]);
+    block_on(d.e().sync(&agent("r", "bob"), d.wref("wb"), None)).expect("sync");
+    assert_eq!(d.all("alice", &["src"], false), hits(&[("src/a.rs", "wb")]));
+}
+
+fn resolve_replaces_the_paths<M: MetaStore>(f: &Fixture<M>) {
+    let d = Drafts::new(f);
+    let head = d.draft("bob", "wb", 0, &["src/a.rs", "src/b.rs", "src/c.rs"]);
+    // src/a.rs conflicts (added on both sides); src/b.rs is already there.
+    let tip = advance_main(&d, &[("src/a.rs", b"2"), ("src/b.rs", b"1")]);
+    block_on(d.e().resolve(
+        &agent("r", "bob"),
+        Resolve {
+            workspace: d.wref("wb"),
+            onto: tip,
+            expected_head: Some(head),
+            resolutions: vec![PathResolution {
+                path: p("src/a.rs"),
+                resolution: Resolution::Put {
+                    kind: graft_model::EntryKind::File,
+                    content: ResolvedContent::Inline(b"1".to_vec()),
+                },
+            }],
+        },
+    ))
+    .expect("resolve");
+    assert_eq!(
+        d.all("alice", &["src"], false),
+        hits(&[("src/a.rs", "wb"), ("src/c.rs", "wb")])
+    );
+}
+
+/// A lease is live through its last millisecond, as `Engine::lapsed` reads
+/// it.
+fn a_lease_counts_until_its_end<M: MetaStore>(f: &Fixture<M>) {
+    let d = Drafts::new(f);
+    d.draft("bob", "wb", HOUR, &["src/x.rs"]);
+    f.clock.advance(HOUR as i64);
+    assert_eq!(d.all("alice", &["src"], false), hits(&[("src/x.rs", "wb")]));
+    f.clock.advance(1);
+    assert!(d.all("alice", &["src"], false).is_empty());
+}
+
 fn needs_the_drafts_scope<M: MetaStore>(f: &Fixture<M>) {
     let d = Drafts::new(f);
     d.draft("bob", "wb", 0, &["src/x.rs"]);
@@ -376,6 +433,9 @@ on_both_stores!(
     same_file_overlaps_and_disjoint_does_not,
     closed_expired_and_emptied_workspaces_drop_out,
     stack_edits_replace_the_paths,
+    sync_replaces_the_paths,
+    resolve_replaces_the_paths,
+    a_lease_counts_until_its_end,
     needs_the_drafts_scope,
     inputs_are_bounded,
     per_page_cost_is_bounded,
