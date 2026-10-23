@@ -29,6 +29,12 @@ Already decided by the operator (2026-10-22):
 - **D21** (operator, 2026-10-23): batch PR export. Agents iterate on a
   graft integration line, and each batch reaches GitHub as one squashed PR
   that the operator merges.
+- **D22** (operator, 2026-10-23): phase 1 is graft as a git alternative.
+  Lines default to `direct`, and no build, test or CI runs in the land path.
+  CI checks (attestation, the attester, the CI token exchange, post-land
+  runs and auto-revert) move to phase 2: the code stays, switched off. D6
+  becomes the phase-2 setting for `main`, not the default. See
+  [D22](#d22-phase-1-is-a-git-alternative).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure; line-level merge in rebase for text
   files under 1 MiB. Each section below names the rejected options.
@@ -40,14 +46,14 @@ Already decided by the operator (2026-10-22):
 | D3 | Storage backend | **Decided:** SQLite + filesystem through phase 3, Litestream for off-box WAL | — |
 | D4 | Wire protocol | **Decided:** gRPC (tonic, prost) plus a read-only JSON facade | — |
 | D5 | At-rest codec | **Decided:** store the gzip wire frame (zero transcode); benchmark zstd in the pilot | — |
-| D6 | Landing gate on `main` | **Decided:** `attested` (pre-land CI on the draft) plus post-land CI with auto-revert on failure | — |
+| D6 | Landing gate on `main` | **Decided:** `attested` (pre-land CI on the draft) plus post-land CI with auto-revert on failure. **Phase 2 under D22**: opt-in config, not the default | — |
 | D7 | Hash function | **Decided:** BLAKE3 | — |
 | D8 | GitHub mirror identity | **Decided:** a GitHub App on the org, with ruleset bypass on `main`; key in Infisical | — |
 | D9 | GitHub change notification | Poll every 15 s in phase 1; add webhooks in phase 2 if lag matters | Phase 1 (G1.12) |
 | D10 | Agent token issuance | **Decided:** Vogt mints a session-scoped graft token, renews the lease, closes the workspace at stop | — |
 | D11 | Path rules on import | **Decided:** reject non-UTF-8 and non-portable paths, with a report | — |
 | D12 | Repository namespaces | **Decided:** one server, many repos, a separate object namespace per repo | — |
-| D13 | Deployment | **Decided:** a Komodo stack on Node B; the node daemon as a systemd unit per host | — |
+| D13 | Deployment | **Decided:** a Komodo stack on Node B; the node daemon as a systemd unit per host. Dev server since moved to the graft-dev VM, deployed from `deploy/` (operator, 2026-10-23, WI-2251) | — |
 | D14 | Pilot repository | **Decided:** rustTorrent | — |
 | D15 | Where graft's source lives | **Decided:** GitHub `TheDancingDeveloper-org/graft`, public | — |
 | D16 | Line-level merge in rebase | **Decided:** on for text files under 1 MiB, recorded in metadata; larger or binary files conflict at file level | — |
@@ -56,6 +62,7 @@ Already decided by the operator (2026-10-22):
 | D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
 | D20 | Pilot period | **Decided:** none; G1.18 dropped, phase 2 not gated (replaces D18's gate) | — |
 | D21 | Batch PR export | **Decided:** agents land on a graft integration line; each batch goes to GitHub as one squashed PR the operator merges | — |
+| D22 | What phase 1 is | **Decided:** graft as a git alternative; lines `direct` by default; CI checks are phase 2, switched off | — |
 
 ---
 
@@ -446,3 +453,56 @@ batch reaches GitHub as one squashed PR, which the operator merges.**
   - Graft-primary `main` with direct export (mode B). It needs the authority
     switch and ruleset bypass first, and the operator gives up the merge
     button.
+
+## D22. Phase 1 is a git alternative
+
+**Decided (operator, 2026-10-23): phase 1 is graft as a git alternative.
+Lines default to `direct`, and no build, test or CI runs in the land path. CI
+checks are phase 2 or later.**
+
+Phase 1 is:
+
+- correct storage and history;
+- fast sparse clone and sync;
+- workspaces;
+- server-side rebase, line merge (merge3, D16) and lock-free CAS land;
+- conflicts handed back to the client, as git does;
+- the CLI, MCP and LSP;
+- git import and export;
+- GitHub delivery as one squashed batch PR (D21).
+
+Phase 2 or later covers CI checks:
+
+- the `attested` and `queued` policies;
+- the attester;
+- the CI token exchange;
+- post-land runners and auto-revert.
+
+That code is already built (G3.1, G3.8, the trial attester). It stays in the
+tree but is optional and switched off. Nothing in phase 1 extends it,
+depends on it or prioritises it until the operator starts phase 2.
+
+What follows from it:
+
+- **Line policy.** Every line, `main` included, defaults to `direct`. D6
+  (`attested` on `main` with post-land auto-revert) becomes opt-in
+  configuration (`[[lines]]` in `server.toml`), the phase-2 setting. The
+  engine default changes to match (WI-2298).
+- **Measurement.** graft is measured as source control: land latency and
+  contention, merge and conflict correctness, sync and clone speed, history
+  integrity, and comparisons against git. The repeatable harness in `bench/`
+  (WI-2294) is used rather than live agent runs.
+- **Delivery to GitHub.** GitHub `main` stays git-primary (D21). The
+  graft-primary cutover of rustTorrent (G3.10) and the per-land PR bridge
+  (the G2.6 CLI) are not planned.
+- **Plan.** [plan.md](plan.md) keeps the build waves as history. Its phase
+  table and backlog follow this decision.
+
+The options it replaces:
+
+- Phase 1 as a read pilot (the original plan), with native landing gated
+  by CI in phase 3. The read pilot was dropped by D20. Gating every land on
+  CI makes land latency CI latency, and that hides the source-control
+  properties phase 1 needs to prove.
+- Keeping D6 as the default on `main`. Then a server with no config would
+  gate lands on checks that nothing posts.
