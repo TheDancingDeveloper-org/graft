@@ -189,6 +189,10 @@ measures decompression share of checkout time, and we revisit if it exceeds
 **Decided (operator, 2026-10-23): `attested` on `main`, with post-land CI and
 an auto-revert on failure.**
 
+**Phase 2 under [D22](#d22-phase-1-is-a-git-alternative).** In phase 1 every
+line, `main` included, lands `direct`, and no check runs in the land path.
+The choice below is the opt-in phase-2 configuration, not the default.
+
 Today every PR goes through a GitHub merge queue with required checks. Scion
 drops the global queue and relies on post-merge testing.
 
@@ -482,6 +486,19 @@ Phase 2 or later covers CI checks:
 That code is already built (G3.1, G3.8, the trial attester). It stays in the
 tree but is optional and switched off. Nothing in phase 1 extends it,
 depends on it or prioritises it until the operator starts phase 2.
+
+Why:
+
+- The rustTorrent trial (WI-2270) spent its time in the attestation path
+  (the attester, its queue and its checks), not in source control. It
+  measured CI, not graft.
+- git works without CI. A git alternative has to stand on storage, history,
+  merge and land, so that is what phase 1 measures.
+- Scion and OpenScion have no pre-land gate either. They land at once and
+  rely on post-merge testing.
+- Under D21, GitHub CI already runs once per batch on the squashed PR, and
+  the operator merges it. Breakage is caught there, before it reaches
+  GitHub's `main`.
 
 What follows from it:
 

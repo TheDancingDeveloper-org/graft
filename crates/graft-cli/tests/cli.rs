@@ -470,13 +470,8 @@ fn the_token_comes_from_a_file_or_the_environment_and_is_never_printed() {
 }
 
 #[test]
-fn designed_but_unbuilt_commands_say_so() {
+fn unknown_commands_say_so() {
     let dir = scratch();
-    graft(dir.path())
-        .arg("mcp")
-        .assert()
-        .code(2)
-        .stderr(contains("not implemented yet"));
     graft(dir.path())
         .arg("frobnicate")
         .assert()

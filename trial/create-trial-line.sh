@@ -14,8 +14,8 @@
 # then deleted. Nothing secret is printed or put in argv.
 #
 # Idempotent: if `trial-1` already exists it is left alone, never moved, so a
-# re-run cannot rewind the line. The line's land policy (attested on ci/fmt,
-# ci/clippy, ci/test) comes from deploy/server.toml, not from this script.
+# re-run cannot rewind the line. The line's land policy (`direct`, decision
+# D22) comes from deploy/server.toml, not from this script.
 #
 #   GRAFT_TRIAL_HOST      ssh target (default sprooty@graft-dev)
 #   GRAFT_TRIAL_UPSTREAM  git URL to fork from (default rustTorrent on GitHub)
