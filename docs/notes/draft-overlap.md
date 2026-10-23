@@ -196,10 +196,9 @@ OverlappingDrafts {
   - `InvalidPath` — a malformed path, or the empty/root prefix;
   - `LimitExceeded { limit: "paths", max: 64 }` — too many input paths;
     `LimitExceeded { limit: "limit", max: 200 }` — page size too large;
-  - `InvalidChange { rule: "bad-page-token" }`-style rejection is avoided:
-    a token that fails to decode, or was issued for different inputs, is
-    `InvalidPath { path: "", reason: "bad-page-token" }`. (If a dedicated
-    variant is preferred, it is an additive `ApiError` change in step a.)
+  - `InvalidPath { path: "", reason: "bad-page-token" }` — a page token
+    that fails to decode or was issued for different inputs (a dedicated
+    variant would be an additive `ApiError` change in step a);
   - `NotFound` for an unknown repository or line, as other reads do.
 
 **Optional Watch event.** A journal entry `DraftPathsChanged { workspace,
@@ -245,8 +244,9 @@ It does **not** learn:
 
 Residual risks:
 
-- **Path enumeration.** A caller can ask for prefix `""` and page through
-  every path every agent is touching. That is the intended capability; it is
+- **Path enumeration.** The empty prefix is refused (§4), but a caller can
+  still page through each top-level directory and so list every path every
+  agent is touching, one bounded page at a time. That is the intended capability; it is
   why `drafts` is a separate scope and isn't granted by `read`. Path names
   can themselves be sensitive (an unreleased feature's file names); a
   repository with path read restrictions (§12.2) should not hand out
