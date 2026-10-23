@@ -77,10 +77,20 @@ fn writer() -> Author {
 
 impl EngineRepo {
     /// A repository `name` whose `main` starts at a root holding `files`,
-    /// with the engine's default line configuration (decision D6:
-    /// `attested` on `main`).
+    /// with the engine's default line configuration (decision D22: every
+    /// line, `main` included, is `direct`).
     pub async fn new(name: &str, files: &[(&str, &[u8])]) -> Arc<EngineRepo> {
         Self::with_config(name, EngineConfig::default(), files).await
+    }
+
+    /// The same, with `main` opted into decision D6: `attested` on
+    /// `ci/build` and `ci/test`, post-land with auto-revert.
+    pub async fn d6(name: &str, files: &[(&str, &[u8])]) -> Arc<EngineRepo> {
+        let config = EngineConfig {
+            lines: vec![LineConfig::d6("main")],
+            ..EngineConfig::default()
+        };
+        Self::with_config(name, config, files).await
     }
 
     /// The same, with `main` a `direct` line.

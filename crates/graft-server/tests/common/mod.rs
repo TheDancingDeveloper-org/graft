@@ -30,6 +30,18 @@ pub fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_graft-server")
 }
 
+/// `main` opted into decision D6 (`attested` on `ci/build` and `ci/test`,
+/// the same checks post-land with auto-revert). Since D22 every line,
+/// `main` included, defaults to `direct`; tests of the attested path
+/// configure it with this `[[lines]]` entry.
+pub const D6_MAIN: &str = r#"
+[[lines]]
+name = "main"
+policy = "attested"
+checks = ["ci/build", "ci/test"]
+post_land = { checks = ["ci/build", "ci/test"], auto_revert = true }
+"#;
+
 /// A server's data directory and config file.
 pub struct Site {
     pub dir: TempDir,

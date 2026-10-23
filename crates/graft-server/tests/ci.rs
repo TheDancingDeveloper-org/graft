@@ -6,7 +6,8 @@
 //! A recorded GitHub Actions token is exchanged for a graft token, once the
 //! mirror has recorded (`MirrorService.RecordExports`) that the job's commit
 //! is the draft's export; that token attests both of `main`'s required
-//! checks (decision D6) on the draft, after which an `attested` land
+//! checks (decision D6, configured explicitly: since D22 `main` defaults to
+//! `direct`) on the draft, after which an `attested` land
 //! succeeds. There is no commit map file. A token for another repository is
 //! refused, at the exchange or at the attest.
 
@@ -18,7 +19,7 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::{Auth, Server, Site, api};
+use common::{Auth, D6_MAIN, Server, Site, api};
 use graft_model::ChangesetId;
 use graft_proto::pb;
 use graft_proto::types::{Attest, Land, Landed, MergeMode};
@@ -246,9 +247,13 @@ async fn land(server: &Server, token: &str, head: ChangesetId) -> Result<Landed,
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_exchanged_ci_token_attests_and_the_attested_land_succeeds() {
     let jwks = JwksServer::start(include_str!("fixtures/ci/jwks.json"));
+    // `main` opted into D6: since D22 it defaults to `direct`.
     let site = Site::new(
         "server-ci-e2e",
-        &ci_config(&format!("jwks_url = \"{}\"", jwks.url)),
+        &format!(
+            "{}{D6_MAIN}",
+            ci_config(&format!("jwks_url = \"{}\"", jwks.url))
+        ),
     );
     let server = site.start();
     assert!(

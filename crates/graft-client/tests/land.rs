@@ -22,7 +22,7 @@ use graft_client::workcopy::{
 use graft_client::workspace::{DEFAULT_LEASE_MS, stack};
 use graft_client::{Error, Sparse};
 use graft_model::{Author, AuthorKind, ChangesetId, RepoPath, Timestamp};
-use graft_proto::types::StackOp;
+use graft_proto::types::{MergeMode, StackOp};
 use graft_proto::{ApiError, CallContext};
 use proptest::prelude::*;
 
@@ -81,7 +81,7 @@ impl Env {
     /// `main` attested on `ci/build` and `ci/test` (decision D6).
     async fn d6() -> Env {
         Env {
-            repo: EngineRepo::new(REPO, &base_files()).await,
+            repo: EngineRepo::d6(REPO, &base_files()).await,
             dir: tempfile::tempdir().unwrap(),
         }
     }
@@ -98,10 +98,15 @@ impl Env {
     }
 
     async fn clone(&self, name: &str) -> WorkingCopy {
+        self.clone_in(name, None).await
+    }
+
+    /// A clone in its own named workspace, for a second writer.
+    async fn clone_in(&self, name: &str, workspace: Option<&str>) -> WorkingCopy {
         let config = WcConfig {
             endpoint: None,
             repo: REPO.to_owned(),
-            workspace: None,
+            workspace: workspace.map(str::to_owned),
         };
         let (mut wc, _) = clone(
             &*self.repo,
@@ -558,6 +563,75 @@ async fn a_sync_conflict_needs_a_clean_working_copy() {
     assert_eq!(wc.state().head, Some(head));
     assert_eq!(wc.state().moving, None);
     assert_eq!(read(&wc, "README.md"), "mine\n");
+}
+
+/// Two working copies edit `src/lib.rs` and commit; the first, which
+/// changes the last function, lands. Returns the env and the second
+/// working copy, its draft (`second`) not yet landed.
+async fn two_writers_on_one_file(second: &str) -> (Env, WorkingCopy) {
+    let env = Env::direct().await;
+    let mut one = env.clone_in("one", Some("one")).await;
+    let mut two = env.clone_in("two", Some("two")).await;
+    write(&one, "src/lib.rs", "fn a() {}\nfn b() {}\nfn c() { 1 }\n");
+    env.commit(&mut one, Some("one")).await.unwrap();
+    write(&two, "src/lib.rs", second);
+    env.commit(&mut two, Some("two")).await.unwrap();
+    let (_, rebased) = landed(env.land(&mut one).await.unwrap());
+    assert!(!rebased);
+    (env, two)
+}
+
+#[tokio::test]
+async fn land_line_merges_edits_to_separate_regions_of_one_file() {
+    // The first and the last function, with an untouched line between.
+    let (env, mut two) = two_writers_on_one_file("fn a() { 2 }\nfn b() {}\nfn c() {}\n").await;
+    // A plain land (no sync): the server's rebase merges the file (D16).
+    let (id, rebased) = landed(env.land(&mut two).await.unwrap());
+    assert!(rebased);
+    assert_eq!(env.repo.tip().await, id);
+    let merged = "fn a() { 2 }\nfn b() {}\nfn c() { 1 }\n";
+    assert_eq!(env.repo.files(id).await["src/lib.rs"], merged.as_bytes());
+    assert_eq!(read(&two, "src/lib.rs"), merged);
+    env.assert_checked_out(&two).await;
+}
+
+#[tokio::test]
+async fn land_with_file_merge_refuses_edits_to_separate_regions() {
+    let (env, mut two) = two_writers_on_one_file("fn a() { 2 }\nfn b() {}\nfn c() {}\n").await;
+    let head = two.state().head;
+    let o = LandOptions {
+        merge: MergeMode::File,
+        ..quick()
+    };
+    let err = env.land_with(&mut two, &o).await.unwrap_err();
+    assert!(
+        matches!(&err, Error::Api(ApiError::Conflict { .. })),
+        "{err:?}"
+    );
+    assert_eq!(two.state().head, head);
+    assert_eq!(
+        read(&two, "src/lib.rs"),
+        "fn a() { 2 }\nfn b() {}\nfn c() {}\n"
+    );
+}
+
+#[tokio::test]
+async fn land_line_merge_still_refuses_edits_to_the_same_line() {
+    let (env, mut two) = two_writers_on_one_file("fn a() {}\nfn b() {}\nfn c() { 2 }\n").await;
+    let head = two.state().head;
+    let tip = env.repo.tip().await;
+    let err = env.land(&mut two).await.unwrap_err();
+    assert!(
+        matches!(&err, Error::Api(ApiError::Conflict { onto, .. }) if *onto == tip),
+        "{err:?}"
+    );
+    // Nothing moved: the line, the draft and the file are as they were.
+    assert_eq!(env.repo.tip().await, tip);
+    assert_eq!(two.state().head, head);
+    assert_eq!(
+        read(&two, "src/lib.rs"),
+        "fn a() {}\nfn b() {}\nfn c() { 2 }\n"
+    );
 }
 
 #[tokio::test]

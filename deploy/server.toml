@@ -17,27 +17,38 @@ json_logs = true
 max_token_ttl_s = 2592000
 shutdown_grace_s = 20
 
-# Per-line land policy (WI-2288). Absent, `main` is decision D6 (attested on
-# ci/build and ci/test) and every other line lands directly. A [[lines]] entry
-# replaces the default for its name; unnamed lines keep theirs, and an
-# optional [default_line] table replaces the direct default. Global to the
-# server for now (not per repository). Keys: crates/graft-server/src/lines.rs.
+# Per-line land policy (WI-2288, WI-2298). Decision D22: phase 1 is a git
+# alternative, so every line, `main` included, lands `direct` by default, with
+# no build, test or CI in the land path. A [[lines]] entry replaces the
+# default for its name and opts it into `attested`, `queued` or `post_land`
+# checks (the phase-2 setting); unnamed lines stay direct, and an optional
+# [default_line] table replaces the direct default. Global to the server for
+# now (not per repository). Keys: crates/graft-server/src/lines.rs.
 #
-# Decision D22 (docs/decisions.md): phase 1 is a git alternative. Every line
-# lands `direct`: rebase, line merge and CAS, with no build, test or CI in the
-# land path. `attested`, `queued`, post-land CI and auto-revert are phase 2
-# and stay off here. The engine still defaults `main` to D6, so `main` is
-# listed to make it direct. It is git-primary, so the mirror's main stays
-# what GitHub says.
+# `main` is direct (D22) and git-primary, so the mirror's main stays what
+# GitHub says. Listed so the authority is explicit.
 [[lines]]
 name = "main"
 policy = "direct"
 authority = "git-primary"
 
-# The WI-2270 trial line (decision D21): agents land here, directly (D22).
-# The operator merges the batch PR that `graft-mirror pr-batch trial-1`
-# opens, and GitHub CI runs on that PR. Create the line with
-# trial/create-trial-line.sh.
+# Phase 2 (D22): decision D6 for `main` is opt-in, no longer the engine
+# default. To gate `main` on CI attestations, with the same checks post-land
+# and an automatic revert on failure, replace the entry above with:
+#
+# [[lines]]
+# name = "main"
+# policy = "attested"
+# checks = ["ci/build", "ci/test"]
+# attest_merged = false
+# authority = "git-primary"
+# post_land = { checks = ["ci/build", "ci/test"], auto_revert = true }
+
+# The WI-2270 trial line (decision D21): agents land here directly (D22). The
+# operator merges the batch PR that `graft-mirror pr-batch trial-1` opens.
+# Create the line with trial/create-trial-line.sh. Phase 2 gates it on the
+# attester's checks again: policy = "attested",
+# checks = ["ci/fmt", "ci/clippy", "ci/test"], attest_merged = false.
 [[lines]]
 name = "trial-1"
 policy = "direct"

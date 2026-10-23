@@ -29,13 +29,16 @@ Already decided by the operator (2026-10-22):
 - **D21** (operator, 2026-10-23): batch PR export. Agents iterate on a
   graft integration line, and each batch reaches GitHub as one squashed PR
   that the operator merges.
+- **D22** (operator, 2026-10-23): phase 1 is graft as a git alternative.
+  Lines default to `direct`, and no build, test or CI runs in the land path.
+  CI checks (attestation, the attester, the CI token exchange, post-land
+  runs and auto-revert) move to phase 2: the code stays, switched off. D6
+  becomes the phase-2 setting for `main`, not the default. See
+  [D22](#d22-phase-1-is-a-git-alternative).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
-  post-land CI and auto-revert on failure; line-level merge in rebase for text
+  post-land CI and auto-revert on failure (D6 is the phase-2 setting under
+  D22, not the default); line-level merge in rebase for text
   files under 1 MiB. Each section below names the rejected options.
-- **D22** (operator, 2026-10-23): phase 1 is a git alternative, and CI
-  checks are phase 2 or later. Lines default to `direct`, and nothing is
-  built or tested in the land path. For phase 1 it supersedes D6's
-  `attested` default on `main`.
 
 | # | Decision | Recommendation | Blocks |
 | --- | --- | --- | --- |
@@ -44,23 +47,23 @@ Already decided by the operator (2026-10-22):
 | D3 | Storage backend | **Decided:** SQLite + filesystem through phase 3, Litestream for off-box WAL | — |
 | D4 | Wire protocol | **Decided:** gRPC (tonic, prost) plus a read-only JSON facade | — |
 | D5 | At-rest codec | **Decided:** store the gzip wire frame (zero transcode); benchmark zstd in the pilot | — |
-| D6 | Landing gate on `main` | **Superseded for phase 1 by D22.** Was: `attested` (pre-land CI on the draft) plus post-land CI with auto-revert on failure; it stands as the phase 2 design | — |
+| D6 | Landing gate on `main` | **Decided:** `attested` (pre-land CI on the draft) plus post-land CI with auto-revert on failure. **Phase 2 under D22**: opt-in config, not the default | — |
 | D7 | Hash function | **Decided:** BLAKE3 | — |
 | D8 | GitHub mirror identity | **Decided:** a GitHub App on the org, with ruleset bypass on `main`; key in Infisical | — |
 | D9 | GitHub change notification | Poll every 15 s in phase 1; add webhooks in phase 2 if lag matters | Phase 1 (G1.12) |
 | D10 | Agent token issuance | **Decided:** Vogt mints a session-scoped graft token, renews the lease, closes the workspace at stop | — |
 | D11 | Path rules on import | **Decided:** reject non-UTF-8 and non-portable paths, with a report | — |
 | D12 | Repository namespaces | **Decided:** one server, many repos, a separate object namespace per repo | — |
-| D13 | Deployment | **Decided:** a Komodo stack on Node B; the node daemon as a systemd unit per host | — |
+| D13 | Deployment | **Decided:** a Komodo stack on Node B; the node daemon as a systemd unit per host. Dev server since moved to the graft-dev VM, deployed from `deploy/` (operator, 2026-10-23, WI-2251) | — |
 | D14 | Pilot repository | **Decided:** rustTorrent | — |
 | D15 | Where graft's source lives | **Decided:** GitHub `TheDancingDeveloper-org/graft`, public | — |
 | D16 | Line-level merge in rebase | **Decided:** on for text files under 1 MiB, recorded in metadata; larger or binary files conflict at file level | — |
 | D17 | MCP hosting | Both: `graft mcp` (stdio) and the server's `/mcp` | Phase 1 (read tools), Phase 2 (write tools) |
-| D18 | Phase 1 kill criteria | **Decided:** as in plan.md, unchanged | — |
+| D18 | Phase 1 kill criteria | **Decided:** as in plan.md, unchanged. Written for the read pilot; targets only under D20 and D22 | — |
 | D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
 | D20 | Pilot period | **Decided:** none; G1.18 dropped, phase 2 not gated (replaces D18's gate) | — |
 | D21 | Batch PR export | **Decided:** agents land on a graft integration line; each batch goes to GitHub as one squashed PR the operator merges | — |
-| D22 | What phase 1 is | **Decided:** phase 1 is a git alternative with `direct` lands; CI checks (attestation, the attester, post-land CI, auto-revert) are phase 2 or later | — |
+| D22 | What phase 1 is | **Decided:** graft as a git alternative; lines `direct` by default; CI checks are phase 2, switched off | — |
 
 ---
 
@@ -186,10 +189,9 @@ measures decompression share of checkout time, and we revisit if it exceeds
 **Decided (operator, 2026-10-23): `attested` on `main`, with post-land CI and
 an auto-revert on failure.**
 
-**Superseded for phase 1 by [D22](#d22-phase-1-is-a-git-alternative)
-(operator, 2026-10-23).** In phase 1 every line, `main` included, lands
-`direct`, and no check runs in the land path. The choice below is kept as the
-phase 2 design: it applies again only when the operator starts phase 2.
+**Phase 2 under [D22](#d22-phase-1-is-a-git-alternative).** In phase 1 every
+line, `main` included, lands `direct`, and no check runs in the land path.
+The choice below is the opt-in phase-2 configuration, not the default.
 
 Today every PR goes through a GitHub merge queue with required checks. Scion
 drops the global queue and relies on post-merge testing.
@@ -459,55 +461,66 @@ batch reaches GitHub as one squashed PR, which the operator merges.**
 
 ## D22. Phase 1 is a git alternative
 
-**Decided (operator, 2026-10-23): phase 1 is a git alternative. CI checks
-are phase 2 or later. For phase 1 this supersedes
-[D6](#d6-landing-gate-on-main)'s `attested` default on `main`.**
+**Decided (operator, 2026-10-23): phase 1 is graft as a git alternative.
+Lines default to `direct`, and no build, test or CI runs in the land path. CI
+checks are phase 2 or later.**
 
-- **Phase 1** is source control: correct storage and history, fast sparse
-  clone and sync, workspaces, server-side rebase, line merge (D16) and
-  lock-free CAS land, conflicts handed back to the client as git does, the
-  CLI, MCP and LSP, git import and export, and GitHub delivery as one
-  squashed batch PR (D21). Lines land `direct`. No build, test or CI runs
-  in the land path.
-- **Phase 2 or later** is CI checks: the `attested` and `queued` policies,
-  the attester, the CI OIDC exchange, post-land runners and auto-revert.
-  That code exists and stays in the tree, but it is optional and switched
-  off. It is not extended, depended on or prioritised until the operator
-  starts phase 2.
+Phase 1 is:
+
+- correct storage and history;
+- fast sparse clone and sync;
+- workspaces;
+- server-side rebase, line merge (merge3, D16) and lock-free CAS land;
+- conflicts handed back to the client, as git does;
+- the CLI, MCP and LSP;
+- git import and export;
+- GitHub delivery as one squashed batch PR (D21).
+
+Phase 2 or later covers CI checks:
+
+- the `attested` and `queued` policies;
+- the attester;
+- the CI token exchange;
+- post-land runners and auto-revert.
+
+That code is already built (G3.1, G3.8, the trial attester). It stays in the
+tree but is optional and switched off. Nothing in phase 1 extends it,
+depends on it or prioritises it until the operator starts phase 2.
 
 Why:
 
 - The rustTorrent trial (WI-2270) spent its time in the attestation path
-  (the attester, its queue and its checks), not in source control. That
+  (the attester, its queue and its checks), not in source control. It
   measured CI, not graft.
 - git works without CI. A git alternative has to stand on storage, history,
-  merge and land, so that is what phase 1 measures: land latency and
-  contention, merge and conflict correctness, sync and clone speed, history
-  integrity, and comparisons against git (the WI-2294 harness).
+  merge and land, so that is what phase 1 measures.
 - Scion and OpenScion have no pre-land gate either. They land at once and
   rely on post-merge testing.
 - Under D21, GitHub CI already runs once per batch on the squashed PR, and
   the operator merges it. Breakage is caught there, before it reaches
   GitHub's `main`.
 
-The other options are rejected:
+What follows from it:
 
-- Keep D6 for phase 1 (`attested` on every agent line). Every land waits
-  for a build, so the trial measures the attester, not graft.
-- `queued` on the integration line. It serializes lands and adds minutes of
-  latency for the same reason.
-- Delete the CI layer. It is built and tested, and phase 2 will want it.
-  Parking it costs nothing.
+- **Line policy.** Every line, `main` included, defaults to `direct`. D6
+  (`attested` on `main` with post-land auto-revert) becomes opt-in
+  configuration (`[[lines]]` in `server.toml`), the phase-2 setting. The
+  engine default changes to match (WI-2298).
+- **Measurement.** graft is measured as source control: land latency and
+  contention, merge and conflict correctness, sync and clone speed, history
+  integrity, and comparisons against git. The repeatable harness in `bench/`
+  (WI-2294) is used rather than live agent runs.
+- **Delivery to GitHub.** GitHub `main` stays git-primary (D21). The
+  graft-primary cutover of rustTorrent (G3.10) and the per-land PR bridge
+  (the G2.6 CLI) are not planned.
+- **Plan.** [plan.md](plan.md) keeps the build waves as history. Its phase
+  table and backlog follow this decision.
 
-Consequences:
+The options it replaces:
 
-- Every line defaults to `direct`, and `deploy/server.toml` lists `main`
-  and `trial-1` as `direct`. The engine's built-in default for `main` is
-  still D6 until a code change moves it, so a deployment states it.
-- The attester's compose profile stays off. The agent guide has no
-  attestation wait: a land is immediate.
-- [plan.md](plan.md#phasing-d22) is re-phased: phase 1 is what is built for
-  source control plus the remaining core work; phase 2 holds the CI items,
-  marked built-but-parked or not started.
-- D6 is kept as the phase 2 design. D16's `graft.merged-paths` metadata is
-  still recorded; `attest_merged` matters only in phase 2.
+- Phase 1 as a read pilot (the original plan), with native landing gated
+  by CI in phase 3. The read pilot was dropped by D20. Gating every land on
+  CI makes land latency CI latency, and that hides the source-control
+  properties phase 1 needs to prove.
+- Keeping D6 as the default on `main`. Then a server with no config would
+  gate lands on checks that nothing posts.

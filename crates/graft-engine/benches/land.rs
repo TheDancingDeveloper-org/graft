@@ -4,7 +4,7 @@
 //! one-file draft (not timed) and lands it (timed):
 //!
 //! - `fast-forward`: a `direct` line, the draft on its tip;
-//! - `attested`: the D6 `main` line, the draft on its tip with both checks
+//! - `attested`: `main` opted into D6, the draft on its tip with both checks
 //!   attested;
 //! - `rebase`: a `direct` line that moved since the draft was made, so the
 //!   land rebases it first.
@@ -29,7 +29,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use graft_engine::{Engine, EngineConfig};
+use graft_engine::{Engine, EngineConfig, LineConfig};
 use graft_model::{
     Author, AuthorKind, Change, ChangesetId, EntryKind, Metadata, ObjectId, ObjectKind, RepoPath,
     SystemClock, Timestamp,
@@ -112,7 +112,11 @@ impl Fixture {
             Arc::new(meta),
             Arc::new(objects),
             Arc::new(SystemClock),
-            EngineConfig::default(),
+            // `main` opted into D6 (the default is `direct`, D22).
+            EngineConfig {
+                lines: vec![LineConfig::d6("main")],
+                ..EngineConfig::default()
+            },
         );
         let mut f = Self {
             engine,

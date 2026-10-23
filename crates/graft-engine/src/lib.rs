@@ -151,8 +151,9 @@ impl Default for EngineConfig {
             land_lease_ms: 10 * 60 * 1000,
             land_backoff_base_ms: 2,
             land_backoff_cap_ms: 200,
-            // Decision D6.
-            lines: vec![LineConfig::d6("main")],
+            // Decision D22: every line, `main` included, lands `direct`.
+            // D6 (`LineConfig::d6`) is the phase-2 opt-in.
+            lines: Vec::new(),
             default_line: LineConfig::direct(""),
             default_lease_ms: 2 * 3600 * 1000,
             max_lease_ms: 24 * 3600 * 1000,

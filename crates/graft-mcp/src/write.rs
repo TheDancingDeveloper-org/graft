@@ -144,9 +144,10 @@ pub struct SyncArgs {
 #[serde(rename_all = "lowercase")]
 pub enum MergeArg {
     /// Any path changed on both sides conflicts.
-    #[default]
     File,
-    /// Three-way line merge for text files.
+    /// Three-way line merge for text files (the default): changes to
+    /// different regions of one file merge; overlapping changes conflict.
+    #[default]
     Line,
 }
 
@@ -165,7 +166,10 @@ pub struct LandArgs {
     pub line: Option<String>,
     /// Land the stack as one changeset (default false).
     pub squash: Option<bool>,
-    /// `file` (default) or `line` merging.
+    /// `line` (default): a three-way line merge, so changes to different
+    /// regions of one file land cleanly. `file`: any path changed on both
+    /// sides conflicts.
+    #[schemars(extend("default" = "line"))]
     pub merge: Option<MergeArg>,
 }
 

@@ -7,13 +7,14 @@ This is the visual companion to [design.md](design.md). It shows four things:
 3. The deployment topologies, including CI.
 4. What an **attester** is, and how graft fits with GitHub, with and without CI.
 
-Phase 1 is a git alternative ([D22](decisions.md#d22-phase-1-is-a-git-alternative)):
-every line lands `direct`, and a land is rebase, line merge (merge3) and a
-CAS, with no checks. The land policy gate, the attester and CI attestation
-are phase 2. Their code exists, but it is off by default.
-
 The diagrams are Mermaid, which GitHub renders. Where this page and the design
 disagree, the design wins.
+
+> **Phase note ([D22](decisions.md#d22-phase-1-is-a-git-alternative)).** In
+> phase 1, lines are `direct` and nothing runs CI in the land path. The
+> attester and attestation flows in section 4 are phase 2, built but switched
+> off. Topology 3b (graft-primary `main` with GitHub as the mirror) is not
+> planned; GitHub delivery is the batch PR of 3c (D21).
 
 ---
 
@@ -319,14 +320,6 @@ sequenceDiagram
 ---
 
 ## 4. The attester, and GitHub with or without CI
-
-**Phase 2, off by default ([D22](decisions.md#d22-phase-1-is-a-git-alternative)).**
-In phase 1 every line is `direct`: a land is rebase, line merge and CAS, and
-it runs no checks. The attester (`graft-attester`, the `attester` compose
-profile), the `attested` and `queued` policies, the CI OIDC exchange,
-post-land CI and auto-revert are built but parked. This section describes
-them for phase 2. In phase 1, GitHub CI runs once per batch on the squashed
-PR (D21).
 
 ### What an attester is
 

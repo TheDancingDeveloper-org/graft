@@ -12,7 +12,7 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 | `server.toml` | graft-server config (`max_token_ttl_s = 2592000`, 30 days) |
 | `mirror.toml` | graft-mirror follows rustTorrent `main` into repo `rusttorrent` |
 | `up.sh` | idempotent deploy: bootstrap secrets, pull, `up -d --wait`, health check |
-| `attester/Dockerfile` | the trial attester's image (profile `attester`, off; phase 2, see below) |
+| `attester/Dockerfile` | the trial attester's image (profile `attester`, off by default; see below) |
 
 The workflow is `.github/workflows/deploy-dev.yml`: on a push to `main` that
 touches `deploy/**`, and on `workflow_dispatch`, it runs `deploy/up.sh` on the
@@ -55,19 +55,12 @@ The mirror token has the stack's maximum TTL (30 days, scope
 `repo:rusttorrent:admin`). `up.sh` re-mints it when it is older than 20 days
 (`GRAFT_TOKEN_RENEW_DAYS`), or on `GRAFT_REMINT=1`, and restarts the mirror.
 
-## Trial attester (WI-2276): phase 2, off
-
-**Off under [D22](../docs/decisions.md#d22-phase-1-is-a-git-alternative).**
-Phase 1 is a git alternative: `trial-1` and `main` land `direct`, and no
-check runs in the land path. GitHub CI runs once per batch, on the squashed
-PR (D21). Leave `GRAFT_ATTESTER` unset. The attester is phase 2 work. This
-section describes it for when the operator starts phase 2, which also needs
-`trial-1` set back to `attested` in `server.toml`.
+## Trial attester (WI-2276)
 
 The contained trial (WI-2270) runs on the integration line `trial-1` of
-`rusttorrent`, the followed copy (decision D21). With phase 2 on, it gets its
-`ci/fmt`, `ci/clippy` and `ci/test` attestations from a small attester on
-this VM, not from GitHub. It is the
+`rusttorrent`, the followed copy (decision D21). It gets its `ci/fmt`,
+`ci/clippy` and `ci/test` attestations from a small attester on this VM, not
+from GitHub. It is the
 `graft-attester` service (crate `crates/graft-attester`), in the compose
 profile `attester`, and is **off by default**. Turn it on in
 `/etc/graft/deploy.env`:
@@ -94,17 +87,19 @@ stack doesn't already serve it) and `GRAFT_ATTESTER_LINE` (default
 `trial-1`) in `/etc/graft/deploy.env`, and the `--check=name=command` lines
 of the service in `compose.yml`. `up.sh` does not create the line.
 
-To run the WI-2270 trial end to end (phase 1, D22):
+To run the WI-2270 trial end to end:
 
-1. `deploy/server.toml` carries the `[[lines]]` entries: `trial-1` is
-   `direct` (graft-primary), and `main` is `direct` and git-primary, so the
-   mirror's `main` is unchanged. The policy is global to the server
-   (WI-2288), so every repository gets these lines. A change to the file
-   restarts the server on the next `up.sh`.
-2. Leave the attester off (no `GRAFT_ATTESTER=1`). In phase 2 you would set
-   it in `/etc/graft/deploy.env` (the defaults name repo `rusttorrent` and
-   line `trial-1`; override with `GRAFT_ATTESTER_REPO` and
-   `GRAFT_ATTESTER_LINE`) and run `deploy/up.sh`.
+1. `deploy/server.toml` carries the `[[lines]]` entries: since decision D22
+   (phase 1, WI-2298) `trial-1` (graft-primary) and `main` (git-primary, so
+   the mirror's `main` is unchanged) are both `direct`, and the attester's
+   checks gate nothing. To gate `trial-1` on them again (phase 2), set it to
+   `attested` on `ci/fmt`, `ci/clippy` and `ci/test` (the file shows how, and
+   the commented-out D6 block for `main`). The policy is global to the server (WI-2288), so every
+   repository gets these lines. A change to the file restarts the server on
+   the next `up.sh`.
+2. Put `GRAFT_ATTESTER=1` in `/etc/graft/deploy.env` (the defaults already
+   name repo `rusttorrent` and line `trial-1`; override with
+   `GRAFT_ATTESTER_REPO` and `GRAFT_ATTESTER_LINE`) and run `deploy/up.sh`.
 3. From a machine on the tailnet, `trial/create-trial-line.sh` creates
    `trial-1` at the current tip of rustTorrent `main` (it leaves an existing
    line alone), then `trial/mint-agent-tokens.sh N` mints the agents' tokens
