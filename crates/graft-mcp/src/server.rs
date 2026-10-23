@@ -306,7 +306,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             .ok_or(ToolError::Api(ApiError::Unauthenticated))?;
         Ok(CallContext {
             principal,
-            request_id: format!("mcp-{}", NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)),
+            request_id: request_id(NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)),
             deadline_ms: None,
         })
     }
@@ -1088,4 +1088,15 @@ fn render_files(files: Vec<FileDiff>) -> Vec<Value> {
             value
         })
         .collect()
+}
+
+/// A request id unique across processes: the server names an unnamed
+/// workspace from the principal and the request id, so two MCP servers
+/// under one token must never send the same one (`graft_client::request_id`
+/// is the same rule; this crate does not depend on the client).
+fn request_id(n: u64) -> String {
+    use std::hash::{BuildHasher, RandomState};
+    static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let nonce = NONCE.get_or_init(|| RandomState::new().hash_one(std::process::id()));
+    format!("mcp-{}-{nonce:016x}-{n}", std::process::id())
 }

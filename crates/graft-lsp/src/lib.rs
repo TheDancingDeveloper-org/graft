@@ -365,7 +365,7 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> LspServer<A> {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         CallContext {
             principal: self.principal.clone(),
-            request_id: format!("lsp-{}-{n}", std::process::id()),
+            request_id: graft_client::request_id("lsp", n),
             deadline_ms: None,
         }
     }

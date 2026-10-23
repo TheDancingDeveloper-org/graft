@@ -236,6 +236,29 @@ impl EngineRepo {
         out
     }
 
+    /// Runs the periodic lease sweep: ends every lapsed workspace.
+    /// Returns how many it ended.
+    pub async fn expire_leases(&self) -> u32 {
+        self.engine
+            .expire_leases(&self.name, 0)
+            .await
+            .expect("expire leases")
+    }
+
+    /// What collection would take now (the `Gc` dry run).
+    pub async fn gc_dry_run(&self) -> GcReport {
+        self.engine
+            .gc(
+                &self.admin(),
+                Gc {
+                    repo: self.name.clone(),
+                    dry_run: true,
+                },
+            )
+            .await
+            .expect("gc dry run")
+    }
+
     /// `main`'s tip.
     pub async fn tip(&self) -> ChangesetId {
         self.engine
