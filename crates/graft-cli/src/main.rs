@@ -82,7 +82,7 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
     let g = &cli.global;
     match &cli.command {
         Command::Clone(args) => cmd::clone::run(g, args),
-        Command::Status => cmd::status::run(g),
+        Command::Status(args) => cmd::status::run(g, args),
         Command::Diff(args) => cmd::diff::run(g, args),
         Command::Log(args) => cmd::log::run(g, args),
         Command::Show(args) => cmd::show::run(g, args),

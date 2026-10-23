@@ -347,6 +347,7 @@ async fn mcp_only_agent_cannot_resolve_in_place_and_must_abandon_and_recommit() 
             "graft_show",
             "graft_status",
             "graft_sync",
+            "graft_upstream",
             "graft_workspace",
         ]
     );

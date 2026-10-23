@@ -123,4 +123,30 @@ pub trait WorkingCopyTools: Send + Sync + 'static {
         cx: &'a CallContext,
         req: WorkingCopySync,
     ) -> WorkingCopyFuture<'a, Option<Value>>;
+
+    /// `graft_upstream` for this working copy: the line's changes since the
+    /// base and how the working copy's edits and stack would merge onto the
+    /// tip, uncommitted edits included. Read-only. `None` for any other
+    /// workspace, which the server then answers from its drafts.
+    fn upstream<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: WorkingCopyUpstream,
+    ) -> WorkingCopyFuture<'a, Option<Value>> {
+        let _ = (cx, req);
+        Box::pin(std::future::ready(Ok(None)))
+    }
+}
+
+/// `graft_upstream` on the working copy.
+#[derive(Clone, Debug)]
+pub struct WorkingCopyUpstream {
+    /// Repository named in the call.
+    pub repo: String,
+    /// Workspace named in the call, if any.
+    pub workspace: Option<String>,
+    /// Bound on every list in the result.
+    pub limit: u32,
+    /// Resume token for the `changed` page.
+    pub cursor: Option<String>,
 }

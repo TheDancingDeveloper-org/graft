@@ -104,6 +104,7 @@ async fn the_service_serves_tools_over_loopback_http() {
             "graft_show",
             "graft_status",
             "graft_sync",
+            "graft_upstream",
             "graft_workspace"
         ]
     );

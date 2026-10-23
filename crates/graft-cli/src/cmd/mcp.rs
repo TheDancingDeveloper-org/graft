@@ -23,7 +23,7 @@ use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat}
 use graft_client::{Endpoint, Error as ClientError, Remote, discover};
 use graft_mcp::{
     McpServer, WorkingCopyCommit, WorkingCopyError, WorkingCopyFuture, WorkingCopyLand,
-    WorkingCopySync, WorkingCopyTools,
+    WorkingCopySync, WorkingCopyTools, WorkingCopyUpstream,
 };
 use graft_model::{Author, AuthorKind, Metadata, Timestamp};
 use graft_proto::CallContext;
@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::cli::Global;
-use crate::cmd::status::change_json;
+use crate::cmd::status::{change_json, upstream_json};
 use crate::conn::{call_context, read_token, runtime, working_copy};
 use crate::error::Failure;
 use crate::render;
@@ -150,6 +150,30 @@ impl Served {
 }
 
 impl WorkingCopyTools for Served {
+    fn upstream<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: WorkingCopyUpstream,
+    ) -> WorkingCopyFuture<'a, Option<Value>> {
+        Box::pin(async move {
+            let wc = self.wc.lock().await;
+            let own = wc.config().workspace.clone();
+            if req.repo != self.repo
+                || req
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|w| Some(w) != own.as_ref())
+            {
+                return Ok(None);
+            }
+            let up = wc
+                .upstream(&*self.remote, cx, req.limit, req.cursor)
+                .await
+                .map_err(client)?;
+            Ok(Some(upstream_json(&up, own.as_deref())))
+        })
+    }
+
     fn status<'a>(&'a self, repo: &'a str) -> WorkingCopyFuture<'a, Value> {
         Box::pin(async move {
             self.check_repo(repo)?;
