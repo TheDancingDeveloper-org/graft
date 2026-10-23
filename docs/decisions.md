@@ -35,6 +35,10 @@ Already decided by the operator (2026-10-22):
   runs and auto-revert) move to phase 2: the code stays, switched off. D6
   becomes the phase-2 setting for `main`, not the default. See
   [D22](#d22-phase-1-is-a-git-alternative).
+- **D23** (operator, 2026-10-23): line fork points. A new line writes one
+  fork row and reads below it fall through to the parent line. No data
+  migration (the schema bumps to version 5).
+  See [D23](#d23-line-fork-points).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -256,7 +260,8 @@ graft code holds a long-lived GitHub credential.
 - **Webhook** through Caddy (a public route to the mirror). Lag is under a
   second, but it needs a public endpoint and a webhook secret.
 - Both: a webhook with a polling backstop. The phase 2 target, if lag matters
-  for the PR bridge.
+  for the PR bridge. (The per-land PR bridge was later removed under
+  D21/D22.)
 
 ## D10. Agent token issuance
 
@@ -454,7 +459,8 @@ batch reaches GitHub as one squashed PR, which the operator merges.**
   lives in graft and in the PR body.
 - The other options are rejected:
   - One PR per land (the G2.6 bridge on every land). CI runs per land, and
-    the operator reviews each one.
+    the operator reviews each one. The bridge was removed (WI-2302,
+    WI-2320).
   - Graft-primary `main` with direct export (mode B). It needs the authority
     switch and ruleset bypass first, and the operator gives up the merge
     button.
@@ -511,8 +517,8 @@ What follows from it:
   integrity, and comparisons against git. The repeatable harness in `bench/`
   (WI-2294) is used rather than live agent runs.
 - **Delivery to GitHub.** GitHub `main` stays git-primary (D21). The
-  graft-primary cutover of rustTorrent (G3.10) and the per-land PR bridge
-  (the G2.6 CLI) are not planned.
+  graft-primary cutover of rustTorrent (G3.10) is not planned, and the
+  per-land PR bridge (the G2.6 CLI) has been removed (WI-2302, WI-2320).
 - **Plan.** [plan.md](plan.md) keeps the build waves as history. Its phase
   table and backlog follow this decision.
 
@@ -524,3 +530,29 @@ The options it replaces:
   properties phase 1 needs to prove.
 - Keeping D6 as the default on `main`. Then a server with no config would
   gate lands on checks that nothing posts.
+
+## D23. Line fork points
+
+**Decided (operator, 2026-10-23): creating a line writes one fork row instead
+of copying its parent's line index. No data migration; the schema bumps to
+version 5.**
+
+- Creating a line on existing history indexes only the unlanded stretch it
+  lands. It writes one `line_forks(repo, line, parent, pos)` row (SQLite
+  schema version 5) pointing at a line that holds the first landed ancestor
+  in its own rows. A line created at the root has no fork row.
+- `line_pos` and the path scan read the line's own rows, then fall through to
+  the parent at positions `<= pos`, one hop at a time. Positions are
+  first-parent depth, so no renumbering is needed.
+- Creating a line costs the unlanded stretch plus one indexed read, not
+  O(history x paths) rows (AGENTS.md rule 2).
+- Consequence: the line index can no longer be rebuilt from refs and history
+  alone. Which line a line forked from, and at what position, is stored only
+  in `line_forks`.
+- No data migration, rollback guard or backfill: graft has no users. Existing
+  databases open at version 5 with their rows intact.
+- Rejected: shared-prefix segments (rewrites every row's key shape), and
+  chunking the full copy (keeps the O(history) cost and breaks one
+  transaction per write).
+
+Details: [notes/line-fork-point.md](notes/line-fork-point.md) (WI-2316).
