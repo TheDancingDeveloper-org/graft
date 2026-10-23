@@ -22,6 +22,12 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(300);
 /// anything but this copy.
 pub const UPSTREAM_NS: &str = "refs/graft-mirror/upstream/";
 
+/// Set to `1` in the environment of every push the mirror makes. The local
+/// stand-in for GitHub's ruleset ([`crate::authority::HookGate`]) lets only
+/// such pushes through on a graft-primary branch. It is not a credential:
+/// the real gate on GitHub is the ruleset's bypass for the mirror's App.
+pub const MIRROR_PUSH_ENV: &str = "GRAFT_MIRROR_PUSH";
+
 /// A git CLI failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitCliError(pub String);
@@ -286,9 +292,10 @@ impl Mirror {
         ))
     }
 
-    /// The `http.extraHeader` environment for an HTTPS bearer token.
+    /// The environment of a push: [`MIRROR_PUSH_ENV`], and the
+    /// `http.extraHeader` for an HTTPS bearer token.
     fn auth_env(&self, bearer: Option<&str>) -> Vec<(String, String)> {
-        let mut env = Vec::new();
+        let mut env = vec![(MIRROR_PUSH_ENV.to_owned(), "1".to_owned())];
         if let Some(token) = bearer
             && self.is_https()
         {
@@ -321,6 +328,18 @@ impl Mirror {
             Some(128) if !self.has_commit(ancestor).await? => Ok(false),
             _ => Err(failed("merge-base", &out)),
         }
+    }
+
+    /// The root tree of commit `sha` in the mirror.
+    pub async fn commit_tree(&self, sha: GitSha) -> Result<GitSha, GitCliError> {
+        let spec = format!("{}^{{tree}}", sha.to_hex());
+        let out = ok(
+            Some(&self.dir),
+            &["rev-parse", "-q", "--verify", "--end-of-options", &spec],
+        )
+        .await?;
+        GitSha::from_hex(String::from_utf8_lossy(&out).trim())
+            .ok_or_else(|| GitCliError("git rev-parse: unexpected output".to_owned()))
     }
 
     /// Whether the mirror holds `sha` as a commit.
