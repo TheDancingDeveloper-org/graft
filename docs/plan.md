@@ -8,13 +8,15 @@
 
 The build waves below (G1 to G3) were planned as a read pilot, then writes
 through GitHub, then native landing. Almost all of them are built: every item
-from G1.1 to G3.11 is merged on `main`, except G3.10. The product phases are
-now set by D22:
+from G1.1 to G3.11 is merged on `main`, except G3.10 (not planned), G1.17
+(superseded by the graft-dev VM) and G1.18 (dropped by D20). The product
+phases are now set by D22:
 
 | Phase | Ships | State |
 | --- | --- | --- |
 | 1 | **A git alternative.** Correct storage and history; fast sparse clone and sync; workspaces; server-side rebase, line merge (D16) and lock-free CAS land; conflicts handed back to the client; CLI, MCP and LSP; git import and export; GitHub delivery as one squashed batch PR (D21). Lines default to `direct`; no build, test or CI runs in the land path | Built and in use (trial WI-2270). Remaining work in the backlog below |
 | 2 | **CI checks.** `attested` and `queued` policies, the attester, the CI token exchange, post-land runners, auto-revert | Code exists (G3.1, G3.8, the trial attester), switched off. Not extended until the operator starts phase 2 |
+| (3) | Folded into phases 1 and 2: native landing ships in phase 1 on `direct` lines; its policy gate and CI attestations are phase 2 | — |
 | 4 | **Breadth:** per-line combiner, prefetch, symbol index, a second repository, the export drill (auto-revert moves to phase 2) | Outline, WI-2214 (p4) |
 | 5 | **Later:** regional tier, virtual checkouts, chunked blobs, code search, publish decision | — |
 
@@ -427,6 +429,10 @@ through git and GitHub.
   evidence, and the operator gives a go or no-go.
 
 ### Phase 1 exit and kill criteria
+
+> These criteria were written for the read pilot. D22 redefines phase 1 as
+> the git alternative. They stay as targets, and the `bench/` harness now
+> measures phase 1 against git.
 
 **Superseded by [D20](decisions.md#d20-no-pilot-period):** there is no
 pilot period, and G1.18 is dropped. These criteria are targets that the G1.16

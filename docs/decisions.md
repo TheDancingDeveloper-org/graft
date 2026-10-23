@@ -36,7 +36,8 @@ Already decided by the operator (2026-10-22):
   becomes the phase-2 setting for `main`, not the default. See
   [D22](#d22-phase-1-is-a-git-alternative).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
-  post-land CI and auto-revert on failure; line-level merge in rebase for text
+  post-land CI and auto-revert on failure (D6 is the phase-2 setting under
+  D22, not the default); line-level merge in rebase for text
   files under 1 MiB. Each section below names the rejected options.
 
 | # | Decision | Recommendation | Blocks |
@@ -58,7 +59,7 @@ Already decided by the operator (2026-10-22):
 | D15 | Where graft's source lives | **Decided:** GitHub `TheDancingDeveloper-org/graft`, public | — |
 | D16 | Line-level merge in rebase | **Decided:** on for text files under 1 MiB, recorded in metadata; larger or binary files conflict at file level | — |
 | D17 | MCP hosting | Both: `graft mcp` (stdio) and the server's `/mcp` | Phase 1 (read tools), Phase 2 (write tools) |
-| D18 | Phase 1 kill criteria | **Decided:** as in plan.md, unchanged | — |
+| D18 | Phase 1 kill criteria | **Decided:** as in plan.md, unchanged. Written for the read pilot; targets only under D20 and D22 | — |
 | D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
 | D20 | Pilot period | **Decided:** none; G1.18 dropped, phase 2 not gated (replaces D18's gate) | — |
 | D21 | Batch PR export | **Decided:** agents land on a graft integration line; each batch goes to GitHub as one squashed PR the operator merges | — |
