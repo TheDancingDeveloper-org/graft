@@ -165,11 +165,23 @@ pub(crate) fn api_error_value(e: &ApiError) -> Value {
             "name": name,
             "actual": actual.map(|id| id.to_string()),
         }),
-        ApiError::Conflict { paths, onto } => json!({
-            "kind": "conflict",
-            "onto": onto.to_string(),
-            "paths": paths.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
-        }),
+        ApiError::Conflict { paths, onto } => {
+            let hex = |id: &Option<graft_model::ObjectId>| id.map(|id| id.to_hex());
+            json!({
+                "kind": "conflict",
+                "onto": onto.to_string(),
+                "paths": paths.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+                "sides": paths
+                    .iter()
+                    .map(|p| json!({
+                        "path": p.path,
+                        "base": hex(&p.base),
+                        "ours": hex(&p.ours),
+                        "theirs": hex(&p.theirs),
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        }
         ApiError::Contended { line, tip } => {
             json!({"kind": "contended", "line": line, "tip": tip.to_string()})
         }
@@ -287,6 +299,26 @@ mod tests {
         });
         assert_eq!(v["kind"], "not_found");
         assert_eq!(v["retryable"], false);
+    }
+
+    #[test]
+    fn conflict_errors_render_the_side_ids_additively() {
+        let v = api_error_value(&ApiError::Conflict {
+            paths: vec![graft_proto::error::ConflictPath {
+                path: "f.txt".into(),
+                base: Some(graft_model::ObjectId([1; 32])),
+                ours: None,
+                theirs: Some(graft_model::ObjectId([3; 32])),
+            }],
+            onto: id(9),
+        });
+        assert_eq!(v["kind"], "conflict");
+        assert_eq!(v["paths"], json!(["f.txt"]));
+        let side = &v["sides"][0];
+        assert_eq!(side["path"], "f.txt");
+        assert_eq!(side["base"], "01".repeat(32));
+        assert_eq!(side["ours"], Value::Null);
+        assert_eq!(side["theirs"], "03".repeat(32));
     }
 
     #[test]

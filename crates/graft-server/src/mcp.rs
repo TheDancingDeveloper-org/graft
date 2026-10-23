@@ -23,6 +23,7 @@ use graft_proto::types::*;
 use graft_proto::{ApiError, CallContext, RepoApi, WorkspaceApi};
 
 use crate::app::{App, CallError, Caller, ServerEngine};
+use crate::grpc::own_workspace;
 
 /// The `/mcp` route, behind bearer-token authentication.
 pub(crate) fn router(app: Arc<App>) -> Router {
@@ -183,9 +184,18 @@ impl RepoApi for McpApi {
             .await)
     }
     async fn revert(&self, cx: &CallContext, req: Revert) -> ApiResult<ChangesetId> {
-        via!(self, "Revert", req.repo, cx, true, |e, c| e
-            .revert(&c, req)
-            .await)
+        // As on gRPC: a revert into a workspace adds a draft to it, so only
+        // its owner (or a repository admin) may.
+        via!(self, "Revert", req.repo, cx, true, |e, c| {
+            if let Some(name) = &req.workspace {
+                let ws = WorkspaceRef {
+                    repo: req.repo.clone(),
+                    name: name.clone(),
+                };
+                own_workspace(&e, &c, &ws).await?;
+            }
+            e.revert(&c, req).await
+        })
     }
     async fn land(&self, cx: &CallContext, req: Land) -> ApiResult<Landed> {
         via!(self, "Land", req.repo, cx, true, |e, c| e
@@ -278,19 +288,25 @@ impl WorkspaceApi for McpApi {
             .await)
     }
 
-    async fn get_conflicts(
-        &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::GetConflicts,
-    ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
-        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
+    // As on gRPC: only the workspace's owner (or a repository admin)
+    // reads its conflicts or resolves its stack.
+    async fn get_conflicts(&self, cx: &CallContext, req: GetConflicts) -> ApiResult<Conflicts> {
+        via!(
+            self,
+            "GetConflicts",
+            req.workspace.repo,
+            cx,
+            true,
+            |e, c| {
+                own_workspace(&e, &c, &req.workspace).await?;
+                e.get_conflicts(&c, req).await
+            }
+        )
     }
-
-    async fn resolve(
-        &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::Resolve,
-    ) -> graft_proto::error::ApiResult<graft_proto::types::Resolved> {
-        Err(graft_proto::ApiError::unimplemented("Resolve"))
+    async fn resolve(&self, cx: &CallContext, req: Resolve) -> ApiResult<Resolved> {
+        via!(self, "Resolve", req.workspace.repo, cx, true, |e, c| {
+            own_workspace(&e, &c, &req.workspace).await?;
+            e.resolve(&c, req).await
+        })
     }
 }

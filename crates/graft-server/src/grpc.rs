@@ -106,7 +106,7 @@ fn req_cid(b: Vec<u8>, field: &'static str) -> Result<ChangesetId, Status> {
 /// owns `ws` nor administers its repository is refused before the operation
 /// runs, and learns nothing of it. A workspace that does not exist is left
 /// to the operation to answer.
-async fn own_workspace(
+pub(crate) async fn own_workspace(
     e: &ServerEngine,
     cx: &CallContext,
     ws: &WorkspaceRef,
@@ -742,15 +742,25 @@ impl pb::repo_service_server::RepoService for Services {
         &self,
         request: Request<pb::RevertRequest>,
     ) -> Result<Response<pb::ChangesetRef>, Status> {
-        unary!(
-            self,
-            request,
-            "Revert",
-            true,
-            Revert,
-            |e, cx, req| e.revert(&cx, req).await,
-            |id| pb::ChangesetRef { id: cid(id) }
-        )
+        let cx = self.cx(&request, "Revert")?;
+        let req: Revert = wire(request.into_inner())?;
+        let repo = req.repo.clone();
+        let id = self
+            .app
+            .call("Revert", &repo, cx, true, move |e, cx| async move {
+                // A revert into a workspace adds a draft to it: owner only.
+                if let Some(name) = &req.workspace {
+                    let ws = WorkspaceRef {
+                        repo: req.repo.clone(),
+                        name: name.clone(),
+                    };
+                    own_workspace(&e, &cx, &ws).await?;
+                }
+                e.revert(&cx, req).await
+            })
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(pb::ChangesetRef { id: cid(id) }))
     }
 
     async fn land(
