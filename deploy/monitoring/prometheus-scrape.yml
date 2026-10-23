@@ -1,0 +1,21 @@
+# Scrape config for the graft-dev stack (WI-2307), to merge into
+# personal/grafanaloki/prometheus/prometheus.yml in the ops repo. Ports are
+# published on the VM's Tailscale address (100.99.200.95, GRAFT_BIND_IP).
+
+# 1. A new job under scrape_configs:
+  - job_name: graft-dev
+    static_configs:
+      - targets: ['100.99.200.95:17889']
+        labels:
+          host: graft-dev
+          service: graft-server
+      - targets: ['100.99.200.95:17890']
+        labels:
+          host: graft-dev
+          service: graft-mirror
+
+# 2. A target in the existing blackbox-services job (module http_2xx_insecure):
+      - targets: ['http://100.99.200.95:17889/readyz']
+        labels:
+          service: graft-dev-server
+          host: graft-dev

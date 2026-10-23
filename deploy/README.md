@@ -12,12 +12,20 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 | `server.toml` | graft-server config (`max_token_ttl_s = 2592000`, 30 days) |
 | `mirror.toml` | graft-mirror follows rustTorrent `main` into repo `rusttorrent` |
 | `up.sh` | idempotent deploy: bootstrap secrets, pull, config pre-flight, `up -d --wait`, readiness gate with rollback, health check |
+| `backup/` | backup script, systemd timer, `install.sh`, `restore-rehearsal.sh` (WI-2307) |
+| `monitoring/` | Prometheus alert rules and scrape config for the ops repo (WI-2307) |
 | `attester/Dockerfile` | the trial attester's image (profile `attester`, off by default; see below) |
 
 The workflow is `.github/workflows/deploy-dev.yml`: on a push to `main` that
 touches `deploy/**`, and on `workflow_dispatch`, it runs `deploy/up.sh` on the
 runner labelled `[self-hosted, graft-dev]`. It is not a required check. The image is public on GHCR, so the job does
 not log in to a registry.
+
+## Backups and alerts
+
+Backups are a systemd timer, installed once with
+`sudo deploy/backup/install.sh`; alerts live in the estate Prometheus. See
+[docs/runbooks/graft-dev-backup-restore.md](../docs/runbooks/graft-dev-backup-restore.md).
 
 ## Ports
 

@@ -1019,7 +1019,7 @@ fn clipped(s: &str, max: usize) -> Value {
     json!({"text": kept, "truncated": cut})
 }
 
-fn kind_name(kind: EntryKind) -> &'static str {
+pub(crate) fn kind_name(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::File => "file",
         EntryKind::Exec => "exec",
