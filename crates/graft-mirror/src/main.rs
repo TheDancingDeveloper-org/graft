@@ -1,7 +1,7 @@
 //! `graft-mirror`: the only service that speaks git (`docs/design.md` §11).
 //!
 //! Work items G1.14 (import, follow), G2.6 (PR bridge), G3.3 (export),
-//! G3.9 (authority switch).
+//! G3.9 (authority switch), WI-2284 (batch PRs, decision D21).
 //!
 //! The bearer token comes from `GRAFT_TOKEN` or a token file, never from the
 //! command line.
@@ -13,6 +13,7 @@ use graft_git::import::ImportConfig;
 use graft_mirror::authority::{
     DEFAULT_LAST, Gate, HookGate, RulesetGate, Stage, Status, Switcher, Unfrozen,
 };
+use graft_mirror::batch::{BatchConfig, BatchOutcome, BatchRecord, Batcher};
 use graft_mirror::config::{AuthChoice, FileConfig, GithubFile, parse_shas};
 use graft_mirror::credentials::{CredentialProvider, GithubApp, NoCredentials, StaticToken};
 use graft_mirror::export::{Export, export_all};
@@ -40,6 +41,10 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
                                         re-export the last N and compare shas
   reconcile --config <file> --line <l> (--land | --discard)
                                         resolve an export divergence by hand
+  pr-batch <line> --base <branch> --config <file> [--track]
+                                        sync an integration line onto the
+                                        followed base, export its net change
+                                        as one squashed PR (D21); never merges
   authority <status|freeze|verify|flip|unfreeze> --config <file> --line <l>
          [--last N]                     switch a line's authority (§11.3);
                                         docs/runbooks/authority-switch.md
@@ -57,6 +62,7 @@ fn main() -> ExitCode {
         Some("follow") => run(cmd_follow(&args[1..])),
         Some("export") => run(cmd_export(&args[1..])),
         Some("reconcile") => run(cmd_reconcile(&args[1..])),
+        Some("pr-batch") => run(cmd_pr_batch(&args[1..])),
         Some("verify") => run(cmd_authority(Step::Verify, &args[1..])),
         Some("authority") => match args.get(1).map(String::as_str).and_then(Step::parse) {
             Some(step) => run(cmd_authority(step, &args[2..])),
@@ -523,6 +529,145 @@ impl AsyncCredentialFn<()> for RunReconcile<'_> {
             _ => println!("stray commits replaced by graft's history; export resumes"),
         }
         Ok(())
+    }
+}
+
+async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
+    let mut line = None;
+    let mut base = None;
+    let mut config = None;
+    let mut track = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |flag: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| CmdError::Usage(format!("{flag} needs a value")))
+        };
+        match a.as_str() {
+            "--base" => base = Some(value("--base")?),
+            "--config" => config = Some(PathBuf::from(value("--config")?)),
+            "--track" => track = true,
+            s if s.starts_with('-') => return Err(CmdError::Usage(format!("unknown flag {s}"))),
+            s if line.is_none() => line = Some(s.to_owned()),
+            s => return Err(CmdError::Usage(format!("unexpected argument {s}"))),
+        }
+    }
+    let line = line.ok_or_else(|| CmdError::Usage("pr-batch needs <line>".into()))?;
+    let base = base.ok_or_else(|| CmdError::Usage("pr-batch needs --base <branch>".into()))?;
+    let config = config.ok_or_else(|| CmdError::Usage("pr-batch needs --config".into()))?;
+    let file = FileConfig::load(&config)?;
+    let base = file
+        .lines()
+        .into_iter()
+        .find(|l| l.branch == base)
+        .ok_or_else(|| CmdError::Usage(format!("branch {base} is not a followed line")))?;
+    if file.github.is_none() {
+        return Err(MirrorError::Config("pr-batch opens PRs: configure [github]".into()).into());
+    }
+    let api = Server::connect(&file.server, token(file.token_file.as_deref())?).await?;
+    let db = MirrorDb::open(&file.db).map_err(MirrorError::from)?;
+    let batch = BatchConfig::new(line, base, file.follow()?);
+    with_credentials(
+        file.github.as_ref(),
+        RunBatch {
+            file: &file,
+            api: &api,
+            db: &db,
+            batch,
+            track,
+        },
+    )
+    .await
+}
+
+struct RunBatch<'a> {
+    file: &'a FileConfig,
+    api: &'a Server,
+    db: &'a MirrorDb,
+    batch: BatchConfig,
+    track: bool,
+}
+
+impl AsyncCredentialFn<()> for RunBatch<'_> {
+    async fn call<C: CredentialProvider>(self, credentials: &C) -> Result<(), CmdError> {
+        let file = self.file;
+        let gh = file
+            .github
+            .as_ref()
+            .ok_or_else(|| MirrorError::Config("pr-batch opens PRs: configure [github]".into()))?;
+        let forge = HttpForge::new(
+            gh.api.as_deref().unwrap_or(GITHUB_API),
+            &gh.owner,
+            &gh.repo,
+            credentials,
+            RetryPolicy::default(),
+        )?;
+        let line = self.batch.line.clone();
+        let mut batcher = Batcher::new(
+            self.api,
+            mirror_cx(&file.repo),
+            self.db,
+            Mirror::new(&file.mirror_dir, &file.upstream),
+            &forge,
+            self.batch,
+        )?;
+        if self.track {
+            match batcher.track().await? {
+                Some(rec) => print_batch(&rec),
+                None => println!("line {line}: no batch yet"),
+            }
+            return Ok(());
+        }
+        let run = batcher.run().await?;
+        if let Some(rec) = &run.settled {
+            print_batch(rec);
+        }
+        if let Some(m) = run.synced {
+            println!("line {line}: synced onto the base as {m}");
+        }
+        match run.outcome {
+            BatchOutcome::Opened(rec) => print_batch(&rec),
+            BatchOutcome::Waiting(rec) => {
+                print_batch(&rec);
+                println!(
+                    "line {line}: batch {} is still open; no new batch",
+                    rec.number
+                );
+            }
+            BatchOutcome::NothingToExport => {
+                println!("line {line}: nothing the base lacks; no batch")
+            }
+            BatchOutcome::Conflict { onto, paths } => {
+                println!("line {line}: does not rebase onto {onto}; nothing moved. Conflicts:");
+                for p in paths {
+                    println!("  {p}");
+                }
+                return Err(MirrorError::Config("sync conflict".into()).into());
+            }
+            BatchOutcome::BaseStopped(why) => {
+                return Err(MirrorError::Config(why).into());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn print_batch(rec: &BatchRecord) {
+    println!(
+        "batch {} ({}): {} land(s), {} on {} at {}",
+        rec.number,
+        rec.state.as_str(),
+        rec.lands,
+        rec.branch,
+        rec.base_branch,
+        rec.base_sha
+    );
+    if let Some(url) = &rec.pr_url {
+        println!("  PR:     {url}");
+    }
+    if !rec.detail.is_empty() {
+        println!("  detail: {}", rec.detail);
     }
 }
 
