@@ -7,7 +7,11 @@
 //! `ci/test`.
 //!
 //! - Drafts come from `ChangesetCreated` entries held by a workspace on
-//!   [`Config::line`]. A workspace's line comes from its `WorkspaceOpened`
+//!   [`Config::line`], and from head moves in such a workspace: a
+//!   `WorkspaceHeadMoved` entry (an amend, which creates its replacement
+//!   outside the workspace and then `SetHead`s it; a commit that adopts an
+//!   abandoned changeset; a stack edit) and a `WorkspaceSynced` entry whose
+//!   head changed (a rebase). The new head is the workspace's draft. A workspace's line comes from its `WorkspaceOpened`
 //!   entry, read in journal order with the drafts, and is forgotten at its
 //!   `WorkspaceClosed`, so a name closed and reopened on another line is
 //!   read right. For a workspace opened before the read position, the
@@ -67,6 +71,14 @@ pub const WORKSPACE_OPENED: &str = "WorkspaceOpened";
 
 /// The journal entry kind written when a workspace closes or lapses.
 pub const WORKSPACE_CLOSED: &str = "WorkspaceClosed";
+
+/// The journal entry kind written when a workspace's head moves without a
+/// new changeset in it: `SetHead` (an amend), an adopted changeset, a stack
+/// edit.
+pub const WORKSPACE_HEAD_MOVED: &str = "WorkspaceHeadMoved";
+
+/// The journal entry kind written when `Sync` rebases a workspace.
+pub const WORKSPACE_SYNCED: &str = "WorkspaceSynced";
 
 /// The repository attested when none is configured (decision D21).
 pub const DEFAULT_REPO: &str = "rusttorrent";
@@ -227,21 +239,36 @@ pub struct Pending {
     pub attempts: u32,
 }
 
-/// Reads a `ChangesetCreated` entry for a draft held by a workspace; any
-/// other entry is `None`.
+/// Reads a workspace's new draft: a `ChangesetCreated` entry for a draft
+/// held by a workspace, or the new head of a `WorkspaceHeadMoved` entry or
+/// of a `WorkspaceSynced` entry whose head changed. Any other entry, and a
+/// head moved to nothing, is `None`.
 pub fn parse_entry(entry: &JournalEntry) -> Option<Pending> {
-    if entry.kind != CHANGESET_CREATED {
-        return None;
-    }
-    let body: serde_json::Value = serde_json::from_str(&entry.body).ok()?;
-    if body.get("state")?.as_str()? != "draft" {
-        return None;
-    }
-    let workspace = body.get("workspace")?.as_str()?.to_owned();
-    let draft = ChangesetId::parse(body.get("id")?.as_str()?).ok()?;
+    let body: serde_json::Value = match entry.kind.as_str() {
+        CHANGESET_CREATED | WORKSPACE_HEAD_MOVED | WORKSPACE_SYNCED => {
+            serde_json::from_str(&entry.body).ok()?
+        }
+        _ => return None,
+    };
+    let (workspace, id) = match entry.kind.as_str() {
+        CHANGESET_CREATED => {
+            if body.get("state")?.as_str()? != "draft" {
+                return None;
+            }
+            (body.get("workspace")?, body.get("id")?)
+        }
+        WORKSPACE_HEAD_MOVED => (body.get("name")?, body.get("new")?),
+        _ => {
+            let head = body.get("new_head")?;
+            if body.get("old_head") == Some(head) {
+                return None;
+            }
+            (body.get("name")?, head)
+        }
+    };
     Some(Pending {
-        draft,
-        workspace,
+        draft: ChangesetId::parse(id.as_str()?).ok()?,
+        workspace: workspace.as_str()?.to_owned(),
         lsn: entry.lsn,
         attempts: 0,
     })
@@ -536,6 +563,8 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
                             CHANGESET_CREATED.to_owned(),
                             WORKSPACE_OPENED.to_owned(),
                             WORKSPACE_CLOSED.to_owned(),
+                            WORKSPACE_HEAD_MOVED.to_owned(),
+                            WORKSPACE_SYNCED.to_owned(),
                         ],
                         limit: 0,
                         wait_ms: wait,
@@ -1206,6 +1235,74 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn a_moved_head_is_queued_as_the_workspaces_draft() {
+        let (old, new) = (id(1), id(2));
+        let entry = |kind: &str, body: String| JournalEntry {
+            lsn: 9,
+            kind: kind.to_owned(),
+            body,
+        };
+        let queued = Some(Pending {
+            draft: new,
+            workspace: "w".to_owned(),
+            lsn: 9,
+            attempts: 0,
+        });
+        // An amend: the replacement is created outside the workspace (so
+        // its `ChangesetCreated` says abandoned) and `SetHead` moves to it.
+        assert_eq!(
+            parse_entry(&entry(
+                WORKSPACE_HEAD_MOVED,
+                format!("{{\"name\":\"w\",\"old\":\"{old}\",\"new\":\"{new}\"}}")
+            )),
+            queued
+        );
+        assert_eq!(
+            parse_entry(&entry(
+                WORKSPACE_HEAD_MOVED,
+                format!("{{\"name\":\"w\",\"old\":null,\"new\":\"{new}\"}}")
+            )),
+            queued
+        );
+        assert_eq!(
+            parse_entry(&entry(
+                WORKSPACE_SYNCED,
+                format!(
+                    "{{\"name\":\"w\",\"old_base\":\"{old}\",\"new_base\":\"{old}\",\"old_head\":\"{old}\",\"new_head\":\"{new}\"}}"
+                )
+            )),
+            queued
+        );
+        for (kind, body) in [
+            // Moved to nothing: no draft.
+            (
+                WORKSPACE_HEAD_MOVED,
+                format!("{{\"name\":\"w\",\"old\":\"{old}\",\"new\":null}}"),
+            ),
+            // A sync that left the head where it was: nothing new.
+            (
+                WORKSPACE_SYNCED,
+                format!(
+                    "{{\"name\":\"w\",\"old_base\":\"{old}\",\"new_base\":\"{new}\",\"old_head\":\"{new}\",\"new_head\":\"{new}\"}}"
+                ),
+            ),
+            (
+                WORKSPACE_SYNCED,
+                format!(
+                    "{{\"name\":\"w\",\"old_base\":\"{old}\",\"new_base\":\"{new}\",\"old_head\":\"{old}\",\"new_head\":null}}"
+                ),
+            ),
+            (
+                WORKSPACE_HEAD_MOVED,
+                "{\"name\":\"w\",\"old\":null,\"new\":\"nope\"}".to_owned(),
+            ),
+            (WORKSPACE_HEAD_MOVED, "not json".to_owned()),
+        ] {
+            assert_eq!(parse_entry(&entry(kind, body)), None);
+        }
     }
 
     #[test]
