@@ -195,7 +195,7 @@ impl BindingConfig {
         )
         .map_err(|_| {
             format!(
-                "ci binding {}: scopes must be read or write on {} (never land or admin), and at least one",
+                "ci binding {}: scopes must be read or attest on {} (never write, land or admin), and at least one",
                 self.ci_repo, self.graft_repo
             )
         })?;
@@ -732,7 +732,7 @@ repo_id = "101"
 graft_repo = "r"
 refs = ["refs/heads/graft/"]
 workflows = ["o/graft-ci/.github/workflows/graft-pre-land.yml@refs/heads/main"]
-scopes = ["repo:r:read", "repo:r:write:.ci"]
+scopes = ["repo:r:read", "repo:r:attest"]
 "#
         ))
         .expect("parses");
