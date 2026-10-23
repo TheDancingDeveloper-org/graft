@@ -137,6 +137,11 @@ impl RepoApi for McpApi {
             .update_ref(&c, req)
             .await)
     }
+    async fn create_line(&self, cx: &CallContext, req: CreateLine) -> ApiResult<RefView> {
+        via!(self, "CreateLine", req.repo, cx, true, |e, c| e
+            .create_line(&c, req)
+            .await)
+    }
     async fn stat(&self, cx: &CallContext, req: PathAt) -> ApiResult<EntryView> {
         via!(self, "Stat", req.repo, cx, false, |e, c| e
             .stat(&c, req)

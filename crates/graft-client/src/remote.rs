@@ -437,6 +437,11 @@ impl RepoApi for Remote {
         RefView::try_from(r).map_err(wire_error)
     }
 
+    async fn create_line(&self, cx: &CallContext, req: CreateLine) -> ApiResult<RefView> {
+        let r = unary!(self, cx, repo, create_line, pb::CreateLineRequest::from(req));
+        RefView::try_from(r).map_err(wire_error)
+    }
+
     async fn stat(&self, cx: &CallContext, req: PathAt) -> ApiResult<EntryView> {
         let r = unary!(self, cx, repo, stat, pb::PathAt::from(req));
         EntryView::try_from(r).map_err(wire_error)

@@ -288,6 +288,9 @@ where
     async fn update_ref(&self, cx: &CallContext, req: UpdateRef) -> ApiResult<RefView> {
         self.do_update_ref(cx, req).await
     }
+    async fn create_line(&self, cx: &CallContext, req: CreateLine) -> ApiResult<RefView> {
+        self.do_create_line(cx, req).await
+    }
     async fn stat(&self, cx: &CallContext, req: PathAt) -> ApiResult<EntryView> {
         self.do_stat(cx, req).await
     }

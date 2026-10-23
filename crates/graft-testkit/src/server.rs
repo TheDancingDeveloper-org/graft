@@ -578,6 +578,15 @@ impl<A: ObjectApi + RepoApi + 'static> RepoService for Svc<A> {
         })
     }
 
+    async fn create_line(
+        &self,
+        req: Request<pb::CreateLineRequest>,
+    ) -> Result<Response<pb::RefView>, Status> {
+        unary!(self, req, "CreateLine", CreateLine, create_line, |r| {
+            pb::RefView::from(r)
+        })
+    }
+
     async fn stat(&self, req: Request<pb::PathAt>) -> Result<Response<pb::EntryView>, Status> {
         unary!(self, req, "Stat", PathAt, stat, |r| pb::EntryView::from(r))
     }
