@@ -100,13 +100,13 @@ impl<M: MetaStore, O: ObjectStore> Collector<M, O> {
             after = Some((last.lease_until_ms, last.name.clone()));
             for ws in page {
                 let expires = ws.lease_until_ms.saturating_add(retention);
+                // The whole stack: the sweep closes a long one in several
+                // transactions, but closes all of it.
                 let mut at = ws.head;
-                let mut walked = 0;
                 while let Some(id) = at {
-                    if id == ws.base || walked >= self.config.max_stack {
+                    if id == ws.base {
                         break;
                     }
-                    walked += 1;
                     let Some((content, record)) = meta.changeset(repo, id).await? else {
                         break;
                     };

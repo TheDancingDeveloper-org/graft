@@ -64,6 +64,7 @@ mod workspace;
 mod write;
 
 pub use diff::MAX_CONTEXT;
+pub use gc::GcSettings;
 pub use land::{
     ATTESTATION, LAND_RESULT, MAX_ATTEST_URL, MAX_CHECK_NAME, REBASED_HOPS, Sleeper, ThreadSleeper,
 };
@@ -189,6 +190,7 @@ pub struct Engine<M, O> {
     config: EngineConfig,
     hooks: Arc<dyn LandHooks>,
     sleeper: Arc<dyn Sleeper>,
+    gc: gc::GcSettings,
 }
 
 impl<M, O> Engine<M, O>
@@ -207,7 +209,14 @@ where
             config,
             hooks: Arc::new(policy::NoHooks),
             sleeper: Arc::new(ThreadSleeper),
+            gc: gc::GcSettings::default(),
         }
+    }
+
+    /// Installs how `Gc` and [`Engine::gc_sweep`] run the collector.
+    pub fn with_gc(mut self, gc: gc::GcSettings) -> Self {
+        self.gc = gc;
+        self
     }
 
     /// Installs the CI hooks `Land` and `Attest` call.

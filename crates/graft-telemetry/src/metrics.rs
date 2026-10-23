@@ -34,6 +34,14 @@ pub const SQLITE_WRITER_QUEUE_DEPTH: &str = "graft_sqlite_writer_queue_depth";
 pub const ORPHANS: &str = "graft_orphans";
 /// Bytes reclaimed by GC.
 pub const GC_RECLAIMED_BYTES_TOTAL: &str = "graft_gc_reclaimed_bytes_total";
+/// GC sweep passes by outcome.
+pub const GC_SWEEPS_TOTAL: &str = "graft_gc_sweeps_total";
+/// Changesets collected by GC.
+pub const GC_COLLECTED_TOTAL: &str = "graft_gc_collected_total";
+/// Objects doomed by GC.
+pub const GC_DOOMED_TOTAL: &str = "graft_gc_doomed_total";
+/// Objects deleted by GC.
+pub const GC_DELETED_TOTAL: &str = "graft_gc_deleted_total";
 /// Mirror lag in seconds.
 pub const MIRROR_LAG_SECONDS: &str = "graft_mirror_lag_seconds";
 /// Mirror lag in changesets.
@@ -68,6 +76,10 @@ pub const ALL: &[&str] = &[
     SQLITE_WRITER_QUEUE_DEPTH,
     ORPHANS,
     GC_RECLAIMED_BYTES_TOTAL,
+    GC_SWEEPS_TOTAL,
+    GC_COLLECTED_TOTAL,
+    GC_DOOMED_TOTAL,
+    GC_DELETED_TOTAL,
     MIRROR_LAG_SECONDS,
     MIRROR_LAG_CHANGESETS,
     MIRROR_DIVERGENCE,
@@ -179,6 +191,20 @@ pub const SPECS: &[MetricSpec] = &[
         &[],
         "Bytes reclaimed by GC.",
     ),
+    spec(
+        GC_SWEEPS_TOTAL,
+        Counter,
+        &["outcome"],
+        "GC sweep passes by outcome (ok, busy, refused, mismatch, failed).",
+    ),
+    spec(
+        GC_COLLECTED_TOTAL,
+        Counter,
+        &[],
+        "Changesets collected by GC.",
+    ),
+    spec(GC_DOOMED_TOTAL, Counter, &[], "Objects doomed by GC."),
+    spec(GC_DELETED_TOTAL, Counter, &[], "Objects deleted by GC."),
     spec(MIRROR_LAG_SECONDS, G, &["line"], "Mirror lag in seconds."),
     spec(
         MIRROR_LAG_CHANGESETS,
@@ -266,6 +292,14 @@ pub struct Metrics {
     pub orphans: IntGaugeVec,
     /// [`GC_RECLAIMED_BYTES_TOTAL`].
     pub gc_reclaimed_bytes_total: IntCounter,
+    /// [`GC_SWEEPS_TOTAL`] `{outcome}`.
+    pub gc_sweeps_total: IntCounterVec,
+    /// [`GC_COLLECTED_TOTAL`].
+    pub gc_collected_total: IntCounter,
+    /// [`GC_DOOMED_TOTAL`].
+    pub gc_doomed_total: IntCounter,
+    /// [`GC_DELETED_TOTAL`].
+    pub gc_deleted_total: IntCounter,
     /// [`MIRROR_LAG_SECONDS`] `{line}`.
     pub mirror_lag_seconds: GaugeVec,
     /// [`MIRROR_LAG_CHANGESETS`] `{line}`.
@@ -319,6 +353,10 @@ impl Metrics {
             sqlite_writer_queue_depth: IntGauge::with_opts(opts(SQLITE_WRITER_QUEUE_DEPTH))?,
             orphans: IntGaugeVec::new(opts(ORPHANS), l(ORPHANS))?,
             gc_reclaimed_bytes_total: IntCounter::with_opts(opts(GC_RECLAIMED_BYTES_TOTAL))?,
+            gc_sweeps_total: IntCounterVec::new(opts(GC_SWEEPS_TOTAL), l(GC_SWEEPS_TOTAL))?,
+            gc_collected_total: IntCounter::with_opts(opts(GC_COLLECTED_TOTAL))?,
+            gc_doomed_total: IntCounter::with_opts(opts(GC_DOOMED_TOTAL))?,
+            gc_deleted_total: IntCounter::with_opts(opts(GC_DELETED_TOTAL))?,
             mirror_lag_seconds: GaugeVec::new(opts(MIRROR_LAG_SECONDS), l(MIRROR_LAG_SECONDS))?,
             mirror_lag_changesets: IntGaugeVec::new(
                 opts(MIRROR_LAG_CHANGESETS),
@@ -354,6 +392,10 @@ impl Metrics {
             Box::new(self.sqlite_writer_queue_depth.clone()),
             Box::new(self.orphans.clone()),
             Box::new(self.gc_reclaimed_bytes_total.clone()),
+            Box::new(self.gc_sweeps_total.clone()),
+            Box::new(self.gc_collected_total.clone()),
+            Box::new(self.gc_doomed_total.clone()),
+            Box::new(self.gc_deleted_total.clone()),
             Box::new(self.mirror_lag_seconds.clone()),
             Box::new(self.mirror_lag_changesets.clone()),
             Box::new(self.mirror_divergence.clone()),

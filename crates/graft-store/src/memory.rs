@@ -98,6 +98,12 @@ impl Repo {
                 self.doomed.get(object).is_some_and(|mark| !mark.deleting)
             }
             Precondition::ObjectUnheld(object) => self.rows_of(*object).next().is_none(),
+            Precondition::DerivedIs {
+                kind,
+                version,
+                key,
+                value,
+            } => self.derived.get(&(kind.clone(), *version, key.clone())) == value.as_ref(),
         }
     }
 

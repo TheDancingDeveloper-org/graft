@@ -38,7 +38,12 @@ const USAGE: &str = "usage: graft-server [--config <file>] <serve|admin> [args]
   admin repo create <name>       create a repository
   admin fsck <repo>              verify every referenced object (server stopped)
   admin backup <dir> [--objects] snapshot metadata (and copy objects)
-  admin gc <repo> [--dry-run]    collect orphans (not in this release)
+  admin gc <repo> [--dry-run] [--verify]
+                                 one GC sweep pass, or what it would collect
+                                 (server stopped)
+  admin gc deletion <repo> on|off
+                                 the repository's GC deletion switch (off
+                                 until turned on)
 
 config: --config <file>, else $GRAFT_SERVER_CONFIG, else /etc/graft/server.toml";
 

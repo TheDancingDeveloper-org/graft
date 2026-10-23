@@ -450,6 +450,7 @@ where
     /// One follow poll of the base. `Some` (described) when the base line is
     /// stopped.
     async fn follow(&mut self) -> Result<Option<String>, MirrorError> {
+        self.check_mapped().await?;
         let mut config = self.config.follow.clone();
         config.repo = self.config.repo.clone();
         config.lines = vec![self.config.base.clone()];
@@ -479,6 +480,37 @@ where
             ))),
             None => Err(config_err("follow reported no line")),
         }
+    }
+
+    /// Refuses a DB that cannot map the base: graft's base line has a tip
+    /// the DB has no commit for, and the DB has never followed the line or
+    /// followed it to a changeset this repo does not hold. Follow alone
+    /// would call that `graft-moved`, which hides an empty or wrong DB.
+    async fn check_mapped(&mut self) -> Result<(), MirrorError> {
+        let base = self.config.base.line.clone();
+        let cx = self.call("mapped");
+        let repo = self.config.repo.clone();
+        let Some(tip) = current_ref(self.api, &cx, &repo, &base).await? else {
+            return Ok(());
+        };
+        if self.db.sha_of(tip)?.is_some() {
+            return Ok(());
+        }
+        let followed = match self.db.line(&base)?.upstream {
+            None => None,
+            Some(up) => self.db.changeset_of(up)?,
+        };
+        if let Some(c) = followed
+            && !self.views(&[c]).await?.is_empty()
+        {
+            // The DB belongs here and graft really moved: follow says so.
+            return Ok(());
+        }
+        Err(MirrorError::Unmapped {
+            db: self.db.path().to_owned(),
+            line: base,
+            empty: self.db.commit_count()? == 0,
+        })
     }
 
     async fn tip(&mut self, line: &str) -> Result<ChangesetId, MirrorError> {

@@ -3,8 +3,13 @@
 //!
 //! - `WorkspaceClosed`: `{"name":"w","reason":"lease-expired","abandoned":2}`,
 //!   exactly as the engine writes it when it ends a lapsed workspace
-//! - `Collected`: `{"ids":["c…"],"objects":3,"moved":1}`: the changeset
-//!   collected, the objects it doomed, and the rows it moved to its successor
+//! - `WorkspaceLapsing`: `{"name":"w","abandoned":1000}`: one part of the
+//!   close of a lapsed workspace whose stack is longer than `max_stack`; the
+//!   head moved below the drafts it abandoned. The close ends with
+//!   `WorkspaceClosed`, whose `abandoned` counts only its own part
+//! - `Collected`: `{"ids":["c…"],"objects":3,"bytes":120,"moved":1}`: the
+//!   changeset collected, the objects it doomed and their frame bytes (what
+//!   the delete step will reclaim), and the rows it moved to its successor
 //! - `RowsExpired`: `{"holder":"upload:…","rows":4,"objects":2}`: the expired
 //!   upload or claim rows of one holder removed, and the objects doomed
 //! - `ObjectDeleted`: `{"id":"<hex>","bytes":120}`: a doomed object's frame
@@ -19,6 +24,9 @@ use graft_store::Write;
 
 /// Kind of the entry written when a lapsed workspace is closed.
 pub const WORKSPACE_CLOSED: &str = "WorkspaceClosed";
+
+/// Kind of the entry written for each part but the last of a long close.
+pub const WORKSPACE_LAPSING: &str = "WorkspaceLapsing";
 
 /// Kind of the entry written with each collection.
 pub const COLLECTED: &str = "Collected";
@@ -69,11 +77,19 @@ pub(crate) fn workspace_closed(name: &str, abandoned: usize) -> Write {
     entry(WORKSPACE_CLOSED, body)
 }
 
+/// The `WorkspaceLapsing` entry.
+pub(crate) fn workspace_lapsing(name: &str, abandoned: usize) -> Write {
+    let mut body = String::from("{\"name\":");
+    json_str(&mut body, name);
+    let _ = write!(body, ",\"abandoned\":{abandoned}}}");
+    entry(WORKSPACE_LAPSING, body)
+}
+
 /// The `Collected` entry.
-pub(crate) fn collected(id: ChangesetId, objects: usize, moved: usize) -> Write {
+pub(crate) fn collected(id: ChangesetId, objects: usize, bytes: u64, moved: usize) -> Write {
     entry(
         COLLECTED,
-        format!("{{\"ids\":[\"{id}\"],\"objects\":{objects},\"moved\":{moved}}}"),
+        format!("{{\"ids\":[\"{id}\"],\"objects\":{objects},\"bytes\":{bytes},\"moved\":{moved}}}"),
     )
 }
 
@@ -128,8 +144,15 @@ mod tests {
             )
         );
         assert_eq!(
-            body(collected(id, 3, 1)).1,
-            format!(r#"{{"ids":["{id}"],"objects":3,"moved":1}}"#)
+            body(collected(id, 3, 120, 1)).1,
+            format!(r#"{{"ids":["{id}"],"objects":3,"bytes":120,"moved":1}}"#)
+        );
+        assert_eq!(
+            body(workspace_lapsing("w", 2)),
+            (
+                "WorkspaceLapsing".to_owned(),
+                r#"{"name":"w","abandoned":2}"#.to_owned()
+            )
         );
         assert_eq!(
             body(rows_expired("upload:5:t", 4, 2)).1,

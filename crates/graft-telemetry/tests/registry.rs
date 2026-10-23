@@ -20,6 +20,11 @@ const DESIGN: &[(&str, &[&str])] = &[
     ("graft_sqlite_writer_queue_depth", &[]),
     ("graft_orphans", &["state"]),
     ("graft_gc_reclaimed_bytes_total", &[]),
+    // Not yet in design §13: the sweep's own counters (WI-2274).
+    ("graft_gc_sweeps_total", &["outcome"]),
+    ("graft_gc_collected_total", &[]),
+    ("graft_gc_doomed_total", &[]),
+    ("graft_gc_deleted_total", &[]),
     ("graft_mirror_lag_seconds", &["line"]),
     ("graft_mirror_lag_changesets", &["line"]),
     ("graft_mirror_divergence", &["line"]),
@@ -95,6 +100,10 @@ fn exposition_uses_documented_names_and_labels() {
     m.sqlite_writer_queue_depth.set(3);
     m.orphans.with_label_values(&["held"]).set(1);
     m.gc_reclaimed_bytes_total.inc_by(5);
+    m.gc_sweeps_total.with_label_values(&["ok"]).inc();
+    m.gc_collected_total.inc();
+    m.gc_doomed_total.inc_by(2);
+    m.gc_deleted_total.inc_by(2);
     m.mirror_lag_seconds.with_label_values(&["main"]).set(1.5);
     m.mirror_lag_changesets.with_label_values(&["main"]).set(2);
     m.mirror_divergence.with_label_values(&["main"]).set(0);

@@ -192,16 +192,22 @@ fn a_child_racing_its_parents_collection_pins_it_or_fails_collected() {
 
 /// A draft `a` whose blob `a1` (and root tree) were collected and doomed
 /// for longer than the grace period, ready to delete; `w2` is open.
-fn doomed_past_grace(w: &World<MemoryStore>, data: &[u8]) -> (ChangesetId, ChangesetId) {
+/// `(root, a, a's root tree)`: the tree is read before `a` is collected,
+/// since a tombstone keeps no content.
+fn doomed_past_grace(
+    w: &World<MemoryStore>,
+    data: &[u8],
+) -> (ChangesetId, ChangesetId, graft_model::TreeId) {
     let root = w.seed();
     w.open("w").expect("open");
-    let a = w.commit(vec![root], "a", data, Some("w")).expect("a").id;
+    let created = w.commit(vec![root], "a", data, Some("w")).expect("a");
+    let (a, a_root) = (created.id, created.root);
     w.close("w").expect("close");
     w.advance(RETENTION_PLUS);
     assert_eq!(w.sweep().collected, 1);
     w.advance(GRACE_PLUS);
     w.open("w2").expect("open");
-    (root, a)
+    (root, a, a_root)
 }
 
 #[test]
@@ -210,7 +216,7 @@ fn a_write_naming_a_blob_racing_its_delete_keeps_it_or_misses_it() {
     let a1 = blob_id(b"a1");
     for schedule in schedules() {
         let w = memory();
-        let (root, _) = doomed_past_grace(&w, b"a1");
+        let (root, _, _) = doomed_past_grace(&w, b"a1");
         let write = w.engine.create_changeset(
             &w.cx,
             w.request(vec![root], vec![put("z", b"a1")], Some("w2")),
@@ -249,19 +255,9 @@ fn a_write_deriving_a_tree_racing_its_delete_keeps_or_restores_it() {
         let w = memory();
         // `a` puts the landed blob `b0` at a new path: its blob stays
         // held, only its root tree is doomed.
-        let (root, a) = doomed_past_grace(&w, b"b0");
+        let (root, _, a_root) = doomed_past_grace(&w, b"b0");
         let tree = w.snapshot_of(root).expect("root");
-        let a_tree: Vec<_> = {
-            let (content, _) = block_on(graft_store::MetaStore::changeset(&*w.meta, w.repo, a))
-                .expect("read")
-                .expect("stored");
-            vec![
-                graft_model::Changeset::decode(&content)
-                    .expect("decode")
-                    .root
-                    .0,
-            ]
-        };
+        let a_tree = [a_root.0];
         assert!(!tree.contains(&a_tree[0]));
         // The same change on the same parent derives the same tree.
         let write = w.engine.create_changeset(
