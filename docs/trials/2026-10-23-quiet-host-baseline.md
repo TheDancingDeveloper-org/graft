@@ -3,6 +3,10 @@
 WI-2248. The same `graft-pilot` trial as the 2026-10-22 Node B baseline (WI-2247),
 run on the dedicated graft-dev VM, which has nothing else running on it.
 
+This is a quiet but smaller baseline, not a like-for-like speed comparison with
+Node B. The VM has 4 vCPU; Node B has 24 CPUs and was shared with other work. See
+[Reading](#reading).
+
 ## Setup
 
 | Item | Value |
@@ -88,14 +92,24 @@ diff, which suggests cache warm-up. Runs 2 and 3 agree within about 2%
 | diff | 12.9 ms | 13.1 ms | +2% |
 
 Only graft's numbers were supplied for Node B, so there is no git comparison
-for that host in this note.
+for that host in this note. The hosts are not equivalent: Node B has 24 CPUs and
+the VM has 4 vCPU, so these columns do not compare like for like (see Reading).
 
 ## Reading
 
-- The quiet host did not make graft faster. All four figures are the same as or
-  slower than Node B's. Node B is faster per core (or the VM costs more in
-  virtualised I/O and process start), and its load was not the dominant noise.
-  The VM is the better baseline for stability, not for speed.
+- The quiet host did not make graft faster, and that is expected. The VM has
+  4 vCPU against Node B's 24 CPUs. A full clone is parallel work (it fetches and
+  decodes frames on several threads), so it should scale with core count, and
+  the +25% on full clone most likely comes from having a sixth of the cores.
+  For the parallel scenarios the VM numbers are not comparable with Node B's.
+  Diff and `log --path` are mostly serial, and diff (+2%) is level.
+- A secondary hypothesis is that Node B's cores are individually faster, or that
+  the VM pays more for virtualised I/O and process start. This run cannot
+  separate these from the core-count effect. Doing so would need Node B pinned
+  to 4 cores (for example with `taskset -c 0-3`) or a 24-core quiet host.
+- So these figures are a quiet but smaller baseline: good for stability and
+  for tracking graft against git on one fixed host, not a speed comparison
+  across hosts.
 - Against git on the same host, the ratios hold up: diff is level (1.02), sparse
   clone is level (0.96), blame cached is 1.8x faster than git, and full clone
   (1.18), log --path (1.26) and blame cold (1.77) are slower.
