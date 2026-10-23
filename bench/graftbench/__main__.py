@@ -98,7 +98,7 @@ def main(argv=None) -> int:
             except StepError as e:
                 log(f"[{scale}] failed: {e}")
                 doc["scales"].append({"scale": scale, "error": str(e)})
-                rc = 1
+                rc = 2
                 break
             doc["scales"].append(r)
             if not r["ok"]:

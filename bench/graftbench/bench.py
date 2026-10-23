@@ -242,7 +242,9 @@ def run_scale(cfg: Config, scale: int, site, graft: Graft, mirror: Mirror, git: 
         "no_lost_or_duplicated_lands": sorted(log_ids) == sorted(landed) and len(set(log_ids)) == len(log_ids),
         "replay_lands_in_order": _is_subsequence(landed[: scale + 1], log_ids),
         "tips_observed": len(watcher.tips),
-        "line_never_moved_backwards": _is_subsequence(landed[: scale + 1], log_ids) and _is_subsequence(watcher.tips, log_ids),
+        "line_never_moved_backwards": _is_subsequence(landed[: scale + 1], log_ids)
+        and bool(watcher.tips)
+        and _is_subsequence(watcher.tips, log_ids),
     }
     res["verify_final"]["blame"] = [blame_check(graft, git, final_g, final_git, p, set(log_ids)) for p in (gen.REGISTRY, gen.CHANGELOG)]
     stats["end"] = site.stats()

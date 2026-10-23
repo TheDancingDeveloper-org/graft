@@ -145,6 +145,17 @@ class Outcome:
         self.error: str | None = None
 
 
+def _guarded(fn, *args) -> None:
+    """Runs a writer; an exception (a command timeout, a harness bug) is
+    recorded as that writer's failure, never counted as a land."""
+    o = args[-1]
+    try:
+        fn(*args)
+    except Exception as e:  # noqa: BLE001 - every failure must be counted
+        o.error = f"{type(e).__name__}: {e}"[:300]
+        o.landed = None
+
+
 def graft_writer(g: Graft, wc: Path, scenario: str, path: str, barrier: threading.Barrier, o: Outcome) -> None:
     """Lands as an agent does: `graft land`; on exit 3 from the server's
     file-level rebase, `graft land --sync` (the client syncs, which merges
@@ -288,7 +299,8 @@ def run_graft(g: Graft, wcs: list[Path], plan: Plan, landed_ids: list[str]) -> d
             barrier = threading.Barrier(len(wcs))
             round_outs = [Outcome() for _ in wcs]
             threads = [
-                threading.Thread(target=graft_writer, args=(g, wc, scenario, paths[i], barrier, round_outs[i])) for i, wc in enumerate(wcs)
+                threading.Thread(target=_guarded, args=(graft_writer, g, wc, scenario, paths[i], barrier, round_outs[i]))
+                for i, wc in enumerate(wcs)
             ]
             t0 = time.perf_counter()
             for t in threads:
@@ -315,7 +327,8 @@ def run_git(git: Git, wcs: list[Path], plan: Plan) -> dict:
             barrier = threading.Barrier(len(wcs))
             round_outs = [Outcome() for _ in wcs]
             threads = [
-                threading.Thread(target=git_writer, args=(git, wc, scenario, paths[i], barrier, round_outs[i])) for i, wc in enumerate(wcs)
+                threading.Thread(target=_guarded, args=(git_writer, git, wc, scenario, paths[i], barrier, round_outs[i]))
+                for i, wc in enumerate(wcs)
             ]
             t0 = time.perf_counter()
             for t in threads:

@@ -81,12 +81,12 @@ class LocalSite:
         return run([self.bin, "--config", self.config, "admin"] + args)
 
     def start(self) -> None:
-        log = open(self.dir / "server.log", "ab")
+        self._log = open(self.dir / "server.log", "ab")
         self.proc = subprocess.Popen(
             [str(self.bin), "--config", str(self.config), "serve"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=log,
+            stderr=self._log,
         )
         found: queue.Queue = queue.Queue()
 
@@ -116,6 +116,9 @@ class LocalSite:
                 self.proc.kill()
                 self.proc.wait()
         self.proc = None
+        if getattr(self, "_log", None):
+            self._log.close()
+            self._log = None
 
     def create_repo(self, name: str) -> None:
         """Repositories are created before the server starts (above)."""
