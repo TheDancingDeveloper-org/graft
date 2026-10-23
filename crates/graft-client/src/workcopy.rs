@@ -4,9 +4,11 @@
 //! ```text
 //! <wc>/.graft/
 //!   config   endpoint, repo, workspace          (key = value lines)
-//!   state    line, base, head, last synced LSN  (key = value lines)
+//!   state    line, base, head, last synced LSN, (key = value lines)
+//!            and an unfinished move, if any
 //!   sparse   prefixes, one per line             (see crate::sparse)
 //!   index    path → kind, blob id, stat         (one entry per line)
+//!   conflict the conflicts a sync wrote, until they are committed
 //!   cache/   local object frames (graft-store-fs, LRU mode)
 //! ```
 //!
@@ -42,10 +44,14 @@ use crate::sparse::{escape, unescape};
 use crate::{Error, Result, Sparse};
 
 mod commit;
+mod conflict;
+mod rewrite;
 mod session;
 
 pub use commit::{CommitLimits, CommitOptions, Committed, UploadStats};
-pub use session::{Begun, LandOptions, LandOutcome, Recovered, SyncOutcome};
+pub use conflict::{ConflictFile, ConflictMode, Conflicts, sidecar_path};
+pub use rewrite::{Reverted, Rewritten};
+pub use session::{Begun, LandOptions, LandOutcome, Moved, Recovered, SyncOutcome};
 
 /// The working copy's state directory.
 pub const GRAFT_DIR: &str = ".graft";
@@ -62,6 +68,11 @@ const INDEX_HEADER: &str = "graft-index 1";
 
 /// Suffix of the temp file a checkout writes before renaming into place.
 const TMP_SUFFIX: &str = ".graft-tmp";
+
+/// Suffix of the sidecar a sync writes beside a conflicting file it cannot
+/// mark (a binary, a symlink, or a file one side deleted). Like the temp
+/// suffix, it is the working copy's own: status and commit never see it.
+pub const CONFLICT_SUFFIX: &str = ".graft-conflict";
 
 /// Diff page size used by update.
 const DIFF_PAGE: u32 = 1000;
@@ -88,6 +99,34 @@ pub struct WcState {
     pub head: Option<ChangesetId>,
     /// Last synced journal position.
     pub lsn: u64,
+    /// A move of the working copy and its workspace that started and has
+    /// not finished: where both are going. Until it finishes the server's
+    /// workspace may be on either side of it.
+    pub moving: Option<Moving>,
+}
+
+/// Where an unfinished move takes the working copy and its workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Moving {
+    /// The new base.
+    pub base: ChangesetId,
+    /// The new head.
+    pub head: Option<ChangesetId>,
+    /// The server is rebasing or rewriting the stack and picks the head
+    /// (`head` is unused): a workspace on `base` with any head is where the
+    /// move goes, and one still on the old base and head never moved.
+    pub by_server: bool,
+}
+
+impl Moving {
+    /// A move to `base` and `head`.
+    pub fn to(base: ChangesetId, head: Option<ChangesetId>) -> Self {
+        Self {
+            base,
+            head,
+            by_server: false,
+        }
+    }
 }
 
 /// The stat fields status compares.
@@ -217,6 +256,7 @@ pub async fn clone<A: ObjectApi + RepoApi>(
         base,
         head: None,
         lsn: 0,
+        moving: None,
     };
     let mut wc = WorkingCopy::init(dest, config, state, sparse)?;
     let cache = wc.open_cache(DEFAULT_CACHE_BYTES)?;
@@ -811,12 +851,20 @@ impl WorkingCopy {
         s
     }
 
-    fn save_state(&self) -> io::Result<()> {
+    pub(crate) fn save_state(&self) -> io::Result<()> {
         let mut s = format!("line = {}\nbase = {}\n", self.state.line, self.state.base);
         if let Some(h) = self.state.head {
             s.push_str(&format!("head = {h}\n"));
         }
         s.push_str(&format!("lsn = {}\n", self.state.lsn));
+        if let Some(m) = self.state.moving {
+            s.push_str(&format!("moving.base = {}\n", m.base));
+            match (m.by_server, m.head) {
+                (true, _) => s.push_str("moving.head = server\n"),
+                (false, Some(h)) => s.push_str(&format!("moving.head = {h}\n")),
+                (false, None) => {}
+            }
+        }
         write_atomic(&self.root.join(GRAFT_DIR).join(STATE_FILE), s.as_bytes())
     }
 
@@ -1113,7 +1161,7 @@ fn walk(dir: &Path, prefix: Option<&RepoPath>, out: &mut BTreeSet<RepoPath>) -> 
 fn entry_path(prefix: Option<&RepoPath>, entry: &fs::DirEntry) -> Option<RepoPath> {
     let name = entry.file_name();
     let name = name.to_str()?;
-    if name.ends_with(TMP_SUFFIX) {
+    if name.ends_with(TMP_SUFFIX) || name.ends_with(CONFLICT_SUFFIX) {
         return None;
     }
     match prefix {
@@ -1182,6 +1230,15 @@ fn parse_state(text: &str) -> Result<WcState> {
             .map(|s| s.parse().map_err(|_| Error::State("bad lsn".to_owned())))
             .transpose()?
             .unwrap_or(0),
+        moving: match id("moving.base")? {
+            Some(base) if kv.get("moving.head") == Some(&"server") => Some(Moving {
+                base,
+                head: None,
+                by_server: true,
+            }),
+            Some(base) => Some(Moving::to(base, id("moving.head")?)),
+            None => None,
+        },
     })
 }
 
@@ -1322,6 +1379,10 @@ mod tests {
             base,
             head: Some(ChangesetId::hash(b"head")),
             lsn: 42,
+            moving: Some(Moving::to(
+                ChangesetId::hash(b"tip"),
+                Some(ChangesetId::hash(b"next")),
+            )),
         };
         let sparse = Sparse::new([RepoPath::new("a b/c").unwrap()], true);
         let mut wc =
@@ -1339,6 +1400,14 @@ mod tests {
         let opened = WorkingCopy::open(&dir.path().join("a b")).unwrap();
         assert_eq!(opened.config(), &config);
         assert_eq!(opened.state(), &state);
+        wc.state.moving = Some(Moving {
+            base,
+            head: None,
+            by_server: true,
+        });
+        wc.save_state().unwrap();
+        let opened = WorkingCopy::open(dir.path()).unwrap();
+        assert_eq!(opened.state(), wc.state());
         assert_eq!(opened.sparse(), &sparse);
         assert_eq!(opened.index().entries, wc.index.entries);
         assert!(opened.index().written_ns > 0);

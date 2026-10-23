@@ -238,7 +238,7 @@ fn sync_fast_forwards_and_refuses_to_overwrite_local_changes() {
 }
 
 #[test]
-fn sync_with_a_conflicting_stack_exits_3_and_changes_nothing() {
+fn sync_with_a_conflicting_stack_exits_3_and_writes_the_conflicts() {
     let s = serve();
     let dir = scratch();
     let app = clone_app(&s, dir.path());
@@ -250,8 +250,11 @@ fn sync_with_a_conflicting_stack_exits_3_and_changes_nothing() {
             .commit("main", &main_files(&[("README.md", b"theirs\n")])),
     );
     let a = run(&app, &["--json", "sync"]).code(3);
-    assert_eq!(error_kind(&a), json!("conflict"));
-    assert_eq!(fs::read_to_string(app.join("README.md")).unwrap(), "mine\n");
+    assert_eq!(error_kind(&a), json!("conflicted"));
+    assert_eq!(
+        fs::read_to_string(app.join("README.md")).unwrap(),
+        "<<<<<<< ours\nmine\n||||||| base\nhello\n=======\ntheirs\n>>>>>>> theirs\n"
+    );
 }
 
 #[test]

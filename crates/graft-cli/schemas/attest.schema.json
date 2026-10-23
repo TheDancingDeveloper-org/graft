@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft attest --json",
+  "type": "object",
+  "required": [
+    "changeset",
+    "check",
+    "passed",
+    "url"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "changeset": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+    },
+    "check": {
+      "type": "string"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "url": {
+      "type": "string"
+    }
+  }
+}

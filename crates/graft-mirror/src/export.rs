@@ -285,6 +285,16 @@ where
     }
 
     async fn poll_line(&mut self, l: &FollowLine) -> Result<ExportOutcome, MirrorError> {
+        // An authority switch can hand the line back to git-primary while
+        // export runs; from then on export does not write it.
+        if let Some(holder) = self.db.authority(&l.line)?
+            && holder != GRAFT_PRIMARY
+        {
+            return Ok(ExportOutcome::Failed(format!(
+                "line {} is claimed by {holder}; export does not write it",
+                l.line
+            )));
+        }
         let (mut state, mut target) = match self.db.export_state(&l.line)? {
             Some(state) => (state, None),
             None => match self.bootstrap(l).await? {

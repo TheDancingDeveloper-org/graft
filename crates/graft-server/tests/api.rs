@@ -328,8 +328,8 @@ async fn health_metrics_and_the_json_facade() {
         .expect_err("no workspace");
     assert_eq!(e.code(), tonic::Code::NotFound);
 
-    // An operation the engine has not built yet (Revert, G3.7) answers
-    // Unimplemented, not a crash, and the server still serves afterwards.
+    // A malformed Revert (a changeset onto itself) is refused as
+    // InvalidArgument, not a crash, and the server still serves afterwards.
     let e = c
         .repo
         .revert(pb::RevertRequest {
@@ -339,8 +339,8 @@ async fn health_metrics_and_the_json_facade() {
             workspace: None,
         })
         .await
-        .expect_err("unimplemented");
-    assert_eq!(e.code(), tonic::Code::Unimplemented);
+        .expect_err("revert onto itself");
+    assert_eq!(e.code(), tonic::Code::InvalidArgument);
     assert_eq!(server.get("/healthz", None).status, 200);
 
     let bad = server.get("/v1/repos/r/file/main?path=../x", Some(&token));

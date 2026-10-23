@@ -473,7 +473,7 @@ fn the_token_comes_from_a_file_or_the_environment_and_is_never_printed() {
 fn designed_but_unbuilt_commands_say_so() {
     let dir = scratch();
     graft(dir.path())
-        .arg("revert")
+        .arg("mcp")
         .assert()
         .code(2)
         .stderr(contains("not implemented yet"));
@@ -497,7 +497,7 @@ fn every_schema_file_compiles() {
         count += 1;
     }
     assert_eq!(
-        count, 19,
+        count, 21,
         "one schema per command, plus error, api-list and workspace-list"
     );
 }

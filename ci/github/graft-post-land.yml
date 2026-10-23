@@ -1,0 +1,156 @@
+# Reusable workflow: post-land checks for ONE graft-managed repository.
+#
+# Runs the repository's checks on the mirror's pushes to a line's branch, and
+# reports each result to graft as an Attest on the landed changeset, under a
+# `post-land/` name. A failing one is the signal the auto-revert bot acts on
+# (docs/decisions.md, D6).
+#
+# THIS FILE IS A TEMPLATE: copy it, once per repository, into the shared
+# workflow repository that the graft server's binding pins (`job_workflow_ref`),
+# and edit the lines marked EDIT. It deliberately takes NO inputs. The checks,
+# the graft endpoint, the audience and the runners are fixed here, by the people
+# who own that repository, because anyone who can push a branch can write the
+# caller workflow, and a caller that could choose the commands could attest a
+# check that never ran. See ci/README.md.
+name: graft post-land
+
+on:
+  workflow_call:
+
+# Nothing by default. Each job asks for what it needs: the check jobs run the
+# branch's own code and get no `id-token`; only the attest job does.
+permissions: {}
+
+env:
+  # EDIT
+  GRAFT_ENDPOINT: https://graft.example.com
+  GRAFT_REPO: myrepo
+  # A value unique to this graft deployment, matching the server's issuer rule.
+  AUDIENCE: https://graft.example.com
+
+jobs:
+  build:
+    name: post-land/build
+    if: ${{ github.actor == 'graft-mirror[bot]' }}  # EDIT: the mirror's GitHub App
+    # EDIT
+    runs-on: [self-hosted]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # EDIT: this repository's command.
+      - run: cargo build --workspace --locked
+
+  test:
+    name: post-land/test
+    if: ${{ github.actor == 'graft-mirror[bot]' }}  # EDIT: the mirror's GitHub App
+    # EDIT
+    runs-on: [self-hosted]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # EDIT: this repository's command.
+      - run: cargo nextest run --workspace --locked
+
+  # Attests from a job that never checks out or runs the branch's code. It
+  # holds the only `id-token: write` in this workflow, takes each result from
+  # `needs` (not from anything the check wrote), and keeps the OIDC token in
+  # this step's shell variables, masked, and the graft token in a 0600 file.
+  #
+  # The graft server maps the job's commit (the OIDC `sha` claim) to the
+  # changeset the mirror exported for it and mints a token for that changeset
+  # only. The trailer read below just names the changeset the job asks for; the
+  # server does not trust it.
+  attest:
+    needs: [build, test]
+    if: ${{ !cancelled() && github.actor == 'graft-mirror[bot]' }}
+    # A GitHub-hosted runner: fresh for every job, so nothing the check jobs
+    # ran can have replaced `graft`, `curl` or `jq` here. The graft endpoint
+    # must be reachable from it. If you move this to a self-hosted runner, it
+    # must be ephemeral or in a runner group the check jobs cannot use.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # EDIT: where to fetch the graft CLI, and its checksum. Pinning the
+      # checksum keeps a changed download from running with `id-token`.
+      - name: install graft
+        env:
+          GRAFT_CLI_URL: https://example.com/releases/graft-x86_64-linux
+          GRAFT_CLI_SHA256: 0000000000000000000000000000000000000000000000000000000000000000
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/graft-bin"
+          mkdir -p "$bin"
+          curl -fsSL --max-time 120 -o "$bin/graft" "$GRAFT_CLI_URL"
+          echo "$GRAFT_CLI_SHA256  $bin/graft" | sha256sum -c -
+          chmod 0755 "$bin/graft"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: attest
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_URL: ${{ github.api_url }}/repos/${{ github.repository }}/git/commits/${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # EDIT: job id -> the check name the line's `attested` policy names.
+          declare -A check_name=([build]=post-land/build [test]=post-land/test)
+
+          message="$(curl -fsS --max-time 30 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' "$COMMIT_URL" | jq -r '.message')"
+          changeset="$(printf '%s\n' "$message" | sed -n 's/^Graft-Changeset: *//p' | tail -n1 | tr -d '[:space:]')"
+          if [ -z "$changeset" ]; then
+            echo "::error::the commit has no Graft-Changeset trailer; nothing to attest"
+            exit 1
+          fi
+
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::no OIDC token available; the caller must grant 'id-token: write'"
+            exit 1
+          fi
+          query="$(jq -rn --arg a "$AUDIENCE" '$a | @uri')"
+          jwt="$(curl -fsS --max-time 30 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${query}" | jq -r '.value')"
+          echo "::add-mask::$jwt"
+
+          # The graft token goes to a private file and is read from there by
+          # `--token-file`: never stdout, an argument or the environment.
+          umask 077
+          token_file="$(mktemp "$RUNNER_TEMP/graft-token.XXXXXX")"
+          trap 'rm -f "$token_file"' EXIT
+          printf '%s' "$jwt" | graft --endpoint "$GRAFT_ENDPOINT" \
+            ci exchange --provider github --changeset "$changeset" --out "$token_file"
+          unset jwt
+
+          failed=0
+          while read -r job result; do
+            name="${check_name[$job]:-}"
+            [ -n "$name" ] || { echo "::error::no check name for job $job"; failed=1; continue; }
+            case "$result" in
+              success) result_flag=--pass ;;
+              failure) result_flag=--fail; failed=1 ;;
+              *) echo "::warning::$job is $result; not attested"; failed=1; continue ;;
+            esac
+            graft --endpoint "$GRAFT_ENDPOINT" --repo "$GRAFT_REPO" \
+              --token-file "$token_file" attest "$changeset" \
+              --check "$name" "$result_flag" --url "$RUN_URL"
+          done < <(printf '%s' "$NEEDS" | jq -r 'to_entries[] | "\(.key) \(.value.result)"')
+
+          # The Actions UI shows the real result, not only the attestation.
+          exit "$failed"

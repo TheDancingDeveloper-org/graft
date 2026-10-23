@@ -91,8 +91,19 @@ fn land_files(k: u64) -> Vec<(String, Vec<u8>)> {
     files
 }
 
-/// The child: land, export, acknowledge, until killed.
-async fn child(dir: &Path) {
+/// Whether the kill in `iteration` is armed by the child's first push rather
+/// than by its first land. Under load a child killed after a random delay
+/// from its first land may never have pushed; the armed-by-push iterations
+/// guarantee progress, the others still kill inside the first export.
+fn gated_on_push(iteration: u32) -> bool {
+    iteration.is_multiple_of(2)
+}
+
+/// The child: land, export, acknowledge, until killed. In a gated iteration
+/// the first acknowledgement is the first push, so the parent's kill delay
+/// counts from there.
+async fn child(dir: &Path, iteration: u32) {
+    let mut pushed = !gated_on_push(iteration);
     let api = open_engine(dir);
     let db = MirrorDb::open(&dir.join("mirror.sqlite")).unwrap();
     let mut export = Export::new(
@@ -130,14 +141,19 @@ async fn child(dir: &Path) {
         )
         .await;
         move_line(&api, "main", Some(view.target), id).await;
-        crash::ack(&format!("L {k} {id}"));
+        if pushed {
+            crash::ack(&format!("L {k} {id}"));
+        }
         // Every other land is exported at once; the rest in pairs.
         if k.is_multiple_of(2) {
             continue;
         }
         let (_, outcome) = export.poll_once().await.unwrap().pop().unwrap();
         match outcome {
-            ExportOutcome::Pushed { to, .. } => crash::ack(&format!("P {to}")),
+            ExportOutcome::Pushed { to, .. } => {
+                pushed = true;
+                crash::ack(&format!("P {to}"));
+            }
             ExportOutcome::UpToDate => {}
             other => panic!("export must never stop on its own pushes: {other:?}"),
         }
@@ -159,6 +175,41 @@ fn setup(dir: &Path) {
         .await;
         move_line(&api, "main", None, root).await;
     });
+}
+
+/// Waits until no process but this one works in `dir`. `kill -9` takes the
+/// child, not the `git push`, `receive-pack` or `fast-import` it started:
+/// those finish on their own, and until they do they hold ref locks and can
+/// move GitHub's branch after the child is gone, which would make the next
+/// run's push fail by timing alone. Waits on that state, not on a delay.
+fn wait_for_orphans(dir: &Path) {
+    let me = std::process::id().to_string();
+    let dir = dir.to_str().unwrap();
+    let busy = || {
+        std::fs::read_dir("/proc").unwrap().flatten().any(|p| {
+            let name = p.file_name();
+            let Some(pid) = name
+                .to_str()
+                .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            else {
+                return false;
+            };
+            if pid == me {
+                return false;
+            }
+            let cwd = std::fs::read_link(p.path().join("cwd")).ok();
+            let cmd = std::fs::read(p.path().join("cmdline")).unwrap_or_default();
+            cwd.is_some_and(|c| c.starts_with(dir)) || String::from_utf8_lossy(&cmd).contains(dir)
+        })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while busy() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a process the killed child started never finished"
+        );
+        std::thread::yield_now();
+    }
 }
 
 /// Checks GitHub against graft's line: an exact prefix (all of it when
@@ -211,10 +262,9 @@ fn verify(dir: &Path, acked_pushes: &[String], complete: bool) {
 }
 
 #[test]
-#[ignore = "flaky under CI load, WI-2262"]
 fn kill_9_at_any_point_resumes_with_no_duplicate_and_no_gap() {
     if let Some(c) = crash::child() {
-        runtime().block_on(child(&c.dir));
+        runtime().block_on(child(&c.dir, c.iteration));
         return;
     }
     let dir = crash::TempDir::new("mirror-export-crash");
@@ -232,6 +282,7 @@ fn kill_9_at_any_point_resumes_with_no_duplicate_and_no_gap() {
                 .filter_map(|a| a.strip_prefix("P "))
                 .map(str::to_owned),
         );
+        wait_for_orphans(dir.path());
         verify(dir.path(), &acked, false);
     }
     assert!(killed > ITERATIONS / 2, "most children were killed mid-run");

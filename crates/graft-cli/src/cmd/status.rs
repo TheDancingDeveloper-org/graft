@@ -1,5 +1,7 @@
-//! `graft status`: the working copy's changes against its base. Stat-based
-//! and local, so it never contacts the server.
+//! `graft status`: the working copy's changes against its base, the
+//! conflicts a sync left to resolve, and whether an update is unfinished
+//! (`docs/design.md` §8.2: the base, head and state are always visible).
+//! Stat-based and local, so it never contacts the server.
 
 use graft_client::workcopy::FileStatus;
 use serde_json::{Value, json};
@@ -27,6 +29,7 @@ pub(crate) fn change_json(change: &FileStatus) -> Value {
 pub(crate) fn run(g: &Global) -> Result<(), Failure> {
     let wc = require_working_copy()?;
     let changes = wc.status()?;
+    let conflicts = wc.conflicts()?.map(|c| c.files).unwrap_or_default();
     let state = wc.state();
     if g.json {
         return print_json(&json!({
@@ -35,6 +38,11 @@ pub(crate) fn run(g: &Global) -> Result<(), Failure> {
             "head": state.head.map(|h| h.to_string()),
             "clean": changes.is_empty(),
             "changes": changes.iter().map(change_json).collect::<Vec<_>>(),
+            "conflicts": conflicts.iter().map(|f| json!({
+                "path": f.path.to_string(),
+                "mode": f.mode.name(),
+            })).collect::<Vec<_>>(),
+            "unfinished": state.moving.is_some(),
         }));
     }
     outln!("line {}", state.line);
@@ -43,11 +51,17 @@ pub(crate) fn run(g: &Global) -> Result<(), Failure> {
         Some(head) => outln!("head {}", short(head)),
         None => outln!("head (none)"),
     }
+    if state.moving.is_some() {
+        outln!("an update is unfinished: run `graft sync`");
+    }
     if changes.is_empty() {
         outln!("clean");
     }
     for change in &changes {
         outln!("{:<9} {}", word(change), change.path());
+    }
+    for f in &conflicts {
+        outln!("conflict {:<8} {}", f.mode.name(), f.path);
     }
     Ok(())
 }

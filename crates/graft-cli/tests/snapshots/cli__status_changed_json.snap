@@ -19,6 +19,8 @@ expression: value
     }
   ],
   "clean": false,
+  "conflicts": [],
   "head": null,
-  "line": "main"
+  "line": "main",
+  "unfinished": false
 }

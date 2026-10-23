@@ -7,7 +7,9 @@
     "base",
     "head",
     "clean",
-    "changes"
+    "changes",
+    "conflicts",
+    "unfinished"
   ],
   "additionalProperties": false,
   "properties": {
@@ -54,6 +56,40 @@
               "deleted"
             ]
           }
+        }
+      }
+    },
+    "conflicts": {
+      "description": "Files a conflicting sync wrote, until the commit that resolves them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/conflict"
+      }
+    },
+    "unfinished": {
+      "description": "An update stopped half way; the next sync or land finishes it.",
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "conflict": {
+      "type": "object",
+      "required": [
+        "path",
+        "mode"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "markers",
+            "sidecar",
+            "merged",
+            "skipped"
+          ]
         }
       }
     }
