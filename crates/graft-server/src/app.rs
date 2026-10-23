@@ -22,6 +22,7 @@ use graft_telemetry::Telemetry;
 use tracing::Instrument as _;
 
 use crate::admission::Admission;
+use crate::ci::CiExchange;
 use crate::denylist::Denylist;
 use crate::watch::Watches;
 
@@ -151,6 +152,8 @@ pub(crate) struct App {
     pub(crate) watches: Watches,
     pub(crate) put_budget: PutBudget,
     pub(crate) denylist: Arc<Denylist>,
+    /// The CI token exchange, when the config trusts an issuer.
+    pub(crate) ci: Option<Arc<CiExchange>>,
     ready: AtomicBool,
     next_request: AtomicU64,
 }
@@ -178,9 +181,16 @@ impl App {
             watches,
             put_budget,
             denylist: Arc::new(denylist),
+            ci: None,
             ready: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
         }
+    }
+
+    /// Turns on the CI token exchange.
+    pub(crate) fn with_ci(mut self, ci: Option<Arc<CiExchange>>) -> Self {
+        self.ci = ci;
+        self
     }
 
     /// Refuses a write by a revoked token. A denylist that cannot be read
@@ -325,7 +335,7 @@ impl App {
         tracing::info!(op, outcome = error_name(e), error = %e, "refused");
     }
 
-    fn observe(&self, op: &str, outcome: &str, started: Instant) {
+    pub(crate) fn observe(&self, op: &str, outcome: &str, started: Instant) {
         self.telemetry
             .metrics()
             .rpc_duration_seconds

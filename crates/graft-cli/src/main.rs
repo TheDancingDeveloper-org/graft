@@ -97,6 +97,7 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         Command::Land(args) => cmd::land::run(g, args),
         Command::Revert(args) => cmd::revert::run(g, args),
         Command::Attest(args) => cmd::attest::run(g, args),
+        Command::Ci(args) => cmd::ci::run(g, args),
         Command::Api(args) => api::run(g, args),
         Command::Version => cmd::version::run(g),
         Command::Lsp { args } => match cmd::lsp::run(args) {

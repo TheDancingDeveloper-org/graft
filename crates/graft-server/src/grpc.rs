@@ -49,6 +49,10 @@ pub(crate) const MAX_MESSAGE: usize = 80 << 20;
 /// The largest workspace request or answer (control messages).
 const CONTROL_MESSAGE: usize = 4 << 20;
 
+/// The largest `ExchangeCiToken` request: a CI token of the largest size
+/// `graft_auth::oidc` looks at, plus framing.
+const CI_MESSAGE: usize = graft_auth::oidc::MAX_JWT_LEN + 1024;
+
 /// Room for message and frame headers above a call's frame-byte cap.
 const PUT_FRAMING: u64 = 1 << 20;
 
@@ -188,14 +192,22 @@ impl Services {
             .send_compressed(gz)
             .max_decoding_message_size(CONTROL_MESSAGE)
             .max_encoding_message_size(CONTROL_MESSAGE);
-        let admin = pb::admin_service_server::AdminServiceServer::new(self)
+        let admin = pb::admin_service_server::AdminServiceServer::new(self.clone())
             .accept_compressed(gz)
             .send_compressed(gz)
             .max_decoding_message_size(MAX_MESSAGE);
+        // Unauthenticated callers reach this one: it decodes no more than a
+        // CI token.
+        let ci = pb::ci_service_server::CiServiceServer::new(self)
+            .accept_compressed(gz)
+            .send_compressed(gz)
+            .max_decoding_message_size(CI_MESSAGE)
+            .max_encoding_message_size(CONTROL_MESSAGE);
         tonic::service::Routes::new(objects)
             .add_service(repo)
             .add_service(workspaces)
             .add_service(admin)
+            .add_service(ci)
     }
 
     /// Authenticates a gRPC call.
@@ -1078,6 +1090,54 @@ impl pb::admin_service_server::AdminService for Services {
             Status::from(CallError::Api(e))
         })?;
         tracing::info!(op = "MintToken", principal = %cx.principal.subject, "minted a token");
+        Ok(Response::new(pb::Token {
+            token: token.expose().to_owned(),
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl pb::ci_service_server::CiService for Services {
+    /// Exchanges a CI job's token for a short graft token
+    /// (`docs/design.md` §12.1). No bearer token: the CI token is the
+    /// credential. The protocol version is bound as on every call. Every
+    /// refusal is `Unauthenticated` (the token is not good) or
+    /// `PermissionDenied` (a good token this deployment does not bind), and
+    /// the log says which rule refused, never a claim or the token.
+    async fn exchange_ci_token(
+        &self,
+        request: Request<pb::ExchangeCiTokenRequest>,
+    ) -> Result<Response<pb::Token>, Status> {
+        const OP: &str = "ExchangeCiToken";
+        let started = Instant::now();
+        let refuse = |e: ApiError| {
+            self.app.refused(OP, &e);
+            Status::from(CallError::Api(e))
+        };
+        let header = request
+            .metadata()
+            .get(VERSION_HEADER)
+            .and_then(|v| v.to_str().ok());
+        PROTOCOL_VERSION.accept(header).map_err(refuse)?;
+        let Some(ci) = self.app.ci.clone() else {
+            tracing::info!(op = OP, reason = "no CI issuer is configured", "refused");
+            return Err(refuse(ApiError::Unauthenticated));
+        };
+        let req = request.into_inner();
+        let token = ci
+            .exchange(
+                &self.app.signing,
+                req.ci_token.trim(),
+                req.changeset.as_deref(),
+                self.app.now_s(),
+            )
+            .await
+            .map_err(|e| {
+                tracing::info!(op = OP, reason = %e, "refused");
+                refuse(e.into())
+            })?;
+        self.app.observe(OP, "ok", started);
+        tracing::info!(op = OP, "exchanged a CI token");
         Ok(Response::new(pb::Token {
             token: token.expose().to_owned(),
         }))

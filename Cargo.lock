@@ -1869,6 +1869,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-stream",
+ "tonic",
 ]
 
 [[package]]
@@ -2076,6 +2078,7 @@ dependencies = [
  "graft-store-sqlite",
  "graft-telemetry",
  "graft-testkit",
+ "reqwest",
  "rusqlite",
  "rustix",
  "serde",

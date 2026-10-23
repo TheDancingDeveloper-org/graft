@@ -4,6 +4,7 @@
 pub(crate) mod attest;
 pub(crate) mod blame;
 pub(crate) mod cat;
+pub(crate) mod ci;
 pub(crate) mod clone;
 pub(crate) mod commit;
 pub(crate) mod diff;

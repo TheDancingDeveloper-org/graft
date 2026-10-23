@@ -76,6 +76,8 @@ pub(crate) enum Command {
     Revert(RevertArgs),
     /// Record a check result for a changeset (for CI)
     Attest(AttestArgs),
+    /// CI helpers: exchange the job's identity token for a graft token
+    Ci(CiArgs),
     /// Call a read operation of the API, with JSON in and out
     Api(ApiArgs),
     /// Print versions
@@ -361,6 +363,50 @@ pub(crate) struct AttestArgs {
     /// A link to the run
     #[arg(long, value_name = "URL", default_value = "")]
     pub(crate) url: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CiArgs {
+    #[command(subcommand)]
+    pub(crate) action: CiAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum CiAction {
+    /// Exchange the CI job's identity token (on standard input) for a short graft token, written to --out
+    Exchange(CiExchangeArgs),
+}
+
+/// The CI system a job runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum CiProvider {
+    /// GitHub Actions OIDC
+    Github,
+    /// A Woodpecker job token
+    Woodpecker,
+}
+
+impl CiProvider {
+    /// The name on the command line.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Woodpecker => "woodpecker",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CiExchangeArgs {
+    /// The CI system
+    #[arg(long, value_enum)]
+    pub(crate) provider: CiProvider,
+    /// Pin the token to the changeset the job attests (a binding that can attest requires it)
+    #[arg(long, value_name = "ID")]
+    pub(crate) changeset: Option<String>,
+    /// File to write the graft token to (mode 0600; replaced whole). The token is never printed.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) out: PathBuf,
 }
 
 #[derive(Debug, Args)]
