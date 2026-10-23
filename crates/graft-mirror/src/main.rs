@@ -33,7 +33,6 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
          [--server <url>] [--db <file>] [--token-file <file>]
          [--line <git-ref>=<line>]... [--no-tags] [--allow-lossy <sha>]...
   follow --config <file>                git-primary: follow GitHub main
-  bridge --config <file>                git-primary: land drafts as GitHub PRs
   export --config <file>                graft-primary: export lines to GitHub
   export --to <bare-repo> --repo <name> full export (exit path, drill)
          --db <file> [--server <url>] [--token-file <file>]
@@ -68,10 +67,6 @@ fn main() -> ExitCode {
             Some(step) => run(cmd_authority(step, &args[2..])),
             None => usage(),
         },
-        Some("bridge") => {
-            eprintln!("graft-mirror: not implemented yet (see docs/plan.md)");
-            ExitCode::from(2)
-        }
         _ => usage(),
     }
 }
