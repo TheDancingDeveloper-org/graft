@@ -300,7 +300,7 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
                 .await?;
             let full = page.len() == limit as usize;
             limit = (limit * 2).min(MAX_PAGE);
-            for (id, _) in page {
+            for (id, _, _) in page {
                 let cached = self.get::<Blame>(repo, &blame_key(id, path)).await?;
                 if pending.is_empty()
                     && let Some(runs) = cached
