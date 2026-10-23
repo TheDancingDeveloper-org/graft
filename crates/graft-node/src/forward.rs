@@ -67,6 +67,7 @@ pub const FORWARDED: &[(&str, &str)] = &[
     ),
     ("/graft.v1.AdminService/Gc", "Gc"),
     ("/graft.v1.AdminService/MintToken", "MintToken"),
+    ("/graft.v1.CiService/ExchangeCiToken", "ExchangeCiToken"),
 ];
 
 /// Hop-by-hop headers, which describe one connection and are not passed on.
