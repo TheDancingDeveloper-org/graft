@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
-use graft_model::{ChangesetId, ObjectId};
+use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
     MetaTxn, Precondition, RecordState, RepoId, StoreError, StoreResult, TxnOutcome, Write,
 };
@@ -481,12 +481,13 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
             Write::PutWorkspace(ws) => {
                 conn.prepare_cached(
                     "INSERT INTO workspaces
-                         (repo, name, owner, session, line, base, head, lease_until)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         (repo, name, owner, session, line, base, head, lease_until, work_item)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                      ON CONFLICT (repo, name) DO UPDATE SET
                          owner = excluded.owner, session = excluded.session,
                          line = excluded.line, base = excluded.base,
-                         head = excluded.head, lease_until = excluded.lease_until",
+                         head = excluded.head, lease_until = excluded.lease_until,
+                         work_item = excluded.work_item",
                 )
                 .and_then(|mut s| {
                     s.execute(params![
@@ -498,6 +499,7 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                         &ws.base.0.0[..],
                         ws.head.map(|h| h.0.0.to_vec()),
                         ws.lease_until_ms,
+                        ws.work_item,
                     ])
                 })
                 .map_err(sql_err)?;
@@ -506,12 +508,21 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 conn.prepare_cached("DELETE FROM workspaces WHERE repo = ?1 AND name = ?2")
                     .and_then(|mut s| s.execute(params![repo, name]))
                     .map_err(sql_err)?;
+                clear_draft_paths(conn, repo, &name)?;
             }
-            // The draft_paths table arrives with migration v6 (WI-2310 step
-            // b); until then nothing writes these.
-            Write::SetDraftPaths { .. } | Write::AddDraftPaths { .. } => {
-                return Err(invalid("draft paths are not supported yet".into()));
+            Write::SetDraftPaths {
+                workspace,
+                line,
+                paths,
+            } => {
+                clear_draft_paths(conn, repo, &workspace)?;
+                add_draft_paths(conn, repo, &workspace, &line, &paths)?;
             }
+            Write::AddDraftPaths {
+                workspace,
+                line,
+                paths,
+            } => add_draft_paths(conn, repo, &workspace, &line, &paths)?,
             Write::PutDerived {
                 kind,
                 version,
@@ -605,4 +616,31 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
         }
     }
     Ok(TxnOutcome::Committed(lsns))
+}
+
+fn clear_draft_paths(conn: &Connection, repo: i64, workspace: &str) -> StoreResult<()> {
+    conn.prepare_cached("DELETE FROM draft_paths WHERE repo = ?1 AND workspace = ?2")
+        .and_then(|mut s| s.execute(params![repo, workspace]))
+        .map_err(sql_err)?;
+    Ok(())
+}
+
+fn add_draft_paths(
+    conn: &Connection,
+    repo: i64,
+    workspace: &str,
+    line: &str,
+    paths: &[RepoPath],
+) -> StoreResult<()> {
+    let mut stmt = conn
+        .prepare_cached(
+            "INSERT OR IGNORE INTO draft_paths (repo, line, path, workspace)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(sql_err)?;
+    for path in paths {
+        stmt.execute(params![repo, line, path.as_str(), workspace])
+            .map_err(sql_err)?;
+    }
+    Ok(())
 }

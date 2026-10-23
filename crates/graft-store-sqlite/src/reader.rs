@@ -175,9 +175,10 @@ type RawWorkspace = (
     Vec<u8>,
     Option<Vec<u8>>,
     i64,
+    Option<String>,
 );
 
-const WORKSPACE_COLUMNS: &str = "name, owner, session, line, base, head, lease_until";
+const WORKSPACE_COLUMNS: &str = "name, owner, session, line, base, head, lease_until, work_item";
 
 fn raw_workspace(r: &Row<'_>) -> rusqlite::Result<RawWorkspace> {
     Ok((
@@ -188,11 +189,12 @@ fn raw_workspace(r: &Row<'_>) -> rusqlite::Result<RawWorkspace> {
         r.get(4)?,
         r.get(5)?,
         r.get(6)?,
+        r.get(7)?,
     ))
 }
 
 fn workspace_record(raw: RawWorkspace) -> StoreResult<WorkspaceRecord> {
-    let (name, owner, session, line, base, head, lease_until_ms) = raw;
+    let (name, owner, session, line, base, head, lease_until_ms, work_item) = raw;
     Ok(WorkspaceRecord {
         name,
         owner,
@@ -201,7 +203,7 @@ fn workspace_record(raw: RawWorkspace) -> StoreResult<WorkspaceRecord> {
         base: changeset_id(&base)?,
         head: head.as_deref().map(changeset_id).transpose()?,
         lease_until_ms,
-        work_item: None,
+        work_item,
     })
 }
 
@@ -788,4 +790,95 @@ pub(crate) fn gc_protection(conn: &Connection, repo: RepoId) -> StoreResult<bool
     conn.prepare_cached("SELECT gc_protection FROM repos WHERE id = ?1")
         .and_then(|mut s| s.query_row([repo.0], |r| r.get(0)))
         .map_err(sql_err)
+}
+
+pub(crate) fn scan_draft_paths(
+    conn: &Connection,
+    repo: RepoId,
+    line: &str,
+    prefix: &RepoPath,
+    after: Option<(RepoPath, String)>,
+    limit: u32,
+) -> StoreResult<Vec<(RepoPath, String)>> {
+    check_repo(conn, repo)?;
+    let limit = page_limit(limit) as i64;
+    // `prefix` itself, then the range [prefix/, prefix0) ('0' follows
+    // '/'): every row scanned is beneath `prefix`, so the cost follows the
+    // rows returned.
+    let (after_path, after_ws) = match &after {
+        Some((p, w)) => (p.as_str().to_owned(), w.clone()),
+        None => (String::new(), String::new()),
+    };
+    let has_after = after.is_some() as i64;
+    let lo = format!("{prefix}/");
+    let hi = format!("{prefix}0");
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT path, workspace FROM (
+                 SELECT path, workspace FROM draft_paths
+                 WHERE repo = ?1 AND line = ?2 AND path = ?3
+                     AND (?6 = 0 OR (path, workspace) > (?7, ?8))
+                 ORDER BY path, workspace LIMIT ?9
+             )
+             UNION ALL
+             SELECT path, workspace FROM (
+                 SELECT path, workspace FROM draft_paths
+                 WHERE repo = ?1 AND line = ?2 AND path >= ?4 AND path < ?5
+                     AND (?6 = 0 OR (path, workspace) > (?7, ?8))
+                 ORDER BY path, workspace LIMIT ?9
+             )
+             LIMIT ?9",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(
+            params![
+                repo.0,
+                line,
+                prefix.as_str(),
+                lo,
+                hi,
+                has_after,
+                after_path,
+                after_ws,
+                limit
+            ],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map_err(sql_err)?;
+    rows.map(|r| {
+        let (p, w) = r.map_err(sql_err)?;
+        Ok((path(&p)?, w))
+    })
+    .collect()
+}
+
+pub(crate) fn workspace_draft_paths(
+    conn: &Connection,
+    repo: RepoId,
+    workspace: &str,
+    after: Option<RepoPath>,
+    limit: u32,
+) -> StoreResult<Vec<RepoPath>> {
+    check_repo(conn, repo)?;
+    let limit = page_limit(limit) as i64;
+    let has_after = after.is_some() as i64;
+    let after = after.map(|p| p.as_str().to_owned()).unwrap_or_default();
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT DISTINCT path FROM draft_paths
+             WHERE repo = ?1 AND workspace = ?2 AND (?3 = 0 OR path > ?4)
+             ORDER BY path LIMIT ?5",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, workspace, has_after, after, limit], |r| {
+            r.get::<_, String>(0)
+        })
+        .map_err(sql_err)?;
+    rows.map(|r| path(&r.map_err(sql_err)?)).collect()
+}
+
+fn path(s: &str) -> StoreResult<RepoPath> {
+    RepoPath::new(s).map_err(|e| StoreError::Corrupt(format!("draft path: {}", e.reason())))
 }

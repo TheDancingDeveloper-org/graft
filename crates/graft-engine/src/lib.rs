@@ -45,6 +45,7 @@ use graft_store::{MAX_PAGE, MetaStore, ObjectStore};
 
 mod access;
 mod diff;
+mod drafts;
 mod errors;
 mod gc;
 mod history;
@@ -420,6 +421,14 @@ where
         req: graft_proto::types::Resolve,
     ) -> graft_proto::error::ApiResult<graft_proto::types::Resolved> {
         self.do_resolve(cx, req).await
+    }
+
+    async fn overlapping_drafts(
+        &self,
+        cx: &graft_proto::CallContext,
+        req: graft_proto::types::OverlappingDrafts,
+    ) -> graft_proto::error::ApiResult<graft_proto::types::DraftOverlap> {
+        self.do_overlapping_drafts(cx, req).await
     }
 }
 

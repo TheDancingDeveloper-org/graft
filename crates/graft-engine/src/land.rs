@@ -421,7 +421,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     /// The line ref `name`: present and a line.
-    async fn line_ref(&self, repo: RepoId, name: &str) -> Result<RefRecord, ApiError> {
+    pub(crate) async fn line_ref(&self, repo: RepoId, name: &str) -> Result<RefRecord, ApiError> {
         let line = self
             .meta
             .get_ref(repo, name)

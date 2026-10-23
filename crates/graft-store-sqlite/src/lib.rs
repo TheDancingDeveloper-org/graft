@@ -582,6 +582,35 @@ impl MetaStore for SqliteMetaStore {
         .await
     }
 
+    async fn scan_draft_paths(
+        &self,
+        repo: RepoId,
+        line: &str,
+        prefix: &RepoPath,
+        after: Option<(RepoPath, String)>,
+        limit: u32,
+    ) -> StoreResult<Vec<(RepoPath, String)>> {
+        let (line, prefix) = (line.to_owned(), prefix.clone());
+        self.read("scan_draft_paths", move |c| {
+            reader::scan_draft_paths(c, repo, &line, &prefix, after, limit)
+        })
+        .await
+    }
+
+    async fn workspace_draft_paths(
+        &self,
+        repo: RepoId,
+        workspace: &str,
+        after: Option<RepoPath>,
+        limit: u32,
+    ) -> StoreResult<Vec<RepoPath>> {
+        let workspace = workspace.to_owned();
+        self.read("workspace_draft_paths", move |c| {
+            reader::workspace_draft_paths(c, repo, &workspace, after, limit)
+        })
+        .await
+    }
+
     async fn gc_protection(&self, repo: RepoId) -> StoreResult<bool> {
         self.read("gc_protection", move |c| reader::gc_protection(c, repo))
             .await

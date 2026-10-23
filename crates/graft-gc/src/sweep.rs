@@ -321,6 +321,14 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
                 }
                 Some(rest) => {
                     txn.writes.push(Write::PutWorkspace(rest.clone()));
+                    // A lapsed workspace's paths no longer count for draft
+                    // overlap; the first chunk drops them (later ones find
+                    // none). The final delete would drop them too.
+                    txn.writes.push(Write::SetDraftPaths {
+                        workspace: current.name.clone(),
+                        line: current.line.clone(),
+                        paths: Vec::new(),
+                    });
                     txn.writes
                         .push(journal::workspace_lapsing(&current.name, abandoned));
                 }

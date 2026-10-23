@@ -62,6 +62,8 @@ where
     case!(gc_protection_marker);
     case!(derived_value_cas);
     case!(a_collected_changeset_is_replaced);
+    case!(draft_path_index);
+    case!(workspace_work_item_round_trips);
 }
 
 fn cs(n: u8) -> ChangesetId {
@@ -2221,4 +2223,117 @@ async fn a_collected_changeset_is_replaced<O: ObjectStore, M: MetaStore>(_object
         .expect("read")
         .expect("protection");
     assert_eq!((p.pins, p.expires_at_ms), (0, Some(5)));
+}
+
+async fn draft_path_index<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "draft-paths").await;
+    let p = |s: &str| RepoPath::new(s).expect("valid path");
+    let set = |ws: &str, line: &str, paths: &[&str]| Write::SetDraftPaths {
+        workspace: ws.into(),
+        line: line.into(),
+        paths: paths.iter().map(|s| p(s)).collect(),
+    };
+    let want = |v: &[(&str, &str)]| {
+        v.iter()
+            .map(|(a, b)| (p(a), (*b).to_owned()))
+            .collect::<Vec<_>>()
+    };
+    apply(
+        meta,
+        repo,
+        vec![
+            // Siblings that sort inside [src, src0) but are not beneath it.
+            set("a", "main", &["src", "src/x.rs", "src-y", "src.z", "src0"]),
+            set("b", "main", &["src/x.rs", "doc/z"]),
+            set("c", "dev", &["src/x.rs"]),
+        ],
+    )
+    .await;
+    let src = p("src");
+    let scan = |after, limit| meta.scan_draft_paths(repo, "main", &src, after, limit);
+    let all = want(&[("src", "a"), ("src/x.rs", "a"), ("src/x.rs", "b")]);
+    assert_eq!(scan(None, 10).await.expect("scan"), all);
+    // Every row scanned is a hit: a page of n is the first n hits.
+    assert_eq!(scan(None, 2).await.expect("scan"), all[..2]);
+    assert_eq!(
+        scan(Some((p("src"), "a".into())), 1).await.expect("scan"),
+        all[1..2]
+    );
+    assert_eq!(
+        scan(Some((p("src/x.rs"), "a".into())), 10)
+            .await
+            .expect("scan"),
+        all[2..]
+    );
+    assert_eq!(
+        meta.scan_draft_paths(repo, "main", &p("src/x.rs"), None, 10)
+            .await
+            .expect("scan"),
+        want(&[("src/x.rs", "a"), ("src/x.rs", "b")])
+    );
+    assert_eq!(
+        meta.scan_draft_paths(repo, "dev", &src, None, 10)
+            .await
+            .expect("scan"),
+        want(&[("src/x.rs", "c")])
+    );
+    // Add is a set union.
+    apply(
+        meta,
+        repo,
+        vec![Write::AddDraftPaths {
+            workspace: "b".into(),
+            line: "main".into(),
+            paths: vec![p("src/x.rs"), p("src/w.rs")],
+        }],
+    )
+    .await;
+    assert_eq!(
+        meta.workspace_draft_paths(repo, "b", None, 10)
+            .await
+            .expect("paths"),
+        vec![p("doc/z"), p("src/w.rs"), p("src/x.rs")]
+    );
+    assert_eq!(
+        meta.workspace_draft_paths(repo, "b", Some(p("doc/z")), 1)
+            .await
+            .expect("paths"),
+        vec![p("src/w.rs")]
+    );
+    // Replace, clear, and delete with the workspace.
+    apply(
+        meta,
+        repo,
+        vec![
+            set("a", "main", &["doc/z"]),
+            set("c", "dev", &[]),
+            Write::DeleteWorkspace("b".into()),
+        ],
+    )
+    .await;
+    assert!(scan(None, 10).await.expect("scan").is_empty());
+    assert_eq!(
+        meta.workspace_draft_paths(repo, "a", None, 10)
+            .await
+            .expect("paths"),
+        vec![p("doc/z")]
+    );
+    for gone in ["b", "c"] {
+        assert!(
+            meta.workspace_draft_paths(repo, gone, None, 10)
+                .await
+                .expect("paths")
+                .is_empty()
+        );
+    }
+}
+
+async fn workspace_work_item_round_trips<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "work-item").await;
+    let record = WorkspaceRecord {
+        work_item: Some("WI-1".to_owned()),
+        ..ws("w", None, 10)
+    };
+    apply(meta, repo, vec![Write::PutWorkspace(record.clone())]).await;
+    assert_eq!(meta.workspace(repo, "w").await.expect("read"), Some(record));
 }

@@ -7,7 +7,8 @@
 //! `land` grant `read`; `land:<line>` grants landing on that line only,
 //! and creating it (`CreateLine`) when it does not exist yet;
 //! `attest` grants `Attest` and nothing else, and only it and `admin` grant
-//! `Attest`. This is the engine's minimal reading of the text form until
+//! `Attest`; `drafts` grants `Drafts` (the draft overlap query, D24) and
+//! nothing else, and only it and `admin` grant `Drafts`. This is the engine's minimal reading of the text form until
 //! `graft_auth::authorize` (G1.9) replaces it.
 
 use graft_model::{Change, RepoPath};
@@ -29,6 +30,8 @@ pub(crate) enum Need<'a> {
     Land(&'a str),
     /// Post an attestation (`attest`).
     Attest,
+    /// See other workspaces' draft paths (`drafts`).
+    Drafts,
     /// Administer the repository.
     Admin,
 }
@@ -49,6 +52,7 @@ pub(crate) fn require(cx: &CallContext, repo: &str, need: Need<'_>) -> Result<()
             });
         }
         Need::Attest => ("attest", None),
+        Need::Drafts => ("drafts", None),
         Need::Admin => ("admin", None),
     };
     Err(ApiError::PermissionDenied {
@@ -97,6 +101,7 @@ fn grants(scope: &str, repo: &str, need: Need<'_>) -> bool {
         (Some("write"), Need::Workspace) => true,
         (Some("land"), Need::Land(line)) => arg == Some(line),
         (Some("attest"), Need::Attest) => arg.is_none(),
+        (Some("drafts"), Need::Drafts) => arg.is_none(),
         (Some("write"), Need::Write(path)) => match (arg, path) {
             (None, _) => true,
             // A prefix-restricted write scope covers only paths beneath it.
@@ -183,6 +188,31 @@ mod tests {
             Need::Admin,
         ] {
             assert!(!grants("repo:r:attest", "r", need), "{need:?}");
+        }
+    }
+
+    #[test]
+    fn drafts_is_its_own_scope() {
+        assert!(grants("repo:r:drafts", "r", Need::Drafts));
+        assert!(grants("repo:r:admin", "r", Need::Drafts));
+        for scope in [
+            "repo:r:read",
+            "repo:r:write",
+            "repo:r:land:main",
+            "repo:r:attest",
+        ] {
+            assert!(!grants(scope, "r", Need::Drafts), "{scope}");
+        }
+        assert!(!grants("repo:s:drafts", "r", Need::Drafts));
+        assert!(!grants("repo:r:drafts:src", "r", Need::Drafts));
+        for need in [
+            Need::Objects,
+            Need::Read,
+            Need::Write(None),
+            Need::Workspace,
+            Need::Admin,
+        ] {
+            assert!(!grants("repo:r:drafts", "r", need), "{need:?}");
         }
     }
 

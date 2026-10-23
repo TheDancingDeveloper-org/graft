@@ -24,8 +24,9 @@ struct Repo {
     changesets: BTreeMap<ChangesetId, (Vec<u8>, ChangesetRecord)>,
     refs: BTreeMap<String, RefRecord>,
     workspaces: BTreeMap<String, WorkspaceRecord>,
-    /// Draft path index: (line, path, workspace).
-    draft_paths: BTreeSet<(String, RepoPath, String)>,
+    /// Draft path index: (line, path, workspace). Paths are kept as
+    /// strings so a scan can start at `prefix/`, which is not a `RepoPath`.
+    draft_paths: BTreeSet<(String, String, String)>,
     /// Reverse draft path index: workspace → (line, path).
     workspace_paths: BTreeMap<String, BTreeSet<(String, RepoPath)>>,
     derived: BTreeMap<(String, u32, Vec<u8>), Vec<u8>>,
@@ -517,10 +518,10 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
     Ok(TxnOutcome::Committed(lsns))
 }
 
-/// Clears a doomed mark that is not `deleting`: the object is held again.
 fn clear_draft_paths(repo: &mut Repo, workspace: &str) {
     for (line, path) in repo.workspace_paths.remove(workspace).unwrap_or_default() {
-        repo.draft_paths.remove(&(line, path, workspace.to_owned()));
+        repo.draft_paths
+            .remove(&(line, path.as_str().to_owned(), workspace.to_owned()));
     }
 }
 
@@ -530,12 +531,16 @@ fn add_draft_paths(repo: &mut Repo, workspace: &str, line: &str, paths: Vec<Repo
         .entry(workspace.to_owned())
         .or_default();
     for path in paths {
-        repo.draft_paths
-            .insert((line.to_owned(), path.clone(), workspace.to_owned()));
+        repo.draft_paths.insert((
+            line.to_owned(),
+            path.as_str().to_owned(),
+            workspace.to_owned(),
+        ));
         rows.insert((line.to_owned(), path));
     }
 }
 
+/// Clears a doomed mark that is not `deleting`: the object is held again.
 fn revive(repo: &mut Repo, object: ObjectId) {
     if repo.doomed.get(&object).is_some_and(|m| !m.deleting) {
         repo.doomed.remove(&object);
@@ -954,21 +959,40 @@ impl MetaStore for MemoryStore {
     ) -> impl Future<Output = StoreResult<Vec<(RepoPath, String)>>> + Send {
         ready(self.with(|st| {
             use std::ops::Bound;
-            let start = match after {
-                Some((path, ws)) => Bound::Excluded((line.to_owned(), path, ws)),
-                None => Bound::Included((line.to_owned(), prefix.clone(), String::new())),
+            let rows = &st.repo(repo)?.draft_paths;
+            let key = |p: String, w: String| (line.to_owned(), p, w);
+            let after = after.map(|(p, w)| key(p.as_str().to_owned(), w));
+            // One sub-range [from, to), resumed after `after`; empty once
+            // `after` is past its end (a reversed range would panic).
+            let range = |from: (String, String, String), to: (String, String, String)| {
+                let start = match &after {
+                    Some(a) if *a >= to => return None,
+                    Some(a) if *a >= from => Bound::Excluded(a.clone()),
+                    _ => Bound::Included(from),
+                };
+                Some(rows.range((start, Bound::Excluded(to))))
             };
-            // Beneath `prefix` sorts before `prefix0` ('0' follows '/').
-            let end = format!("{prefix}0");
-            Ok(st
-                .repo(repo)?
-                .draft_paths
-                .range((start, Bound::Unbounded))
-                .take_while(|(l, p, _)| l == line && p.as_str() < end.as_str())
-                .filter(|(_, p, _)| p.starts_with(prefix))
+            // `prefix` itself (a path never holds NUL, so `prefix\0` ends
+            // those rows), then [prefix/, prefix0) ('0' follows '/'): every
+            // row scanned is a hit, so the cost follows the rows returned.
+            let exact = range(
+                key(prefix.as_str().to_owned(), String::new()),
+                key(format!("{prefix}\0"), String::new()),
+            );
+            let under = range(
+                key(format!("{prefix}/"), String::new()),
+                key(format!("{prefix}0"), String::new()),
+            );
+            exact
+                .into_iter()
+                .flatten()
+                .chain(under.into_iter().flatten())
                 .take(page_limit(limit))
-                .map(|(_, p, w)| (p.clone(), w.clone()))
-                .collect())
+                .map(|(_, p, w)| {
+                    let p = RepoPath::new(p).map_err(|_| StoreError::Corrupt(p.clone()))?;
+                    Ok((p, w.clone()))
+                })
+                .collect()
         }))
     }
 

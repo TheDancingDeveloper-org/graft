@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -190,6 +190,23 @@ CREATE TABLE line_forks (
     PRIMARY KEY (repo, line)
 ) WITHOUT ROWID;
 CREATE INDEX line_pos_changeset ON line_pos (repo, changeset, line);
+";
+
+/// Version 6 (WI-2310): the draft path index (`docs/notes/draft-overlap.md`
+/// §3, D24). One row per path a live workspace's stack changes, keyed for
+/// the overlap range scan, with a reverse index by workspace for removal.
+/// Workspaces get the Vogt work item from the opening token. No back-fill:
+/// existing workspaces gain rows at their next draft write.
+const V6: &str = "
+ALTER TABLE workspaces ADD COLUMN work_item TEXT;
+CREATE TABLE draft_paths (
+    repo      INTEGER NOT NULL REFERENCES repos(id),
+    line      TEXT NOT NULL,
+    path      TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    PRIMARY KEY (repo, line, path, workspace)
+) WITHOUT ROWID;
+CREATE INDEX draft_paths_workspace ON draft_paths (repo, workspace, path, line);
 ";
 
 /// The database's schema version.
