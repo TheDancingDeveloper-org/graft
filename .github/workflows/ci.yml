@@ -42,6 +42,9 @@ jobs:
           while IFS=: read -r file number line; do
             case "$line" in
               *self-hosted*) ;;
+              # The graft-dev runner is self-hosted but registered with
+              # --no-default-labels, so its only label is graft-dev.
+              *"[graft-dev]"*) ;;
               *)
                 echo "::error file=$file,line=$number::job does not name a self-hosted runner"
                 bad=1
@@ -93,8 +96,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-      - run: cargo nextest run --workspace --all-features --no-tests=pass
+      # Pinned cargo-nextest, run from the job's temp dir. Some self-hosted
+      # runners carry an older cargo-nextest in $CARGO_HOME/bin, which cargo
+      # resolves before PATH, so neither install-action nor a PATH prepend
+      # is enough.
+      - run: |
+          curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/cargo-nextest" nextest --version
+      - run: '"$RUNNER_TEMP/cargo-nextest" nextest run --workspace --all-features --no-tests=pass'
       - run: cargo test --workspace --all-features --doc

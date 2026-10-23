@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, graft-dev]
+    runs-on: [graft-dev]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
