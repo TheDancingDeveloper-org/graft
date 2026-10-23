@@ -74,6 +74,8 @@ def markdown(doc: dict) -> str:
 
 
 def scale_md(r: dict) -> list[str]:
+    if r.get("kind") == "many_copies":
+        return copies_md(r)
     g = r["generate"]
     out = [
         f"## Scale {r['scale']:,}",
@@ -175,6 +177,36 @@ def scale_md(r: dict) -> list[str]:
 
 def _mib(v, div) -> str:
     return "" if v is None else f"{v / div:.1f}"
+
+
+def copies_md(r: dict) -> list[str]:
+    """The many-working-copies scenario (WI-2313)."""
+    rp = r["repository"]
+    out = [
+        f"## Many working copies, scale {r['scale']:,}: {'pass' if r['ok'] else '**FAIL**'}",
+        "",
+        f"Repository: {rp['files']:,} files, {rp['bytes'] / 1048576:.1f} MiB; sparse slice `{rp['sparse_prefix']}`: "
+        f"{rp['sparse_files']:,} files, {rp['sparse_bytes'] / 1048576:.2f} MiB. The N graft clones start at once; "
+        "git is one clone plus N-1 `git worktree add`, one at a time, sharing one object store.",
+        "",
+        "| System | Shape | N | Copies ok | Wall s | Clone p50 ms | Clone p95 ms | Files MiB | Cache MiB | Other state MiB | Total MiB | Per copy MiB |",
+        "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for x in r["runs"]:
+        b = x["bytes"]
+        out.append(
+            f"| {x['system']} | {x['shape']} | {x['n']} | {_yes(x['copies_ok'])} | {x['wall_s']:.2f} | "
+            f"{_ms(x['clone'])} | {_ms(x['clone'], 'p95_ms')} | {_mib(b['files'], 1048576)} | {_mib(b['cache'], 1048576)} | "
+            f"{_mib(b['meta'], 1048576)} | {_mib(b['total'], 1048576)} | {_mib(x['bytes_per_copy']['total'], 1048576)} |"
+        )
+    out += [
+        "",
+        "graft's cache is per clone (`.graft/cache`), so it grows with N; git's object store is shared, counted once "
+        "under other state. Server storage growth over the run: "
+        f"{r['server_storage_growth_bytes']:,} bytes. graft-node: {r['node']}.",
+        "",
+    ]
+    return out
 
 
 def live_md(la: dict) -> list[str]:

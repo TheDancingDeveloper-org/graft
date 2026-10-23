@@ -12,7 +12,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import bench, livea, report
+from . import bench, copies, livea, report
 from .proc import StepError
 from .site import LocalSite, RemoteSite
 from .tools import Git, Graft, Mirror
@@ -45,6 +45,11 @@ def parse_args(argv):
     )
     p.add_argument("--repo-prefix", default="bench", help="repositories are <prefix>-<scale> and <prefix>-<scale>-import")
     p.add_argument("--no-import", action="store_true", help="skip the graft-mirror import benchmark (and its repository)")
+    p.add_argument(
+        "--many-copies",
+        metavar="N,N,...",
+        help="instead of the full bench: N graft clones (full and sparse) against one clone plus N-1 git worktrees, e.g. 1,8,32",
+    )
     p.add_argument("--live-awareness", action="store_true", help="also run the deterministic live-awareness scenario (WI-2311)")
     p.add_argument("--overlap", default="mid", help="live awareness: comma-separated overlap levels from low,mid,high (default mid)")
     p.add_argument("--la-writers", type=int, default=4, help="live awareness: writers (default 4)")
@@ -52,6 +57,7 @@ def parse_args(argv):
     p.add_argument("--racing", action="store_true", help="live awareness: also run each graft policy with real threads (correctness only)")
     a = p.parse_args(argv)
     a.scales = [int(x) for x in a.scales.split(",") if x]
+    a.many_copies = [int(x) for x in a.many_copies.split(",") if x] if a.many_copies else None
     a.overlap = [x for x in a.overlap.split(",") if x]
     for o in a.overlap:
         if o not in livea.OVERLAPS:
@@ -75,7 +81,10 @@ def main(argv=None) -> int:
     def log(msg: str) -> None:
         print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
-    repos = {s: (f"{a.repo_prefix}-{s}", None if a.no_import else f"{a.repo_prefix}-{s}-import") for s in a.scales}
+    if a.many_copies:
+        repos = {s: (f"{a.repo_prefix}-{s}-copies", None) for s in a.scales}
+    else:
+        repos = {s: (f"{a.repo_prefix}-{s}", None if a.no_import else f"{a.repo_prefix}-{s}-import") for s in a.scales}
     git = Git(a.git_bin)
     if a.server_url:
         site = RemoteSite(a.server_url, a.token_file)
@@ -105,7 +114,10 @@ def main(argv=None) -> int:
         for scale in a.scales:
             repo, imp = repos[scale]
             try:
-                r = bench.run_scale(cfg, scale, site, graft, mirror, git, repo, imp)
+                if a.many_copies:
+                    r = copies.run_scale(cfg, scale, site, graft, mirror, git, repo, a.many_copies)
+                else:
+                    r = bench.run_scale(cfg, scale, site, graft, mirror, git, repo, imp)
             except StepError as e:
                 log(f"[{scale}] failed: {e}")
                 doc["scales"].append({"scale": scale, "error": str(e)})
