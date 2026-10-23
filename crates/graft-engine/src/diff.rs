@@ -10,6 +10,10 @@ use graft_proto::types::{Diff, DiffResult, FileDiff, PatchOptions};
 use graft_proto::{ApiError, CallContext, Frame};
 use graft_store::{MetaStore, ObjectStore, RepoId};
 use std::fmt;
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 use imara_diff::{
     Algorithm, InternedInput, Interner, Token, UnifiedDiffConfig, UnifiedDiffPrinter,
@@ -222,6 +226,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// Fills in unified patches for text files, within the per-file cap and
     /// the response budget. A file past the budget gets no patch and is
     /// marked truncated.
+    ///
+    /// Blobs are read in file order, a window at a time: as many files as
+    /// the remaining budget could show, by input size, and at least one.
+    /// Each window is decoded, verified and diffed on a few threads, then
+    /// capped in file order, so the result (errors included) is what one
+    /// file after another would give.
     async fn patches(
         &self,
         repo: RepoId,
@@ -234,49 +244,87 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             0 => self.config.default_patch_file_bytes,
             n => n.min(self.config.max_patch_file_bytes),
         } as usize;
+        let context = opts.context;
         let mut budget = self.config.max_patch_bytes as usize;
-        for file in files {
+        let mut next = 0;
+        while next < files.len() {
             if budget == 0 {
-                file.truncated = true;
-                continue;
+                for file in &mut files[next..] {
+                    file.truncated = true;
+                }
+                break;
             }
-            let path = file.change.path();
-            let old = trees
-                .lookup(from, path)
-                .await
-                .map_err(errors::source)?
-                .filter(|e| !e.kind.is_tree());
-            let new = match &file.change {
-                Change::Put { kind, id, .. } => Some((*kind, *id)),
-                Change::Delete { .. } => None,
-            };
-            let old_text = match &old {
-                None => None,
-                Some(e) if textual(e.kind) => match self.text(repo, e.id).await? {
-                    Some(t) => Some(t),
-                    None => continue,
-                },
-                Some(_) => continue,
-            };
-            let new_text = match new {
-                None => None,
-                Some((kind, id)) if textual(kind) => match self.text(repo, id).await? {
-                    Some(t) => Some(t),
-                    None => continue,
-                },
-                Some(_) => continue,
-            };
-            let mut patch = unified(path, old_text.as_deref(), new_text.as_deref(), opts.context);
-            file.truncated = cap_patch(&mut patch, per_file.min(budget));
-            budget -= patch.len();
-            file.patch = Some(patch);
+            let start = next;
+            let mut jobs = Vec::new();
+            let mut input = 0u64;
+            while next < files.len() && (jobs.is_empty() || input < budget as u64) {
+                let job = self.read_job(repo, trees, from, &files[next].change).await;
+                input += job.input_bytes();
+                jobs.push((files[next].change.path().clone(), job));
+                next += 1;
+            }
+            let results = parallel(jobs, input, |(path, job)| {
+                job.patch(&path, context, per_file)
+            });
+            for (file, result) in files[start..next].iter_mut().zip(results) {
+                if budget == 0 {
+                    file.truncated = true;
+                    continue;
+                }
+                let Some((mut patch, cut)) = result? else {
+                    continue;
+                };
+                file.truncated = cap_patch(&mut patch, budget) || cut;
+                budget -= patch.len();
+                file.patch = Some(patch);
+            }
         }
         Ok(())
     }
 
-    /// A blob as text, or `None` when it is larger than the patch input cap,
-    /// not UTF-8, or contains NUL.
-    async fn text(&self, repo: RepoId, id: ObjectId) -> Result<Option<String>, ApiError> {
+    /// Reads what one file's patch needs, stopping where a file-by-file
+    /// patch would stop. A failure is kept in the job, to surface only if
+    /// the budget reaches the file.
+    async fn read_job(
+        &self,
+        repo: RepoId,
+        trees: &Trees<'_, O>,
+        from: TreeId,
+        change: &Change,
+    ) -> Job {
+        let old = match trees.lookup(from, change.path()).await {
+            Ok(entry) => entry.filter(|e| !e.kind.is_tree()).map(|e| (e.kind, e.id)),
+            Err(e) => return Job::Failed(errors::source(e)),
+        };
+        let old = match self.input(repo, old).await {
+            Ok(Input::Skip) => return Job::Skip,
+            Ok(input) => input,
+            Err(e) => return Job::Failed(e),
+        };
+        let new = match change {
+            Change::Put { kind, id, .. } => Some((*kind, *id)),
+            Change::Delete { .. } => None,
+        };
+        Job::Read {
+            old,
+            new: self.input(repo, new).await,
+        }
+    }
+
+    /// One side of a patch: absent, a blob frame to decode, or `Skip` when
+    /// the side cannot be shown as text (not a text kind, or larger than
+    /// the patch input cap).
+    async fn input(
+        &self,
+        repo: RepoId,
+        side: Option<(EntryKind, ObjectId)>,
+    ) -> Result<Input, ApiError> {
+        let Some((kind, id)) = side else {
+            return Ok(Input::Absent);
+        };
+        if !textual(kind) {
+            return Ok(Input::Skip);
+        }
         let raw = self
             .objects
             .get(repo, id)
@@ -288,15 +336,140 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .filter(|f| f.kind == ObjectKind::Blob)
             .ok_or(ApiError::CorruptObject { id })?;
         if frame.uncompressed_len > self.config.max_patch_input_bytes {
-            return Ok(None);
+            return Ok(Input::Skip);
         }
+        Ok(Input::Blob(id, frame))
+    }
+}
+
+/// One side of a file's patch, read but not yet decoded.
+enum Input {
+    Absent,
+    Blob(ObjectId, Frame),
+    Skip,
+}
+
+impl Input {
+    /// The side's text: `Ok(None)` when it is not shown as text (`Skip`,
+    /// not UTF-8, or contains NUL), `Ok(Some(None))` when absent.
+    fn text(self) -> Result<Option<Option<String>>, ApiError> {
+        let (id, frame) = match self {
+            Input::Absent => return Ok(Some(None)),
+            Input::Skip => return Ok(None),
+            Input::Blob(id, frame) => (id, frame),
+        };
         let payload = frame
             .decode_verified(id)
             .map_err(|_| ApiError::CorruptObject { id })?;
         Ok(String::from_utf8(payload)
             .ok()
-            .filter(|s| !s.contains('\0')))
+            .filter(|s| !s.contains('\0'))
+            .map(Some))
     }
+
+    fn bytes(&self) -> u64 {
+        match self {
+            Input::Blob(_, frame) => frame.uncompressed_len,
+            Input::Absent | Input::Skip => 0,
+        }
+    }
+}
+
+/// What one file's patch needs, read in file order.
+enum Job {
+    /// No patch: the old side is not shown as text.
+    Skip,
+    /// Reading the old side failed.
+    Failed(ApiError),
+    /// The old side, and the new side or why it could not be read (which
+    /// matters only if the old side turns out to be text).
+    Read {
+        old: Input,
+        new: Result<Input, ApiError>,
+    },
+}
+
+impl Job {
+    fn input_bytes(&self) -> u64 {
+        match self {
+            Job::Read { old, new } => old.bytes() + new.as_ref().map_or(0, Input::bytes),
+            Job::Skip | Job::Failed(_) => 0,
+        }
+    }
+
+    /// The file's patch, cut to `cap` bytes, and whether it was cut; `None`
+    /// when either side is not shown as text.
+    fn patch(
+        self,
+        path: &RepoPath,
+        context: u32,
+        cap: usize,
+    ) -> Result<Option<(String, bool)>, ApiError> {
+        let (old, new) = match self {
+            Job::Skip => return Ok(None),
+            Job::Failed(e) => return Err(e),
+            Job::Read { old, new } => (old, new),
+        };
+        let Some(old) = old.text()? else {
+            return Ok(None);
+        };
+        let Some(new) = new?.text()? else {
+            return Ok(None);
+        };
+        let mut patch = unified(path, old.as_deref(), new.as_deref(), context);
+        let cut = cap_patch(&mut patch, cap);
+        Ok(Some((patch, cut)))
+    }
+}
+
+/// The most threads one diff decodes and diffs on.
+const MAX_PATCH_THREADS: usize = 8;
+
+/// Input bytes per patch thread: smaller windows run on fewer threads.
+const BYTES_PER_PATCH_THREAD: u64 = 256 * 1024;
+
+/// `f` over `items` on up to [`MAX_PATCH_THREADS`] scoped threads, one per
+/// [`BYTES_PER_PATCH_THREAD`] of `bytes`, with results in item order.
+fn parallel<T: Send, R: Send>(items: Vec<T>, bytes: u64, f: impl Fn(T) -> R + Sync) -> Vec<R> {
+    let threads = thread::available_parallelism()
+        .map_or(1, NonZeroUsize::get)
+        .min(MAX_PATCH_THREADS)
+        .min(items.len())
+        .min(usize::try_from(bytes.div_ceil(BYTES_PER_PATCH_THREAD)).unwrap_or(usize::MAX));
+    if threads <= 1 {
+        return items.into_iter().map(f).collect();
+    }
+    let slots: Vec<Mutex<Option<T>>> = items.into_iter().map(|t| Mutex::new(Some(t))).collect();
+    let taken = AtomicUsize::new(0);
+    let worker = || {
+        let mut done = Vec::new();
+        loop {
+            let i = taken.fetch_add(1, Ordering::Relaxed);
+            let Some(slot) = slots.get(i) else {
+                return done;
+            };
+            let item = slot.lock().expect("patch slot").take().expect("taken once");
+            done.push((i, f(item)));
+        }
+    };
+    let mut out: Vec<Option<R>> = Vec::new();
+    out.resize_with(slots.len(), || None);
+    thread::scope(|s| {
+        let workers: Vec<_> = (0..threads).map(|_| s.spawn(worker)).collect();
+        for w in workers {
+            match w.join() {
+                Ok(done) => {
+                    for (i, r) in done {
+                        out[i] = Some(r);
+                    }
+                }
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+    });
+    out.into_iter()
+        .map(|r| r.expect("every item ran"))
+        .collect()
 }
 
 /// The changes at and beneath `prefix`, after `after`, at most `limit`.

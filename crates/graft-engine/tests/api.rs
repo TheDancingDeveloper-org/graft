@@ -554,3 +554,111 @@ fn diff_names_and_patches<M: MetaStore>(f: &Fixture<M>) {
         b"inline\n"
     );
 }
+
+/// A diff with enough text to decode and diff on several threads gives
+/// each file the patch it gets on its own, in file order, until the
+/// response budget runs out; after that files are truncated with no patch,
+/// and a corrupt blob there is never read for a patch.
+#[test]
+fn threaded_patches_follow_file_order_and_the_budget() {
+    let budget = 600 * 1024;
+    let f = memory_with(graft_engine::EngineConfig {
+        max_patch_bytes: budget,
+        ..graft_engine::EngineConfig::default()
+    });
+    let repo = Repo::new(&f, "big");
+    let text = |name: &str, edit: bool| -> Vec<u8> {
+        (0..4000)
+            .map(|i| {
+                let changed = if edit && i % 10 == 0 { " changed" } else { "" };
+                format!("line {i} of {name}{changed}\n")
+            })
+            .collect::<String>()
+            .into_bytes()
+    };
+    let names: Vec<String> = (0..12).map(|i| format!("f{i:02}")).collect();
+    let before: Vec<Vec<u8>> = names.iter().map(|n| text(n, false)).collect();
+    let after: Vec<Vec<u8>> = names.iter().map(|n| text(n, true)).collect();
+    fn files<'a>(
+        names: &'a [String],
+        texts: &'a [Vec<u8>],
+        last: &'a [u8],
+    ) -> Vec<(&'a str, &'a [u8])> {
+        let mut files: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(String::as_str)
+            .zip(texts.iter().map(Vec::as_slice))
+            .collect();
+        files.push(("z-last", last));
+        files
+    }
+    let a = repo
+        .commit(vec![], &files(&names, &before, b"old\n"), &[])
+        .id;
+    let b = repo
+        .commit(vec![a], &files(&names, &after, b"new\n"), &[])
+        .id;
+    let diff = |paths: Vec<&str>| {
+        block_on(repo.e().diff(
+            &repo.cx,
+            Diff {
+                repo: repo.name.clone(),
+                from: a,
+                to: b,
+                paths: paths.into_iter().map(p).collect(),
+                patch: Some(PatchOptions {
+                    context: 3,
+                    max_bytes_per_file: 1 << 20,
+                }),
+                page: Page::default(),
+            },
+        ))
+    };
+    // Each file alone, well within the budget.
+    let alone: Vec<String> = names
+        .iter()
+        .map(|n| {
+            let d = diff(vec![n.as_str()]).expect("one file");
+            assert!(!d.files[0].truncated);
+            d.files[0].patch.clone().expect("a text patch")
+        })
+        .collect();
+
+    // A corrupt new blob in the last file, which is past the budget.
+    let (meta, _) = repo.e().stores();
+    let rid = block_on(meta.repo("big")).expect("repo").expect("exists");
+    f.objects.corrupt(
+        rid,
+        blob_id(b"new\n"),
+        Frame::encode(ObjectKind::Blob, b"bad\n").to_bytes(),
+    );
+
+    let all = diff(vec![]).expect("the corrupt file is past the budget");
+    assert_eq!(all.files.len(), names.len() + 1);
+    let mut used = 0;
+    let mut spent = false;
+    for (file, whole) in all.files.iter().zip(alone.iter()) {
+        if spent {
+            assert!(file.truncated && file.patch.is_none());
+            continue;
+        }
+        let patch = file.patch.as_deref().expect("a patch while within budget");
+        assert!(whole.starts_with(patch));
+        assert_eq!(file.truncated, patch.len() < whole.len());
+        used += patch.len();
+        // A cut at a line end can leave a few bytes for the next file.
+        spent = used == budget as usize;
+    }
+    assert!(spent, "the budget runs out before the last files");
+    assert!(used <= budget as usize);
+    let last = all.files.last().expect("last file");
+    assert!(last.truncated && last.patch.is_none());
+
+    // Within the budget, the corrupt blob is read and reported.
+    assert_eq!(
+        diff(vec!["z-last"]).expect_err("corrupt"),
+        ApiError::CorruptObject {
+            id: blob_id(b"new\n")
+        }
+    );
+}

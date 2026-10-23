@@ -3,7 +3,7 @@
 //! describe each one. Object ids in entries are lowercase hex (the kind is
 //! in the entry); changeset ids use their text form (`c` plus hex).
 
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 
 use base64::Engine;
 use graft_model::{Author, AuthorKind, Change, ChangesetId, EntryKind, Timestamp};
@@ -15,11 +15,13 @@ use serde_json::{Value, json};
 
 use crate::error::Failure;
 
-/// Writes `value` as pretty JSON and a newline to standard output.
+/// Writes `value` as pretty JSON and a newline to standard output,
+/// buffered (stdout alone flushes at every line).
 pub(crate) fn print_json(value: &Value) -> Result<(), Failure> {
-    let mut out = io::stdout().lock();
+    let mut out = BufWriter::new(io::stdout().lock());
     serde_json::to_writer_pretty(&mut out, value).map_err(io::Error::from)?;
     writeln!(out)?;
+    out.flush()?;
     Ok(())
 }
 

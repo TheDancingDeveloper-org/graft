@@ -1038,8 +1038,8 @@ fn scenarios(
             s.add_time(
                 "diff",
                 "git",
-                &format!("{note}, --name-only"),
-                git_timed(bare, &["diff", "--name-only", from_sha, &shape.tip])?,
+                &format!("{note}, with patches"),
+                git_timed(bare, &["diff", "--no-renames", from_sha, &shape.tip])?,
             );
         }
     }
