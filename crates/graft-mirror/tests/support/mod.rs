@@ -118,6 +118,10 @@ pub(crate) fn trailers(dir: &Path, branch: &str) -> Vec<String> {
 pub(crate) fn github(dir: &Path, deny_rewrites: bool) {
     std::fs::create_dir_all(dir).unwrap();
     git(dir, &["init", "-q", "--bare"]);
+    // No background housekeeping: a detached `gc --auto` after a push holds
+    // ref locks and makes the next push fail by timing alone.
+    git(dir, &["config", "receive.autogc", "false"]);
+    git(dir, &["config", "gc.auto", "0"]);
     if deny_rewrites {
         git(dir, &["config", "receive.denyNonFastForwards", "true"]);
     }
