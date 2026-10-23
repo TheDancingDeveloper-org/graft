@@ -149,7 +149,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             message: req.message,
             metadata: req.metadata,
         };
-        self.insert(repo, cs, None, inline, Roots::IfEmpty, hold)
+        self.insert(repo, cs, None, inline, Roots::IfEmpty, hold, None)
             .await
     }
 
@@ -269,7 +269,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         for cs in req.changesets {
             let root = cs.root;
             out.push(
-                self.insert(repo, cs, Some(root), Vec::new(), Roots::Allowed, None)
+                self.insert(repo, cs, Some(root), Vec::new(), Roots::Allowed, None, None)
                     .await?,
             );
         }
@@ -284,8 +284,30 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cs: Changeset,
     ) -> Result<Created, ApiError> {
         let root = cs.root;
-        self.insert(repo, cs, Some(root), Vec::new(), Roots::IfEmpty, None)
+        self.insert(repo, cs, Some(root), Vec::new(), Roots::IfEmpty, None, None)
             .await
+    }
+
+    /// Stores a land candidate the server built, as a draft held by the
+    /// land-attempt lease `lease` (design §8.1, §8.6), checking its root
+    /// against `cs.root`. A changeset already stored keeps its record.
+    pub(crate) async fn insert_candidate(
+        &self,
+        repo: RepoId,
+        cs: Changeset,
+        lease: String,
+    ) -> Result<Created, ApiError> {
+        let root = cs.root;
+        self.insert(
+            repo,
+            cs,
+            Some(root),
+            Vec::new(),
+            Roots::IfEmpty,
+            None,
+            Some(lease),
+        )
+        .await
     }
 
     /// Whether the repository has no changesets yet: its journal is empty
@@ -301,8 +323,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 
     /// Validates `cs`, derives its root (which must equal `expected` when
     /// given), and stores it: as a draft held by `hold`'s workspace, whose
-    /// head moves to it in the same transaction, or abandoned when nothing
-    /// holds it. Returns the stored changeset on a retry.
+    /// head moves to it in the same transaction, as a draft held by the
+    /// land-attempt `lease`, or abandoned when nothing holds it. Returns the
+    /// stored changeset on a retry.
+    #[allow(clippy::too_many_arguments)]
     async fn insert(
         &self,
         repo: RepoId,
@@ -311,6 +335,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         inline: Vec<Upload>,
         roots: Roots,
         mut hold: Option<Hold<'_>>,
+        lease: Option<String>,
     ) -> Result<Created, ApiError> {
         // Rules 3, 8 and 9 (and portability); rule 2 waits for the id, so
         // that a retried root changeset still returns its id.
@@ -403,9 +428,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
 
         let object_holder = id.to_string();
-        let state = match hold {
-            Some(_) => RecordState::Draft,
-            None => RecordState::Abandoned,
+        let state = match (&hold, &lease) {
+            (None, None) => RecordState::Abandoned,
+            _ => RecordState::Draft,
         };
         let mut writes = vec![Write::PutChangeset {
             id,
@@ -414,7 +439,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 lsn: 0,
                 received_at_ms: self.clock.now().ms,
                 state,
-                holder: hold.as_ref().map(|h| holder(&h.ws.name)),
+                holder: hold.as_ref().map(|h| holder(&h.ws.name)).or(lease.clone()),
                 superseded_by: None,
             },
         }];
@@ -452,7 +477,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 }
             }
             let ws_name = hold.as_ref().map(|h| h.ws.name.as_str());
-            txn.writes.push(journal::changeset_created(id, ws_name));
+            txn.writes.push(match &lease {
+                Some(lease) => journal::candidate_created(id, lease),
+                None => journal::changeset_created(id, ws_name),
+            });
             match self.meta.commit(repo, txn).await.map_err(errors::store)? {
                 TxnOutcome::Committed(lsns) => {
                     return Ok(Created {

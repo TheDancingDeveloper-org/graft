@@ -4,7 +4,7 @@
 //! `repo:<name>:read`, `repo:<name>:write[:<path-prefix>]`,
 //! `repo:<name>:land:<line>`, `repo:<name>:admin` and `objects:read`.
 //! `admin` grants everything on its repository; `write` and `land` grant
-//! `read`. This is the engine's minimal reading of the text form until
+//! `read`; `land:<line>` grants landing on that line only. This is the engine's minimal reading of the text form until
 //! `graft_auth::authorize` (G1.9) replaces it.
 
 use graft_model::{Change, RepoPath};
@@ -22,6 +22,8 @@ pub(crate) enum Need<'a> {
     /// Hold workspaces: any write scope on the repository, whatever its
     /// path prefix (the paths are checked per change).
     Workspace,
+    /// Land on a line (`land:<line>`).
+    Land(&'a str),
     /// Administer the repository.
     Admin,
 }
@@ -35,6 +37,12 @@ pub(crate) fn require(cx: &CallContext, repo: &str, need: Need<'_>) -> Result<()
         Need::Objects | Need::Read => ("read", None),
         Need::Write(path) => ("write", path.map(|p| p.to_string())),
         Need::Workspace => ("write", None),
+        Need::Land(line) => {
+            return Err(ApiError::PermissionDenied {
+                scope: format!("repo:{repo}:land:{line}"),
+                path: None,
+            });
+        }
         Need::Admin => ("admin", None),
     };
     Err(ApiError::PermissionDenied {
@@ -81,6 +89,7 @@ fn grants(scope: &str, repo: &str, need: Need<'_>) -> bool {
         (Some("admin"), _) => true,
         (Some("read" | "land" | "write"), Need::Objects | Need::Read) => true,
         (Some("write"), Need::Workspace) => true,
+        (Some("land"), Need::Land(line)) => arg == Some(line),
         (Some("write"), Need::Write(path)) => match (arg, path) {
             (None, _) => true,
             // A prefix-restricted write scope covers only paths beneath it.
@@ -143,5 +152,20 @@ mod tests {
         assert!(!grants("objects:read", "r", Need::Read));
         assert!(grants("repo:r:land:main", "r", Need::Read));
         assert!(!grants("repo:r:land:main", "r", Need::Admin));
+    }
+
+    #[test]
+    fn land_scopes_name_their_line() {
+        assert!(grants("repo:r:land:main", "r", Need::Land("main")));
+        assert!(grants(
+            "repo:r:land:release:1",
+            "r",
+            Need::Land("release:1")
+        ));
+        assert!(!grants("repo:r:land:main", "r", Need::Land("dev")));
+        assert!(!grants("repo:r:land", "r", Need::Land("main")));
+        assert!(!grants("repo:r:write", "r", Need::Land("main")));
+        assert!(!grants("repo:s:land:main", "r", Need::Land("main")));
+        assert!(grants("repo:r:admin", "r", Need::Land("main")));
     }
 }
