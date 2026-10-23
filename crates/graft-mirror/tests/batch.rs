@@ -12,7 +12,7 @@ use graft_mirror::batch::{BatchConfig, BatchOutcome, BatchRecord, BatchState, Ba
 use graft_mirror::credentials::SecretToken;
 use graft_mirror::follow::{FollowConfig, FollowLine, POLL_INTERVAL};
 use graft_mirror::github::{CheckRun, Forge, ForgeError, NewPull, Pull};
-use graft_mirror::{Mirror, MirrorDb, current_ref};
+use graft_mirror::{Mirror, MirrorDb, MirrorError, current_ref};
 use graft_model::{
     Author, AuthorKind, Change, ChangesetId, EntryKind, Metadata, ObjectKind, RepoPath, Timestamp,
 };
@@ -203,6 +203,11 @@ impl World {
     }
 
     fn batcher(&self) -> Batcher<'_, Api, FakeGitHub> {
+        self.batcher_on(&self.db)
+    }
+
+    /// A batcher on this world's graft and GitHub with another mirror DB.
+    fn batcher_on<'w>(&'w self, db: &'w MirrorDb) -> Batcher<'w, Api, FakeGitHub> {
         let base = FollowLine {
             branch: "main".to_owned(),
             line: "main".to_owned(),
@@ -217,7 +222,7 @@ impl World {
         Batcher::new(
             &self.api,
             cx(),
-            &self.db,
+            db,
             Mirror::new(&self.mirror_dir, self.upstream.to_str().unwrap()),
             &self.github,
             BatchConfig::new(LINE, base, follow),
@@ -604,4 +609,47 @@ async fn after_a_merge_a_moved_main_and_new_lands_sync_without_conflict() {
     let squash = rec.squash_sha.to_hex();
     assert_eq!(w.changed(&main, &squash), ["a.txt"]);
     assert_eq!(w.show(&squash, "a.txt"), "a2");
+}
+
+#[tokio::test]
+async fn an_empty_db_is_reported_as_empty_not_graft_moved() {
+    let w = World::new().await;
+    w.start().await;
+    let path = w._tmp.path().join("empty.sqlite");
+    let empty = MirrorDb::open(&path).unwrap();
+    let err = w.batcher_on(&empty).run().await.unwrap_err();
+    match &err {
+        MirrorError::Unmapped { db, line, empty } => {
+            assert_eq!(db, &path);
+            assert_eq!(line, "main");
+            assert!(*empty);
+        }
+        e => panic!("expected Unmapped, got {e}"),
+    }
+    let text = err.to_string();
+    assert!(
+        text.contains("is empty") && text.contains("empty.sqlite"),
+        "{text}"
+    );
+    assert!(!text.contains("graft-moved"), "{text}");
+}
+
+#[tokio::test]
+async fn another_repos_db_is_reported_as_unmapped_not_graft_moved() {
+    let w = World::new().await;
+    w.start().await;
+    let other = World::new().await;
+    other.push_main(&[("elsewhere.txt", "not this repo\n")], "other init");
+    assert!(other.batcher().run().await.is_err());
+    assert!(other.db.commit_count().unwrap() > 0);
+    let err = w.batcher_on(&other.db).run().await.unwrap_err();
+    match &err {
+        MirrorError::Unmapped { db, line, empty } => {
+            assert_eq!(db, other.db.path());
+            assert_eq!(line, "main");
+            assert!(!*empty);
+        }
+        e => panic!("expected Unmapped, got {e}"),
+    }
+    assert!(err.to_string().contains("another repo"), "{err}");
 }

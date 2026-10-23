@@ -33,6 +33,7 @@
 
 use std::fmt;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use graft_git::{GitError, GitSha};
@@ -77,6 +78,17 @@ pub enum MirrorError {
     Forge(ForgeError),
     /// An authority switch step refused, described.
     Switch(String),
+    /// The mirror DB has no git commit for a line's tip, and has not
+    /// followed the line in this repo: the DB is empty, or belongs to
+    /// another repo.
+    Unmapped {
+        /// The DB file.
+        db: PathBuf,
+        /// The graft line whose tip is unmapped.
+        line: String,
+        /// The DB records no commits at all.
+        empty: bool,
+    },
 }
 
 impl fmt::Display for MirrorError {
@@ -88,6 +100,27 @@ impl fmt::Display for MirrorError {
             MirrorError::Config(what) => write!(f, "configuration: {what}"),
             MirrorError::Forge(e) => e.fmt(f),
             MirrorError::Switch(what) => write!(f, "authority switch: {what}"),
+            MirrorError::Unmapped {
+                db,
+                line,
+                empty: true,
+            } => write!(
+                f,
+                "mirror DB {} is empty: it has no git commit for line {line}'s tip; \
+                 run import or follow for this repo first",
+                db.display()
+            ),
+            MirrorError::Unmapped {
+                db,
+                line,
+                empty: false,
+            } => write!(
+                f,
+                "mirror DB {} has no git commit for line {line}'s tip and has not \
+                 followed {line} in this repo; it may be another repo's DB (check \
+                 `db` in the config), or the line was never imported",
+                db.display()
+            ),
         }
     }
 }
