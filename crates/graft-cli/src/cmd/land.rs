@@ -16,15 +16,21 @@
 //! On a git-primary line the server hands the stack to the PR bridge and
 //! answers with the pull request; `--wait` asks again until it merges, and a
 //! pull request still open when the wait runs out exits 4.
+//!
+//! A file both sides changed is merged line by line on the server when it
+//! is text (decision D16); only overlapping edits conflict. `--merge file`
+//! asks for the stricter rebase, where any file changed on both sides
+//! conflicts.
 
 use std::time::Duration;
 
 use graft_client::fetch::FetchOptions;
 use graft_client::workcopy::{DEFAULT_CACHE_BYTES, LandOptions, LandOutcome};
 use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat};
+use graft_proto::types::MergeMode;
 use serde_json::json;
 
-use crate::cli::{Global, LandArgs};
+use crate::cli::{Global, LandArgs, LandMerge};
 use crate::conn::{begin, runtime};
 use crate::error::Failure;
 use crate::render::{print_json, short};
@@ -35,6 +41,10 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
         squash: args.squash,
         sync: args.sync,
         wait: args.wait.map(Duration::from_secs),
+        merge: match args.merge {
+            LandMerge::Line => MergeMode::Line,
+            LandMerge::File => MergeMode::File,
+        },
         ..LandOptions::default()
     };
     runtime()?.block_on(async {

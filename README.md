@@ -6,9 +6,12 @@ Anthropic described for Scion in
 [*Redesigning source control*](https://www.anthropic.com/engineering/redesigning-source-control)
 and starts from a clean slate, in Rust.
 
-> **Status: design and skeleton.** Nothing works yet. The workspace builds,
-> and every API body is `todo!()`. The build plan is in
-> [docs/plan.md](docs/plan.md).
+> **Status: phase 1, a git alternative ([D22](docs/decisions.md#d22-phase-1-is-a-git-alternative)).**
+> Import, sparse clone, workspaces, commit, sync, server-side rebase with line
+> merge, lock-free land, conflicts, log, diff, blame, git export, and batch
+> delivery to GitHub all work end to end, through the CLI, MCP and LSP. CI
+> checks in the land path are built but switched off (phase 2). What is
+> delivered, and what is next, is in [docs/status.md](docs/status.md).
 
 ## The idea in six lines
 
@@ -37,7 +40,8 @@ full export.
 | Document | What it covers |
 | --- | --- |
 | [docs/design.md](docs/design.md) | goals, data model, tiers, storage, API, landing, git interop, auth, observability, failure modes |
-| [docs/plan.md](docs/plan.md) | phased build plan; work items sized for one worker session each, in waves of three |
+| [docs/status.md](docs/status.md) | what is delivered, measured numbers, and the phase 1 backlog |
+| [docs/plan.md](docs/plan.md) | phases (D22), backlog, and the build waves as history |
 | [docs/decisions.md](docs/decisions.md) | open questions for the operator, with options and recommendations |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | how changes land |
 | [AGENTS.md](AGENTS.md) | rules for agent sessions working in this repository |
@@ -64,7 +68,7 @@ crates/
   graft-lsp           LSP server over the API traits
   graft-git           git import, export and mapping (the only git-aware crate)
   graft-mirror        bin: git and GitHub mirror
-  graft-attester      bin: trial attester, builds and tests drafts, posts Attest
+  graft-attester      bin: trial attester, builds and tests drafts, posts Attest (phase 2, off)
   graft-testkit       test fixtures and harnesses (dev only)
 ```
 

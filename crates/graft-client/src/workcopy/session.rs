@@ -110,6 +110,10 @@ pub struct LandOptions {
     pub max_poll: Duration,
     /// The lease to ask for when the workspace is reopened.
     pub lease_ms: u64,
+    /// How the server's rebase treats a path both sides changed. The
+    /// default is a three-way line merge for text files (decision D16);
+    /// [`MergeMode::File`] refuses any path changed on both sides.
+    pub merge: MergeMode,
 }
 
 impl Default for LandOptions {
@@ -122,6 +126,7 @@ impl Default for LandOptions {
             poll: Duration::from_millis(500),
             max_poll: Duration::from_secs(15),
             lease_ms: crate::workspace::DEFAULT_LEASE_MS,
+            merge: MergeMode::Line,
         }
     }
 }
@@ -675,7 +680,7 @@ impl WorkingCopy {
             head,
             line: self.state.line.clone(),
             squash: opts.squash,
-            merge: MergeMode::File,
+            merge: opts.merge,
             deadline_ms: None,
         };
         let (landed, rebased) = loop {

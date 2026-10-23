@@ -1,21 +1,57 @@
 # graft build plan
 
-- **Status:** Draft 1 (2026-10-22)
+- **Status:** Draft 2 (2026-10-23): re-phased by [D22](decisions.md#d22-phase-1-is-a-git-alternative).
+  What is delivered is in [status.md](status.md).
 - **Design:** [design.md](design.md) · **Decisions:** [decisions.md](decisions.md)
 
-Every phase ends in something we can ship and use. Phase 1 is a **read
-pilot** on a mirrored real repository (rustTorrent). Each later phase moves
-one more part of the workflow onto graft, and none takes away the fallback to
-git and GitHub until phase 3's authority switch, which can be rolled back.
+## Phases (D22)
 
-| Phase | Ships | Fallback |
+The build waves below (G1 to G3) were planned as a read pilot, then writes
+through GitHub, then native landing. Almost all of them are built: every item
+from G1.1 to G3.11 is merged on `main`, except G3.10 (not planned), G1.17
+(superseded by the graft-dev VM) and G1.18 (dropped by D20). The product
+phases are now set by D22:
+
+| Phase | Ships | State |
 | --- | --- | --- |
-| 0 | Workspace skeleton, design, plan (this commit) | — |
-| 1 | **Read pilot:** rustTorrent mirrored into graft (git-primary). Agents clone sparse slices and ask log, diff, blame and read through the CLI and MCP | Git is untouched; agents can ignore graft |
-| 2 | **Write through GitHub:** agents commit drafts in graft, and `graft land` goes through a GitHub PR into the existing merge queue. Node daemon on shared hosts | The GitHub workflow is unchanged; graft is a front end to it |
-| 3 | **Native landing:** server rebase and land; graft becomes authoritative for rustTorrent `main`, exported to GitHub. GC, LSP, CI attestations | Authority switch back to git-primary (§11.3 of the design) |
-| 4 | **Breadth:** per-line combiner, prefetch, auto-revert, symbol index, a second repository, the export drill | Per repository, as for phase 3 |
+| 1 | **A git alternative.** Correct storage and history; fast sparse clone and sync; workspaces; server-side rebase, line merge (D16) and lock-free CAS land; conflicts handed back to the client; CLI, MCP and LSP; git import and export; GitHub delivery as one squashed batch PR (D21). Lines default to `direct`; no build, test or CI runs in the land path | Built and in use (trial WI-2270). Remaining work in the backlog below |
+| 2 | **CI checks.** `attested` and `queued` policies, the attester, the CI token exchange, post-land runners, auto-revert | Code exists (G3.1, G3.8, the trial attester), switched off. Not extended until the operator starts phase 2 |
+| (3) | Folded into phases 1 and 2: native landing ships in phase 1 on `direct` lines; its policy gate and CI attestations are phase 2 | — |
+| 4 | **Breadth:** per-line combiner, prefetch, symbol index, a second repository, the export drill (auto-revert moves to phase 2) | Outline, WI-2214 (p4) |
 | 5 | **Later:** regional tier, virtual checkouts, chunked blobs, code search, publish decision | — |
+
+Not planned (D21, D22): cutting rustTorrent `main` over to graft-primary
+(G3.10), and the per-land PR bridge CLI (G2.6's `bridge` subcommand).
+
+Phase 1 is measured as source control against git with the `bench/` harness
+(WI-2294): land latency and contention, merge and conflict correctness, sync
+and clone speed, history integrity.
+
+### Phase 1 backlog
+
+The Vogt review WI-2297 holds this list; Vogt is the source of truth for its
+state. In priority order:
+
+| Item | P | What |
+| --- | --- | --- |
+| WI-2296 | p1 | `graft land` sends `MergeMode::Line` (D16); today a same-file land is refused unless `--sync` |
+| WI-2298 | p1 | every line defaults to `direct`; D6 becomes opt-in config |
+| WI-2270 | p1 | finish the rustTorrent trial: write-up, trial-1 config in the repo, batch PR #214 |
+| WI-2300 | p2 | `graft mcp` (stdio) in the CLI |
+| WI-2301 | p2 | create a line through the API, CLI and MCP |
+| WI-2303 | p2 | plain `log` is 2.5x slower than git |
+| WI-2304 | p2 | bench at 10k and 100k on the graft-dev VM |
+| WI-2291 | p2 | deploy-dev: config can deploy ahead of its image |
+| WI-2274 | p3 | wire the GC sweep into the server |
+| WI-2305 | p3 | bench correctness smoke in the merge queue |
+| WI-2306 | p3 | pr-batch: clear error for an empty mirror DB |
+| WI-2307 | p3 | graft-dev backups, restore rehearsal, alerts |
+| WI-2308 | p3 | graft-mirror import throughput |
+| WI-2302 | p3 | remove the `bridge` stub |
+| WI-2240 | p3 | estate token front for Vogt sessions (D10) |
+
+New items follow the work item format below. Each names its crates, and new
+items keep the rule of one area per branch.
 
 ## How the work is run
 
@@ -86,7 +122,12 @@ pushed; don't poll CI; print AUTOPILOT: DONE.*
 
 ---
 
-## Phase 0: skeleton (done in this commit)
+## Build waves (history)
+
+The waves below are the original build plan, kept as the record of what each
+item delivered and accepted. Their phase names predate D22.
+
+## Phase 0: skeleton (done)
 
 - A Cargo workspace of 19 crates with frozen public APIs and `todo!()` bodies.
   It passes `CARGO_BUILD_JOBS=4 cargo check --workspace --all-targets`.
@@ -99,6 +140,10 @@ D11, D12, D13, D14, D15 and D18.)
 ---
 
 ## Phase 1: read pilot
+
+> **Delivered** (G1.1 to G1.16). G1.17 (the Komodo deployment) was superseded
+> by the graft-dev VM (WI-2251), and G1.18 was dropped (D20). Under D22,
+> "phase 1" now means the git alternative described at the top.
 
 **Goal:** rustTorrent's full history is in graft and follows GitHub `main`
 within a minute. Agent sessions on Node B can `graft clone` sparse slices and
@@ -385,6 +430,10 @@ through git and GitHub.
 
 ### Phase 1 exit and kill criteria
 
+> These criteria were written for the read pilot. D22 redefines phase 1 as
+> the git alternative. They stay as targets, and the `bench/` harness now
+> measures phase 1 against git.
+
 **Superseded by [D20](decisions.md#d20-no-pilot-period):** there is no
 pilot period, and G1.18 is dropped. These criteria are targets that the G1.16
 harness reports on. They don't gate phase 2.
@@ -413,6 +462,9 @@ harness reports on. They don't gate phase 2.
 ---
 
 ## Phase 2: write through GitHub
+
+> **Delivered** (G2.1 to G2.9). The per-land PR bridge (G2.6) was
+> superseded by the batch PR (D21); its CLI stub is being removed (WI-2302).
 
 **Goal:** agents commit drafts in graft and land them through GitHub. `graft
 land` exports the stack as a PR into the existing merge queue, and the merged
@@ -551,6 +603,10 @@ superseded, or held, or else it is reported abandoned.
 ---
 
 ## Phase 3: native landing (graft-primary for rustTorrent)
+
+> **Delivered** except G3.10, which is not planned (D21, D22). Native
+> landing ships in phase 1 on `direct` lines. The policy gate and CI
+> attestations (G3.1 policies, G3.8) are phase 2 and switched off.
 
 **Goal:** graft `main` is authoritative for rustTorrent. Lands are native
 (server rebase and CAS, with a policy gate). GitHub `main` is an exported
@@ -730,6 +786,8 @@ run at once.
 ---
 
 ## Phase 4: breadth (outline)
+
+> Under D22 the auto-revert bot is phase 2. The rest stays phase 4 (WI-2214).
 
 Each becomes items in waves of three when phase 3 exits.
 
