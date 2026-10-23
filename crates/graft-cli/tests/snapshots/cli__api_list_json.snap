@@ -124,8 +124,8 @@ expression: value
   },
   {
     "api": "RepoApi",
-    "command": null,
-    "excluded": "revert command (phase 3)",
+    "command": "revert",
+    "excluded": null,
     "op": "revert",
     "raw": false
   },
@@ -138,8 +138,8 @@ expression: value
   },
   {
     "api": "RepoApi",
-    "command": null,
-    "excluded": "CI check results, attest (phase 3)",
+    "command": "attest",
+    "excluded": null,
     "op": "attest",
     "raw": false
   },
@@ -194,8 +194,8 @@ expression: value
   },
   {
     "api": "WorkspaceApi",
-    "command": null,
-    "excluded": "reorder, squash, split and drop are stack commands in phase 3; `graft stack list` reads the stack",
+    "command": "stack",
+    "excluded": null,
     "op": "stack",
     "raw": false
   },

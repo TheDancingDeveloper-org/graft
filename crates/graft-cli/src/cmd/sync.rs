@@ -1,7 +1,11 @@
 //! `graft sync`: moves the working copy and its workspace to the line tip
-//! (`docs/design.md` §8.4). With no stack this fast-forwards the files that
-//! changed; with a stack the server rebases it, and a conflict changes
-//! nothing (exit 3).
+//! (`docs/design.md` §8.2, §8.4). With no stack this fast-forwards the files
+//! that changed; with a stack the server rebases it. When the stack
+//! conflicts with the tip, the working copy still moves there, with the
+//! stack's changes on top and the conflicts written into the files (markers
+//! for text, a `.graft-conflict` sidecar otherwise), and the command exits 3:
+//! resolve them, then `graft commit` and `graft land`. An update an earlier
+//! command left half done is finished first.
 
 use graft_client::fetch::FetchOptions;
 use graft_client::workcopy::DEFAULT_CACHE_BYTES;

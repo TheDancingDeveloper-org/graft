@@ -686,7 +686,7 @@ async fn sync_fast_forwards_a_working_copy_with_no_stack() {
 }
 
 #[tokio::test]
-async fn sync_with_a_stack_rebases_on_the_server_or_changes_nothing() {
+async fn sync_with_a_stack_rebases_on_the_server_or_writes_the_conflicts() {
     let env = Env::new(&base_files()).await;
     let mut wc = env.clone("wc", Sparse::full()).await;
     let ws = env.workspace(&wc);
@@ -720,9 +720,10 @@ async fn sync_with_a_stack_rebases_on_the_server_or_changes_nothing() {
     assert_eq!(read(wc.root(), "src/util.rs"), "fn u() { mine }\n");
     assert!(wc.status().unwrap().is_empty());
 
-    // The line changes our file: a conflict, and nothing moves.
+    // The line changes our file: a conflict. The working copy moves to the
+    // tip with our change on top, marked (`docs/design.md` §8.2).
     next.insert("src/util.rs".into(), b"fn u() { theirs }\n".to_vec());
-    env.repo.commit("main", &next).await;
+    let tip = env.repo.commit("main", &next).await;
     wc.begin(&env.remote, &cx(), DEFAULT_LEASE_MS)
         .await
         .unwrap();
@@ -735,9 +736,15 @@ async fn sync_with_a_stack_rebases_on_the_server_or_changes_nothing() {
             &FetchOptions::default(),
         )
         .await;
-    assert!(matches!(err, Err(Error::Api(ApiError::Conflict { .. }))));
-    assert_eq!(wc.state().head, Some(head));
-    assert_eq!(read(wc.root(), "src/util.rs"), "fn u() { mine }\n");
+    let Err(Error::Conflicted(c)) = err else {
+        panic!("expected conflicts: {err:?}");
+    };
+    assert_eq!(c.onto, tip);
+    assert_eq!((wc.state().base, wc.state().head), (tip, None));
+    assert_eq!(
+        read(wc.root(), "src/util.rs"),
+        "<<<<<<< ours\nfn u() { mine }\n||||||| base\nfn u() {}\n=======\nfn u() { theirs }\n>>>>>>> theirs\n"
+    );
 }
 
 #[tokio::test]

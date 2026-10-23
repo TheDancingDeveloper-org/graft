@@ -18,7 +18,9 @@ use crate::render::{self, print_json, short};
 
 /// Commits the working copy's changes.
 pub(crate) fn run(g: &Global, args: &CommitArgs) -> Result<(), Failure> {
-    if args.message.is_none() && !args.amend {
+    // After a conflicting sync, the message defaults to the stack's.
+    let resolving = crate::conn::working_copy()?.is_some_and(|wc| wc.has_conflicts());
+    if args.message.is_none() && !args.amend && !resolving {
         return Err(Failure::usage("a commit needs a message: pass -m"));
     }
     let author = author(args)?;
@@ -34,6 +36,7 @@ pub(crate) fn run(g: &Global, args: &CommitArgs) -> Result<(), Failure> {
     runtime()?.block_on(async {
         let mut s = begin(g).await?;
         s.note_recovery();
+        s.finish_unfinished().await?;
         let ws = s.workspace_ref();
         let done = with_heartbeat(
             &s.conn.remote,

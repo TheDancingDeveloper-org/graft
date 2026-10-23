@@ -1,0 +1,7 @@
+---
+source: crates/graft-cli/tests/land.rs
+expression: stderr(&a)
+---
+graft: 1 file conflicts with ca231fedbc3cb2df6bf2c81355f26b13b699c98c70e635632cda771e8bfb4c31d
+  markers  src/lib.rs
+  edit the files (and delete any .graft-conflict sidecar), then `graft commit` and `graft land`

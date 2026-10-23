@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft revert --json",
+  "type": "object",
+  "required": [
+    "reverted",
+    "id",
+    "workspace",
+    "changed",
+    "recovered"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "reverted": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "The changeset inverted."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][0-9a-f]{64}$",
+      "description": "The new draft, now the workspace head."
+    },
+    "workspace": {
+      "type": "string"
+    },
+    "changed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "recovered": {
+      "description": "An interrupted commit the command found first: finished, rolled back, or none.",
+      "enum": [
+        "finished",
+        "rolled_back",
+        null
+      ]
+    }
+  }
+}
