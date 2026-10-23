@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use graft_auth::oidc::{Binding, Exchange, Issuer, Jwks, OidcError, Provider, verify_jwt};
+use graft_auth::oidc::{
+    Binding, Exchange, Issuer, Jwks, OidcError, Provider, pinned_changeset, verify_jwt,
+};
 use graft_auth::{NoDenylist, SigningKey, Token, verify};
 use graft_proto::{ApiError, PrincipalKind};
 
@@ -85,6 +87,15 @@ fn exchange() -> Exchange {
 
 fn server_key() -> SigningKey {
     SigningKey::from_seed(&[0x42; 32])
+}
+
+const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+const CHANGESET: &str = "cAbCdEf0123456789";
+
+/// The pinned exchange, as the server runs it: the job's commit must be the
+/// one exported for `CHANGESET` (here, `SHA`).
+fn pin(x: &Exchange, key: &SigningKey, jwt: &str) -> Result<Token, OidcError> {
+    x.exchange_pinned(key, jwt, NOW, CHANGESET, |sha| sha == SHA)
 }
 
 fn verify_graft(key: &SigningKey, t: &Token, now: i64) -> graft_auth::Claims {
@@ -208,13 +219,14 @@ fn leeway_covers_small_skew_only() {
 #[test]
 fn exchange_mints_a_short_ci_token() {
     let key = server_key();
-    let t = exchange().exchange(&key, &tok("gh_ok"), NOW).unwrap();
+    let t = pin(&exchange(), &key, &tok("gh_ok")).unwrap();
     let c = verify_graft(&key, &t, NOW);
     assert_eq!(c.principal.kind, PrincipalKind::Ci);
     assert_eq!(
         c.principal.subject,
-        "ci:github:TheDancingDeveloper-org/graft"
+        "ci:github:TheDancingDeveloper-org/graft#cAbCdEf0123456789"
     );
+    assert_eq!(pinned_changeset(&c.principal.subject), Some(CHANGESET));
     assert_eq!(
         c.principal.scopes,
         ["repo:graft:read", "repo:graft:write:.ci"]
@@ -228,35 +240,35 @@ fn exchange_mints_a_short_ci_token() {
 #[test]
 fn exchanged_token_never_outlives_the_ci_token() {
     let key = server_key();
-    let t = exchange()
-        .exchange(&key, &tok("gh_short_remaining"), NOW)
-        .unwrap();
+    let t = pin(&exchange(), &key, &tok("gh_short_remaining")).unwrap();
     assert_eq!(verify_graft(&key, &t, NOW).exp, NOW + 30);
 }
 
 #[test]
 fn exchanged_token_is_capped_by_max_ttl() {
     let key = server_key();
-    let t = exchange()
-        .with_max_ttl_s(100)
-        .exchange(&key, &tok("gh_ok"), NOW)
-        .unwrap();
+    let x = exchange().with_max_ttl_s(100);
+    let t = pin(&x, &key, &tok("gh_ok")).unwrap();
     assert_eq!(verify_graft(&key, &t, NOW).exp, NOW + 100);
+    // Never above the default cap.
+    let x = exchange().with_max_ttl_s(86_400);
+    let t = x.exchange_pinned(&key, &tok("gh_long_remaining"), NOW, CHANGESET, |_| true);
+    assert_eq!(verify_graft(&key, &t.unwrap(), NOW).exp, NOW + 900);
 }
 
 #[test]
 fn every_exchange_gets_its_own_jti() {
     let key = server_key();
     let x = exchange();
-    let a = verify_graft(&key, &x.exchange(&key, &tok("gh_ok"), NOW).unwrap(), NOW);
-    let b = verify_graft(&key, &x.exchange(&key, &tok("gh_ok"), NOW).unwrap(), NOW);
+    let a = verify_graft(&key, &pin(&x, &key, &tok("gh_ok")).unwrap(), NOW);
+    let b = verify_graft(&key, &pin(&x, &key, &tok("gh_ok")).unwrap(), NOW);
     assert_ne!(a.jti, b.jti);
 }
 
 #[test]
 fn exchanged_token_is_signed_by_the_server_key_only() {
     let key = server_key();
-    let t = exchange().exchange(&key, &tok("gh_ok"), NOW).unwrap();
+    let t = pin(&exchange(), &key, &tok("gh_ok")).unwrap();
     let other = SigningKey::from_seed(&[7; 32]).verifying_key();
     assert!(verify(&other, &t, NOW, &NoDenylist).is_err());
 }
@@ -264,9 +276,11 @@ fn exchanged_token_is_signed_by_the_server_key_only() {
 #[test]
 fn woodpecker_exchange() {
     let key = server_key();
+    // A read-only binding needs no pin.
     let t = exchange().exchange(&key, &tok("wp_ok"), NOW).unwrap();
     let c = verify_graft(&key, &t, NOW);
     assert_eq!(c.principal.subject, "ci:woodpecker:indexarr/graft");
+    assert_eq!(pinned_changeset(&c.principal.subject), None);
     assert_eq!(c.principal.scopes, ["repo:graft:read"]);
 }
 
@@ -278,7 +292,7 @@ fn a_token_for_another_repo_is_refused() {
         "gh_other_owner_same_name",
         "gh_tampered_payload",
     ] {
-        let err = exchange().exchange(&key, &tok(name), NOW).unwrap_err();
+        let err = pin(&exchange(), &key, &tok(name)).unwrap_err();
         assert!(
             matches!(err, OidcError::RepoNotBound | OidcError::BadSignature),
             "{name}: {err:?}"
@@ -286,18 +300,14 @@ fn a_token_for_another_repo_is_refused() {
     }
     // The clean case: a properly signed token for an unbound repository is
     // refused as a permission failure, not an authentication one.
-    let err = exchange()
-        .exchange(&key, &tok("gh_other_repo"), NOW)
-        .unwrap_err();
+    let err = pin(&exchange(), &key, &tok("gh_other_repo")).unwrap_err();
     assert_eq!(err, OidcError::RepoNotBound);
     assert!(matches!(
         ApiError::from(err),
         ApiError::PermissionDenied { .. }
     ));
     assert_eq!(
-        exchange()
-            .exchange(&key, &tok("wp_other_repo"), NOW)
-            .unwrap_err(),
+        pin(&exchange(), &key, &tok("wp_other_repo")).unwrap_err(),
         OidcError::RepoNotBound
     );
 }
@@ -305,9 +315,7 @@ fn a_token_for_another_repo_is_refused() {
 #[test]
 fn repository_names_compare_case_insensitively_on_github_only() {
     let key = server_key();
-    exchange()
-        .exchange(&key, &tok("gh_mixed_case_repo"), NOW)
-        .unwrap();
+    pin(&exchange(), &key, &tok("gh_mixed_case_repo")).unwrap();
     // Woodpecker names are exact.
     let strict = Binding::new(
         Provider::Woodpecker,
@@ -318,7 +326,7 @@ fn repository_names_compare_case_insensitively_on_github_only() {
     .unwrap();
     let x = Exchange::new().trust(woodpecker()).bind(strict);
     assert_eq!(
-        x.exchange(&key, &tok("wp_ok"), NOW).unwrap_err(),
+        pin(&x, &key, &tok("wp_ok")).unwrap_err(),
         OidcError::RepoNotBound
     );
 }
@@ -327,9 +335,7 @@ fn repository_names_compare_case_insensitively_on_github_only() {
 fn a_reused_repository_name_with_a_new_id_is_refused() {
     let key = server_key();
     assert_eq!(
-        exchange()
-            .exchange(&key, &tok("gh_reused_name_new_id"), NOW)
-            .unwrap_err(),
+        pin(&exchange(), &key, &tok("gh_reused_name_new_id")).unwrap_err(),
         OidcError::RepoNotBound
     );
 }
@@ -338,13 +344,11 @@ fn a_reused_repository_name_with_a_new_id_is_refused() {
 fn refs_outside_the_binding_are_refused() {
     let key = server_key();
     // `graft/` is a prefix rule; `refs/heads/main` is exact.
-    exchange().exchange(&key, &tok("gh_ok"), NOW).unwrap();
-    exchange()
-        .exchange(&key, &tok("gh_post_land_ref"), NOW)
-        .unwrap();
+    pin(&exchange(), &key, &tok("gh_ok")).unwrap();
+    pin(&exchange(), &key, &tok("gh_post_land_ref")).unwrap();
     for name in ["gh_ref_release", "gh_ref_prefix_trick", "gh_no_ref"] {
         assert_eq!(
-            exchange().exchange(&key, &tok(name), NOW).unwrap_err(),
+            pin(&exchange(), &key, &tok(name)).unwrap_err(),
             OidcError::RefNotAllowed,
             "{name}"
         );
@@ -358,8 +362,8 @@ fn refs_outside_the_binding_are_refused() {
     )
     .unwrap();
     let x = Exchange::new().trust(github()).bind(open);
-    x.exchange(&key, &tok("gh_ref_release"), NOW).unwrap();
-    x.exchange(&key, &tok("gh_no_ref"), NOW).unwrap();
+    pin(&x, &key, &tok("gh_ref_release")).unwrap();
+    pin(&x, &key, &tok("gh_no_ref")).unwrap();
 }
 
 #[test]
@@ -368,7 +372,7 @@ fn only_the_pinned_workflow_may_exchange() {
     // A workflow the repository's own branch added, asking for a token.
     for name in ["gh_own_workflow", "gh_workflow_other_ref", "gh_no_workflow"] {
         assert_eq!(
-            exchange().exchange(&key, &tok(name), NOW).unwrap_err(),
+            pin(&exchange(), &key, &tok(name)).unwrap_err(),
             OidcError::WorkflowNotAllowed,
             "{name}"
         );
@@ -388,7 +392,7 @@ fn a_provider_cannot_use_another_providers_binding() {
     let key = server_key();
     let x = Exchange::new().trust(woodpecker()).bind(gh_binding());
     assert_eq!(
-        x.exchange(&key, &tok("wp_ok"), NOW).unwrap_err(),
+        pin(&x, &key, &tok("wp_ok")).unwrap_err(),
         OidcError::RepoNotBound
     );
 }
@@ -398,13 +402,11 @@ fn unknown_issuer_is_refused() {
     let key = server_key();
     let x = Exchange::new().trust(woodpecker()).bind(wp_binding());
     assert_eq!(
-        x.exchange(&key, &tok("gh_ok"), NOW).unwrap_err(),
+        pin(&x, &key, &tok("gh_ok")).unwrap_err(),
         OidcError::WrongIssuer
     );
     assert_eq!(
-        Exchange::new()
-            .exchange(&key, &tok("gh_ok"), NOW)
-            .unwrap_err(),
+        pin(&Exchange::new(), &key, &tok("gh_ok")).unwrap_err(),
         OidcError::WrongIssuer
     );
 }
@@ -415,9 +417,7 @@ fn a_token_is_checked_by_the_keys_of_the_issuer_it_names() {
     // checked against Woodpecker's keys, where its `kid` is unknown.
     let key = server_key();
     assert_eq!(
-        exchange()
-            .exchange(&key, &tok("gh_signed_claiming_wp_issuer"), NOW)
-            .unwrap_err(),
+        pin(&exchange(), &key, &tok("gh_signed_claiming_wp_issuer")).unwrap_err(),
         OidcError::UnknownKey
     );
 }
@@ -426,10 +426,10 @@ fn a_token_is_checked_by_the_keys_of_the_issuer_it_names() {
 fn set_jwks_replaces_an_issuers_keys() {
     let key = server_key();
     let mut x = exchange();
-    x.exchange(&key, &tok("gh_ok"), NOW).unwrap();
+    pin(&x, &key, &tok("gh_ok")).unwrap();
     assert!(x.set_jwks(GH_ISS, Jwks::from_json(br#"{"keys":[]}"#).unwrap()));
     assert_eq!(
-        x.exchange(&key, &tok("gh_ok"), NOW).unwrap_err(),
+        pin(&x, &key, &tok("gh_ok")).unwrap_err(),
         OidcError::UnknownKey
     );
     assert!(!x.set_jwks("https://nobody.example.test", github_jwks()));
@@ -483,4 +483,170 @@ fn nothing_secret_appears_in_debug_or_display() {
     assert!(!shown.contains(body));
     assert!(!shown.contains(&t));
     assert!(!format!("{:?}", github_jwks()).contains("\"n\""));
+}
+
+// ----------------------------------------------------- pinning to a commit
+
+#[test]
+fn a_write_binding_needs_a_pinned_exchange() {
+    let key = server_key();
+    assert_eq!(
+        exchange().exchange(&key, &tok("gh_ok"), NOW).unwrap_err(),
+        OidcError::PinRequired
+    );
+}
+
+#[test]
+fn the_job_must_have_run_on_the_changesets_commit() {
+    // Another draft's trailer on a branch the attacker pushed: the commit the
+    // job ran on is not the one exported for that draft.
+    let key = server_key();
+    let x = exchange();
+    for name in ["gh_other_sha", "gh_no_sha"] {
+        let err = pin(&x, &key, &tok(name)).unwrap_err();
+        assert_eq!(err, OidcError::CommitMismatch, "{name}");
+    }
+    let err = x
+        .exchange_pinned(&key, &tok("gh_ok"), NOW, CHANGESET, |_| false)
+        .unwrap_err();
+    assert_eq!(err, OidcError::CommitMismatch);
+    assert!(matches!(
+        ApiError::from(err),
+        ApiError::PermissionDenied { .. }
+    ));
+}
+
+#[test]
+fn the_commit_check_sees_only_a_verified_sha_and_runs_last() {
+    let key = server_key();
+    let x = exchange();
+    let mut seen = Vec::new();
+    x.exchange_pinned(&key, &tok("gh_ok"), NOW, CHANGESET, |sha| {
+        seen.push(sha.to_owned());
+        true
+    })
+    .unwrap();
+    assert_eq!(seen, [SHA]);
+    // Refused earlier (wrong repo, bad signature, ref): never called.
+    for name in [
+        "gh_other_repo",
+        "gh_wrong_key",
+        "gh_ref_release",
+        "gh_own_workflow",
+    ] {
+        let r = x.exchange_pinned(&key, &tok(name), NOW, CHANGESET, |_| {
+            panic!("{name}: commit check ran before the other checks")
+        });
+        assert!(r.is_err(), "{name}");
+    }
+}
+
+#[test]
+fn a_pin_must_be_a_plain_id() {
+    let key = server_key();
+    for bad in ["", "c#x", "c x", "c/../x", &"c".repeat(65)] {
+        let r = exchange().exchange_pinned(&key, &tok("gh_ok"), NOW, bad, |_| true);
+        assert_eq!(r.unwrap_err(), OidcError::Malformed, "{bad:?}");
+    }
+}
+
+#[test]
+fn pinned_changeset_reads_only_pinned_ci_subjects() {
+    assert_eq!(pinned_changeset("ci:github:o/r#cabc"), Some("cabc"));
+    assert_eq!(pinned_changeset("ci:github:o/r"), None);
+    assert_eq!(pinned_changeset("ci:github:o/r#"), None);
+    assert_eq!(pinned_changeset("ses_01#cabc"), None);
+    assert_eq!(pinned_changeset(""), None);
+}
+
+#[test]
+fn a_write_binding_must_name_refs_and_pin_the_workflow() {
+    let key = server_key();
+    let write = |b: Binding| Exchange::new().trust(github()).bind(b);
+    let base = || {
+        Binding::new(
+            Provider::GitHubActions,
+            "TheDancingDeveloper-org/graft",
+            "graft",
+            &["repo:graft:read", "repo:graft:write:.ci"],
+        )
+        .unwrap()
+    };
+    let no_refs = write(base().with_workflows(&[WORKFLOW]));
+    assert_eq!(
+        pin(&no_refs, &key, &tok("gh_ok")).unwrap_err(),
+        OidcError::RefNotAllowed
+    );
+    let no_workflow = write(base().with_refs(&["refs/heads/graft/"]));
+    assert_eq!(
+        pin(&no_workflow, &key, &tok("gh_ok")).unwrap_err(),
+        OidcError::WorkflowNotAllowed
+    );
+    let both = write(
+        base()
+            .with_refs(&["refs/heads/graft/"])
+            .with_workflows(&[WORKFLOW]),
+    );
+    pin(&both, &key, &tok("gh_ok")).unwrap();
+}
+
+#[test]
+fn woodpecker_cannot_hold_a_write_binding() {
+    // A Woodpecker pipeline is the branch's own file; it cannot be pinned.
+    let key = server_key();
+    let b = Binding::new(
+        Provider::Woodpecker,
+        "indexarr/graft",
+        "graft",
+        &["repo:graft:write:.ci"],
+    )
+    .unwrap()
+    .with_refs(&["refs/heads/graft/"]);
+    let x = Exchange::new().trust(woodpecker()).bind(b);
+    assert_eq!(
+        pin(&x, &key, &tok("wp_ok")).unwrap_err(),
+        OidcError::WorkflowNotAllowed
+    );
+}
+
+#[test]
+fn a_repo_can_have_a_binding_per_workflow() {
+    // Pre-land (graft/ branches) and post-land (main) as separate bindings;
+    // the one whose rules the token passes is used.
+    let key = server_key();
+    let pre = Binding::new(
+        Provider::GitHubActions,
+        "TheDancingDeveloper-org/graft",
+        "graft",
+        &["repo:graft:read"],
+    )
+    .unwrap()
+    .with_refs(&["refs/heads/graft/"])
+    .with_workflows(&["other/ci/.github/workflows/pre.yml@refs/heads/main"]);
+    let post = Binding::new(
+        Provider::GitHubActions,
+        "TheDancingDeveloper-org/graft",
+        "graft",
+        &["repo:graft:read", "repo:graft:write:.ci"],
+    )
+    .unwrap()
+    .with_refs(&["refs/heads/graft/"])
+    .with_workflows(&[WORKFLOW]);
+    let x = Exchange::new().trust(github()).bind(pre).bind(post);
+    let t = pin(&x, &key, &tok("gh_ok")).unwrap();
+    assert!(
+        verify_graft(&key, &t, NOW)
+            .principal
+            .scopes
+            .contains(&"repo:graft:write:.ci".to_owned())
+    );
+    // None passes: the first refusal is reported.
+    assert_eq!(
+        pin(&x, &key, &tok("gh_own_workflow")).unwrap_err(),
+        OidcError::WorkflowNotAllowed
+    );
+    assert_eq!(
+        pin(&x, &key, &tok("gh_ref_release")).unwrap_err(),
+        OidcError::RefNotAllowed
+    );
 }

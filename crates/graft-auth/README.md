@@ -92,3 +92,11 @@ is `PermissionDenied`; an invalid one is `Unauthenticated`. The minted token
 carries exactly the binding's `read`/`write` scopes and expires at the
 earlier of 15 minutes and the CI token's own `exp`. See `ci/README.md` for the
 workflow side and the trust model.
+
+A binding with a `write` scope can attest, so it is exchanged only through
+`Exchange::exchange_pinned`: the caller names the changeset and supplies a
+check that the token's `sha` claim is the commit exported for it, and the
+minted subject is `ci:<provider>:<repo>#<changeset>` (`oidc::pinned_changeset`).
+The server must refuse an `Attest` from a `ci` principal pinned to another
+changeset. Write bindings must name refs and (GitHub) pin the reusable
+workflow; Woodpecker bindings are read-only.

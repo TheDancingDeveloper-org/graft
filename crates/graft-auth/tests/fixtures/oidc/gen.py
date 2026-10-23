@@ -25,6 +25,7 @@ NOW = 1_800_000_000
 GH_ISS = "https://token.actions.githubusercontent.com"
 GH_AUD = "https://graft.example.test"
 WP_ISS = "https://ci.example.test"
+SHA = "0123456789abcdef0123456789abcdef01234567"
 WORKFLOW = ("TheDancingDeveloper-org/graft-ci/.github/workflows/"
             "graft-pre-land.yml@refs/heads/main")
 
@@ -62,6 +63,7 @@ def gh_claims(**over):
         "repository_id": "900000001",
         "repository_owner": "TheDancingDeveloper-org",
         "ref": "refs/heads/graft/wi-2265",
+        "sha": SHA,
         "job_workflow_ref": WORKFLOW,
         "event_name": "push",
         "iat": NOW - 60,
@@ -99,6 +101,8 @@ def main():
                          "@refs/heads/graft/wi-2265"), sign)
     t["gh_workflow_other_ref"] = jwt(hdr, gh_claims(job_workflow_ref=WORKFLOW[:-4] + "evil"), sign)
     t["gh_no_workflow"] = jwt(hdr, gh_claims(job_workflow_ref=None), sign)
+    t["gh_other_sha"] = jwt(hdr, gh_claims(sha="f" * 40), sign)
+    t["gh_no_sha"] = jwt(hdr, gh_claims(sha=None), sign)
     t["gh_no_ref"] = jwt(hdr, gh_claims(ref=None), sign)
     t["gh_wrong_aud"] = jwt(hdr, gh_claims(aud="https://other.example.test"), sign)
     t["gh_no_aud"] = jwt(hdr, gh_claims(aud=None), sign)
@@ -110,6 +114,7 @@ def main():
     t["gh_not_before"] = jwt(hdr, gh_claims(nbf=NOW + 3600), sign)
     t["gh_future_iat"] = jwt(hdr, gh_claims(iat=NOW + 3600), sign)
     t["gh_long_lived"] = jwt(hdr, gh_claims(exp=NOW + 7200), sign)
+    t["gh_long_remaining"] = jwt(hdr, gh_claims(exp=NOW + 3000, iat=NOW - 60), sign)
     t["gh_short_remaining"] = jwt(hdr, gh_claims(exp=NOW + 30), sign)
     t["gh_no_kid"] = jwt({"alg": "RS256", "typ": "JWT"}, gh_claims(), sign)
     t["gh_unknown_kid"] = jwt({**hdr, "kid": "nope"}, gh_claims(), sign)
@@ -134,7 +139,7 @@ def main():
 
     wp_claims = {
         "iss": WP_ISS, "aud": GH_AUD, "sub": "indexarr/graft/pipeline/7",
-        "repo": "indexarr/graft", "repo_id": 42, "ref": "refs/heads/graft/wi-2265",
+        "repo": "indexarr/graft", "repo_id": 42, "ref": "refs/heads/graft/wi-2265", "commit": SHA,
         "event": "push", "iat": NOW - 30, "exp": NOW + 270,
     }
     wp_hdr = {"alg": "EdDSA", "typ": "JWT", "kid": "wp-test-1"}
