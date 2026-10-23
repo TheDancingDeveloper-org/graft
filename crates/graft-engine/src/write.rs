@@ -13,7 +13,11 @@
 //! holds it and it is created abandoned (a line move still lands it). A land
 //! candidate is a draft held by its land-attempt lease instead.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
+use std::thread;
 
 use graft_model::{
     ApplyOptions, Change, Changeset, ChangesetId, CheckOptions, EntryKind, ObjectId, ObjectKind,
@@ -158,7 +162,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             message: req.message,
             metadata: req.metadata,
         };
-        self.insert(repo, cs, None, inline, Roots::IfEmpty, hold, None)
+        self.insert(repo, cs, None, inline, Roots::IfEmpty, hold, None, None)
             .await
     }
 
@@ -274,16 +278,89 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         if req.changesets.len() > self.config.max_import as usize {
             return Err(errors::limit("import", self.config.max_import.into()));
         }
+        // Every new tree of the import is written, and synced, before the
+        // first changeset commits, so the writes overlap instead of costing
+        // a sync round per changeset (WI-2318).
+        let written = self.prewrite_import(repo, &req.changesets).await?;
         let mut out = Vec::with_capacity(req.changesets.len());
         // One transaction per changeset: a failure keeps the ones before it.
         for cs in req.changesets {
             let root = cs.root;
             out.push(
-                self.insert(repo, cs, Some(root), Vec::new(), Roots::Allowed, None, None)
-                    .await?,
+                self.insert(
+                    repo,
+                    cs,
+                    Some(root),
+                    Vec::new(),
+                    Roots::Allowed,
+                    None,
+                    None,
+                    Some(&written),
+                )
+                .await?,
             );
         }
         Ok(out)
+    }
+
+    /// Derives the new trees of `changesets` in order, each on its first
+    /// parent (stored, or earlier in the batch), and puts them all at once.
+    /// Returns the ids put. It stops at the first changeset it cannot
+    /// derive or whose root differs from the one it claims: `insert` then
+    /// reports that one as it would without this, and puts its trees.
+    async fn prewrite_import(
+        &self,
+        repo: RepoId,
+        changesets: &[Changeset],
+    ) -> Result<HashSet<ObjectId>, ApiError> {
+        let trees = Trees::new(&*self.objects, repo);
+        let apply = ApplyOptions {
+            case_clash: self.config.portable_paths,
+        };
+        let mut roots: HashMap<ChangesetId, TreeId> = HashMap::new();
+        let mut frames: Vec<(ObjectId, Vec<u8>)> = Vec::new();
+        let mut seen = HashSet::new();
+        let opts = CheckOptions {
+            allow_root: true,
+            max_changes: self.config.max_changes as usize,
+            portable_paths: self.config.portable_paths,
+        };
+        for cs in changesets {
+            if cs.check(&opts).is_err() {
+                break;
+            }
+            let base = match cs.parents.first() {
+                None => None,
+                Some(parent) => match roots.get(parent) {
+                    Some(&root) => model_root(root),
+                    None => match self.changeset_opt(repo, *parent).await {
+                        Ok(Some((p, _))) => model_root(p.root),
+                        _ => break,
+                    },
+                },
+            };
+            let Ok(applied) = apply_changes_with(&trees, base, &cs.changes, &apply).await else {
+                break;
+            };
+            let root = applied.root.unwrap_or_else(empty_tree);
+            if root != cs.root {
+                break;
+            }
+            let mut new_trees = applied.new_trees;
+            if applied.root.is_none() {
+                new_trees.push((root, Tree::default()));
+            }
+            trees.remember(&new_trees);
+            for (tree_id, tree) in &new_trees {
+                if seen.insert(tree_id.0) {
+                    let frame = Frame::encode(ObjectKind::Tree, &tree.encode());
+                    frames.push((tree_id.0, frame.to_bytes()));
+                }
+            }
+            roots.insert(cs.id(), root);
+        }
+        put_concurrently(&*self.objects, repo, frames.iter().collect()).await?;
+        Ok(seen)
     }
 
     /// Stores a changeset the server built (a rebased draft) with nothing
@@ -296,8 +373,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         inline: Vec<Upload>,
     ) -> Result<Created, ApiError> {
         let root = cs.root;
-        self.insert(repo, cs, Some(root), inline, Roots::IfEmpty, None, None)
-            .await
+        self.insert(
+            repo,
+            cs,
+            Some(root),
+            inline,
+            Roots::IfEmpty,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Stores a changeset the server built (a revert) as a draft on top of
@@ -324,6 +410,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             Roots::IfEmpty,
             Some(hold),
             None,
+            None,
         )
         .await
     }
@@ -348,6 +435,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             Roots::IfEmpty,
             None,
             Some(lease),
+            None,
         )
         .await
     }
@@ -373,7 +461,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// every object on its changed paths, one pin on each non-landed parent
     /// (guarded by the parent not being collected), and its expiry when it
     /// is not a draft a workspace holds. Before it, the objects it
-    /// references are claimed and their frames checked.
+    /// references are claimed and their frames checked. Objects in
+    /// `written` were put and synced earlier in this request.
     #[allow(clippy::too_many_arguments)]
     async fn insert(
         &self,
@@ -384,6 +473,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         roots: Roots,
         mut hold: Option<Hold<'_>>,
         lease: Option<Lease>,
+        written: Option<&HashSet<ObjectId>>,
     ) -> Result<Created, ApiError> {
         // Rules 3, 8 and 9 (and portability); rule 2 waits for the id, so
         // that a retried root changeset still returns its id.
@@ -484,12 +574,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             let frame = Frame::encode(ObjectKind::Tree, &tree.encode());
             (tree_id.0, frame.to_bytes())
         }));
-        for (object, frame) in &own {
-            self.objects
-                .put(repo, *object, frame.clone())
-                .await
-                .map_err(errors::store)?;
-        }
+        // Ones this request already put and synced (`written`) are skipped.
+        let unwritten = own
+            .iter()
+            .filter(|(o, _)| !written.is_some_and(|w| w.contains(o)))
+            .collect();
+        put_concurrently(&*self.objects, repo, unwritten).await?;
 
         // Claim what it references, then check every frame is there: one
         // deleted since the checks above is put again, or reported missing
@@ -519,14 +609,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         if !missing.is_empty() {
             return Err(ApiError::MissingObjects { ids: missing });
         }
-        for (object, frame) in own {
-            if !present.contains(&object) {
-                self.objects
-                    .put(repo, object, frame)
-                    .await
-                    .map_err(errors::store)?;
-            }
-        }
+        let again: Vec<&(ObjectId, Vec<u8>)> =
+            own.iter().filter(|(o, _)| !present.contains(o)).collect();
+        put_concurrently(&*self.objects, repo, again).await?;
 
         let object_holder = id.to_string();
         let now = self.clock.now().ms;
@@ -637,6 +722,78 @@ struct Hold<'a> {
     cx: &'a CallContext,
     repo_name: &'a str,
     ws: WorkspaceRecord,
+}
+
+/// The most objects one changeset writes at once.
+const MAX_PUT_THREADS: usize = 32;
+
+/// Puts `frames` into `objects`, up to [`MAX_PUT_THREADS`] at a time, and
+/// returns once every one is durable (or the first error). Each put syncs
+/// its file and directory, so a changeset's new trees put one after another
+/// cost one sync round each; concurrent puts overlap them, which is what
+/// makes an import of many small changesets fast (WI-2318).
+///
+/// Object stores here do synchronous work inside their futures (the file
+/// system and memory stores, and SQLite's own writer thread), so each
+/// thread drives its puts with [`block_on`] and needs no runtime.
+async fn put_concurrently<O: ObjectStore>(
+    objects: &O,
+    repo: RepoId,
+    frames: Vec<&(ObjectId, Vec<u8>)>,
+) -> Result<(), ApiError> {
+    let threads = frames.len().min(MAX_PUT_THREADS);
+    if threads <= 1 {
+        for (id, frame) in frames {
+            objects
+                .put(repo, *id, frame.clone())
+                .await
+                .map_err(errors::store)?;
+        }
+        return Ok(());
+    }
+    let put = |(id, frame): &(ObjectId, Vec<u8>)| {
+        block_on(objects.put(repo, *id, frame.clone())).map_err(errors::store)
+    };
+    let next = AtomicUsize::new(0);
+    thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    while let Some(item) = frames.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        put(item)?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        let mut out = Ok(());
+        for w in workers {
+            match w.join() {
+                Ok(r) => out = out.and(r),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+        out
+    })
+}
+
+/// Drives a future to completion on this thread, parking between polls.
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(thread::Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let mut future = std::pin::pin!(future);
+    let waker = Waker::from(Arc::new(Unpark(thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        thread::park();
+    }
 }
 
 /// The blob ids `changes` put, each once, in order. Submodule ids are opaque
