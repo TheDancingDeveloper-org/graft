@@ -180,7 +180,7 @@ fn refusals_write_nothing() {
 fn exchange_then_attest_then_the_attested_land_succeeds() {
     let s = stage();
     let files: Vec<(&str, &[u8])> = vec![("README.md", b"hello\n")];
-    let repo = s.rt.block_on(EngineRepo::new("demo", &files));
+    let repo = s.rt.block_on(EngineRepo::d6("demo", &files));
     let server = s.rt.block_on(TestServer::tcp_workspaces(repo.clone()));
     let url = server.url().to_owned();
 

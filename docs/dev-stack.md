@@ -226,9 +226,9 @@ Every runtime service has `restart: on-failure:3`. `docker inspect` shows
 ## Line land policy
 
 `server.toml` takes an optional `[[lines]]` array and a `[default_line]`
-table (WI-2288). Without them the engine defaults stand: `main` is decision D6
-(attested on `ci/build` and `ci/test`, post-land with auto-revert) and every
-other line lands directly.
+table (WI-2288). Without them every line, `main` included, lands directly
+(D22, WI-2298). D6 (attested on `ci/build` and `ci/test`, post-land with
+auto-revert) is the phase-2 opt-in for `main`, through a `[[lines]]` entry.
 
 | Key | Meaning |
 | --- | --- |
@@ -240,8 +240,8 @@ other line lands directly.
 | `path_rules` | `{ prefix, checks, human_review }`: extra requirements under a path |
 | `post_land` | `{ checks, auto_revert }`: post-land testing |
 
-An entry replaces the default for its name, so a `[[lines]]` entry for `main`
-replaces D6; `main` keeps D6 unless listed. `[default_line]` takes the same
+An entry replaces the default for its name: list `main` with
+`policy = "attested"` and the D6 checks to opt it into D6. `[default_line]` takes the same
 keys (no `name`) and applies to every line no entry names. Unknown keys and
 invalid combinations stop the server at start-up. The config is global: every
 repository gets the same lines. Per-repository configs can come later. A

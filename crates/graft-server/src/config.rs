@@ -98,8 +98,10 @@ pub(crate) struct ServerConfig {
     pub(crate) put_idle_ms: u64,
     /// CI token exchange: trusted issuers and repository bindings.
     pub(crate) ci: crate::ci::CiConfig,
-    /// Per-line land policy; absent means the engine defaults (`main` is D6,
-    /// every other line direct). Global to the server, not per repository.
+    /// Per-line land policy; absent means the engine defaults (every line,
+    /// `main` included, is `direct`: decision D22). An entry opts its line
+    /// into `attested`, `queued` or `post_land` (phase 2; D6 for `main` is
+    /// one). Global to the server, not per repository.
     pub(crate) lines: Vec<crate::lines::LineSpec>,
     /// The policy of lines `lines` does not name.
     pub(crate) default_line: Option<crate::lines::LineSpec>,
@@ -336,10 +338,10 @@ checks = ["ci/test"]
         )
         .expect("parses");
         let e = c.engine_config();
-        // main keeps D6; the two configured lines follow it.
+        // Only the configured lines: `main` is not implicit (D22).
         let names: Vec<_> = e.lines.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, ["main", "trial-1", "release"]);
-        let trial = &e.lines[1];
+        assert_eq!(names, ["trial-1", "release"]);
+        let trial = &e.lines[0];
         assert_eq!(
             trial.policy,
             LandPolicy::Attested {
@@ -348,7 +350,7 @@ checks = ["ci/test"]
             }
         );
         assert_eq!(trial.authority, Authority::GraftPrimary);
-        let release = &e.lines[2];
+        let release = &e.lines[1];
         assert!(matches!(release.policy, LandPolicy::Queued { .. }));
         assert_eq!(release.authority, Authority::GitPrimary);
         assert_eq!(release.path_rules.len(), 1);
@@ -358,10 +360,55 @@ checks = ["ci/test"]
     }
 
     #[test]
-    fn a_configured_main_replaces_the_d6_default() {
+    fn without_line_sections_main_is_direct() {
+        // Decision D22: no implicit D6 for `main`; every line lands directly.
+        let e = ServerConfig::parse("").expect("parses").engine_config();
+        assert!(e.lines.is_empty());
+        assert_eq!(
+            e.default_line.policy,
+            graft_engine::policy::LandPolicy::Direct
+        );
+        assert!(e.default_line.post_land.is_none());
+    }
+
+    #[test]
+    fn a_listed_main_opts_into_d6() {
+        let lines = lines_of(
+            r#"
+[[lines]]
+name = "main"
+policy = "attested"
+checks = ["ci/build", "ci/test"]
+post_land = { checks = ["ci/build", "ci/test"], auto_revert = true }
+"#,
+        );
+        assert_eq!(lines, [graft_engine::policy::LineConfig::d6("main")]);
+    }
+
+    #[test]
+    fn a_listed_main_with_no_policy_is_direct() {
         let lines = lines_of("[[lines]]\nname = \"main\"\n");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].policy, graft_engine::policy::LandPolicy::Direct);
+    }
+
+    #[test]
+    fn the_deploy_config_parses_and_lands_directly() {
+        use graft_engine::policy::{Authority, LandPolicy};
+        // deploy/server.toml as the graft-dev VM runs it: direct (D22).
+        let c = ServerConfig::parse(include_str!("../../../deploy/server.toml"))
+            .expect("deploy/server.toml parses");
+        let e = c.engine_config();
+        let names: Vec<_> = e.lines.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["main", "trial-1"]);
+        for line in &e.lines {
+            assert_eq!(line.policy, LandPolicy::Direct, "{}", line.name);
+            assert!(line.post_land.is_none(), "{}", line.name);
+            assert!(line.path_rules.is_empty(), "{}", line.name);
+        }
+        assert_eq!(e.lines[0].authority, Authority::GitPrimary);
+        assert_eq!(e.lines[1].authority, Authority::GraftPrimary);
+        assert_eq!(e.default_line.policy, LandPolicy::Direct);
     }
 
     #[test]
