@@ -42,6 +42,9 @@ jobs:
           while IFS=: read -r file number line; do
             case "$line" in
               *self-hosted*) ;;
+              # The graft-dev runner is self-hosted but registered with
+              # --no-default-labels, so its only label is graft-dev.
+              *"[graft-dev]"*) ;;
               *)
                 echo "::error file=$file,line=$number::job does not name a self-hosted runner"
                 bad=1
@@ -95,6 +98,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest
+          # Exact pin: an older nextest on a self-hosted runner rejects
+          # --no-tests. install-action replaces a binary of another version.
+          tool: cargo-nextest@0.9.148
+      - run: cargo nextest --version
       - run: cargo nextest run --workspace --all-features --no-tests=pass
       - run: cargo test --workspace --all-features --doc
