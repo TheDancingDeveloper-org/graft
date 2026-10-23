@@ -45,7 +45,6 @@ rustTorrent #214).
 | Gap | State | Item |
 | --- | --- | --- |
 | `graft land` doesn't line-merge | the client sends `MergeMode::File`, so a same-file land is refused unless `--sync` | WI-2296 (p1) |
-| `main` defaults to D6 | the engine and `deploy/server.toml` gate `main` on CI checks; D22 says `direct` | WI-2298 (p1) |
 | `graft mcp` over stdio | the CLI prints "not implemented yet"; the library has the transport | WI-2300 |
 | Creating a line | no API or CLI; the trial used `graft-mirror import --line` | WI-2301 |
 | GC sweep in the server | `admin gc` refuses, and the engine's `do_gc` refuses a real (non-dry-run) sweep; no scheduler | WI-2274 |
@@ -102,7 +101,6 @@ In priority order. Vogt is the source of truth.
 | Item | P | What |
 | --- | --- | --- |
 | WI-2296 | p1 | `graft land` sends `MergeMode::Line` (D16) |
-| WI-2298 | p1 | every line defaults to `direct`; D6 opt-in |
 | WI-2299 | p1 | this docs alignment (D22, plan, status) |
 | WI-2270 | p1 | finish the trial: write-up, trial-1 config in the repo, PR #214 |
 | WI-2294 | p1 | the bench harness (in review) |
