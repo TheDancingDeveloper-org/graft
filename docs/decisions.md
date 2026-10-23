@@ -422,6 +422,12 @@ batch reaches GitHub as one squashed PR, which the operator merges.**
   opens a PR whose body lists every land in the batch (changeset, author,
   session, work item, attestations) and ends with `Graft-Batch` trailers.
   graft never merges or queues the PR.
+- Every land is listed. The squashed commit's message lists all of them.
+  The PR body stays under GitHub's 65,536-character limit (graft-mirror
+  caps it at 60,000): it lists as many lands as fit and says how many more
+  are in the commit message. Each cell is capped, and at most 8 checks are
+  shown per land. A batch listing is bounded at 5,000 lands (the newest);
+  a larger batch is still exported, and both texts say it has more.
 - Sync rebases the line's net change onto the moved base (line merge, D16)
   and records it on the integration line as a fast-forward merge
   changeset. A conflict is reported with its paths, and nothing moves or is

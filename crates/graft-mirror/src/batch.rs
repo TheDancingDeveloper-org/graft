@@ -28,9 +28,11 @@
 //!    recorded before anything is pushed, so a retry pushes the same sha.
 //! 5. **Push** branch `graft/batch-<n>` with a lease that requires the
 //!    branch not to exist, and **open a PR** into the base (adopting one
-//!    already on the branch). The PR body lists every land in the batch
-//!    (changeset, author, session, work item, attestations) and ends with
-//!    `Graft-Batch` trailers. The mirror never merges or queues it.
+//!    already on the branch). The squashed commit's message lists every
+//!    land in the batch (changeset, author, session, work item,
+//!    attestations); the PR body lists as many as fit under
+//!    [`MAX_PR_BODY`] and names the commit message for the rest. Both end
+//!    with `Graft-Batch` trailers. The mirror never merges or queues it.
 //!
 //! Costs follow the change: the sync reads one diff and one rebase; the land
 //! list is a first-parent `Log` from the tip back to the batch start, capped
@@ -76,12 +78,18 @@ pub const BRANCH_PREFIX: &str = "graft/batch-";
 /// The trailer naming the batch, in the squashed commit and the PR body.
 pub const BATCH_TRAILER: &str = "Graft-Batch:";
 
-/// Lands listed in a PR body; more are counted, not listed.
-pub const MAX_LISTED: usize = 200;
+/// The longest PR body graft-mirror writes, in characters: under GitHub's
+/// 65,536, with room for the trailers. Lands that do not fit are listed in
+/// the squashed commit's message, which lists every land.
+pub const MAX_PR_BODY: usize = 60_000;
 
-/// Lands one batch may count. A longer batch is still exported; the body
-/// says the count is at least this.
+/// Lands one batch lists. A batch with more is still exported; the PR body
+/// and the commit message list the newest `MAX_LANDS` and say how many more
+/// there are, at least.
 pub const MAX_LANDS: usize = 5000;
+
+/// Checks listed per land; more are counted.
+pub const MAX_CHECKS: usize = 8;
 
 /// Journal pages read for attestations, at most.
 pub const MAX_ATTEST_PAGES: usize = 16;
@@ -895,13 +903,19 @@ where
             TITLE_CHARS,
             false,
         );
-        let body = self.body(
-            number,
+        let (body, message_body) = render(
+            &BatchHeader {
+                number,
+                line: self.config.line.clone(),
+                branch: self.config.base.branch.clone(),
+                base: base_tip,
+                base_sha,
+                start: state.start,
+                tip,
+                capped,
+                truncated,
+            },
             &lands,
-            capped,
-            truncated,
-            (base_tip, base_sha),
-            (state.start, tip),
         );
 
         // The tree: the integration tip, exported deterministically.
@@ -934,7 +948,7 @@ where
             message: None,
             raw_trees: Vec::new(),
         };
-        let message = format!("{title}\n\n{body}");
+        let message = format!("{title}\n\n{message_body}");
         let raw = commit_object(tree, &[base_sha], &record, &message);
         let squash_sha = self.mirror.write_commit(&raw).await?;
 
@@ -970,70 +984,6 @@ where
             lands = rec.lands, squash = %squash_sha, "mirror batch planned"
         );
         Ok(Some(rec))
-    }
-
-    /// The PR body: what the batch is, every land, then the trailers.
-    fn body(
-        &self,
-        number: u64,
-        lands: &[LandLine],
-        capped: bool,
-        truncated: bool,
-        (base, base_sha): (ChangesetId, GitSha),
-        (start, tip): (ChangesetId, ChangesetId),
-    ) -> String {
-        let line = clean_text(&self.config.line, FIELD_CHARS, false);
-        let branch = clean_text(&self.config.base.branch, FIELD_CHARS, false);
-        let mut b = format!(
-            "Batch {number} of graft line `{line}`, squashed into one commit by graft-mirror \
-             (decision D21). graft never merges or queues this PR: the operator merges it.\n\n"
-        );
-        b.push_str(&format!(
-            "- Base: `{branch}` at {base_sha} (graft {base})\n"
-        ));
-        b.push_str(&format!(
-            "- Lands: {}{} ({start}..{tip})\n",
-            lands.len(),
-            if capped { "+" } else { "" }
-        ));
-        if truncated {
-            b.push_str(
-                "- Attestations: the journal read stopped at its cap; the list may be incomplete\n",
-            );
-        }
-        b.push_str("\n| Changeset | Author | Session | Work item | Attestations | Subject |\n");
-        b.push_str("| --- | --- | --- | --- | --- | --- |\n");
-        let cell = |s: &str| s.replace('|', "\\|");
-        for land in lands.iter().take(MAX_LISTED) {
-            let checks = if land.checks.is_empty() {
-                "none".to_owned()
-            } else {
-                land.checks
-                    .iter()
-                    .map(|(c, ok)| format!("{c} {}", if *ok { "passed" } else { "failed" }))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            b.push_str(&format!(
-                "| `{}` | {} | {} | {} | {} | {} |\n",
-                short(land.id),
-                cell(&land.author),
-                cell(land.session.as_deref().unwrap_or("-")),
-                cell(land.work_item.as_deref().unwrap_or("-")),
-                cell(&checks),
-                cell(&land.subject),
-            ));
-        }
-        if lands.len() > MAX_LISTED {
-            b.push_str(&format!(
-                "\n… and {} more lands.\n",
-                lands.len() - MAX_LISTED
-            ));
-        }
-        b.push_str(&format!(
-            "\n{BATCH_TRAILER} {number}\nGraft-Line: {line}\nGraft-Changeset: {tip}\n"
-        ));
-        b
     }
 
     /// Runs whichever step the batch is at, until it waits on the operator
@@ -1183,6 +1133,127 @@ where
     }
 }
 
+/// What a batch's PR body and commit message say before the land list.
+struct BatchHeader {
+    number: u64,
+    line: String,
+    branch: String,
+    base: ChangesetId,
+    base_sha: GitSha,
+    start: ChangesetId,
+    tip: ChangesetId,
+    /// The land count stopped at [`MAX_LANDS`].
+    capped: bool,
+    /// The attestation read stopped at its cap.
+    truncated: bool,
+}
+
+/// One table row for a land. Every cell is bounded, so a row is too.
+fn land_row(land: &LandLine) -> String {
+    let cell = |s: &str| clean_text(s, FIELD_CHARS, false).replace('|', "\\|");
+    let mut checks: Vec<String> = land
+        .checks
+        .iter()
+        .take(MAX_CHECKS)
+        .map(|(c, ok)| {
+            let c = clean_text(c, FIELD_CHARS, false);
+            format!("{c} {}", if *ok { "passed" } else { "failed" })
+        })
+        .collect();
+    if land.checks.len() > MAX_CHECKS {
+        checks.push(format!("+{} more", land.checks.len() - MAX_CHECKS));
+    }
+    let checks = if checks.is_empty() {
+        "none".to_owned()
+    } else {
+        checks.join(", ")
+    };
+    format!(
+        "| `{}` | {} | {} | {} | {} | {} |\n",
+        short(land.id),
+        cell(&land.author),
+        cell(land.session.as_deref().unwrap_or("-")),
+        cell(land.work_item.as_deref().unwrap_or("-")),
+        checks.replace('|', "\\|"),
+        cell(&land.subject),
+    )
+}
+
+/// The PR body and the squashed commit's message body. Both say what the
+/// batch is, list its lands (newest first) and end with the trailers. The
+/// commit message lists every land. The PR body lists as many as fit in
+/// [`MAX_PR_BODY`] and points to the commit message for the rest.
+fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
+    let line = clean_text(&h.line, FIELD_CHARS, false);
+    let branch = clean_text(&h.branch, FIELD_CHARS, false);
+    let mut head = format!(
+        "Batch {} of graft line `{line}`, squashed into one commit by graft-mirror \
+         (decision D21). graft never merges or queues this PR: the operator merges it.\n\n",
+        h.number
+    );
+    head.push_str(&format!(
+        "- Base: `{branch}` at {} (graft {})\n",
+        h.base_sha, h.base
+    ));
+    head.push_str(&format!(
+        "- Lands: {}{} ({}..{})\n",
+        lands.len(),
+        if h.capped { "+" } else { "" },
+        h.start,
+        h.tip
+    ));
+    if h.capped {
+        head.push_str(&format!(
+            "- Only the newest {MAX_LANDS} lands are listed; the batch has more\n"
+        ));
+    }
+    if h.truncated {
+        head.push_str(
+            "- Attestations: the journal read stopped at its cap; the list may be incomplete\n",
+        );
+    }
+    head.push_str("\n| Changeset | Author | Session | Work item | Attestations | Subject |\n");
+    head.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    let trailers = format!(
+        "\n{BATCH_TRAILER} {}\nGraft-Line: {line}\nGraft-Changeset: {}\n",
+        h.number, h.tip
+    );
+    let rows: Vec<String> = lands.iter().map(land_row).collect();
+
+    let mut message = head.clone();
+    for r in &rows {
+        message.push_str(r);
+    }
+    message.push_str(&trailers);
+
+    // The note for lands the PR body has no room for, at its longest.
+    let note = |n: usize| {
+        format!(
+            "\n{n} more lands are listed in the squashed commit's message \
+             (`git log -1 {BRANCH_PREFIX}{}`).\n",
+            h.number
+        )
+    };
+    let reserve = note(lands.len()).chars().count() + trailers.chars().count();
+    let mut body = head;
+    let mut len = body.chars().count();
+    let mut listed = 0;
+    for r in &rows {
+        let n = r.chars().count();
+        if len + n + reserve > MAX_PR_BODY {
+            break;
+        }
+        body.push_str(r);
+        len += n;
+        listed += 1;
+    }
+    if listed < rows.len() {
+        body.push_str(&note(rows.len() - listed));
+    }
+    body.push_str(&trailers);
+    (body, message)
+}
+
 /// Whether a changeset with `metadata` is a sync changeset the mirror made.
 pub fn is_sync(metadata: &Metadata) -> bool {
     metadata.contains_key(SYNC_KEY)
@@ -1206,6 +1277,89 @@ mod tests {
         assert!(BatchState::Merged.is_terminal());
         assert!(!BatchState::Open.is_terminal());
         assert_eq!(BatchState::parse("landed"), None);
+    }
+
+    fn header(capped: bool) -> BatchHeader {
+        let id = ChangesetId(graft_model::ObjectId([7; 32]));
+        BatchHeader {
+            number: 9,
+            line: "integration".to_owned(),
+            branch: "main".to_owned(),
+            base: id,
+            base_sha: GitSha([1; 20]),
+            start: id,
+            tip: id,
+            capped,
+            truncated: false,
+        }
+    }
+
+    fn land(n: u32, long: bool) -> LandLine {
+        let mut bytes = [0u8; 32];
+        bytes[..4].copy_from_slice(&n.to_be_bytes());
+        let text = |s: &str| if long { s.repeat(200) } else { s.to_owned() };
+        let mut checks = BTreeMap::new();
+        for c in 0..if long { 40 } else { 1 } {
+            checks.insert(text(&format!("ci/check-{c}|")), c % 2 == 0);
+        }
+        LandLine {
+            id: ChangesetId(graft_model::ObjectId(bytes)),
+            author: text("Tess|"),
+            session: Some(text("ses_x")),
+            work_item: Some(text("WI-1")),
+            subject: text("subject "),
+            checks,
+        }
+    }
+
+    #[test]
+    fn a_small_batch_lists_every_land_in_both() {
+        let lands: Vec<LandLine> = (0..3).map(|n| land(n, false)).collect();
+        let (body, message) = render(&header(false), &lands);
+        assert_eq!(body, message);
+        for l in &lands {
+            assert!(body.contains(&short(l.id)));
+        }
+        assert!(body.ends_with(&format!("Graft-Changeset: {}\n", header(false).tip)));
+        assert!(body.contains("Graft-Batch: 9\n"));
+    }
+
+    #[test]
+    fn a_large_batch_fits_github_and_the_commit_lists_every_land() {
+        let lands: Vec<LandLine> = (0..MAX_LANDS as u32).map(|n| land(n, true)).collect();
+        let (body, message) = render(&header(true), &lands);
+        assert!(
+            body.chars().count() <= MAX_PR_BODY,
+            "{}",
+            body.chars().count()
+        );
+        assert!(body.chars().count() < 65_536);
+        assert!(body.contains("more lands are listed in the squashed commit's message"));
+        assert!(body.contains("Graft-Batch: 9\nGraft-Line: integration\n"));
+        assert!(body.contains("Only the newest 5000 lands are listed"));
+        let rows = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|l| l.starts_with("| `c"))
+                .map(|l| l[3..16].to_owned())
+                .collect()
+        };
+        let expected: Vec<String> = lands.iter().map(|l| short(l.id)).collect();
+        assert_eq!(
+            rows(&message),
+            expected,
+            "the commit lists every land in order"
+        );
+        // Cells are bounded and cannot break the table.
+        let row = land_row(&lands[0]);
+        assert_eq!(row.matches(" | ").count(), 5, "{row}");
+        assert!(row.contains("+32 more"));
+        assert!(row.chars().count() < 2000, "{}", row.chars().count());
+        // The listed rows plus the note account for every land.
+        let listed = rows(&body);
+        assert!(!listed.is_empty());
+        assert_eq!(listed[..], expected[..listed.len()]);
+        let note = format!("\n{} more lands are listed", MAX_LANDS - listed.len());
+        assert!(body.contains(&note), "{note}");
     }
 
     #[test]

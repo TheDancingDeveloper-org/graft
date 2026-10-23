@@ -275,6 +275,9 @@ sequenceDiagram
   changeset (first parent the line tip, second `main`'s tip) moves the line
   by compare-and-swap, so the move is a fast-forward. A conflict is
   reported with its paths, and nothing moves.
+- **Every land is listed.** The squashed commit's message lists every land.
+  The PR body lists as many as fit under GitHub's body limit, and names the
+  commit message for the rest. Listings stop at the newest 5,000 lands.
 - **One batch open per line.** While its PR is open, a run only reports it.
   A PR closed unmerged marks the batch rejected, and its lands stay on the
   line for the next batch.
