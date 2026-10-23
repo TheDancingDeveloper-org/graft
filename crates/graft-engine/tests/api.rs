@@ -662,3 +662,82 @@ fn threaded_patches_follow_file_order_and_the_budget() {
         }
     );
 }
+
+/// An import whose trees pass `import_prewrite_bytes` many times over is
+/// written and committed in several runs and still stores every changeset
+/// as one call would. A changeset that fails later keeps the ones before
+/// it committed.
+#[test]
+fn import_in_several_prewrite_runs() {
+    for budget in [1, 600] {
+        let config = graft_engine::EngineConfig {
+            import_prewrite_bytes: budget,
+            ..graft_engine::EngineConfig::default()
+        };
+        import_runs(&memory_with(config.clone()));
+        import_runs(&sqlite_with(config));
+    }
+}
+
+fn import_runs<M: MetaStore>(f: &Fixture<M>) {
+    let scratch = Repo::new(f, "scratch");
+    let mut parent = Vec::new();
+    let mut batch = Vec::new();
+    for i in 0..12 {
+        let path = format!("d{}/e{}/f{i}", i % 3, i % 2);
+        let body = format!("version {i}\n");
+        let id = scratch
+            .commit(parent.clone(), &[(path.as_str(), body.as_bytes())], &[])
+            .id;
+        batch.push(scratch.changeset(id).changeset);
+        parent = vec![id];
+    }
+    let repo = Repo::new(f, "import");
+    let blobs: Vec<Vec<u8>> = (0..12)
+        .map(|i| format!("version {i}\n").into_bytes())
+        .collect();
+    repo.upload(&blobs.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    let imported = block_on(repo.e().import_changesets(
+        &repo.cx,
+        ImportChangesets {
+            repo: repo.name.clone(),
+            changesets: batch.clone(),
+        },
+    ))
+    .expect("import");
+    let ids: Vec<ChangesetId> = batch.iter().map(|cs| cs.id()).collect();
+    assert_eq!(imported.iter().map(|c| c.id).collect::<Vec<_>>(), ids);
+    assert_eq!(
+        repo.fetch(imported[11].root),
+        scratch.fetch(batch[11].root),
+        "the last snapshot comes back whole"
+    );
+
+    // A wrong root at 7: 0 to 6 stay committed.
+    let other = Repo::new(f, "partial");
+    other.upload(&blobs.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    let mut bad = batch.clone();
+    bad[7].root = bad[6].root;
+    let err = block_on(other.e().import_changesets(
+        &other.cx,
+        ImportChangesets {
+            repo: other.name.clone(),
+            changesets: bad,
+        },
+    ))
+    .expect_err("root mismatch");
+    assert!(
+        matches!(&err, ApiError::InvalidChange { rule, .. } if rule == "root-mismatch"),
+        "{err:?}"
+    );
+    assert_eq!(other.journal().len(), 7, "0 to 6 committed, nothing after");
+    let kept = block_on(other.e().import_changesets(
+        &other.cx,
+        ImportChangesets {
+            repo: other.name.clone(),
+            changesets: batch[..7].to_vec(),
+        },
+    ))
+    .expect("re-import the kept prefix");
+    assert_eq!(kept.iter().map(|c| c.id).collect::<Vec<_>>(), ids[..7]);
+}

@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
@@ -278,47 +278,58 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         if req.changesets.len() > self.config.max_import as usize {
             return Err(errors::limit("import", self.config.max_import.into()));
         }
-        // Every new tree of the import is written, and synced, before the
-        // first changeset commits, so the writes overlap instead of costing
-        // a sync round per changeset (WI-2318).
-        let written = self.prewrite_import(repo, &req.changesets).await?;
-        let mut out = Vec::with_capacity(req.changesets.len());
-        // One transaction per changeset: a failure keeps the ones before it.
-        for cs in req.changesets {
-            let root = cs.root;
-            out.push(
-                self.insert(
-                    repo,
-                    cs,
-                    Some(root),
-                    Vec::new(),
-                    Roots::Allowed,
-                    None,
-                    None,
-                    Some(&written),
-                )
-                .await?,
-            );
+        // The new trees of a run of changesets are written, and synced,
+        // before the first of them commits, so the writes overlap instead
+        // of costing a sync round per changeset (WI-2318). A run ends once
+        // its frames pass `import_prewrite_bytes`, which bounds memory.
+        let mut rest = req.changesets;
+        let mut roots = HashMap::new();
+        let mut out = Vec::with_capacity(rest.len());
+        while !rest.is_empty() {
+            let (planned, written) = self.prewrite_import(repo, &rest, &mut roots).await?;
+            // One transaction per changeset: a failure keeps the ones
+            // before it. One `prewrite_import` could not derive is
+            // inserted alone, which reports why.
+            for cs in rest.drain(..planned.max(1)) {
+                let root = cs.root;
+                out.push(
+                    self.insert(
+                        repo,
+                        cs,
+                        Some(root),
+                        Vec::new(),
+                        Roots::Allowed,
+                        None,
+                        None,
+                        Some(&written),
+                    )
+                    .await?,
+                );
+            }
         }
         Ok(out)
     }
 
-    /// Derives the new trees of `changesets` in order, each on its first
-    /// parent (stored, or earlier in the batch), and puts them all at once.
-    /// Returns the ids put. It stops at the first changeset it cannot
-    /// derive or whose root differs from the one it claims: `insert` then
-    /// reports that one as it would without this, and puts its trees.
+    /// Derives the new trees of a prefix of `changesets` in order, each on
+    /// its first parent (stored, or derived earlier in the request, as
+    /// `roots` records), and puts them all at once. It stops after the
+    /// changeset whose frames pass `import_prewrite_bytes`, or before the
+    /// first one it cannot derive or whose root differs from the one it
+    /// claims (`insert` reports that one as it would without this).
+    /// Returns how many it planned and the ids it put.
     async fn prewrite_import(
         &self,
         repo: RepoId,
         changesets: &[Changeset],
-    ) -> Result<HashSet<ObjectId>, ApiError> {
+        roots: &mut HashMap<ChangesetId, TreeId>,
+    ) -> Result<(usize, HashSet<ObjectId>), ApiError> {
         let trees = Trees::new(&*self.objects, repo);
         let apply = ApplyOptions {
             case_clash: self.config.portable_paths,
         };
-        let mut roots: HashMap<ChangesetId, TreeId> = HashMap::new();
         let mut frames: Vec<(ObjectId, Vec<u8>)> = Vec::new();
+        let mut bytes = 0usize;
+        let mut planned = 0;
         let mut seen = HashSet::new();
         let opts = CheckOptions {
             allow_root: true,
@@ -354,13 +365,19 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             for (tree_id, tree) in &new_trees {
                 if seen.insert(tree_id.0) {
                     let frame = Frame::encode(ObjectKind::Tree, &tree.encode());
-                    frames.push((tree_id.0, frame.to_bytes()));
+                    let frame = frame.to_bytes();
+                    bytes += frame.len();
+                    frames.push((tree_id.0, frame));
                 }
             }
             roots.insert(cs.id(), root);
+            planned += 1;
+            if bytes >= self.config.import_prewrite_bytes {
+                break;
+            }
         }
         put_concurrently(&*self.objects, repo, frames.iter().collect()).await?;
-        Ok(seen)
+        Ok((planned, seen))
     }
 
     /// Stores a changeset the server built (a rebased draft) with nothing
@@ -755,12 +772,19 @@ async fn put_concurrently<O: ObjectStore>(
         block_on(objects.put(repo, *id, frame.clone())).map_err(errors::store)
     };
     let next = AtomicUsize::new(0);
+    // Set by the first failed put: the other workers stop taking more.
+    let failed = AtomicBool::new(false);
     thread::scope(|s| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 s.spawn(|| {
-                    while let Some(item) = frames.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        put(item)?;
+                    while !failed.load(Ordering::Relaxed)
+                        && let Some(item) = frames.get(next.fetch_add(1, Ordering::Relaxed))
+                    {
+                        if let Err(e) = put(item) {
+                            failed.store(true, Ordering::Relaxed);
+                            return Err(e);
+                        }
                     }
                     Ok(())
                 })

@@ -127,6 +127,10 @@ pub struct EngineConfig {
     pub max_page: u32,
     /// Most changesets per `ImportChangesets` call.
     pub max_import: u32,
+    /// Tree frame bytes one `ImportChangesets` call writes ahead of its
+    /// commits before it commits the changesets they cover and carries on:
+    /// memory stays bounded however wide the changed directories are.
+    pub import_prewrite_bytes: usize,
     /// Most path prefixes per `Diff`.
     pub max_diff_paths: u32,
     /// Most files per `Diff` page when patches are requested.
@@ -170,6 +174,7 @@ impl Default for EngineConfig {
             default_page: 100,
             max_page: MAX_PAGE,
             max_import: 1000,
+            import_prewrite_bytes: 64 << 20,
             max_diff_paths: 64,
             max_patch_files: 256,
             default_patch_file_bytes: 64 << 10,
