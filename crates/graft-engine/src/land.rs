@@ -23,10 +23,18 @@
 //!
 //! An attestation is the latest `Attest` for a `(changeset, check)`. The
 //! `attested` policy and path rules read the stack head's attestations,
-//! following `graft.rebased-from` back through file-level rebases (a sync)
-//! for at most [`REBASED_HOPS`] hops: a file-level rebase onto a newer tip
-//! is trusted (D6). A `queued` line reads the candidate's own attestations
-//! only, or asks [`LandHooks::test_candidate`].
+//! following `graft.rebased-from` back through rebases (a sync) for at most
+//! [`REBASED_HOPS`] hops: a file-level rebase onto a newer tip is trusted
+//! (D6). A `queued` line reads the candidate's own attestations only, or
+//! asks [`LandHooks::test_candidate`].
+//!
+//! With `merge = line` the land's rebase may resolve paths by line merge
+//! (D16); the result names them in `merged_paths`. On an `attested` line
+//! with `attest_merged`, a line-merged result must carry its own
+//! attestations: the lookup stops at a changeset whose rebase merged
+//! (`graft.merged-paths`), and a land whose own rebase would merge is
+//! `Rejected`, so the caller syncs, has CI attest the merged head, and lands
+//! that.
 //!
 //! Durable formats, in the derived rows (`MetaStore::derived`):
 //!
@@ -59,7 +67,7 @@ use crate::policy::{
     Authority, Candidate, HUMAN_REVIEW, HookFuture, LandPolicy, LandedEvent, LineConfig,
     RevertRequest, Verdict,
 };
-use crate::rebase::{REBASED_FROM, Step};
+use crate::rebase::{MERGED_PATHS, REBASED_FROM, Step};
 use crate::refs::check_ref_name;
 use crate::workspace::transition;
 use crate::write::Lease;
@@ -351,6 +359,37 @@ fn check_check_name(check: &str) -> Result<(), ApiError> {
     }
 }
 
+/// Whether a line requires line-merged results to be re-attested.
+fn attest_merged(line: &LineConfig) -> bool {
+    matches!(
+        line.policy,
+        LandPolicy::Attested {
+            attest_merged: true,
+            ..
+        }
+    )
+}
+
+/// How many merged paths a `Rejected` detail names.
+const DETAIL_PATHS: usize = 8;
+
+/// The `Rejected { detail }` of a land whose rebase merged by line on an
+/// `attest_merged` line.
+fn merged_detail(paths: &[RepoPath], tip: ChangesetId) -> String {
+    let mut named: Vec<&str> = paths
+        .iter()
+        .take(DETAIL_PATHS)
+        .map(RepoPath::as_str)
+        .collect();
+    if paths.len() > DETAIL_PATHS {
+        named.push("…");
+    }
+    format!(
+        "rebasing onto {tip} merges {} by line, and merged results must be re-attested: sync, attest the merged head and land it",
+        named.join(", ")
+    )
+}
+
 /// Why a head lacks a check, for `Rejected { detail }`.
 enum Missing {
     /// No attestation, or none by a person where one is needed.
@@ -454,16 +493,26 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     /// The latest attestation of `check` on `id`, or on the drafts it was
-    /// rebased from (at most [`REBASED_HOPS`] links).
+    /// rebased from (at most [`REBASED_HOPS`] links). With `merged_own`,
+    /// a changeset whose rebase merged by line passes on no attestation
+    /// from before it: its content was never tested.
     async fn inherited_attestation(
         &self,
         repo: RepoId,
         id: ChangesetId,
         cs: &Changeset,
         check: &str,
+        merged_own: bool,
     ) -> Result<Option<Attestation>, ApiError> {
+        let link = |c: &Changeset| {
+            if merged_own && c.metadata.contains_key(MERGED_PATHS) {
+                None
+            } else {
+                c.metadata.get(REBASED_FROM).cloned()
+            }
+        };
         let mut cur = id;
-        let mut from = cs.metadata.get(REBASED_FROM).cloned();
+        let mut from = link(cs);
         for _ in 0..=REBASED_HOPS {
             if let Some(found) = self.attestation(repo, cur, check).await? {
                 return Ok(Some(found));
@@ -473,7 +522,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             };
             cur = prev;
             from = match self.changeset_opt(repo, prev).await {
-                Ok(Some((pcs, _))) => pcs.metadata.get(REBASED_FROM).cloned(),
+                Ok(Some((pcs, _))) => link(&pcs),
                 Ok(None) | Err(ApiError::Collected { .. }) => None,
                 Err(e) => return Err(e),
             };
@@ -482,7 +531,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     /// The first of `checks` the head does not pass (with a person's
-    /// attestation when `human`), or `None`.
+    /// attestation when `human`), or `None`. `merged_own` is the line's
+    /// `attest_merged`.
     async fn head_lacks(
         &self,
         repo: RepoId,
@@ -490,9 +540,13 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cs: &Changeset,
         checks: &[String],
         human: bool,
+        merged_own: bool,
     ) -> Result<Option<Missing>, ApiError> {
         for check in checks {
-            match self.inherited_attestation(repo, id, cs, check).await? {
+            match self
+                .inherited_attestation(repo, id, cs, check, merged_own)
+                .await?
+            {
                 Some(a) if a.passed => {}
                 Some(a) => return Ok(Some(Missing::Failed(check.clone(), a.url))),
                 None => return Ok(Some(Missing::Absent(check.clone()))),
@@ -500,7 +554,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
         if human {
             match self
-                .inherited_attestation(repo, id, cs, HUMAN_REVIEW)
+                .inherited_attestation(repo, id, cs, HUMAN_REVIEW, merged_own)
                 .await?
             {
                 Some(a) if a.passed && a.kind == PrincipalKind::Human => {}
@@ -524,8 +578,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         head_cs: &Changeset,
         stack: &[(ChangesetId, Changeset)],
     ) -> Result<(), ApiError> {
+        let merged_own = attest_merged(line);
         if let LandPolicy::Attested { checks, .. } = &line.policy
-            && let Some(missing) = self.head_lacks(repo, head, head_cs, checks, false).await?
+            && let Some(missing) = self
+                .head_lacks(repo, head, head_cs, checks, false, merged_own)
+                .await?
         {
             return Err(rejected(line.policy.name(), missing.detail(head)));
         }
@@ -533,7 +590,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .iter()
             .flat_map(|(_, cs)| cs.changes.iter().map(|c| c.path()));
         let (checks, human) = line.rule_checks(paths);
-        if let Some(missing) = self.head_lacks(repo, head, head_cs, &checks, human).await? {
+        if let Some(missing) = self
+            .head_lacks(repo, head, head_cs, &checks, human, merged_own)
+            .await?
+        {
             let policy = match &missing {
                 Missing::Absent(c) | Missing::Failed(c, _) if c == HUMAN_REVIEW && human => {
                     "human-review"
@@ -596,7 +656,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         if req.squash {
             return Err(rejected(
                 "squash",
-                "landing a stack as one changeset is not built yet (docs/plan.md, G3.7)".to_owned(),
+                "landing a stack as one changeset is not built yet: squash the stack with the `Stack` operation and land its head".to_owned(),
             ));
         }
         // Each attempt reads the tip before the land record. A record is
@@ -701,10 +761,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .and_then(|(_, cs)| cs.first_parent())
             .ok_or_else(|| errors::invalid(None, "land-root"))?;
 
-        let (candidate, steps) = if bottom == tip {
-            (req.head, Vec::new())
+        let (candidate, steps, merged_paths) = if bottom == tip {
+            (req.head, Vec::new(), Vec::new())
         } else {
-            let plan = match self.plan(repo, stack, tip).await {
+            let plan = match self.plan(repo, stack, tip, req.merge).await {
                 Ok(plan) => plan,
                 Err(ApiError::Conflict { paths, .. }) => {
                     let txn = MetaTxn {
@@ -720,10 +780,20 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 }
                 Err(e) => return Err(e),
             };
+            if attest_merged(config) && !plan.merged.is_empty() {
+                return Err(rejected(
+                    config.policy.name(),
+                    merged_detail(&plan.merged, tip),
+                ));
+            }
             if plan.head != tip {
                 let lease = self.lease(cx, req.head, attempt);
                 for cs in &plan.new {
-                    match self.insert_candidate(repo, cs.clone(), lease.clone()).await {
+                    let uploads = plan.uploads(cs);
+                    match self
+                        .insert_candidate(repo, cs.clone(), lease.clone(), uploads)
+                        .await
+                    {
                         Ok(_) => {}
                         // Collected under a stalled attempt: this one fails
                         // like a lost CAS.
@@ -732,7 +802,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     }
                 }
             }
-            (plan.head, plan.steps)
+            (plan.head, plan.steps, plan.merged)
         };
 
         if let LandPolicy::Queued { checks } = &config.policy
@@ -771,7 +841,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             version: line.version,
             pos: 0,
             rebased: candidate != req.head,
-            merged_paths: Vec::new(),
+            merged_paths,
         };
         if candidate == tip {
             // Every change is already on the line: nothing moves.

@@ -205,7 +205,7 @@ fn landed(result: ApiResult<Landed>) -> (ChangesetId, u64, u64, bool) {
             rebased,
             merged_paths,
         }) => {
-            assert!(merged_paths.is_empty(), "file-level only until G3.7");
+            assert!(merged_paths.is_empty(), "file-level lands merge nothing");
             (landed, line_version, pos, rebased)
         }
         other => panic!("expected Landed, got {other:?}"),
