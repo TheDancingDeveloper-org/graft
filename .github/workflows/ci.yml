@@ -96,14 +96,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          # Exact pin: an older nextest on a self-hosted runner rejects
-          # --no-tests. install-action replaces a binary of another version.
-          tool: cargo-nextest@0.9.148
-      # Some self-hosted runners carry an older cargo-nextest in
-      # $CARGO_HOME/bin, which cargo searches before PATH. Call the pinned
-      # binary that install-action put in /usr/local/bin directly.
-      - run: /usr/local/bin/cargo-nextest nextest --version
-      - run: /usr/local/bin/cargo-nextest nextest run --workspace --all-features --no-tests=pass
+      # Pinned cargo-nextest, run from the job's temp dir. Some self-hosted
+      # runners carry an older cargo-nextest in $CARGO_HOME/bin, which cargo
+      # resolves before PATH, so neither install-action nor a PATH prepend
+      # is enough.
+      - run: |
+          curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/cargo-nextest" nextest --version
+      - run: '"$RUNNER_TEMP/cargo-nextest" nextest run --workspace --all-features --no-tests=pass'
       - run: cargo test --workspace --all-features --doc
