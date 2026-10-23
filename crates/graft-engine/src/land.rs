@@ -53,6 +53,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use graft_auth::oidc::pinned_changeset;
 use graft_model::{Changeset, ChangesetId, ObjectId, ObjectKind, RepoPath};
 use graft_proto::types::{Attest, Land, Landed};
 use graft_proto::{ApiError, CallContext, PrincipalKind};
@@ -963,13 +964,27 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         Ok(())
     }
 
-    /// Records a check result. CI, services and people attest; an agent
-    /// never does, so a session cannot attest its own draft. A failing
+    /// Records a check result. It needs `attest` or `admin` on the
+    /// repository (`write` is not enough). CI, services and people attest;
+    /// an agent never does, so a session cannot attest its own draft, and a
+    /// CI token attests only the changeset it is pinned to. A failing
     /// post-land check on a landed changeset of a line with `auto_revert`
     /// also journals `RevertRequested` in the same transaction (D6).
     pub(crate) async fn do_attest(&self, cx: &CallContext, req: Attest) -> Result<(), ApiError> {
-        require(cx, &req.repo, Need::Workspace)?;
-        if cx.principal.kind == PrincipalKind::Agent {
+        require(cx, &req.repo, Need::Attest)?;
+        let pinned_here = || {
+            pinned_changeset(&cx.principal.subject)
+                .is_some_and(|pin| pin == req.changeset.to_string())
+        };
+        // Agents never attest. A CI token attests only the changeset its
+        // exchange pinned it to (`ci:<provider>:<repo>#<changeset>`); an
+        // unpinned one attests nothing.
+        let refused = match cx.principal.kind {
+            PrincipalKind::Agent => true,
+            PrincipalKind::Ci => !pinned_here(),
+            PrincipalKind::Human | PrincipalKind::Service => false,
+        };
+        if refused {
             return Err(ApiError::PermissionDenied {
                 scope: format!("repo:{}:attest", req.repo),
                 path: None,

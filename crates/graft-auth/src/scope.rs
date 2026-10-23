@@ -10,6 +10,7 @@ use graft_proto::Principal;
 use crate::AuthError;
 
 /// A scope, in the text form `repo:<name>:<perm>[:<arg>]` or `objects:read`.
+/// `<perm>` is `read`, `write`, `land`, `attest` or `admin`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Scope {
     /// Read a repository: `repo:<name>:read`.
@@ -30,6 +31,12 @@ pub enum Scope {
         repo: String,
         /// Line.
         line: String,
+    },
+    /// Post attestations (`Attest`) and nothing else: `repo:<name>:attest`.
+    /// It does not grant `read`, and `write` does not grant it.
+    Attest {
+        /// Repository.
+        repo: String,
     },
     /// Administer a repository: `repo:<name>:admin`.
     Admin {
@@ -71,6 +78,7 @@ impl Scope {
                 repo,
                 line: line.to_owned(),
             }),
+            ("attest", None) => Ok(Self::Attest { repo }),
             ("admin", None) => Ok(Self::Admin { repo }),
             _ => Err(AuthError::Malformed),
         }
@@ -82,6 +90,7 @@ impl Scope {
             Self::Read { repo }
             | Self::Write { repo, .. }
             | Self::Land { repo, .. }
+            | Self::Attest { repo }
             | Self::Admin { repo } => Some(repo),
             Self::ObjectsRead => None,
         }
@@ -93,7 +102,8 @@ impl Scope {
     /// `admin` grants everything on its repository. `write` and `land` grant
     /// `read` on theirs. A `write` with a prefix grants writes to that prefix
     /// and below only, never a write that names no path. `land` is per line.
-    /// `objects:read` is granted only by itself.
+    /// `attest` and `objects:read` are granted only by themselves (and
+    /// `attest` by `admin`).
     fn grants(&self, needed: &Scope, path: Option<&RepoPath>) -> bool {
         if let Self::Admin { repo } = self {
             return needed.repo() == Some(repo.as_str());
@@ -119,6 +129,7 @@ impl Scope {
                     line: want_line,
                 },
             ) => repo == want && line == want_line,
+            (Self::Attest { repo }, Self::Attest { repo: want }) => repo == want,
             _ => false,
         }
     }
@@ -142,6 +153,7 @@ impl fmt::Display for Scope {
                 prefix: Some(prefix),
             } => write!(f, "repo:{repo}:write:{prefix}"),
             Self::Land { repo, line } => write!(f, "repo:{repo}:land:{line}"),
+            Self::Attest { repo } => write!(f, "repo:{repo}:attest"),
             Self::Admin { repo } => write!(f, "repo:{repo}:admin"),
             Self::ObjectsRead => f.write_str("objects:read"),
         }

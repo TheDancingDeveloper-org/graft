@@ -48,26 +48,26 @@ CI job's JWT and mints a graft token:
   restrict refs, and pin the workflow. A repository may have several bindings
   (for example one for pre-land and one for post-land); the first whose ref and
   workflow rules the token passes is used.
-- A binding with a `write` scope can attest, so its tokens come only from
-  `Exchange::exchange_pinned`. The caller names the changeset, and supplies a
-  check that the token's `sha` is the commit exported for it. A token with no
-  `sha`, or a `sha` that does not match, is refused. A write binding must also
-  name its refs and, for GitHub, pin the reusable workflow. `Exchange::exchange`
-  (no pin) refuses write bindings with `PinRequired`.
+- A binding holds `repo:<r>:read` and, to attest, `repo:<r>:attest`, and
+  nothing else: `Binding::new` refuses `write`, `land` and `admin`. A binding
+  with `attest` gives tokens only through `Exchange::exchange_pinned`. The
+  caller names the changeset, and supplies a check that the token's `sha` is
+  the commit exported for it. A token with no `sha`, or a `sha` that does not
+  match, is refused. An attest binding must also name its refs and, for
+  GitHub, pin the reusable workflow. `Exchange::exchange` (no pin) refuses
+  attest bindings with `PinRequired`.
 - The graft token is `kind = ci`, subject
   `ci:<provider>:<owner/repo>#<changeset>`, carries exactly the binding's
-  scopes (`read` and `write`, never `land` or `admin`), and lives at most 15
-  minutes and never past the CI token's own expiry.
+  scopes (`read` and `attest`), and lives at most 15 minutes and never past
+  the CI token's own expiry.
 
-### The server must enforce the pin
+### The engine enforces the pin
 
 The token's subject carries the pinned changeset (`graft_auth::oidc::pinned_changeset`).
-The pin only has an effect where `Attest` is checked: **the server (or engine)
-must refuse an `Attest` from a `ci` principal whose subject is not pinned to
-`req.changeset`**. `graft-engine`'s `do_attest` does not do this yet; it is the
-one change in another crate that this design needs before CI bindings go live
-(tracked as WI-2272, with the dedicated `attest` scope below). Until it does, a CI write token can
-attest any changeset in its repository for its 15 minutes.
+`graft-engine`'s `do_attest` refuses, with `PermissionDenied`, an `Attest` from
+a `ci` principal whose subject is not pinned to exactly `req.changeset`
+(pinned to another changeset, or not pinned at all), before it looks the
+changeset up. So a CI token attests the one changeset it was minted for.
 
 ### Server configuration (what an operator sets)
 
@@ -81,7 +81,7 @@ pre-land   owner/repo -> graft repo `myrepo`
            repository id  <numeric id, from the GitHub API>
            refs           refs/heads/graft/        (prefix: ends with `/`)
            workflows      <shared-org>/graft-ci/.github/workflows/graft-pre-land-myrepo.yml@refs/heads/main
-           scopes         repo:myrepo:read   repo:myrepo:write:<prefix>
+           scopes         repo:myrepo:read   repo:myrepo:attest
 
 post-land  owner/repo -> graft repo `myrepo`
            repository id  <same>
@@ -90,23 +90,15 @@ post-land  owner/repo -> graft repo `myrepo`
            scopes         as above
 ```
 
-### What a CI write token can do (operator decision)
+### What a CI token can do
 
-`Attest` needs a `write` scope on the repository, any prefix: the engine's
-check is `Need::Workspace`, and the path prefix is not looked at for an
-attestation. The same check admits `OpenWorkspace`, `RenewLease`, `SetHead`
-(which can adopt abandoned drafts), `CloseWorkspace` and `Sync`. So a CI token
-cannot change repository *content* (a prefixed write scope limits changes to
-that prefix, which should be a path nothing real lives under), **but it can
-open, move, adopt and close draft stacks and workspaces in that repository**
-for its 15 minutes. The changeset pin limits `Attest` only.
-
-That is the exposure of using `write` for CI today. The operator has decided
-on a dedicated `repo:<r>:attest` scope, which grants `Attest` and nothing else;
-it, and the engine's pin check, are WI-2272. Once it lands, CI bindings carry
-`repo:<r>:read` and `repo:<r>:attest` and no `write` at all, and the paragraph
-above no longer applies. Until then, enabling a write binding is an operator
-decision.
+`Attest` needs `repo:<r>:attest` (or `admin`, which CI never holds). `attest`
+grants `Attest` and nothing else: no read, no write, no land, no workspaces.
+`write` does not imply it, so a token with only `write` cannot attest. A CI
+token therefore reads the repository and attests the one changeset it is
+pinned to, and cannot open, move, adopt or close drafts or workspaces
+(operator decision, WI-2272; before it, CI attested with a `write` scope on an
+unused prefix, which also admitted those workspace calls).
 
 ### Trust model
 
@@ -160,7 +152,7 @@ audience, lifetime and binding rules. The claim names are an assumption about
 the job token an estate Woodpecker will issue; check them against a real token
 before enabling it. A Woodpecker pipeline is the branch's own file, so it
 cannot be pinned to a trusted workflow: a Woodpecker binding can hold `read`
-only, and `exchange_pinned` refuses a Woodpecker `write` binding. There is no
+only, and `exchange_pinned` refuses a Woodpecker `attest` binding. There is no
 Woodpecker template.
 
 ## Rehearsal

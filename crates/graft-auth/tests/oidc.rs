@@ -58,7 +58,7 @@ fn gh_binding() -> Binding {
         Provider::GitHubActions,
         "TheDancingDeveloper-org/graft",
         "graft",
-        &["repo:graft:read", "repo:graft:write:.ci"],
+        &["repo:graft:read", "repo:graft:attest"],
     )
     .unwrap()
     .with_repo_id("900000001")
@@ -227,10 +227,9 @@ fn exchange_mints_a_short_ci_token() {
         "ci:github:TheDancingDeveloper-org/graft#cAbCdEf0123456789"
     );
     assert_eq!(pinned_changeset(&c.principal.subject), Some(CHANGESET));
-    assert_eq!(
-        c.principal.scopes,
-        ["repo:graft:read", "repo:graft:write:.ci"]
-    );
+    assert_eq!(c.principal.scopes, ["repo:graft:read", "repo:graft:attest"]);
+    // Attesting takes the dedicated scope, never a write (WI-2272).
+    assert!(!c.principal.scopes.iter().any(|s| s.contains(":write")));
     assert_eq!(c.principal.session, None);
     assert_eq!(c.principal.work_item, None);
     // The CI token has 240 s left, under the 900 s default cap.
@@ -439,7 +438,13 @@ fn set_jwks_replaces_an_issuers_keys() {
 fn bindings_refuse_scopes_ci_must_not_hold() {
     let bind = |scopes: &[&str]| Binding::new(Provider::GitHubActions, "o/r", "graft", scopes);
     assert!(bind(&["repo:graft:read"]).is_ok());
+    assert!(bind(&["repo:graft:read", "repo:graft:attest"]).is_ok());
     assert!(bind(&[]).is_err());
+    // CI attests with `attest`; a write scope, even on an unused prefix,
+    // would also let it open, move and close drafts (WI-2272).
+    assert!(bind(&["repo:graft:write"]).is_err());
+    assert!(bind(&["repo:graft:write:.ci"]).is_err());
+    assert!(bind(&["repo:other:attest"]).is_err());
     assert!(bind(&["repo:graft:admin"]).is_err());
     assert!(bind(&["repo:graft:land:main"]).is_err());
     assert!(bind(&["objects:read"]).is_err());
@@ -488,7 +493,7 @@ fn nothing_secret_appears_in_debug_or_display() {
 // ----------------------------------------------------- pinning to a commit
 
 #[test]
-fn a_write_binding_needs_a_pinned_exchange() {
+fn an_attest_binding_needs_a_pinned_exchange() {
     let key = server_key();
     assert_eq!(
         exchange().exchange(&key, &tok("gh_ok"), NOW).unwrap_err(),
@@ -573,29 +578,29 @@ fn pinned_changeset_reads_only_pinned_ci_subjects() {
 }
 
 #[test]
-fn a_write_binding_must_name_refs_and_pin_the_workflow() {
+fn an_attest_binding_must_name_refs_and_pin_the_workflow() {
     let key = server_key();
-    let write = |b: Binding| Exchange::new().trust(github()).bind(b);
+    let attest = |b: Binding| Exchange::new().trust(github()).bind(b);
     let base = || {
         Binding::new(
             Provider::GitHubActions,
             "TheDancingDeveloper-org/graft",
             "graft",
-            &["repo:graft:read", "repo:graft:write:.ci"],
+            &["repo:graft:read", "repo:graft:attest"],
         )
         .unwrap()
     };
-    let no_refs = write(base().with_workflows(&[WORKFLOW]));
+    let no_refs = attest(base().with_workflows(&[WORKFLOW]));
     assert_eq!(
         pin(&no_refs, &key, &tok("gh_ok")).unwrap_err(),
         OidcError::RefNotAllowed
     );
-    let no_workflow = write(base().with_refs(&["refs/heads/graft/"]));
+    let no_workflow = attest(base().with_refs(&["refs/heads/graft/"]));
     assert_eq!(
         pin(&no_workflow, &key, &tok("gh_ok")).unwrap_err(),
         OidcError::WorkflowNotAllowed
     );
-    let both = write(
+    let both = attest(
         base()
             .with_refs(&["refs/heads/graft/"])
             .with_workflows(&[WORKFLOW]),
@@ -604,14 +609,14 @@ fn a_write_binding_must_name_refs_and_pin_the_workflow() {
 }
 
 #[test]
-fn woodpecker_cannot_hold_a_write_binding() {
+fn woodpecker_cannot_hold_an_attest_binding() {
     // A Woodpecker pipeline is the branch's own file; it cannot be pinned.
     let key = server_key();
     let b = Binding::new(
         Provider::Woodpecker,
         "indexarr/graft",
         "graft",
-        &["repo:graft:write:.ci"],
+        &["repo:graft:attest"],
     )
     .unwrap()
     .with_refs(&["refs/heads/graft/"]);
@@ -640,7 +645,7 @@ fn a_repo_can_have_a_binding_per_workflow() {
         Provider::GitHubActions,
         "TheDancingDeveloper-org/graft",
         "graft",
-        &["repo:graft:read", "repo:graft:write:.ci"],
+        &["repo:graft:read", "repo:graft:attest"],
     )
     .unwrap()
     .with_refs(&["refs/heads/graft/"])
@@ -651,7 +656,7 @@ fn a_repo_can_have_a_binding_per_workflow() {
         verify_graft(&key, &t, NOW)
             .principal
             .scopes
-            .contains(&"repo:graft:write:.ci".to_owned())
+            .contains(&"repo:graft:attest".to_owned())
     );
     // None passes: the first refusal is reported.
     assert_eq!(
