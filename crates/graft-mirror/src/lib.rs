@@ -1,7 +1,7 @@
 //! `graft-mirror`: the only service that speaks git (`docs/design.md` §11).
 //!
-//! Work items G1.14 (import, follow), G2.6 (PR bridge) and G3.3 (export);
-//! G3.9 (authority switch) comes later.
+//! Work items G1.14 (import, follow), G2.6 (PR bridge), G3.3 (export) and
+//! G3.9 (authority switch).
 //!
 //! - [`import`]: a one-shot lossless import of a local git repository, then
 //!   the line and tag refs set by compare-and-swap.
@@ -12,6 +12,8 @@
 //! - [`export`]: graft-primary mode B. Tail the journal, export each line
 //!   move, push to GitHub with a lease, and record progress. A refused lease
 //!   stops the line and raises `graft_mirror_divergence`; nothing is forced.
+//! - [`authority`]: the switch of a line between git-primary and
+//!   graft-primary: freeze, verify, flip, unfreeze, in both directions.
 //! - [`reconcile`]: an operator resolves a stopped line, landing the stray
 //!   commits through graft or replacing them on a lease.
 //! - [`pulls`]: GitHub PRs imported as drafts in `github-pr/<n>` workspaces,
@@ -36,6 +38,7 @@ use graft_proto::{ApiError, CallContext};
 
 use crate::github::ForgeError;
 
+pub mod authority;
 pub mod bridge;
 pub mod config;
 pub mod credentials;
@@ -66,6 +69,8 @@ pub enum MirrorError {
     Config(String),
     /// GitHub refused or could not be reached.
     Forge(ForgeError),
+    /// An authority switch step refused, described.
+    Switch(String),
 }
 
 impl fmt::Display for MirrorError {
@@ -76,6 +81,7 @@ impl fmt::Display for MirrorError {
             MirrorError::Api(e) => write!(f, "the graft API refused: {e:?}"),
             MirrorError::Config(what) => write!(f, "configuration: {what}"),
             MirrorError::Forge(e) => e.fmt(f),
+            MirrorError::Switch(what) => write!(f, "authority switch: {what}"),
         }
     }
 }

@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use graft_git::import::ImportConfig;
+use graft_mirror::authority::{
+    DEFAULT_LAST, Gate, HookGate, RulesetGate, Stage, Status, Switcher, Unfrozen,
+};
 use graft_mirror::config::{AuthChoice, FileConfig, GithubFile, parse_shas};
 use graft_mirror::credentials::{CredentialProvider, GithubApp, NoCredentials, StaticToken};
 use graft_mirror::export::{Export, export_all};
@@ -33,10 +36,13 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
   export --config <file>                graft-primary: export lines to GitHub
   export --to <bare-repo> --repo <name> full export (exit path, drill)
          --db <file> [--server <url>] [--token-file <file>]
-  verify --repo <name> [--last N]       re-export and compare shas
+  verify --config <file> --line <l> [--last N]
+                                        re-export the last N and compare shas
   reconcile --config <file> --line <l> (--land | --discard)
                                         resolve an export divergence by hand
-  authority <status|freeze|verify|flip|unfreeze> --line <l>
+  authority <status|freeze|verify|flip|unfreeze> --config <file> --line <l>
+         [--last N]                     switch a line's authority (§11.3);
+                                        docs/runbooks/authority-switch.md
 
   The server URL defaults to GRAFT_ENDPOINT; the token comes from
   GRAFT_TOKEN or --token-file / token_file.";
@@ -51,7 +57,12 @@ fn main() -> ExitCode {
         Some("follow") => run(cmd_follow(&args[1..])),
         Some("export") => run(cmd_export(&args[1..])),
         Some("reconcile") => run(cmd_reconcile(&args[1..])),
-        Some("bridge" | "verify" | "authority") => {
+        Some("verify") => run(cmd_authority(Step::Verify, &args[1..])),
+        Some("authority") => match args.get(1).map(String::as_str).and_then(Step::parse) {
+            Some(step) => run(cmd_authority(step, &args[2..])),
+            None => usage(),
+        },
+        Some("bridge") => {
             eprintln!("graft-mirror: not implemented yet (see docs/plan.md)");
             ExitCode::from(2)
         }
@@ -513,6 +524,212 @@ impl AsyncCredentialFn<()> for RunReconcile<'_> {
         }
         Ok(())
     }
+}
+
+/// One `graft-mirror authority` step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Status,
+    Freeze,
+    Verify,
+    Flip,
+    Unfreeze,
+}
+
+impl Step {
+    fn parse(s: &str) -> Option<Step> {
+        Some(match s {
+            "status" => Step::Status,
+            "freeze" => Step::Freeze,
+            "verify" => Step::Verify,
+            "flip" => Step::Flip,
+            "unfreeze" => Step::Unfreeze,
+            _ => return None,
+        })
+    }
+}
+
+async fn cmd_authority(step: Step, args: &[String]) -> Result<(), CmdError> {
+    let mut config = None;
+    let mut line = None;
+    let mut last = DEFAULT_LAST;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |flag: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| CmdError::Usage(format!("{flag} needs a value")))
+        };
+        match a.as_str() {
+            "--config" => config = Some(PathBuf::from(value("--config")?)),
+            "--line" => line = Some(value("--line")?),
+            "--last" if step == Step::Verify => {
+                last = value("--last")?
+                    .parse()
+                    .map_err(|_| CmdError::Usage("--last takes a number".into()))?;
+            }
+            s => return Err(CmdError::Usage(format!("unexpected argument {s}"))),
+        }
+    }
+    let config = config.ok_or_else(|| CmdError::Usage("authority needs --config".into()))?;
+    let line = line.ok_or_else(|| CmdError::Usage("authority needs --line".into()))?;
+    let file = FileConfig::load(&config)?;
+    let line = file
+        .lines()
+        .into_iter()
+        .find(|l| l.line == line)
+        .ok_or_else(|| CmdError::Usage(format!("line {line} is not in the config")))?;
+    let api = Server::connect(&file.server, token(file.token_file.as_deref())?).await?;
+    let db = MirrorDb::open(&file.db).map_err(MirrorError::from)?;
+    with_credentials(
+        file.github.as_ref(),
+        RunAuthority {
+            file: &file,
+            api: &api,
+            db: &db,
+            line,
+            step,
+            last,
+        },
+    )
+    .await
+}
+
+struct RunAuthority<'a> {
+    file: &'a FileConfig,
+    api: &'a Server,
+    db: &'a MirrorDb,
+    line: graft_mirror::follow::FollowLine,
+    step: Step,
+    last: usize,
+}
+
+impl AsyncCredentialFn<()> for RunAuthority<'_> {
+    async fn call<C: CredentialProvider>(self, credentials: &C) -> Result<(), CmdError> {
+        let Some(gh) = self.file.github.as_ref() else {
+            let gate = HookGate::for_upstream(&self.file.upstream).ok_or_else(|| {
+                MirrorError::Config(
+                    "no gate: configure [github] (its ruleset is the gate), or use a local \
+                     bare repository as upstream"
+                        .to_owned(),
+                )
+            })?;
+            return self.run(&gate).await;
+        };
+        let forge = HttpForge::new(
+            gh.api.as_deref().unwrap_or(GITHUB_API),
+            &gh.owner,
+            &gh.repo,
+            credentials,
+            RetryPolicy::default(),
+        )?;
+        let gate = RulesetGate::new(&forge, gh.github_app.as_ref().map(|a| a.app_id));
+        self.run(&gate).await
+    }
+}
+
+impl RunAuthority<'_> {
+    async fn run<G: Gate>(self, gate: &G) -> Result<(), CmdError> {
+        let file = self.file;
+        let switcher = Switcher::new(
+            self.api,
+            mirror_cx(&file.repo),
+            self.db,
+            Mirror::new(&file.mirror_dir, &file.upstream),
+            gate,
+            file.repo.clone(),
+            self.line.clone(),
+        );
+        let line = &self.line.line;
+        match self.step {
+            Step::Status => print_status(line, &switcher.status().await?),
+            Step::Freeze => {
+                let s = switcher.freeze().await?;
+                println!(
+                    "line {line}: frozen for the switch {} -> {}",
+                    s.from.as_str(),
+                    s.to.as_str()
+                );
+                if s.from == graft_mirror::authority::Authority::GraftPrimary {
+                    println!(
+                        "graft still accepts lands on {line}: stop them on graft's side \
+                         (see the runbook) before verify"
+                    );
+                }
+            }
+            Step::Verify => {
+                let v = switcher.verify(self.last).await?;
+                println!(
+                    "line {line}: level at {} = {}; {} changeset(s) re-exported and identical",
+                    v.tip, v.sha, v.checked
+                );
+            }
+            Step::Flip => {
+                let s = switcher.flip().await?;
+                println!(
+                    "line {line}: flipped to {}; run unfreeze to open it",
+                    s.to.as_str()
+                );
+                println!(
+                    "set line {line} to {} in graft's line policy, and run {} for the line",
+                    s.to.as_str(),
+                    match s.to {
+                        graft_mirror::authority::Authority::GitPrimary => "follow (not export)",
+                        graft_mirror::authority::Authority::GraftPrimary => {
+                            "export (not follow or bridge)"
+                        }
+                    }
+                );
+            }
+            Step::Unfreeze => match switcher.unfreeze().await? {
+                Unfrozen::Finished(a) => {
+                    println!("line {line}: switch finished; {} holds it", a.as_str())
+                }
+                Unfrozen::Aborted(a) => {
+                    println!("line {line}: switch aborted; {} keeps it", a.as_str())
+                }
+                Unfrozen::NoSwitch(a) => println!(
+                    "line {line}: no switch in progress; gate set for {}",
+                    a.as_str()
+                ),
+            },
+        }
+        Ok(())
+    }
+}
+
+fn print_status(line: &str, s: &Status) {
+    let hex = |sha: Option<graft_git::GitSha>| sha.map_or("none".to_owned(), |s| s.to_hex());
+    println!("line {line}");
+    println!("  authority: {}", s.claim.as_deref().unwrap_or("unclaimed"));
+    match &s.switch {
+        Some(sw) => println!(
+            "  switch:    {} -> {} ({}{})",
+            sw.from.as_str(),
+            sw.to.as_str(),
+            sw.stage.as_str(),
+            match (sw.stage, sw.sha) {
+                (Stage::Verified, Some(sha)) => format!(" at {sha}"),
+                _ => String::new(),
+            }
+        ),
+        None => println!("  switch:    none"),
+    }
+    println!("  gate:      {}", s.gate.as_str());
+    println!("  upstream:  {}", hex(s.upstream));
+    println!(
+        "  graft:     {} ({})",
+        s.tip.map_or("none".to_owned(), |t| t.to_string()),
+        hex(s.tip_sha)
+    );
+    println!("  level:     {}", if s.in_sync() { "yes" } else { "no" });
+    if let Some(d) = s.follow.diverged {
+        println!("  follow:    stopped on {d}");
+    }
+    if s.export.as_ref().is_some_and(|e| e.diverged) {
+        println!("  export:    stopped on a divergence (reconcile)");
+    }
+    println!("  open bridge requests: {}", s.open_pulls);
 }
 
 async fn serve_metrics(
