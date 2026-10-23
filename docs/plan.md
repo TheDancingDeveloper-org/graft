@@ -56,14 +56,14 @@ What remains:
 
 | Item | What |
 | --- | --- |
-| WI-2310 | draft overlap (design note #95 merged; implementation open) |
+| WI-2310 | draft overlap (design note #95 merged; step (a) in PR #113; the rest open) |
 | WI-2323 | group-commit chained import inserts (note #111 merged; implementation open) |
 | WI-2304 | bench at 10k and 100k on the graft-dev VM |
 | WI-2314 | CI OOM flake: quarantined (#91), root cause open |
 | WI-2307 | graft-dev alerts patch (blocked on the operator; backups #97 done) |
 | WI-2270 | rustTorrent trial batch PR #214 (blocked on the operator) |
 | WI-2317 | tailnet SSH (blocked on the operator) |
-| WI-2240 | estate token front for Vogt sessions (D10), deferred |
+| WI-2240 | estate token front for Vogt sessions (D10): deferred (p4) |
 
 New items follow the work item format below. Each names its crates, and new
 items keep the rule of one area per branch.

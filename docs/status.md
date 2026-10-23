@@ -73,7 +73,8 @@ server on a 24-CPU host. Each step is a fresh CLI process for both tools.
 | sync, 5 behind (ms) | 21.0 | 22.5 | 0.93 |
 | 8 concurrent clean lands, p50 (ms) | 110 | 139 | 0.79 |
 | 8 concurrent same-file lands (merge3), p50 (ms) | 225 | 137 | 1.64 |
-| import of the history (s) | 6.2 (engine, after #110; was 18.9) | 1 (fast-import) | |
+| import of the history, graft-mirror end to end (s) | 56 | 1 (fast-import) | |
+| import, engine `ImportChangesets` step only, after #110 (s) | 6.2 (was 18.9) | | |
 
 Correctness held at both scales (10 and 1,000):
 - The final graft tree, the final git tree and a model replay are equal,
@@ -87,7 +88,9 @@ The merge3 row predates WI-2296 (#83): plain `land` was refused 140 times
 before `land --sync` merged. `land` now line-merges by default; re-measure
 with WI-2304. Import: `graft-mirror import` went 22.5 → 18.5 s with
 concurrent blob upload (#104), and the engine's `ImportChangesets` 18.9 → 6.2
-s per 1k with batched writes (#110). The rest is SQLite commits (WI-2323).
+s per 1k with batched writes (#110). The 6.2 s is the engine step alone,
+so neither it nor the 56 s end-to-end figure is comparable with fast-import's
+1 s, which runs locally with no server. The rest is SQLite commits (WI-2323).
 Creating a line now writes one fork row, not a copy of its history (#107).
 
 Still to measure: 10k and 100k commits on the quiet VM (WI-2304).
@@ -98,7 +101,7 @@ Vogt is the source of truth.
 
 | Item | What |
 | --- | --- |
-| WI-2310 | draft overlap: who else has in-flight drafts on these paths (design note #95 merged; the rest open) |
+| WI-2310 | draft overlap: who else has in-flight drafts on these paths (design note #95 merged; step (a) in PR #113; the rest open) |
 | WI-2323 | group-commit chained import inserts in graft-store-sqlite (note merged in #111; implementation open) |
 | WI-2304 | bench at 10k and 100k on the graft-dev VM |
 | WI-2314 | CI `test` job OOM flake: quarantined (#91), root cause open |
@@ -109,7 +112,7 @@ Blocked on the operator:
 - WI-2317: tailnet SSH.
 
 Deferred:
-- WI-2240, estate token front for Vogt sessions (D10).
+- WI-2240, estate token front for Vogt sessions (D10), p4.
 
 Parked:
 - WI-2214, phase-4 breadth (p4).
