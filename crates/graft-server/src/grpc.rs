@@ -1037,8 +1037,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         &self,
         request: Request<pb::OverlappingDraftsRequest>,
     ) -> Result<Response<pb::DraftOverlap>, Status> {
-        // Wire stub (WI-2310 step a): the engine checks the drafts scope and
-        // answers once step b lands; until then it is `Unavailable`.
+        // A read: the engine checks the `repo:<r>:drafts` scope.
         let cx = self.cx(&request, "OverlappingDrafts")?;
         let req: OverlappingDrafts = wire(request.into_inner())?;
         let repo = req.repo.clone();
@@ -1048,7 +1047,7 @@ impl pb::workspace_service_server::WorkspaceService for Services {
                 "OverlappingDrafts",
                 &repo,
                 cx,
-                true,
+                false,
                 move |e, cx| async move { e.overlapping_drafts(&cx, req).await },
             )
             .await

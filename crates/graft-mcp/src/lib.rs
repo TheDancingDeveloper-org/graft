@@ -4,12 +4,14 @@
 //! `graft mcp` (stdio, remote API, with working-copy tools) and on the
 //! server's `/mcp` endpoint (streamable HTTP, in-process engine).
 
+mod drafts;
 mod render;
 mod server;
 mod upstream;
 mod workcopy;
 mod write;
 
+pub use drafts::DraftOverlapArgs;
 pub use render::{MAX_RESULT_BYTES, PATCH_MAX_BYTES};
 pub use server::{
     Auth, BlameArgs, Caller, DiffArgs, LogArgs, LsArgs, MAX_REQUEST_BYTES, McpServer, ReadArgs,
@@ -78,6 +80,11 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "graft_upstream",
         description: "What changed on the line since the base, and whether your work would merge onto its tip.",
+        read_only: true,
+    },
+    ToolSpec {
+        name: "graft_draft_overlap",
+        description: "Other live workspaces with open drafts on these paths (no contents).",
         read_only: true,
     },
     ToolSpec {

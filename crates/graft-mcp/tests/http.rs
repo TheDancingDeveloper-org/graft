@@ -98,6 +98,7 @@ async fn the_service_serves_tools_over_loopback_http() {
             "graft_commit",
             "graft_conflicts",
             "graft_diff",
+            "graft_draft_overlap",
             "graft_land",
             "graft_line_create",
             "graft_log",

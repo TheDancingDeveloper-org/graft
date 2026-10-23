@@ -185,13 +185,14 @@ fn fsck(config: &ServerConfig, repo: &str) -> Result<(), Failure> {
         println!("problem: {line}");
     }
     println!(
-        "fsck {repo}: {} changesets ({} collected), {} trees, {} blobs, {} bytes, {} refs, {} problems",
+        "fsck {repo}: {} changesets ({} collected), {} trees, {} blobs, {} bytes, {} refs, {} workspaces, {} problems",
         report.changesets,
         report.collected,
         report.trees,
         report.blobs,
         report.bytes,
         report.refs,
+        report.workspaces,
         report.problems
     );
     if report.is_clean() {
