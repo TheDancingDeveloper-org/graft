@@ -6,6 +6,10 @@
 #   graft-server  gRPC, the /v1 JSON facade, /healthz, /readyz, /metrics
 #   graft-mirror  follows github.com/TheDancingDeveloper-org/rustTorrent main
 #                 into the graft repository `rusttorrent`
+#   graft-attester  (profile `attester`, off by default) checks new drafts on
+#                 the trial line `trial-1` of `rusttorrent` and posts Attest
+#                 for ci/fmt, ci/clippy and ci/test (WI-2276, decision D21);
+#                 built from deploy/attester/Dockerfile
 #
 # Image: GRAFT_IMAGE from deploy/image.env, pinned by digest. Run compose with
 # `--env-file deploy/image.env` (up.sh does).
@@ -22,6 +26,8 @@
 # being created as a directory.
 #   /etc/graft/signing.key   server token signing key (0600, uid 10001)
 #   /etc/graft/mirror-token  graft-mirror's service token (0600, uid 10001)
+#   /etc/graft/attester-token  graft-attester's token (0600, uid 0: only the
+#                            attester reads it, never the checks it runs)
 name: graft-dev
 
 x-graft: &graft
@@ -120,6 +126,66 @@ services:
       retries: 3
       start_period: 20s
 
+  # The trial attester (WI-2276). Off unless the `attester` profile is on
+  # (GRAFT_ATTESTER=1 for up.sh). It runs as root with four capabilities
+  # and runs each check as uid 10001, which can't read the token. One draft
+  # at a time; CPU, memory and process caps leave room for the VM's quiet
+  # benchmarks (4 vCPU).
+  graft-attester:
+    <<: *graft
+    profiles: [attester]
+    build:
+      context: ..
+      dockerfile: deploy/attester/Dockerfile
+      args:
+        CARGO_BUILD_JOBS: "${GRAFT_ATTESTER_JOBS:-2}"
+    image: graft-dev-attester:local
+    pull_policy: build
+    container_name: graft-dev-attester
+    hostname: graft-dev-attester
+    user: "0:0"
+    cap_add: [CHOWN, SETUID, SETGID, KILL]
+    cpus: ${GRAFT_ATTESTER_CPUS:-2}
+    mem_limit: ${GRAFT_ATTESTER_MEM:-6g}
+    pids_limit: 4096
+    tmpfs:
+      - /tmp:rw,nosuid,size=2g,mode=1777
+    depends_on:
+      graft-server:
+        condition: service_healthy
+    command:
+      - --endpoint=http://graft-server:7878
+      - --repo=${GRAFT_ATTESTER_REPO:-rusttorrent}
+      - --line=${GRAFT_ATTESTER_LINE:-trial-1}
+      - --token-file=/run/secrets/graft-attester-token
+      # rustTorrent's Rust job (D21), scoped as its CI scopes it: without the
+      # Tauri desktop crate (GTK) and with only `default-tls`.
+      - --check=ci/fmt=cargo fmt --all -- --check
+      - --check=ci/clippy=cargo clippy --workspace --exclude rtbit-desktop --all-targets --no-default-features --features default-tls -- -D warnings
+      - --check=ci/test=cargo test --workspace --exclude rtbit-desktop --locked --no-default-features --features default-tls
+      - --timeout-s=${GRAFT_ATTESTER_TIMEOUT_S:-2700}
+      - --queue=16
+      - --run-as=10001:10001
+      - --env=PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
+      - --env=RUSTUP_HOME=/usr/local/rustup
+      - --env=CARGO_HOME=/var/cache/graft-attester/cargo
+      - --env=CARGO_TARGET_DIR=/var/cache/graft-attester/target
+      - --env=CARGO_BUILD_JOBS=${GRAFT_ATTESTER_JOBS:-2}
+      - --env=CARGO_TERM_COLOR=never
+      - --env=HOME=/var/cache/graft-attester/home
+      - --env=TMPDIR=/tmp
+    volumes:
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/attester-token
+        target: /run/secrets/graft-attester-token
+        read_only: true
+        bind:
+          create_host_path: false
+      # work (scratch trees), logs (<draft>/<check>.log), state (journal position)
+      - graft-dev-attester:/var/lib/graft-attester
+      # cargo registry, target dir and HOME, shared by every draft's checks
+      - graft-dev-attester-cache:/var/cache/graft-attester
+
 volumes:
   graft-dev-objects:
     name: graft-dev-objects
@@ -127,6 +193,10 @@ volumes:
     name: graft-dev-meta
   graft-dev-mirror:
     name: graft-dev-mirror
+  graft-dev-attester:
+    name: graft-dev-attester
+  graft-dev-attester-cache:
+    name: graft-dev-attester-cache
 
 networks:
   graft-dev:

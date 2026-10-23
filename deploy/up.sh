@@ -12,6 +12,12 @@
 #      existing repo is a success), mint the mirror token if absent or due for renewal.
 #   4. Health-check /healthz, then the /v1 facade: the refs of `rusttorrent`.
 #
+# With GRAFT_ATTESTER=1 (WI-2276; off by default) it also turns on the compose
+# profile `attester`: it mints the attester's token (`read` and `attest` on
+# `rusttorrent`, whose line `trial-1` it attests (decision D21); 0600, owned
+# by root so the checks the attester runs as uid 10001 can't read it), builds
+# the attester image from this checkout and starts it.
+#
 # Needs: docker with compose v2, curl, and membership of the docker group.
 # Non-secret host settings (GRAFT_BIND_IP, ports) may go in
 # /etc/graft/deploy.env. Environment overrides:
@@ -19,6 +25,9 @@
 #   GRAFT_REMINT=1          mint a new mirror token even if the current one is fresh
 #   GRAFT_TOKEN_RENEW_DAYS  re-mint a token older than this (default 20; TTL is 30)
 #   GRAFT_REFS_WAIT         seconds to wait for rusttorrent's first ref (default 600)
+#   GRAFT_ATTESTER=1        run the trial attester (profile `attester`)
+#   GRAFT_ATTESTER_REPO     the repository it attests (default rusttorrent)
+#   GRAFT_ATTESTER_LINE     the line whose drafts it attests (default trial-1)
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -46,6 +55,17 @@ repo=rusttorrent
 # Every repository the stack serves; creating one that exists is a no-op.
 repos=(rusttorrent graft-dev)
 ttl=2592000
+attester=${GRAFT_ATTESTER:-0}
+attester_repo=${GRAFT_ATTESTER_REPO:-rusttorrent}
+export GRAFT_ATTESTER_REPO=$attester_repo
+if [ "$attester" = 1 ]; then
+  export COMPOSE_PROFILES=attester
+  # Created if it is not one the stack already serves (the default is).
+  case " ${repos[*]} " in
+    *" $attester_repo "*) ;;
+    *) repos+=("$attester_repo") ;;
+  esac
+fi
 renew_days=${GRAFT_TOKEN_RENEW_DAYS:-20}
 refs_wait=${GRAFT_REFS_WAIT:-600}
 host=${GRAFT_BIND_IP:-127.0.0.1}
@@ -66,13 +86,14 @@ as_root() {
     -v "$secrets:/s" "$GRAFT_IMAGE" -c "$1"
 }
 
-# Write stdin to /s/$1 atomically: 0600, uid 10001, refusing an empty value.
+# Write stdin to /s/$1 atomically: 0600, owned by $2 (default 10001:10001),
+# refusing an empty value.
 store_secret() {
   as_root "set -e
     umask 077
     cat > /s/.$1.tmp
     if [ ! -s /s/.$1.tmp ]; then rm -f /s/.$1.tmp; echo 'empty value refused' >&2; exit 1; fi
-    chown 10001:10001 /s/.$1.tmp
+    chown ${2:-10001:10001} /s/.$1.tmp
     chmod 0600 /s/.$1.tmp
     mv /s/.$1.tmp /s/$1"
 }
@@ -80,7 +101,8 @@ store_secret() {
 command -v curl >/dev/null || die "curl is required"
 
 log "pulling $GRAFT_IMAGE"
-compose pull --quiet
+# The attester (profile `attester`) is built here, not pulled.
+compose pull --quiet graft-server graft-mirror
 
 if [ ! -e "$secrets/signing.key" ]; then
   log "bootstrap: creating $secrets/signing.key"
@@ -97,18 +119,23 @@ for name in "${repos[@]}"; do
   compose exec -T graft-server graft-server admin repo create "$name" >&2
 done
 
-token="$secrets/mirror-token"
+# Whether the token file $1 is missing or due for renewal ("what" names it
+# in the log).
+due() {
+  local file="$secrets/$1" what=$2
+  if [ ! -e "$file" ]; then
+    log "bootstrap: minting the $what into $file"
+  elif [ "${GRAFT_REMINT:-0}" = 1 ]; then
+    log "GRAFT_REMINT=1: re-minting the $what"
+  elif [ -n "$(find "$file" -mtime "+$renew_days" 2>/dev/null)" ]; then
+    log "$what is older than $renew_days days: re-minting"
+  else
+    return 1
+  fi
+}
+
 mint=0
-if [ ! -e "$token" ]; then
-  log "bootstrap: minting the mirror token into $token"
-  mint=1
-elif [ "${GRAFT_REMINT:-0}" = 1 ]; then
-  log "GRAFT_REMINT=1: re-minting the mirror token"
-  mint=1
-elif [ -n "$(find "$token" -mtime "+$renew_days" 2>/dev/null)" ]; then
-  log "mirror token is older than $renew_days days: re-minting"
-  mint=1
-fi
+due mirror-token "mirror token" && mint=1
 # Whether the mirror already runs: only then does a new token need a restart.
 mirror_was_up=$(compose ps -q graft-mirror)
 if [ "$mint" = 1 ]; then
@@ -118,11 +145,32 @@ if [ "$mint" = 1 ]; then
     | store_secret mirror-token
 fi
 
+attester_mint=0
+attester_was_up=
+if [ "$attester" = 1 ]; then
+  due attester-token "attester token" && attester_mint=1
+  attester_was_up=$(compose ps -q graft-attester)
+  if [ "$attester_mint" = 1 ]; then
+    # `attest` grants Attest only, so the attester also needs `read` to
+    # watch the journal and check drafts out. Owned by root: see compose.yml.
+    compose exec -T graft-server graft-server admin token mint \
+      --subject "graft-attester-$attester_repo" --kind service \
+      --scope "repo:$attester_repo:read" --scope "repo:$attester_repo:attest" \
+      --ttl "$ttl" \
+      | store_secret attester-token 0:0
+  fi
+  log "building the attester image from $here/.."
+  compose build graft-attester
+fi
+
 log "starting the stack"
 compose up -d --wait --remove-orphans
 if [ "$mint" = 1 ] && [ -n "$mirror_was_up" ]; then
   # A new token for a mirror that was running: restart it so it reads it.
   compose up -d --wait --no-deps --force-recreate graft-mirror
+fi
+if [ "$attester_mint" = 1 ] && [ -n "$attester_was_up" ]; then
+  compose up -d --wait --no-deps --force-recreate graft-attester
 fi
 
 log "health: $base/healthz"
