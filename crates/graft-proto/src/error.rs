@@ -128,6 +128,16 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// The error an operation that is designed but not built yet returns.
+    /// It travels as `Rejected` with policy `unimplemented`, so it needs no
+    /// new wire variant.
+    pub fn unimplemented(op: &str) -> ApiError {
+        ApiError::Rejected {
+            policy: "unimplemented".to_owned(),
+            detail: format!("{op} is not built yet"),
+        }
+    }
+
     /// Whether a client may retry the same request unchanged.
     pub fn is_retryable(&self) -> bool {
         matches!(

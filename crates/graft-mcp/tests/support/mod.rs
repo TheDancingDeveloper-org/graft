@@ -590,6 +590,22 @@ impl WorkspaceApi for Fake {
     async fn close_workspace(&self, _: &CallContext, _: WorkspaceRef, _: bool) -> ApiResult<()> {
         Self::unavailable()
     }
+
+    async fn get_conflicts(
+        &self,
+        _cx: &graft_proto::CallContext,
+        _req: graft_proto::types::GetConflicts,
+    ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
+        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
+    }
+
+    async fn resolve(
+        &self,
+        _cx: &graft_proto::CallContext,
+        _req: graft_proto::types::Resolve,
+    ) -> graft_proto::error::ApiResult<graft_proto::types::Resolved> {
+        Err(graft_proto::ApiError::unimplemented("Resolve"))
+    }
 }
 
 use graft_mcp::McpServer;
