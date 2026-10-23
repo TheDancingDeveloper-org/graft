@@ -35,3 +35,18 @@ jobs:
 
       - name: Deploy
         run: deploy/up.sh
+
+      # up.sh exits non-zero, with an ::error:: annotation, when the
+      # pre-flight config check fails (the running stack is left alone) or
+      # the new stack doesn't come up (it rolls back to the last good deploy
+      # and still fails). Say so on the run page too (WI-2291).
+      - name: Report a failed deploy
+        if: failure()
+        run: |
+          {
+            echo "## deploy-dev failed"
+            echo
+            echo "deploy/up.sh refused or rolled back this deploy. The step log and"
+            echo "the ::error:: annotation say which: a pre-flight failure left the"
+            echo "running stack unchanged; a rollback restored the last good deploy."
+          } >> "$GITHUB_STEP_SUMMARY"
