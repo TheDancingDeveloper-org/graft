@@ -2071,6 +2071,7 @@ dependencies = [
  "graft-store-sqlite",
  "graft-telemetry",
  "graft-testkit",
+ "reqwest",
  "rusqlite",
  "rustix",
  "serde",

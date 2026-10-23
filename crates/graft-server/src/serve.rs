@@ -31,6 +31,7 @@ use tonic::transport::server::TcpIncoming;
 
 use crate::admission::Admission;
 use crate::app::{App, PutBudget};
+use crate::ci::CiExchange;
 use crate::config::ServerConfig;
 use crate::denylist::Denylist;
 use crate::grpc::{self, Services};
@@ -136,6 +137,13 @@ async fn run(config: ServerConfig) -> Result<(), String> {
     }
     let admission = Admission::new(volumes, config.min_free_fraction, config.min_free_bytes);
     let denylist = Denylist::open(&config.meta_db)?;
+    let ci = CiExchange::load(&config.ci)?.map(Arc::new);
+    if let Some(ci) = &ci {
+        // Fetched before the server is ready, so the first CI job does not
+        // wait on it; a failure is logged and retried on the timer.
+        ci.refresh_all().await;
+        tokio::spawn(ci.clone().refresh_forever());
+    }
     let app = Arc::new(App::new(
         engine,
         signing,
@@ -148,7 +156,8 @@ async fn run(config: ServerConfig) -> Result<(), String> {
             std::time::Duration::from_millis(config.put_idle_ms),
         ),
         denylist,
-    ));
+    )
+    .with_ci(ci));
 
     if std::env::var_os(HOLD_START_UP_ENV).is_some() {
         // Test hook: hold start-up here until a stop is requested, so a test

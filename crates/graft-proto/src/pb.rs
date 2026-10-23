@@ -14,3 +14,11 @@ impl std::fmt::Debug for Token {
             .finish()
     }
 }
+
+impl std::fmt::Debug for ExchangeCiTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExchangeCiTokenRequest")
+            .field("ci_token", &"<redacted>")
+            .finish()
+    }
+}

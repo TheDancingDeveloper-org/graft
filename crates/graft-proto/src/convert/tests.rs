@@ -795,3 +795,11 @@ fn token_debug_is_redacted() {
     };
     assert!(!format!("{t:?}").contains("secret-value"));
 }
+
+#[test]
+fn ci_token_debug_is_redacted() {
+    let r = pb::ExchangeCiTokenRequest {
+        ci_token: "eyJ.secret.jwt".into(),
+    };
+    assert!(!format!("{r:?}").contains("secret"));
+}

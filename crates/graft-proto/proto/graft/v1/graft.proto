@@ -510,6 +510,13 @@ message Token {
   string token = 1;
 }
 
+// A CI job's identity token (a GitHub Actions OIDC token or a Woodpecker job
+// token, a JWT) to exchange for a short graft token (docs/design.md §12.1).
+// Its generated `Debug` is replaced by one that redacts it.
+message ExchangeCiTokenRequest {
+  string ci_token = 1;
+}
+
 // ---- errors (docs/design.md §7.10) ----------------------------------------
 
 // Carried in the `details` of a gRPC status, so errors round-trip losslessly.
@@ -609,4 +616,10 @@ service AdminService {
   rpc ImportChangesets(ImportChangesetsRequest) returns (CreatedList);
   rpc Gc(GcRequest) returns (GcReport);
   rpc MintToken(MintTokenRequest) returns (Token);
+}
+
+// Called without a bearer token: the CI token in the request is the
+// credential. Served by graft-server only.
+service CiService {
+  rpc ExchangeCiToken(ExchangeCiTokenRequest) returns (Token);
 }
