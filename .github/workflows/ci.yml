@@ -103,10 +103,11 @@ jobs:
       - run: |
           curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/cargo-nextest" nextest --version
-      # Quarantine (WI-2314, docs/known-flakes.md): rustc is sometimes
-      # OOM-killed on a shared runner, so cargo reports "could not compile"
-      # with no diagnostic. Retry once on exactly that signature; any other
-      # failure fails at once. Remove with the host fix.
+      # Quarantine (WI-2314, docs/known-flakes.md): rustc, cargo or the
+      # linker is sometimes OOM-killed on a shared runner. Retry once only
+      # when the log matches .github/scripts/oom-flake-signature.sh; any
+      # other failure fails at once. Runs on pull_request and merge_group
+      # alike. Remove with the host fix.
       - name: nextest
         shell: bash
         run: |

@@ -1,0 +1,2 @@
+   Compiling graft-core v0.1.0
+error: command `cargo test --no-run --workspace` exited with code 1

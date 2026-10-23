@@ -1,0 +1,3 @@
+   Compiling graft-core v0.1.0
+error: unused import: `std::fmt`
+error: could not compile `graft-core` (lib)
