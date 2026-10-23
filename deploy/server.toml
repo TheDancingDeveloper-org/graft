@@ -1,0 +1,18 @@
+# graft-server for the graft-dev VM (deploy/, WI-2251). Ported from the Node B
+# stack (ops repo personal/graft-dev). Keys: crates/graft-server/src/config.rs;
+# unknown keys are refused at start-up.
+# 0.0.0.0 is the container's namespace: compose publishes the ports on
+# GRAFT_BIND_IP only.
+listen = "0.0.0.0:7878"
+metrics = "0.0.0.0:9464"
+objects_dir = "/var/lib/graft/objects"
+meta_db = "/var/lib/graft/meta/meta.db"
+# Host file /etc/graft/signing.key, mounted read-only (mode 0600, owned by
+# uid 10001). up.sh creates it on first run; it is never in git.
+key_file = "/run/secrets/signing.key"
+# Writes are refused below 5% free on either volume.
+min_free_fraction = 0.05
+json_logs = true
+# 30 days, so development service tokens last a month.
+max_token_ttl_s = 2592000
+shutdown_grace_s = 20
