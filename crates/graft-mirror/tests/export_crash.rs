@@ -91,8 +91,19 @@ fn land_files(k: u64) -> Vec<(String, Vec<u8>)> {
     files
 }
 
-/// The child: land, export, acknowledge, until killed.
-async fn child(dir: &Path) {
+/// Whether the kill in `iteration` is armed by the child's first push rather
+/// than by its first land. Under load a child killed after a random delay
+/// from its first land may never have pushed; the armed-by-push iterations
+/// guarantee progress, the others still kill inside the first export.
+fn gated_on_push(iteration: u32) -> bool {
+    iteration.is_multiple_of(2)
+}
+
+/// The child: land, export, acknowledge, until killed. In a gated iteration
+/// the first acknowledgement is the first push, so the parent's kill delay
+/// counts from there.
+async fn child(dir: &Path, iteration: u32) {
+    let mut pushed = !gated_on_push(iteration);
     let api = open_engine(dir);
     let db = MirrorDb::open(&dir.join("mirror.sqlite")).unwrap();
     let mut export = Export::new(
@@ -130,14 +141,19 @@ async fn child(dir: &Path) {
         )
         .await;
         move_line(&api, "main", Some(view.target), id).await;
-        crash::ack(&format!("L {k} {id}"));
+        if pushed {
+            crash::ack(&format!("L {k} {id}"));
+        }
         // Every other land is exported at once; the rest in pairs.
         if k.is_multiple_of(2) {
             continue;
         }
         let (_, outcome) = export.poll_once().await.unwrap().pop().unwrap();
         match outcome {
-            ExportOutcome::Pushed { to, .. } => crash::ack(&format!("P {to}")),
+            ExportOutcome::Pushed { to, .. } => {
+                pushed = true;
+                crash::ack(&format!("P {to}"));
+            }
             ExportOutcome::UpToDate => {}
             other => panic!("export must never stop on its own pushes: {other:?}"),
         }
@@ -248,7 +264,7 @@ fn verify(dir: &Path, acked_pushes: &[String], complete: bool) {
 #[test]
 fn kill_9_at_any_point_resumes_with_no_duplicate_and_no_gap() {
     if let Some(c) = crash::child() {
-        runtime().block_on(child(&c.dir));
+        runtime().block_on(child(&c.dir, c.iteration));
         return;
     }
     let dir = crash::TempDir::new("mirror-export-crash");
