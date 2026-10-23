@@ -7,20 +7,9 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-  id-token: write
-
 jobs:
   post-land:
-    uses: SHARED-ORG/graft-ci/.github/workflows/graft-post-land.yml@refs/heads/main
-    with:
-      graft-endpoint: https://graft.example.com
-      graft-repo: myrepo
-      audience: https://graft.example.com
-      mirror-actor: graft-mirror[bot]
-      checks: >-
-        [
-          {"name": "build", "run": "cargo build --workspace --locked"},
-          {"name": "test", "run": "cargo nextest run --workspace --locked"}
-        ]
+    uses: SHARED-ORG/graft-ci/.github/workflows/graft-post-land-myrepo.yml@refs/heads/main
+    permissions:
+      contents: read
+      id-token: write

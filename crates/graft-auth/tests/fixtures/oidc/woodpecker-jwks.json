@@ -6,7 +6,7 @@
       "kid": "wp-test-1",
       "use": "sig",
       "alg": "EdDSA",
-      "x": "_Yw4CgxyYX8b4Ycqi3DkIokLQq0YzH4AzgmNLQ7rHTw"
+      "x": "ZHha0SKGmxDWhVScQDo7kxBT2SUumW7MoaD1-gMvT0I"
     }
   ]
 }

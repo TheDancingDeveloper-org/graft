@@ -46,7 +46,9 @@ pub const DEFAULT_MAX_LIFETIME_S: i64 = 3600;
 /// Default (and highest) TTL of an exchanged graft token, in seconds.
 pub const DEFAULT_TOKEN_TTL_S: u64 = 900;
 /// Longest subject an exchanged token carries.
-const MAX_SUBJECT_BYTES: usize = 128;
+const MAX_SUBJECT_BYTES: usize = 256;
+/// Longest changeset id text a pin accepts.
+const MAX_PIN_BYTES: usize = 64;
 
 /// Why an exchange was refused. Never carries a token or a claim value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +78,13 @@ pub enum OidcError {
     /// A good token for a bound repository, from a workflow the binding does
     /// not allow.
     WorkflowNotAllowed,
+    /// The binding grants `write`, which can attest, but the call did not
+    /// pin the token to a changeset. Use [`Exchange::exchange_pinned`].
+    PinRequired,
+    /// The CI job did not run on the commit that belongs to the changeset
+    /// it asked to attest: the token has no commit claim, or the caller's
+    /// check of commit against changeset failed.
+    CommitMismatch,
 }
 
 impl fmt::Display for OidcError {
@@ -92,6 +101,8 @@ impl fmt::Display for OidcError {
             Self::RepoNotBound => "CI token repository is not bound to a graft repository",
             Self::RefNotAllowed => "CI token ref is not allowed for this repository",
             Self::WorkflowNotAllowed => "CI token workflow is not allowed for this repository",
+            Self::PinRequired => "this binding needs the token pinned to a changeset",
+            Self::CommitMismatch => "CI job commit does not match the changeset",
         })
     }
 }
@@ -101,12 +112,14 @@ impl std::error::Error for OidcError {}
 impl From<OidcError> for ApiError {
     fn from(e: OidcError) -> Self {
         match e {
-            OidcError::RepoNotBound | OidcError::RefNotAllowed | OidcError::WorkflowNotAllowed => {
-                ApiError::PermissionDenied {
-                    scope: "ci:exchange".into(),
-                    path: None,
-                }
-            }
+            OidcError::RepoNotBound
+            | OidcError::RefNotAllowed
+            | OidcError::WorkflowNotAllowed
+            | OidcError::PinRequired
+            | OidcError::CommitMismatch => ApiError::PermissionDenied {
+                scope: "ci:exchange".into(),
+                path: None,
+            },
             _ => ApiError::Unauthenticated,
         }
     }
@@ -115,12 +128,14 @@ impl From<OidcError> for ApiError {
 impl From<OidcError> for AuthError {
     fn from(e: OidcError) -> Self {
         match e {
-            OidcError::RepoNotBound | OidcError::RefNotAllowed | OidcError::WorkflowNotAllowed => {
-                AuthError::Denied {
-                    scope: "ci:exchange".into(),
-                    path: None,
-                }
-            }
+            OidcError::RepoNotBound
+            | OidcError::RefNotAllowed
+            | OidcError::WorkflowNotAllowed
+            | OidcError::PinRequired
+            | OidcError::CommitMismatch => AuthError::Denied {
+                scope: "ci:exchange".into(),
+                path: None,
+            },
             OidcError::Expired => AuthError::Expired,
             OidcError::BadSignature => AuthError::BadSignature,
             _ => AuthError::Malformed,
@@ -159,6 +174,15 @@ impl Provider {
         match self {
             Self::GitHubActions => Some("job_workflow_ref"),
             Self::Woodpecker => None,
+        }
+    }
+
+    /// The claim naming the commit the job runs on. For Woodpecker the
+    /// name is an assumption (see `ci/README.md`).
+    fn sha_claim(self) -> &'static str {
+        match self {
+            Self::GitHubActions => "sha",
+            Self::Woodpecker => "commit",
         }
     }
 
@@ -338,6 +362,8 @@ pub struct CiIdentity {
     /// `owner/repo/.github/workflows/file.yml@ref`; for a reusable workflow,
     /// the called one), when the CI says.
     pub workflow: Option<String>,
+    /// The commit the job runs on (GitHub's `sha`), when the token has one.
+    pub sha: Option<String>,
     /// The token's `sub`.
     pub subject: String,
     /// Expiry of the CI token, seconds since the epoch.
@@ -504,6 +530,7 @@ fn check_claims(issuer: &Issuer, claims: &Value, now_s: i64) -> Result<CiIdentit
         repo: repo.to_owned(),
         repo_id,
         git_ref: text("ref").map(str::to_owned),
+        sha: text(issuer.provider.sha_claim()).map(str::to_owned),
         workflow: issuer
             .provider
             .workflow_claim()
@@ -595,6 +622,13 @@ impl Binding {
         &self.graft_repo
     }
 
+    /// Whether jobs under this binding can attest or otherwise write.
+    fn grants_write(&self) -> bool {
+        self.scopes
+            .iter()
+            .any(|s| matches!(Scope::parse(s), Ok(Scope::Write { .. })))
+    }
+
     fn matches_repo(&self, id: &CiIdentity) -> bool {
         let same = |a: &str, b: &str| {
             if self.provider.names_fold_case() {
@@ -670,10 +704,11 @@ impl Exchange {
         self
     }
 
-    /// Sets the longest TTL of an exchanged token, seconds.
+    /// Sets the longest TTL of an exchanged token, seconds. Never above
+    /// [`DEFAULT_TOKEN_TTL_S`].
     #[must_use]
     pub fn with_max_ttl_s(mut self, ttl_s: u64) -> Self {
-        self.max_ttl_s = ttl_s;
+        self.max_ttl_s = ttl_s.min(DEFAULT_TOKEN_TTL_S);
         self
     }
 
@@ -688,30 +723,106 @@ impl Exchange {
         found
     }
 
-    /// Verifies `jwt` and, if its repository is bound and its ref allowed,
-    /// mints a graft token (kind `ci`) at `now_s`.
+    /// Verifies `jwt` and, if its repository is bound, mints a graft token
+    /// (kind `ci`) at `now_s` for a binding that grants no `write`.
+    ///
+    /// A binding with `write` can attest, and such a token must be pinned
+    /// to one changeset: this fails with `PinRequired` for it. Use
+    /// [`Exchange::exchange_pinned`].
     ///
     /// The token carries exactly the binding's scopes. Its life is the
     /// smaller of the configured maximum and what the CI token has left, so
     /// a graft token never outlives the proof it came from. Its subject is
-    /// `ci:<provider>:<repo>`, so attestations are attributed to the
-    /// repository that ran them.
+    /// `ci:<provider>:<repo>`, so reads are attributed to the repository
+    /// that made them.
     pub fn exchange(&self, key: &SigningKey, jwt: &str, now_s: i64) -> Result<Token, OidcError> {
         let id = self.verify(jwt, now_s)?;
-        let binding = self
-            .bindings
-            .iter()
-            .find(|b| b.matches_repo(&id))
-            .ok_or(OidcError::RepoNotBound)?;
-        if !binding.allows_ref(&id) {
-            return Err(OidcError::RefNotAllowed);
+        let binding = self.select(&id)?;
+        if binding.grants_write() {
+            return Err(OidcError::PinRequired);
         }
-        if !binding.allows_workflow(&id) {
-            return Err(OidcError::WorkflowNotAllowed);
+        let subject = format!("{}{}", id.provider.subject_prefix(), id.repo);
+        self.mint(key, &id, binding, subject, now_s)
+    }
+
+    /// Like [`Exchange::exchange`], for a binding that grants `write`, and
+    /// the only way to get such a token. The job asks to attest `changeset`,
+    /// and `commit_is(sha)` must say that the commit the job ran on (the
+    /// token's `sha` claim) is the one the mirror exported for that
+    /// changeset. It is called once, after the token and binding checks, and
+    /// only with a verified `sha`; a token without one is `CommitMismatch`.
+    ///
+    /// Without this, anyone who can push a branch could run a workflow on a
+    /// commit that carries another draft's trailer and attest that draft.
+    ///
+    /// A write binding must also name its refs, and for GitHub the pinned
+    /// reusable workflow (`job_workflow_ref`): a Woodpecker pipeline is the
+    /// branch's own file and cannot be pinned, so Woodpecker write bindings
+    /// are refused with `WorkflowNotAllowed`.
+    ///
+    /// The subject is `ci:<provider>:<repo>#<changeset>`; see
+    /// [`pinned_changeset`]. The holder of the token may attest that
+    /// changeset only, if the server enforces the pin where it checks
+    /// `Attest`.
+    pub fn exchange_pinned(
+        &self,
+        key: &SigningKey,
+        jwt: &str,
+        now_s: i64,
+        changeset: &str,
+        commit_is: impl FnOnce(&str) -> bool,
+    ) -> Result<Token, OidcError> {
+        if changeset.is_empty()
+            || changeset.len() > MAX_PIN_BYTES
+            || !changeset.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            return Err(OidcError::Malformed);
         }
+        let id = self.verify(jwt, now_s)?;
+        let binding = self.select(&id)?;
+        if binding.grants_write() {
+            if binding.refs.is_empty() {
+                return Err(OidcError::RefNotAllowed);
+            }
+            if id.provider.workflow_claim().is_none() || binding.workflows.is_empty() {
+                return Err(OidcError::WorkflowNotAllowed);
+            }
+        }
+        match id.sha.as_deref() {
+            Some(sha) if !sha.is_empty() && commit_is(sha) => {}
+            _ => return Err(OidcError::CommitMismatch),
+        }
+        let subject = format!("{}{}#{changeset}", id.provider.subject_prefix(), id.repo);
+        self.mint(key, &id, binding, subject, now_s)
+    }
+
+    /// The binding for `id`: among those for its repository, the first
+    /// whose ref and workflow rules pass. When none does, the first one's
+    /// refusal, so the error names a rule that exists.
+    fn select(&self, id: &CiIdentity) -> Result<&Binding, OidcError> {
+        let mut refused = None;
+        for b in self.bindings.iter().filter(|b| b.matches_repo(id)) {
+            if !b.allows_ref(id) {
+                refused.get_or_insert(OidcError::RefNotAllowed);
+            } else if !b.allows_workflow(id) {
+                refused.get_or_insert(OidcError::WorkflowNotAllowed);
+            } else {
+                return Ok(b);
+            }
+        }
+        Err(refused.unwrap_or(OidcError::RepoNotBound))
+    }
+
+    fn mint(
+        &self,
+        key: &SigningKey,
+        id: &CiIdentity,
+        binding: &Binding,
+        subject: String,
+        now_s: i64,
+    ) -> Result<Token, OidcError> {
         let remaining = u64::try_from(id.exp.saturating_sub(now_s)).unwrap_or(0);
         let ttl = self.max_ttl_s.min(remaining);
-        let subject = format!("{}{}", id.provider.subject_prefix(), id.repo);
         if ttl == 0 || subject.len() > MAX_SUBJECT_BYTES {
             return Err(OidcError::Malformed);
         }
@@ -746,6 +857,18 @@ impl Exchange {
         }
         Err(last)
     }
+}
+
+/// The changeset a CI token is pinned to, from its subject
+/// (`ci:<provider>:<repo>#<changeset>`, as minted by
+/// [`Exchange::exchange_pinned`]). `None` for any other subject.
+///
+/// A server must refuse an `Attest` by a `ci` principal whose subject is
+/// pinned to a different changeset, and one whose subject is not pinned.
+pub fn pinned_changeset(subject: &str) -> Option<&str> {
+    let rest = subject.strip_prefix("ci:")?;
+    let (_, pin) = rest.rsplit_once('#')?;
+    (!pin.is_empty()).then_some(pin)
 }
 
 fn peek_issuer(jwt: &str) -> Result<String, OidcError> {
