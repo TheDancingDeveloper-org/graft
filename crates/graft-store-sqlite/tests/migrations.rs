@@ -278,3 +278,40 @@ fn line_fork_record_golden_vector() {
         (i64::from(repo.0), "b".to_owned(), "main".to_owned(), 2)
     );
 }
+
+/// Version 5 (WI-2316) on a version 4 database: existing line rows are kept
+/// and still read, the line has no fork, and the new table and the lookup
+/// by changeset work.
+#[test]
+fn version_5_adds_line_forks_to_a_version_4_database() {
+    let dir = TempDir::new("mig-v5");
+    let id = ChangesetId(ObjectId([7; 32]));
+    {
+        let mut conn = Connection::open(dir.db()).expect("open");
+        migrations::migrate_to(&mut conn, 4).expect("migrate to v4");
+        conn.execute_batch(&format!(
+            "INSERT INTO repos (id, name) VALUES (1, 'old');
+             INSERT INTO line_pos (repo, line, changeset, pos)
+                 VALUES (1, 'main', X'{}', 3);",
+            "07".repeat(32)
+        ))
+        .expect("seed");
+    }
+    let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
+    let conn = Connection::open(dir.db()).expect("inspect");
+    assert_eq!(migrations::version(&conn).expect("version"), 5);
+    assert!(tables(&conn).contains(&"line_forks".to_owned()));
+    let repo = block_on(store.repo("old")).expect("repo").expect("exists");
+    assert_eq!(
+        block_on(store.line_pos(repo, "main", id)).expect("read"),
+        Some(3)
+    );
+    assert_eq!(
+        block_on(store.line_holders(repo, id, 10)).expect("holders"),
+        vec![("main".to_owned(), 3)]
+    );
+    let forks: i64 = conn
+        .query_row("SELECT count(*) FROM line_forks", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(forks, 0);
+}

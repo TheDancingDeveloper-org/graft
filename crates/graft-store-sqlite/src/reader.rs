@@ -353,6 +353,32 @@ pub(crate) fn line_pos(
     }
 }
 
+pub(crate) fn line_holders(
+    conn: &Connection,
+    repo: RepoId,
+    id: ChangesetId,
+    limit: u32,
+) -> StoreResult<Vec<(String, u64)>> {
+    check_repo(conn, repo)?;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT line, pos FROM line_pos WHERE repo = ?1 AND changeset = ?2
+             ORDER BY line LIMIT ?3",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(
+            params![repo.0, &id.0.0[..], page_limit(limit) as i64],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .map_err(sql_err)?;
+    rows.map(|r| {
+        let (line, pos) = r.map_err(sql_err)?;
+        Ok((line, uint(pos)?))
+    })
+    .collect()
+}
+
 pub(crate) fn scan_line_path(
     conn: &Connection,
     repo: RepoId,

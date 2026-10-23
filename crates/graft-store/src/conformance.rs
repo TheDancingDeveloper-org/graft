@@ -1011,6 +1011,49 @@ async fn line_forks_fall_through_to_the_parent<O: ObjectStore, M: MetaStore>(
     );
     assert_eq!(scan(u64::MAX, 2).await, vec![(4, cs(30)), (3, cs(20))]);
     assert_eq!(scan(3, 2).await, vec![(2, cs(12)), (1, cs(11))]);
+
+    // Holders are lines with their own row: `b` and `c` hold cs(10) only
+    // through forks.
+    let holders = |id| async move { meta.line_holders(repo, id, 10).await.expect("holders") };
+    assert_eq!(holders(cs(10)).await, vec![("main".to_owned(), 0)]);
+    assert_eq!(holders(cs(20)).await, vec![("b".to_owned(), 3)]);
+    assert_eq!(holders(cs(99)).await, vec![]);
+
+    // One fork per line, ever: a second fork row is refused and changes
+    // nothing, alone or twice in one transaction.
+    let fork = |line: &str, pos| Write::PutLineFork {
+        line: line.to_owned(),
+        parent: "main".to_owned(),
+        pos,
+    };
+    assert!(
+        run_txn_err(
+            meta,
+            repo,
+            txn(vec![], vec![fork("b", 1), journal("LineFork")])
+        )
+        .await
+    );
+    assert!(
+        run_txn_err(
+            meta,
+            repo,
+            txn(
+                vec![],
+                vec![fork("d", 1), fork("d", 2), journal("LineFork")]
+            )
+        )
+        .await
+    );
+    assert_eq!(pos("b", cs(12)).await, Some(2));
+    assert_eq!(pos("b", cs(11)).await, Some(1));
+    assert_eq!(meta.line_pos(repo, "d", cs(11)).await.expect("read"), None);
+}
+
+/// Whether committing `t` fails (as opposed to committing or failing a
+/// precondition).
+async fn run_txn_err<M: MetaStore>(meta: &M, repo: RepoId, t: MetaTxn) -> bool {
+    meta.commit(repo, t).await.is_err()
 }
 
 async fn pagination_is_bounded<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {

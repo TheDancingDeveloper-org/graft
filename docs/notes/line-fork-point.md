@@ -40,9 +40,12 @@ A line created at `X` walks first parents from `X` while the records are not
 landed. That walk is the unlanded stretch, the only changesets the create
 lands. It stops at the first landed ancestor `a`, or at the root.
 
-- At `a`: find a line `P` holding it (one page of refs, one `line_pos` read
-  per line; lines are a handful per repository, §4.6), and write one
-  `line_forks(repo, line, parent = P, pos = f)` row with `f = line_pos(P, a)`.
+- At `a`: find a line `P` that holds `a` in its own rows, not through a
+  fork (`MetaStore::line_holders`, one indexed read by changeset; SQLite has
+  `line_pos_changeset` for it). Every landed changeset has such a line: it got
+  its own row on the line it landed on. Forking from a direct holder keeps
+  hop chains from growing with repeated creates. Write one
+  `line_forks(repo, line, parent = P, pos = f)` row.
   The stretch is indexed at `f + 1, f + 2, …`.
 - At the root: no fork row; the stretch is indexed from 0. That is a new
   history, so its whole length is new lands.
@@ -60,7 +63,7 @@ Reads fall through inside the store (`MetaStore::line_pos` and
   the page is short, continue on `P` with `before = min(before, f + 1)`.
 
 **Cost.** Create: the unlanded stretch (changeset reads and rows) plus one
-`line_pos` read per line. Queries: their results plus one fork read per hop.
+indexed holder read, whatever the number of refs. Queries: their results plus one fork read per hop.
 Log, path log, blame's version list, `is_ancestor`, `merge_base` and
 rebase/sync onto a line position all go through those two reads.
 
@@ -101,7 +104,9 @@ The stored line record is new and frozen by golden vectors:
 
 - `Write::PutLineFork { line, parent, pos }` in `graft-store`.
 - SQLite version 5: `line_forks(repo INTEGER, line TEXT, parent TEXT, pos
-  INTEGER, PRIMARY KEY (repo, line)) WITHOUT ROWID`. The DDL and a stored row
+  INTEGER, PRIMARY KEY (repo, line)) WITHOUT ROWID`, plus the index
+  `line_pos_changeset (repo, changeset, line)`. One fork per line: a second
+  fork row fails the transaction in both stores. The DDL and a stored row
   are pinned by `line_fork_record_golden_vector` in
   `graft-store-sqlite/tests/migrations.rs`.
 
@@ -114,8 +119,13 @@ guard and no backfill.
 
 - `graft-store` conformance `line_forks_fall_through_to_the_parent`, on
   memory and SQLite: positions and path scans through a fork and a fork of a
-  fork, bounded at each fork, paging across the hop.
+  fork, bounded at each fork, paging across the hop; direct holders; a
+  duplicate fork row refused.
+- `graft-store-sqlite/tests/migrations.rs`: a version 4 database opens at
+  version 5 with its line rows intact.
 - `graft-engine/tests/line_fork.rs`: log, path log, `is_ancestor` and blame
-  across a fork of a fork on both stores; and on a 300-deep history, creating
+  across a fork of a fork on both stores; a log page straddling both hops;
+  parents landing after the fork change none of the child's answers; and on a 300-deep history, creating
   a line at the tip writes one fork row and no position or path rows, while a
-  line at a two-draft stack writes two.
+  line at a two-draft stack writes two; a second line at the tip forks from
+  `main`, not from the first.

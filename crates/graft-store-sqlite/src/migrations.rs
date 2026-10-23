@@ -179,7 +179,8 @@ CREATE INDEX doomed_since ON doomed (repo, since, object);
 
 /// Version 5 (WI-2316): line fork points. A line created on existing
 /// history stores its parent line and fork position here instead of
-/// copying the parent's index rows (`docs/notes/line-fork-point.md`).
+/// copying the parent's index rows (`docs/notes/line-fork-point.md`), and
+/// `line_pos` gets an index by changeset to find the line to fork from.
 const V5: &str = "
 CREATE TABLE line_forks (
     repo   INTEGER NOT NULL REFERENCES repos(id),
@@ -188,6 +189,7 @@ CREATE TABLE line_forks (
     pos    INTEGER NOT NULL,
     PRIMARY KEY (repo, line)
 ) WITHOUT ROWID;
+CREATE INDEX line_pos_changeset ON line_pos (repo, changeset, line);
 ";
 
 /// The database's schema version.

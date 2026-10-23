@@ -399,28 +399,23 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         Ok(chain)
     }
 
-    /// A line holding the landed changeset `id`, and its position there.
-    /// Lines are a handful per repository (§4.6), so this reads one page of
-    /// refs and one position per line.
+    /// A line holding the landed changeset `id` in its own rows, and its
+    /// position there: one indexed read. Forking from a direct holder keeps
+    /// fork chains from growing with repeated creates. Every landed
+    /// changeset has a direct holder (it got its own row on the line it
+    /// landed on, and lines are never deleted).
     async fn line_holding(&self, repo: RepoId, id: ChangesetId) -> Result<(String, u64), ApiError> {
-        let refs = self
-            .meta
-            .list_refs(repo, "", MAX_PAGE)
+        self.meta
+            .line_holders(repo, id, 1)
             .await
-            .map_err(errors::store)?;
-        for r in refs.into_iter().filter(|r| r.kind == StoredKind::Line) {
-            if let Some(pos) = self
-                .meta
-                .line_pos(repo, &r.name, id)
-                .await
-                .map_err(errors::store)?
-            {
-                return Ok((r.name, pos));
-            }
-        }
-        Err(errors::store(graft_store::StoreError::Corrupt(format!(
-            "landed changeset {id} is on no line"
-        ))))
+            .map_err(errors::store)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                errors::store(graft_store::StoreError::Corrupt(format!(
+                    "landed changeset {id} has no line position"
+                )))
+            })
     }
 
     /// A changeset's skip list, adding rows for any values the walk had to

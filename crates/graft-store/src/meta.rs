@@ -466,6 +466,33 @@ pub trait MetaStore: Send + Sync {
         line: &str,
         id: ChangesetId,
     ) -> impl Future<Output = StoreResult<Option<u64>>> + Send;
+    /// The lines that hold `id` in their own position rows (not through a
+    /// fork), with its position, in line order, up to `limit`. Stores
+    /// answer it with a lookup by changeset. The default, for wrappers,
+    /// reads one page of refs and `line_pos` per line, so it may name a line
+    /// that holds `id` through a fork.
+    fn line_holders(
+        &self,
+        repo: RepoId,
+        id: ChangesetId,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(String, u64)>>> + Send {
+        async move {
+            let mut out = Vec::new();
+            for r in self.list_refs(repo, "", crate::MAX_PAGE).await? {
+                if r.kind != RefKind::Line {
+                    continue;
+                }
+                if let Some(pos) = self.line_pos(repo, &r.name, id).await? {
+                    out.push((r.name, pos));
+                    if out.len() >= crate::page_limit(limit) {
+                        break;
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
     /// Line path index scan, newest first, positions below `before`,
     /// continuing on the parent line below a fork point.
     fn scan_line_path(
@@ -709,6 +736,14 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         id: ChangesetId,
     ) -> impl Future<Output = StoreResult<Option<u64>>> + Send {
         (**self).line_pos(repo, line, id)
+    }
+    fn line_holders(
+        &self,
+        repo: RepoId,
+        id: ChangesetId,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(String, u64)>>> + Send {
+        (**self).line_holders(repo, id, limit)
     }
     fn scan_line_path(
         &self,

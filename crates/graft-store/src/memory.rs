@@ -309,6 +309,20 @@ fn validate(repo: &Repo, txn: &MetaTxn) -> StoreResult<()> {
     let mut overlay = Overlay::new(repo);
     for write in &txn.writes {
         overlay.check(write)?;
+        if let Write::PutLineFork { line, .. } = write {
+            // As SQLite's primary key does: one fork per line, ever.
+            let twice = txn
+                .writes
+                .iter()
+                .filter(|w| matches!(w, Write::PutLineFork { line: l, .. } if l == line))
+                .count()
+                > 1;
+            if twice || repo.line_forks.contains_key(line) {
+                return Err(StoreError::Invalid(format!(
+                    "line {line} already has a fork"
+                )));
+            }
+        }
         if let Write::SetRef(record) = write {
             let guarded = txn
                 .preconditions
@@ -746,6 +760,25 @@ impl MetaStore for MemoryStore {
                 bound = bound.min(*at);
                 line = parent.clone();
             }
+        }))
+    }
+
+    fn line_holders(
+        &self,
+        repo: RepoId,
+        id: ChangesetId,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(String, u64)>>> + Send {
+        // A test store: a scan of the positions stands in for an index.
+        ready(self.with(|st| {
+            Ok(st
+                .repo(repo)?
+                .line_pos
+                .iter()
+                .filter(|((_, c), _)| *c == id)
+                .take(page_limit(limit))
+                .map(|((line, _), pos)| (line.clone(), *pos))
+                .collect())
         }))
     }
 

@@ -430,6 +430,18 @@ impl MetaStore for SqliteMetaStore {
             .await
     }
 
+    async fn line_holders(
+        &self,
+        repo: RepoId,
+        id: ChangesetId,
+        limit: u32,
+    ) -> StoreResult<Vec<(String, u64)>> {
+        self.read("line_holders", move |c| {
+            reader::line_holders(c, repo, id, limit)
+        })
+        .await
+    }
+
     async fn scan_line_path(
         &self,
         repo: RepoId,

@@ -63,6 +63,31 @@ fn log<M: MetaStore>(r: &Repo<'_, M>, from: ChangesetId, paths: &[&str]) -> Vec<
     .collect()
 }
 
+/// One log page of `limit` from `from` (or the resume `token`), and the
+/// next token.
+fn log_page<M: MetaStore>(
+    r: &Repo<'_, M>,
+    from: ChangesetId,
+    limit: u32,
+    token: Option<String>,
+) -> (Vec<ChangesetId>, Option<String>) {
+    let page = block_on(r.e().log(
+        &r.cx,
+        Log {
+            repo: r.name.clone(),
+            from,
+            until: None,
+            paths: vec![],
+            page: Page { limit, token },
+        },
+    ))
+    .expect("log");
+    (
+        page.changesets.into_iter().map(|s| s.id).collect(),
+        page.next,
+    )
+}
+
 fn is_ancestor<M: MetaStore>(r: &Repo<'_, M>, a: ChangesetId, b: ChangesetId) -> bool {
     block_on(r.e().is_ancestor(
         &r.cx,
@@ -165,6 +190,30 @@ fn history_reads_through_a_fork_of_a_fork<M: MetaStore>(f: &Fixture<M>) {
             (5, 6, c1),
         ]
     );
+
+    // A page that straddles both fork hops, then resumes below them.
+    let (first, next) = log_page(&r, c1, 3, None);
+    assert_eq!(first, vec![c1, b1, m[3]]);
+    let (second, _) = log_page(&r, c1, 3, next);
+    assert_eq!(second, vec![m[2], m[1], m[0]]);
+
+    // Parents that land after the fork change none of the child's answers.
+    let answers = |r: &Repo<'_, M>| {
+        (
+            log(r, c1, &[]),
+            log(r, c1, &["g"]),
+            blame(r, c1),
+            [m[4], m[5], b1, b2].map(|a| is_ancestor(r, a, c1)),
+        )
+    };
+    let before = answers(&r);
+    let (m6, _) = append(&r, Some(m[5]), &texts[6], "m6", true);
+    land(&r, "main", m6);
+    let (b3, _) = append(&r, Some(b2), &b1_text, "b3", true);
+    land(&r, "b", b3);
+    assert_eq!(answers(&r), before);
+    assert!(!is_ancestor(&r, m6, c1));
+    assert!(!is_ancestor(&r, b3, c1));
 }
 
 fn rows(conn: &Connection, table: &str, line: &str) -> i64 {
@@ -203,7 +252,23 @@ fn creating_a_line_writes_only_its_own_rows() {
     let d2 = r.commit(vec![d1], &[("f", b"d2")], &[]).id;
     create(&r, "at-stack", d2);
 
+    // The tip is held directly only by `main`; `at-tip` holds it through
+    // its fork, so another line at the tip forks from `main`, not from
+    // `at-tip`: hop chains don't grow with repeated creates.
+    create(&r, "again", tip);
+
     let conn = Connection::open(&db).expect("inspect");
+    let parent = |line: &str| -> String {
+        conn.query_row(
+            "SELECT parent FROM line_forks WHERE line = ?1",
+            [line],
+            |r| r.get(0),
+        )
+        .expect("fork")
+    };
+    assert_eq!(parent("at-tip"), "main");
+    assert_eq!(parent("again"), "main");
+    assert_eq!(parent("at-stack"), "main");
     assert_eq!(rows(&conn, "line_pos", "main"), DEPTH as i64);
     assert_eq!(rows(&conn, "line_pos", "at-tip"), 0);
     assert_eq!(rows(&conn, "line_paths", "at-tip"), 0);
