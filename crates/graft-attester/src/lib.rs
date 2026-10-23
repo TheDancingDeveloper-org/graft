@@ -1,11 +1,16 @@
 //! The trial attester (WI-2276): watches one repository's journal for new
-//! drafts, checks each one out into a scratch directory, runs the configured
-//! checks, and posts `Attest` per check, passed or failed, with a link to the
-//! check's log.
+//! drafts on one line, checks each one out into a scratch directory, runs
+//! the configured checks, and posts `Attest` per check, passed or failed,
+//! with a link to the check's log. The repository, the line and the checks
+//! are configuration; the defaults are the trial's (decision D21): line
+//! `trial-1` of `rusttorrent`, with rustTorrent's `ci/fmt`, `ci/clippy` and
+//! `ci/test`.
 //!
-//! - Drafts come from `ChangesetCreated` entries held by a workspace. Land
-//!   candidates and abandoned changesets are skipped. Before a draft runs,
-//!   `GetChangesets` confirms it is still a draft.
+//! - Drafts come from `ChangesetCreated` entries held by a workspace on
+//!   [`Config::line`] (`GetWorkspace` names the line; the answer is cached
+//!   per workspace). Land candidates, abandoned changesets and drafts on
+//!   other lines are skipped. Before a draft runs, `GetChangesets` confirms
+//!   it is still a draft.
 //! - The queue keeps the newest draft per workspace (a land needs the
 //!   stack's head attested, not every draft under it) and is bounded. The
 //!   journal is read only while the queue has room, so nothing is dropped:
@@ -13,7 +18,8 @@
 //! - One draft at a time. Each check runs in its own process group with a
 //!   cleared environment and a timeout; its output goes to a capped log
 //!   file. After a check fails, the rest are attested failed without
-//!   running (a build failure fails the tests too).
+//!   running, as a CI job's later steps are, unless
+//!   [`Config::stop_on_failure`] is off.
 //! - Every draft that is still a draft gets an attestation per check, never
 //!   silence. A checkout that fails transiently (the server unavailable,
 //!   the token refused, a local I/O error) is retried, up to
@@ -44,19 +50,29 @@ use graft_client::Sparse;
 use graft_client::fetch::FetchOptions;
 use graft_client::workcopy::{self, WcConfig};
 use graft_model::ChangesetId;
-use graft_proto::api::{ObjectApi, RepoApi};
-use graft_proto::types::{Attest, DraftState, GetChangesets, JournalEntry, Watch};
+use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
+use graft_proto::types::{Attest, DraftState, GetChangesets, JournalEntry, Watch, WorkspaceRef};
 use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 /// The journal entry kind that announces a new changeset.
 pub const CHANGESET_CREATED: &str = "ChangesetCreated";
 
-/// The checks run when none are configured (decision D6's names).
-pub const DEFAULT_CHECKS: [&str; 2] = [
-    "ci/build=cargo build --locked",
-    "ci/test=cargo test --locked",
+/// The repository attested when none is configured (decision D21).
+pub const DEFAULT_REPO: &str = "rusttorrent";
+
+/// The line whose drafts are attested when none is configured (D21).
+pub const DEFAULT_LINE: &str = "trial-1";
+
+/// The checks run when none are configured: rustTorrent's Rust job (D21).
+pub const DEFAULT_CHECKS: [&str; 3] = [
+    "ci/fmt=cargo fmt --all -- --check",
+    "ci/clippy=cargo clippy --workspace --all-targets -- -D warnings",
+    "ci/test=cargo test --workspace --locked",
 ];
+
+/// Most workspace lines remembered; the cache starts over past it.
+const LINE_CACHE: usize = 4096;
 
 /// One check: the name it is attested under and the command that runs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,8 +125,13 @@ impl Check {
 pub struct Config {
     /// Repository watched and attested.
     pub repo: String,
+    /// Line whose drafts are attested: only drafts in workspaces tracking
+    /// it are checked.
+    pub line: String,
     /// Checks, run in order.
     pub checks: Vec<Check>,
+    /// After a check fails, attest the rest failed without running them.
+    pub stop_on_failure: bool,
     /// Per-check time limit.
     pub timeout: Duration,
     /// Scratch directory; each draft is checked out in a subdirectory and
@@ -150,16 +171,18 @@ pub struct Config {
 }
 
 impl Config {
-    /// A configuration for `repo` with the default checks and limits, and
-    /// its directories under `root`.
-    pub fn new(repo: impl Into<String>, root: &Path) -> Config {
+    /// A configuration for `line` of `repo` with the default checks and
+    /// limits, and its directories under `root`.
+    pub fn new(repo: impl Into<String>, line: impl Into<String>, root: &Path) -> Config {
         let log_dir = root.join("logs");
         Config {
             repo: repo.into(),
+            line: line.into(),
             checks: DEFAULT_CHECKS
                 .iter()
                 .map(|s| Check::parse(s).expect("default check"))
                 .collect(),
+            stop_on_failure: true,
             timeout: Duration::from_secs(45 * 60),
             work_dir: root.join("work"),
             log_url_prefix: format!("file://{}/", log_dir.display()),
@@ -425,9 +448,11 @@ pub struct Attester<A> {
     running: Option<u64>,
     /// Drafts whose checks ran but whose attestations are not all posted.
     unposted: HashMap<ChangesetId, Report>,
+    /// Workspace → the line it tracks (`None`: closed before it was asked).
+    lines: HashMap<String, Option<String>>,
 }
 
-impl<A: ObjectApi + RepoApi> Attester<A> {
+impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
     /// An attester reading from the saved position, if any. Creates the
     /// work and log directories.
     pub fn new(api: A, cfg: Config) -> Result<Self, Error> {
@@ -445,6 +470,7 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
             next_lsn,
             running: None,
             unposted: HashMap::new(),
+            lines: HashMap::new(),
         })
     }
 
@@ -485,17 +511,33 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
                 .await?;
             let advanced = page.next_lsn > self.next_lsn;
             let mut next = page.next_lsn.max(self.next_lsn);
+            let mut failed = None;
             for entry in &page.entries {
-                if let Some(p) = parse_entry(entry) {
-                    if !self.queue.push(p) {
-                        // Full: read this entry again once there is room.
+                let Some(p) = parse_entry(entry) else {
+                    continue;
+                };
+                match self.workspace_line(&p.workspace).await {
+                    Ok(Some(line)) if line == self.cfg.line => {}
+                    Ok(_) => continue,
+                    Err(e) => {
+                        // Read this entry again on the next poll.
                         next = entry.lsn;
+                        failed = Some(e);
                         break;
                     }
-                    queued += 1;
                 }
+                if !self.queue.push(p) {
+                    // Full: read this entry again once there is room.
+                    next = entry.lsn;
+                    break;
+                }
+                queued += 1;
             }
             self.next_lsn = next;
+            if let Some(e) = failed {
+                self.save()?;
+                return Err(Error::Api(e));
+            }
             if !advanced {
                 break;
             }
@@ -503,6 +545,34 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
         }
         self.save()?;
         Ok(queued)
+    }
+
+    /// The line `workspace` tracks, asked once and remembered; `None` when
+    /// it is gone (closed, or its lease lapsed and it was collected).
+    async fn workspace_line(&mut self, workspace: &str) -> Result<Option<String>, ApiError> {
+        if let Some(line) = self.lines.get(workspace) {
+            return Ok(line.clone());
+        }
+        let line = match self
+            .api
+            .get_workspace(
+                &self.cx,
+                WorkspaceRef {
+                    repo: self.cfg.repo.clone(),
+                    name: workspace.to_owned(),
+                },
+            )
+            .await
+        {
+            Ok(view) => Some(view.line),
+            Err(ApiError::NotFound { .. }) => None,
+            Err(e) => return Err(e),
+        };
+        if self.lines.len() >= LINE_CACHE {
+            self.lines.clear();
+        }
+        self.lines.insert(workspace.to_owned(), line.clone());
+        Ok(line)
     }
 
     /// Checks the oldest waiting draft; `None` when nothing waits. A draft
@@ -621,7 +691,7 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
             &self.cx,
             &dir,
             config,
-            "main",
+            &self.cfg.line,
             Some(draft),
             Sparse::full(),
             &FetchOptions::default(),
@@ -675,7 +745,7 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
         let mut failed = false;
         for check in self.cfg.checks.clone() {
             let log_path = logs.join(check.log_name());
-            let outcome = if failed {
+            let outcome = if failed && self.cfg.stop_on_failure {
                 write_skipped(&log_path, &check, draft)?;
                 Outcome::Skipped
             } else {

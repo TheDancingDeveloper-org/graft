@@ -13,9 +13,9 @@
 #   4. Health-check /healthz, then the /v1 facade: the refs of `rusttorrent`.
 #
 # With GRAFT_ATTESTER=1 (WI-2276; off by default) it also turns on the compose
-# profile `attester`: it creates the repository `rusttorrent-trial`, mints the
-# attester's token (`read` and `attest` on that repository, 0600, owned by
-# root so the checks the attester runs as uid 10001 can't read it), builds
+# profile `attester`: it mints the attester's token (`read` and `attest` on
+# `rusttorrent`, whose line `trial-1` it attests (decision D21); 0600, owned
+# by root so the checks the attester runs as uid 10001 can't read it), builds
 # the attester image from this checkout and starts it.
 #
 # Needs: docker with compose v2, curl, and membership of the docker group.
@@ -26,7 +26,8 @@
 #   GRAFT_TOKEN_RENEW_DAYS  re-mint a token older than this (default 20; TTL is 30)
 #   GRAFT_REFS_WAIT         seconds to wait for rusttorrent's first ref (default 600)
 #   GRAFT_ATTESTER=1        run the trial attester (profile `attester`)
-#   GRAFT_ATTESTER_REPO     the repository it attests (default rusttorrent-trial)
+#   GRAFT_ATTESTER_REPO     the repository it attests (default rusttorrent)
+#   GRAFT_ATTESTER_LINE     the line whose drafts it attests (default trial-1)
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -55,11 +56,15 @@ repo=rusttorrent
 repos=(rusttorrent graft-dev)
 ttl=2592000
 attester=${GRAFT_ATTESTER:-0}
-attester_repo=${GRAFT_ATTESTER_REPO:-rusttorrent-trial}
+attester_repo=${GRAFT_ATTESTER_REPO:-rusttorrent}
 export GRAFT_ATTESTER_REPO=$attester_repo
 if [ "$attester" = 1 ]; then
   export COMPOSE_PROFILES=attester
-  repos+=("$attester_repo")
+  # Created if it is not one the stack already serves (the default is).
+  case " ${repos[*]} " in
+    *" $attester_repo "*) ;;
+    *) repos+=("$attester_repo") ;;
+  esac
 fi
 renew_days=${GRAFT_TOKEN_RENEW_DAYS:-20}
 refs_wait=${GRAFT_REFS_WAIT:-600}

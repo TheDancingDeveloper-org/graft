@@ -6,9 +6,10 @@
 #   graft-server  gRPC, the /v1 JSON facade, /healthz, /readyz, /metrics
 #   graft-mirror  follows github.com/TheDancingDeveloper-org/rustTorrent main
 #                 into the graft repository `rusttorrent`
-#   graft-attester  (profile `attester`, off by default) builds and tests new
-#                 drafts of `rusttorrent-trial` and posts Attest for ci/build
-#                 and ci/test (WI-2276); built from deploy/attester/Dockerfile
+#   graft-attester  (profile `attester`, off by default) checks new drafts on
+#                 the trial line `trial-1` of `rusttorrent` and posts Attest
+#                 for ci/fmt, ci/clippy and ci/test (WI-2276, decision D21);
+#                 built from deploy/attester/Dockerfile
 #
 # Image: GRAFT_IMAGE from deploy/image.env, pinned by digest. Run compose with
 # `--env-file deploy/image.env` (up.sh does).
@@ -154,10 +155,13 @@ services:
         condition: service_healthy
     command:
       - --endpoint=http://graft-server:7878
-      - --repo=${GRAFT_ATTESTER_REPO:-rusttorrent-trial}
+      - --repo=${GRAFT_ATTESTER_REPO:-rusttorrent}
+      - --line=${GRAFT_ATTESTER_LINE:-trial-1}
       - --token-file=/run/secrets/graft-attester-token
-      - --check=ci/build=cargo build --locked
-      - --check=ci/test=cargo test --locked
+      # rustTorrent's Rust job (D21). Edit here to change the checks.
+      - --check=ci/fmt=cargo fmt --all -- --check
+      - --check=ci/clippy=cargo clippy --workspace --all-targets -- -D warnings
+      - --check=ci/test=cargo test --workspace --locked
       - --timeout-s=${GRAFT_ATTESTER_TIMEOUT_S:-2700}
       - --queue=16
       - --run-as=10001:10001

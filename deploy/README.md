@@ -57,8 +57,10 @@ The mirror token has the stack's maximum TTL (30 days, scope
 
 ## Trial attester (WI-2276)
 
-The contained trial (WI-2270) gets its `ci/build` and `ci/test`
-attestations from a small attester on this VM, not from GitHub. It is the
+The contained trial (WI-2270) runs on the integration line `trial-1` of
+`rusttorrent`, the followed copy (decision D21). It gets its `ci/fmt`,
+`ci/clippy` and `ci/test` attestations from a small attester on this VM, not
+from GitHub. It is the
 `graft-attester` service (crate `crates/graft-attester`), in the compose
 profile `attester`, and is **off by default**. Turn it on in
 `/etc/graft/deploy.env`:
@@ -70,9 +72,8 @@ deploy/up.sh
 
 With it on, `up.sh` also:
 
-- creates the repository `rusttorrent-trial` (`GRAFT_ATTESTER_REPO`);
 - mints `/etc/graft/attester-token`, kind `service`, scopes
-  `repo:rusttorrent-trial:read` and `repo:rusttorrent-trial:attest`, with the
+  `repo:rusttorrent:read` and `repo:rusttorrent:attest`, with the
   stack's TTL and the same renewal as the mirror token (`GRAFT_REMINT=1`
   forces it). `attest` grants `Attest` only, so `read` is needed to watch
   the journal and check drafts out. It needs a server that knows the
@@ -80,22 +81,40 @@ With it on, `up.sh` also:
 - builds the image from this checkout (`deploy/attester/Dockerfile`) and
   starts it.
 
+The repository, the line and the checks are configuration:
+`GRAFT_ATTESTER_REPO` (default `rusttorrent`; `up.sh` creates it if the
+stack doesn't already serve it) and `GRAFT_ATTESTER_LINE` (default
+`trial-1`) in `/etc/graft/deploy.env`, and the `--check=name=command` lines
+of the service in `compose.yml`. `up.sh` does not create the line. The trial
+creates `trial-1` itself.
+
 What it does:
 
-- It reads the journal of `rusttorrent-trial` (`Watch`, long-poll) for
-  `ChangesetCreated` entries of drafts held by a workspace. It keeps the
+- It reads the journal of `rusttorrent` (`Watch`, long-poll) for
+  `ChangesetCreated` entries of drafts held by a workspace that tracks
+  `trial-1` (it asks `GetWorkspace` once per workspace). Drafts on `main`
+  or any other line are ignored. It keeps the
   newest draft per workspace, since a land needs the stack's head
   attested. The queue holds at most 16 drafts. When it is full the attester
   stops reading, and the journal holds the rest.
 - It checks one draft at a time: it confirms the changeset is still a
   draft, checks its tree out into `/var/lib/graft-attester/work/<draft>`,
-  runs `cargo build --locked` (`ci/build`), then `cargo test --locked`
-  (`ci/test`), and posts `Attest` for each, passed or failed. A check that
-  fails makes the later ones fail without running. Each check has a
+  runs rustTorrent's Rust job in order (the commands come from D21):
+
+  | Check | Command |
+  |---|---|
+  | `ci/fmt` | `cargo fmt --all -- --check` |
+  | `ci/clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
+  | `ci/test` | `cargo test --workspace --locked` |
+
+  It posts `Attest` for each, passed or failed. As in a CI job, a check
+  that fails makes the later ones fail without running (`--keep-going`
+  runs them all). The toolchain is Rust 1.95 with rustfmt and clippy, as
+  rustTorrent's CI pins it. Each check has a
   timeout (`GRAFT_ATTESTER_TIMEOUT_S`, default 2700 s). At the timeout, or
   when the check ends, its whole process group is killed.
 - The attested URL is the log's path,
-  `file:///var/lib/graft-attester/logs/<draft>/ci-build.log`, in the
+  `file:///var/lib/graft-attester/logs/<draft>/ci-clippy.log`, in the
   `graft-dev-attester` volume. Each log is capped at 8 MiB and kept for 14
   days. To read one:
   `docker exec graft-dev-attester cat /var/lib/graft-attester/logs/<draft>/ci-test.log`.
@@ -127,7 +146,7 @@ Containment:
   hostile draft could poison what later drafts build against. For the trial,
   whose writers are trusted, this is acceptable. To start clean:
   `docker volume rm graft-dev-attester-cache` (with the attester stopped).
-- The checks have network access: `cargo build --locked` fetches crates.
+- The checks have network access: cargo fetches crates.
 
 Turning it off: remove `GRAFT_ATTESTER=1`, then
 `docker compose --env-file deploy/image.env -f deploy/compose.yml --profile attester rm -sf graft-attester`.

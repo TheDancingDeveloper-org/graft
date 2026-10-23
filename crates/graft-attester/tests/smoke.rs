@@ -22,7 +22,8 @@ use graft_store::memory::MemoryStore;
 use graft_testkit::clock::FakeClock;
 use graft_testkit::server::TestServer;
 
-const REPO: &str = "trial";
+const REPO: &str = graft_attester::DEFAULT_REPO;
+const LINE: &str = graft_attester::DEFAULT_LINE;
 
 type Eng = Engine<MemoryStore, MemoryStore>;
 
@@ -98,6 +99,64 @@ impl ObjectApi for AsAttester {
     }
     async fn put_objects(&self, cx: &CallContext, req: PutObjects) -> ApiResult<Vec<ObjectId>> {
         self.engine.put_objects(&self.cx(cx), req).await
+    }
+}
+
+impl WorkspaceApi for AsAttester {
+    async fn open_workspace(
+        &self,
+        cx: &CallContext,
+        req: OpenWorkspace,
+    ) -> ApiResult<WorkspaceView> {
+        self.engine.open_workspace(&self.cx(cx), req).await
+    }
+    async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
+        self.engine.get_workspace(&self.cx(cx), req).await
+    }
+    async fn list_workspaces(
+        &self,
+        cx: &CallContext,
+        repo: String,
+        page: Page,
+    ) -> ApiResult<Vec<WorkspaceView>> {
+        self.engine.list_workspaces(&self.cx(cx), repo, page).await
+    }
+    async fn renew_lease(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        lease_ms: u64,
+    ) -> ApiResult<WorkspaceView> {
+        self.engine.renew_lease(&self.cx(cx), req, lease_ms).await
+    }
+    async fn set_head(&self, cx: &CallContext, req: SetHead) -> ApiResult<WorkspaceView> {
+        self.engine.set_head(&self.cx(cx), req).await
+    }
+    async fn sync(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        onto: Option<ChangesetId>,
+    ) -> ApiResult<Synced> {
+        self.engine.sync(&self.cx(cx), req, onto).await
+    }
+    async fn stack(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        op: StackOp,
+    ) -> ApiResult<WorkspaceView> {
+        self.engine.stack(&self.cx(cx), req, op).await
+    }
+    async fn close_workspace(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        keep_drafts: bool,
+    ) -> ApiResult<()> {
+        self.engine
+            .close_workspace(&self.cx(cx), req, keep_drafts)
+            .await
     }
 }
 
@@ -223,31 +282,45 @@ async fn repo() -> (Arc<Eng>, ChangesetId) {
         None,
     )
     .await;
-    engine
-        .update_ref(
-            &admin(),
-            UpdateRef {
-                repo: REPO.to_owned(),
-                name: "main".to_owned(),
-                expected: None,
-                new: root,
-                kind: RefKind::Line,
-            },
-        )
-        .await
-        .expect("main");
+    // `main` is the followed line; the trial's integration line forks it.
+    for line in ["main", LINE] {
+        engine
+            .update_ref(
+                &admin(),
+                UpdateRef {
+                    repo: REPO.to_owned(),
+                    name: line.to_owned(),
+                    expected: None,
+                    new: root,
+                    kind: RefKind::Line,
+                },
+            )
+            .await
+            .expect("line");
+    }
     (engine, root)
 }
 
-/// A draft in a new workspace `name` on `main`.
+/// A draft in a new workspace `name` on the trial line.
 async fn draft(engine: &Eng, root: ChangesetId, name: &str, files: &[(&str, &str)]) -> ChangesetId {
+    draft_on(engine, root, name, LINE, files).await
+}
+
+/// A draft in a new workspace `name` on `line`.
+async fn draft_on(
+    engine: &Eng,
+    root: ChangesetId,
+    name: &str,
+    line: &str,
+    files: &[(&str, &str)],
+) -> ChangesetId {
     engine
         .open_workspace(
             &admin(),
             OpenWorkspace {
                 repo: REPO.to_owned(),
                 name: Some(name.to_owned()),
-                line: "main".to_owned(),
+                line: line.to_owned(),
                 at: None,
                 lease_ms: 3_600_000,
             },
@@ -293,7 +366,7 @@ async fn attester(
     timeout: Duration,
 ) -> (TestServer, Attester<Remote>, Arc<Faults>) {
     let faults = Arc::new(Faults::default());
-    let server = TestServer::tcp(Arc::new(AsAttester {
+    let server = TestServer::tcp_workspaces(Arc::new(AsAttester {
         engine: engine.clone(),
         faults: faults.clone(),
     }))
@@ -302,7 +375,7 @@ async fn attester(
         .await
         .expect("connect")
         .with_token("not-a-real-token");
-    let mut cfg = Config::new(REPO, root);
+    let mut cfg = Config::new(REPO, LINE, root);
     cfg.checks = checks
         .iter()
         .map(|c| Check::parse(c).expect("check"))
@@ -454,7 +527,8 @@ async fn a_draft_that_is_no_longer_a_draft_is_skipped() {
         Duration::from_secs(30),
     )
     .await;
-    // Closing the workspace abandons its draft before the attester gets to it.
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    // Closing the workspace abandons its queued draft before it runs.
     engine
         .close_workspace(
             &admin(),
@@ -466,7 +540,6 @@ async fn a_draft_that_is_no_longer_a_draft_is_skipped() {
         )
         .await
         .expect("close");
-    assert_eq!(a.poll(0).await.expect("poll"), 1);
     match a.run_next().await.expect("run") {
         Some(Report::Skipped { draft, state }) => {
             assert_eq!(draft, first);
@@ -475,6 +548,21 @@ async fn a_draft_that_is_no_longer_a_draft_is_skipped() {
         other => panic!("expected a skip, got {other:?}"),
     }
     assert!(attestations(&engine).await.is_empty());
+
+    // A draft whose workspace is already gone when it is read is not queued.
+    draft(&engine, root, "v", &[("src.txt", "two\n")]).await;
+    engine
+        .close_workspace(
+            &admin(),
+            WorkspaceRef {
+                repo: REPO.to_owned(),
+                name: "v".to_owned(),
+            },
+            false,
+        )
+        .await
+        .expect("close");
+    assert_eq!(a.poll(0).await.expect("poll"), 0);
 }
 
 /// `(check, passed)` of each attestation, in order.
@@ -594,4 +682,54 @@ async fn a_tree_that_cannot_be_checked_out_attests_failed_at_once() {
         other => panic!("expected a failed checkout, got {other:?}"),
     }
     assert_eq!(verdicts(&attestations(&engine).await), both(false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_drafts_on_the_configured_line_are_checked() {
+    let (engine, root) = repo().await;
+    let _elsewhere = draft_on(&engine, root, "on-main", "main", &[("src.txt", "main\n")]).await;
+    let trial = draft(&engine, root, "on-trial", &[("src.txt", "trial\n")]).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_server, mut a, _) = attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    assert_eq!(
+        a.poll(0).await.expect("poll"),
+        1,
+        "the main draft is not queued"
+    );
+    let (id, _) = checked(a.run_next().await.expect("run"));
+    assert_eq!(id, trial);
+    assert!(a.run_next().await.expect("nothing left").is_none());
+    assert!(
+        attestations(&engine)
+            .await
+            .iter()
+            .all(|(c, ..)| *c == trial.to_string())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keep_going_runs_every_check_after_a_failure() {
+    let (engine, root) = repo().await;
+    let bad = draft(&engine, root, "w", &[("verdict", "fail\n")]).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    // The failing check first; with stop_on_failure off, ci/build still runs.
+    let (server, a, _) = attester(
+        &engine,
+        dir.path(),
+        &["ci/test=sh test.sh", "ci/build=sh build.sh"],
+        Duration::from_secs(60),
+    )
+    .await;
+    let mut cfg = a.config().clone();
+    cfg.stop_on_failure = false;
+    drop(a);
+    let remote = Remote::connect(Endpoint::Server(server.url().to_owned()))
+        .await
+        .expect("connect");
+    let mut a = Attester::new(remote, cfg).expect("attester");
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    let (id, results) = checked(a.run_next().await.expect("run"));
+    assert_eq!(id, bad);
+    assert_eq!(results[0].outcome, Outcome::Failed(Some(1)));
+    assert_eq!(results[1].outcome, Outcome::Passed);
 }

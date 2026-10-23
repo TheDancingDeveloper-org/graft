@@ -4,13 +4,14 @@
 # when the `attester` compose profile is on (context: the repository root).
 #
 #   builder  graft's toolchain builds graft-attester
-#   runtime  the attested repository's toolchain (rustTorrent: Rust 1.99,
-#            npm for the web UI, clang/lld, OpenSSL headers), plus the
-#            attester binary. The attester runs as root with only CHOWN,
-#            SETUID, SETGID and KILL, and runs every check as uid 10001.
+#   runtime  the attested repository's toolchain, as rustTorrent's CI job
+#            has it (Rust 1.95 with rustfmt and clippy), with npm for the
+#            web UI, clang/lld and OpenSSL headers, plus the attester
+#            binary. The attester runs as root with only CHOWN, SETUID,
+#            SETGID and KILL, and runs every check as uid 10001.
 
 ARG RUST_VERSION=1.90
-ARG RUNTIME_RUST_VERSION=1.99
+ARG RUNTIME_RUST_VERSION=1.95
 ARG DEBIAN_VERSION=trixie
 
 FROM rust:${RUST_VERSION}-slim-${DEBIAN_VERSION} AS builder
@@ -30,7 +31,8 @@ FROM rust:${RUNTIME_RUST_VERSION}-slim-${DEBIAN_VERSION} AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates git curl pkg-config libssl-dev clang lld npm \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup component add rustfmt clippy
 # /var/lib/graft-attester (work, logs, state) belongs to root, the attester.
 # /var/cache/graft-attester (cargo home, target dir, HOME) belongs to the
 # check user, so a fresh named volume mounted there is seeded with it.

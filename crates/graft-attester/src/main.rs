@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use graft_attester::{Attester, Check, Config, DEFAULT_CHECKS, log};
+use graft_attester::{Attester, Check, Config, DEFAULT_CHECKS, DEFAULT_LINE, DEFAULT_REPO, log};
 use graft_client::{Endpoint, Remote};
 
 /// Builds and tests new drafts and posts `Attest` per check.
@@ -19,16 +19,23 @@ struct Args {
     #[arg(long, default_value = "http://graft-server:7878")]
     endpoint: String,
     /// Repository to watch and attest.
-    #[arg(long)]
+    #[arg(long, default_value = DEFAULT_REPO)]
     repo: String,
+    /// Line whose drafts are attested (drafts in workspaces tracking it).
+    #[arg(long, default_value = DEFAULT_LINE)]
+    line: String,
     /// File holding the token (mode 0600 or stricter). It needs `read` and
     /// `attest` on the repository.
     #[arg(long, default_value = "/run/secrets/graft-attester-token")]
     token_file: PathBuf,
     /// A check, `name=program args...`, run in order (repeatable; default
-    /// `ci/build=cargo build --locked` and `ci/test=cargo test --locked`).
+    /// rustTorrent's `ci/fmt`, `ci/clippy` and `ci/test`).
     #[arg(long = "check")]
     checks: Vec<String>,
+    /// Run every check even after one fails (default: the rest are
+    /// attested failed without running, as a CI job's later steps are).
+    #[arg(long)]
+    keep_going: bool,
     /// Per-check time limit, in seconds.
     #[arg(long, default_value_t = 2700)]
     timeout_s: u64,
@@ -92,7 +99,8 @@ fn read_token(path: &Path) -> Result<String, String> {
 }
 
 fn config(args: &Args) -> Result<Config, String> {
-    let mut cfg = Config::new(args.repo.clone(), &args.root);
+    let mut cfg = Config::new(args.repo.clone(), args.line.clone(), &args.root);
+    cfg.stop_on_failure = !args.keep_going;
     let specs: Vec<&str> = if args.checks.is_empty() {
         DEFAULT_CHECKS.to_vec()
     } else {
@@ -149,8 +157,9 @@ async fn main() -> ExitCode {
     };
     let checks: Vec<&str> = cfg.checks.iter().map(|c| c.name.as_str()).collect();
     log(&format!(
-        "watching {} on {} for drafts; checks {}",
+        "watching {} line {} on {} for drafts; checks {}",
         cfg.repo,
+        cfg.line,
         args.endpoint,
         checks.join(", ")
     ));
