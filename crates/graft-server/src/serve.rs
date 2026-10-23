@@ -34,6 +34,7 @@ use crate::app::{App, PutBudget};
 use crate::ci::CiExchange;
 use crate::config::ServerConfig;
 use crate::denylist::Denylist;
+use crate::exports::Exports;
 use crate::grpc::{self, Services};
 use crate::watch::Watches;
 use crate::{http, keys, mcp};
@@ -137,7 +138,8 @@ async fn run(config: ServerConfig) -> Result<(), String> {
     }
     let admission = Admission::new(volumes, config.min_free_fraction, config.min_free_bytes);
     let denylist = Denylist::open(&config.meta_db)?;
-    let ci = CiExchange::load(&config.ci)?.map(Arc::new);
+    let exports = Arc::new(Exports::open(&config.meta_db)?);
+    let ci = CiExchange::load(&config.ci, exports.clone())?.map(Arc::new);
     if let Some(ci) = &ci {
         // Fetched before the server is ready, so the first CI job does not
         // wait on it; a failure is logged and retried on the timer.
@@ -157,6 +159,7 @@ async fn run(config: ServerConfig) -> Result<(), String> {
                 std::time::Duration::from_millis(config.put_idle_ms),
             ),
             denylist,
+            exports,
         )
         .with_ci(ci),
     );

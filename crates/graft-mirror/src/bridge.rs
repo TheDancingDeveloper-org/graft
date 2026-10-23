@@ -38,12 +38,12 @@ use graft_proto::CallContext;
 use graft_proto::api::{ObjectApi, RepoApi};
 use graft_proto::types::{DraftState, GetChangesets};
 
-use crate::MirrorError;
 use crate::credentials::SecretToken;
 use crate::current_ref;
 use crate::db::MirrorDb;
 use crate::git::{Mirror, PushOutcome};
 use crate::github::{Forge, ForgeError, NewPull, Pull};
+use crate::{ExportLog, MirrorError};
 
 /// The most changesets one request may carry.
 pub const MAX_STACK: usize = 64;
@@ -166,6 +166,7 @@ pub struct Bridge<'a, A, F> {
     config: BridgeConfig,
     clock: fn() -> i64,
     calls: u64,
+    exports: Option<&'a dyn ExportLog>,
 }
 
 /// Exported commits are dated by the request's planning time, so a re-export
@@ -265,12 +266,20 @@ where
             config,
             clock: system_ms,
             calls: 0,
+            exports: None,
         })
     }
 
     /// Reads time from `clock` (milliseconds since the epoch).
     pub fn with_clock(mut self, clock: fn() -> i64) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Records each pushed stack head's commit in `log`, before the push, so
+    /// the pre-land CI run the push starts can attest it.
+    pub fn with_export_log(mut self, log: &'a dyn ExportLog) -> Self {
+        self.exports = Some(log);
         self
     }
 
@@ -542,6 +551,10 @@ where
             )?;
             exporter.export_changeset(rec.head).await?
         };
+        if let Some(log) = self.exports {
+            let cx = self.call("record-export");
+            log.record_exports(&cx, &repo, &[(rec.head, sha)]).await?;
+        }
         // The token travels to git in the environment, and only for HTTPS.
         let token = if self.mirror.is_https() {
             Some(self.forge.token().await?)
