@@ -2,6 +2,8 @@
 //! repository, inside a working copy (the working-copy tools) and outside
 //! one (the repository tools only).
 
+#[path = "../../graft-client/tests/support/engine.rs"]
+mod engine;
 mod support;
 
 use std::io::{BufRead, BufReader, Write};
@@ -311,4 +313,102 @@ fn without_an_endpoint_it_is_a_usage_error() {
         .code(2)
         .stderr(contains("no endpoint"));
     assert!(out.get_output().stdout.is_empty(), "stdout stays clean");
+}
+
+/// Two working copies on the real engine (a `direct` line) edit separate
+/// regions of `src/lib.rs`. The first lands through the CLI; the second
+/// lands through `graft mcp`: with `merge: "file"` the rebase refuses the
+/// file, and with no `merge` it line-merges (D16) and the working copy holds
+/// the merged file.
+#[test]
+fn land_from_a_working_copy_line_merges_by_default() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let files: Vec<(&str, &[u8])> = vec![
+        ("README.md", b"hello\n"),
+        ("src/lib.rs", b"fn a() {}\nfn b() {}\nfn c() {}\n"),
+    ];
+    let repo = rt.block_on(engine::EngineRepo::direct(REPO, &files));
+    let server = rt.block_on(graft_testkit::server::TestServer::tcp_workspaces(
+        repo.clone(),
+    ));
+    let url = server.url().to_owned();
+    let (one, two) = (scratch(), scratch());
+    let clone = |dir: &Path| {
+        graft(dir)
+            .args(["--endpoint", &url, "clone", REPO, "app"])
+            .assert()
+            .success();
+        dir.join("app")
+    };
+    let first = clone(one.path());
+    let second = clone(two.path());
+    let author = |cmd: &mut assert_cmd::Command| {
+        cmd.env("GRAFT_AUTHOR_NAME", "Test Author")
+            .env("GRAFT_AUTHOR_EMAIL", "author@example.com");
+    };
+
+    std::fs::write(
+        first.join("src/lib.rs"),
+        "fn a() {}\nfn b() {}\nfn c() { 1 }\n",
+    )
+    .unwrap();
+    let mut cmd = graft(&first);
+    author(&mut cmd);
+    cmd.args(["commit", "-m", "one"]).assert().success();
+    let mut cmd = graft(&first);
+    author(&mut cmd);
+    cmd.arg("land").assert().success();
+    let first_tip = rt.block_on(repo.tip());
+
+    std::fs::write(
+        second.join("src/lib.rs"),
+        "fn a() { 2 }\nfn b() {}\nfn c() {}\n",
+    )
+    .unwrap();
+    let mut mcp = Mcp::start(&second, &["--endpoint", &url], &[]);
+    let workspace = mcp.ok("graft_status", json!({"repo": REPO}))["workspace"]
+        .as_str()
+        .map_or_else(|| "mcp".to_owned(), str::to_owned);
+    mcp.ok(
+        "graft_commit",
+        json!({
+            "repo": REPO,
+            "workspace": workspace,
+            "message": "two",
+            "from_working_copy": true,
+        }),
+    );
+
+    // A file merge refuses the file both sides changed; nothing moves.
+    let (refused, error) = mcp.call(
+        "graft_land",
+        json!({"repo": REPO, "workspace": workspace, "merge": "file"}),
+    );
+    assert!(error, "{refused}");
+    assert_eq!(refused["kind"], "conflict", "{refused}");
+    assert_eq!(rt.block_on(repo.tip()), first_tip);
+
+    // No `merge`: a line merge, rebased onto the first land.
+    let landed = mcp.ok("graft_land", json!({"repo": REPO, "workspace": workspace}));
+    assert_eq!(landed["outcome"], "landed", "{landed}");
+    assert_eq!(landed["rebased"], true, "{landed}");
+    let tip = rt.block_on(repo.tip());
+    assert_eq!(landed["landed"], json!(tip.to_string()));
+    let merged = "fn a() { 2 }\nfn b() {}\nfn c() { 1 }\n";
+    assert_eq!(
+        rt.block_on(repo.files(tip))["src/lib.rs"],
+        merged.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read_to_string(second.join("src/lib.rs")).unwrap(),
+        merged
+    );
+    let status = mcp.ok("graft_status", json!({"repo": REPO}));
+    assert_eq!(status["clean"], true, "{status}");
+    assert_eq!(status["base"], json!(tip.to_string()));
+    mcp.finish();
 }

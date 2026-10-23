@@ -10,7 +10,7 @@
 
 use std::{fmt, future::Future, pin::Pin};
 
-use graft_proto::{ApiError, CallContext};
+use graft_proto::{ApiError, CallContext, types::MergeMode};
 use serde_json::Value;
 
 /// The future a [`WorkingCopyTools`] method returns.
@@ -73,8 +73,9 @@ pub struct WorkingCopyLand {
     pub line: Option<String>,
     /// Land the stack as one changeset.
     pub squash: bool,
-    /// Whether the call asked for a line merge explicitly.
-    pub line_merge: bool,
+    /// How the land merges paths both sides changed: the call's `merge`,
+    /// a line merge when it gives none.
+    pub merge: MergeMode,
 }
 
 /// `graft_sync` on the working copy's workspace.

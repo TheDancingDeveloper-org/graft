@@ -341,7 +341,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
                 head: args.head.clone(),
                 line: args.line.clone(),
                 squash: args.squash.unwrap_or(false),
-                line_merge: args.merge == Some(MergeArg::Line),
+                merge: merge_mode(args.merge),
             };
             if let Some(value) = wc.land(cx, req).await? {
                 return bounded(value);
@@ -360,10 +360,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             head,
             line: line.clone(),
             squash: args.squash.unwrap_or(false),
-            merge: match args.merge.unwrap_or_default() {
-                MergeArg::File => MergeMode::File,
-                MergeArg::Line => MergeMode::Line,
-            },
+            merge: merge_mode(args.merge),
             deadline_ms: None,
         };
         let landed = self.api.land(cx, req).await.map_err(ToolError::Api)?;
@@ -591,6 +588,14 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             self.workspace_op(&cx, args).await
         })
         .await)
+    }
+}
+
+/// The merge a land asks for: the argument, a line merge by default.
+fn merge_mode(arg: Option<MergeArg>) -> MergeMode {
+    match arg.unwrap_or_default() {
+        MergeArg::File => MergeMode::File,
+        MergeArg::Line => MergeMode::Line,
     }
 }
 

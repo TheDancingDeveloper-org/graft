@@ -267,15 +267,11 @@ impl WorkingCopyTools for Served {
                     "this working copy lands its own head; omit `head`".into(),
                 ));
             }
-            if req.line_merge {
-                return Err(WorkingCopyError::Invalid(
-                    "a working copy lands with a file merge; omit `merge` or pass `file`".into(),
-                ));
-            }
             let recovered = self.begin(&mut wc, cx, false).await?;
             let cache = wc.open_cache(DEFAULT_CACHE_BYTES).map_err(client)?;
             let opts = LandOptions {
                 squash: req.squash,
+                merge: req.merge,
                 ..LandOptions::default()
             };
             let ws = self.workspace_ref(&wc);
