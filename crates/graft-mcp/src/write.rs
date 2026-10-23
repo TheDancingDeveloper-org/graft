@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 
 use crate::render::{FIELD_MAX_BYTES, ToolError, bounded, clip};
 use crate::server::{McpServer, parse_path, respond, state_name};
+use crate::workcopy::{WorkingCopyCommit, WorkingCopyLand, WorkingCopySync};
 
 /// Most files one inline commit names.
 pub const COMMIT_MAX_FILES: usize = 256;
@@ -221,9 +222,32 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             if !args.files.is_empty() {
                 return Err(invalid("give `files` or `from_working_copy`, not both"));
             }
-            return Err(ToolError::NeedsWorkingCopy {
-                tool: "graft_commit",
-            });
+            let Some(wc) = &self.working_copy else {
+                return Err(ToolError::NeedsWorkingCopy {
+                    tool: "graft_commit",
+                });
+            };
+            if args.parent.is_some() {
+                return Err(invalid(
+                    "`parent` does not apply to `from_working_copy`: the draft goes on the workspace head",
+                ));
+            }
+            if args.message.trim().is_empty() {
+                return Err(invalid("`message` is empty"));
+            }
+            if args.message.len() > COMMIT_MESSAGE_MAX_BYTES {
+                return Err(ToolError::Api(ApiError::LimitExceeded {
+                    limit: "message-bytes".into(),
+                    max: COMMIT_MESSAGE_MAX_BYTES as u64,
+                }));
+            }
+            let req = WorkingCopyCommit {
+                repo: args.repo,
+                workspace: args.workspace,
+                message: args.message,
+                authored_at_ms: args.authored_at_ms,
+            };
+            return bounded(wc.commit(cx, req).await?);
         }
         if args.files.is_empty() {
             return Err(invalid("`files` names no changes"));
@@ -280,6 +304,16 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
     async fn sync(&self, cx: &CallContext, args: SyncArgs) -> Result<CallToolResult, ToolError> {
         check_name("repo", &args.repo)?;
         check_name("workspace", &args.workspace)?;
+        if let Some(wc) = &self.working_copy {
+            let req = WorkingCopySync {
+                repo: args.repo.clone(),
+                workspace: args.workspace.clone(),
+                onto: args.onto.clone(),
+            };
+            if let Some(value) = wc.sync(cx, req).await? {
+                return bounded(value);
+            }
+        }
         let onto = match &args.onto {
             Some(rev) => Some(self.resolve(cx, &args.repo, rev).await?),
             None => None,
@@ -299,6 +333,19 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         check_name("workspace", &args.workspace)?;
         if let Some(line) = &args.line {
             check_name("line", line)?;
+        }
+        if let Some(wc) = &self.working_copy {
+            let req = WorkingCopyLand {
+                repo: args.repo.clone(),
+                workspace: args.workspace.clone(),
+                head: args.head.clone(),
+                line: args.line.clone(),
+                squash: args.squash.unwrap_or(false),
+                line_merge: args.merge == Some(MergeArg::Line),
+            };
+            if let Some(value) = wc.land(cx, req).await? {
+                return bounded(value);
+            }
         }
         let ws = self.workspace(cx, &args.repo, &args.workspace).await?;
         let head = match &args.head {
