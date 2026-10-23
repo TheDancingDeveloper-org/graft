@@ -1,0 +1,23 @@
+# Caller: copy to .github/workflows/graft-pre-land.yml in a graft-managed
+# repository. Runs the required checks on the branches the mirror pushes for
+# drafts, and attests them to graft.
+#
+# The shared workflow takes no inputs: the checks live in it, not here. A
+# caller is branch content, so anything it could choose, a branch author could
+# choose too.
+name: graft pre-land
+
+on:
+  push:
+    branches: ['graft/**']
+
+jobs:
+  pre-land:
+    # Must be the ref the graft binding names in `job_workflow_ref`; a
+    # different ref gets no token.
+    uses: SHARED-ORG/graft-ci/.github/workflows/graft-pre-land-myrepo.yml@refs/heads/main
+    # The ceiling for the shared workflow's jobs. Only its attest job uses
+    # `id-token`; its check jobs ask for `contents: read` alone.
+    permissions:
+      contents: read
+      id-token: write
