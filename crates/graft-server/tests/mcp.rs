@@ -142,7 +142,6 @@ async fn mcp_takes_the_bearer_token_and_the_engine_scopes() {
     let writer = site.mint(&["repo:r:write"]);
     let reader = site.mint(&["repo:r:read"]);
     let lander = site.mint(&["repo:r:write", "repo:r:land:main"]);
-    let ci = site.mint_kind("ci-bot", "ci", &["repo:r:write"], 3600);
     let server = site.start();
 
     let mut c = server.clients(Some(&admin)).await;
@@ -233,19 +232,33 @@ async fn mcp_takes_the_bearer_token_and_the_engine_scopes() {
 
     // CI attests both checks on the draft; the land then succeeds.
     let draft: graft_model::ChangesetId = committed["id"].as_str().unwrap().parse().unwrap();
+    let attest = |check: &str| {
+        pb::AttestRequest::from(Attest {
+            repo: "r".into(),
+            changeset: draft,
+            check: check.into(),
+            passed: true,
+            url: "https://ci.example/run/1".into(),
+        })
+    };
+    // `write` does not attest (WI-2272): CI holds the dedicated `attest`
+    // scope, and its token is pinned to the changeset it attests, as the
+    // OIDC exchange mints it.
+    let mut by_writer = server.clients(Some(&writer)).await;
+    let refused = by_writer.repo.attest(attest("ci/build")).await;
+    assert_eq!(
+        refused.expect_err("write cannot attest").code(),
+        tonic::Code::PermissionDenied
+    );
+    let ci = site.mint_kind(
+        &format!("ci:github:o/r#{draft}"),
+        "ci",
+        &["repo:r:read", "repo:r:attest"],
+        3600,
+    );
     let mut by_ci = server.clients(Some(&ci)).await;
     for check in ["ci/build", "ci/test"] {
-        by_ci
-            .repo
-            .attest(pb::AttestRequest::from(Attest {
-                repo: "r".into(),
-                changeset: draft,
-                check: check.into(),
-                passed: true,
-                url: "https://ci.example/run/1".into(),
-            }))
-            .await
-            .expect("attest");
+        by_ci.repo.attest(attest(check)).await.expect("attest");
     }
     let (failed, landed) = land.call("graft_land", json!({"repo": "r", "workspace": ws}));
     assert!(!failed, "{landed}");

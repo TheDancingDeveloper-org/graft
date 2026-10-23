@@ -279,10 +279,19 @@ impl EngineRepo {
 
     /// Posts a passing attestation of every D6 check on `id`, as CI.
     pub async fn attest_all(&self, id: ChangesetId) {
+        // CI attests as the OIDC exchange mints its token (WI-2272): `read`
+        // and `attest`, pinned to the changeset. The engine refuses a `ci`
+        // principal that is not pinned to it, even with `admin`.
+        let mut ci = self.admin();
+        ci.principal.scopes = vec![
+            format!("repo:{}:read", self.name),
+            format!("repo:{}:attest", self.name),
+        ];
+        ci.principal.subject = format!("ci:github:o/{}#{id}", self.name);
         for check in D6_CHECKS {
             self.engine
                 .attest(
-                    &self.admin(),
+                    &ci,
                     Attest {
                         repo: self.name.clone(),
                         changeset: id,
