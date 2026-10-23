@@ -1,11 +1,13 @@
 //! Principals, tokens, scopes and path rules (`docs/design.md` §12, work
-//! item G1.9). Token and key values never appear in `Debug` or `Display`
+//! item G1.9), and the exchange of CI identity tokens for graft tokens
+//! ([`oidc`], G3.8). Token and key values never appear in `Debug` or `Display`
 //! output.
 
 use std::fmt;
 
 use graft_proto::ApiError;
 
+pub mod oidc;
 mod scope;
 mod token;
 

@@ -1,0 +1,128 @@
+# Reusable workflow: post-land CI for graft-managed repositories.
+#
+# The graft mirror pushes every landed changeset to the GitHub branch for its
+# line. This workflow runs the repository's checks on those pushes and
+# reports each result to graft as an Attest on the landed changeset, under a
+# `post-land/` name. A failing one is the signal the auto-revert bot acts on
+# (docs/decisions.md, D6). See ci/README.md, and caller-post-land.yml for the
+# caller.
+#
+# This file is a template for graft-managed repositories. It is not run by
+# this repository's own CI. Put it in the shared workflow repository the
+# graft server's binding pins (`job_workflow_ref`).
+name: graft post-land
+
+on:
+  workflow_call:
+    inputs:
+      checks:
+        description: >-
+          JSON array of the post-land checks, for example
+          [{"name":"build","run":"cargo build --locked"},
+          {"name":"test","run":"cargo nextest run"}]. Each is reported as
+          `<check-prefix><name>`.
+        type: string
+        required: true
+      check-prefix:
+        type: string
+        default: post-land/
+      graft-endpoint:
+        type: string
+        required: true
+      graft-repo:
+        type: string
+        required: true
+      audience:
+        type: string
+        required: true
+      mirror-actor:
+        description: >-
+          The GitHub actor the mirror pushes as (its App, `name[bot]`). When
+          set, pushes by anyone else are skipped.
+        type: string
+        default: ''
+      runner:
+        description: JSON for runs-on.
+        type: string
+        default: '["self-hosted"]'
+      timeout-minutes:
+        type: number
+        default: 60
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  check:
+    name: ${{ inputs.check-prefix }}${{ matrix.check.name }}
+    if: ${{ inputs.mirror-actor == '' || github.actor == inputs.mirror-actor }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(inputs.checks) }}
+    # Unlike pre-land, never cancel a run for a newer push: every landed
+    # changeset's result matters to the revert bot.
+    concurrency:
+      group: graft-post-land-${{ github.sha }}-${{ matrix.check.name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: ${{ matrix.check.name }}
+        id: check
+        continue-on-error: true
+        env:
+          CHECK_RUN: ${{ matrix.check.run }}
+        run: bash -euo pipefail -c "$CHECK_RUN"
+
+      - name: attest
+        if: ${{ !cancelled() }}
+        env:
+          CHECK_NAME: ${{ inputs.check-prefix }}${{ matrix.check.name }}
+          CHECK_OUTCOME: ${{ steps.check.outcome }}
+          GRAFT_ENDPOINT: ${{ inputs.graft-endpoint }}
+          GRAFT_REPO: ${{ inputs.graft-repo }}
+          AUDIENCE: ${{ inputs.audience }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The pushed commit is the landed changeset as the mirror exported it.
+          changeset="$(git log -1 --format='%(trailers:key=Graft-Changeset,valueonly)' | head -n1 | tr -d '[:space:]')"
+          if [ -z "$changeset" ]; then
+            echo "::error::the pushed commit has no Graft-Changeset trailer; nothing to attest"
+            exit 1
+          fi
+
+          if [ "$CHECK_OUTCOME" = success ]; then status=passed; else status=failed; fi
+
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::no OIDC token available; the caller must grant 'id-token: write'"
+            exit 1
+          fi
+          query="$(jq -rn --arg a "$AUDIENCE" '$a | @uri')"
+          jwt="$(curl -fsS --max-time 30 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${query}" | jq -r '.value')"
+          echo "::add-mask::$jwt"
+
+          GRAFT_TOKEN="$(printf '%s' "$jwt" | graft --endpoint "$GRAFT_ENDPOINT" ci exchange --provider github)"
+          echo "::add-mask::$GRAFT_TOKEN"
+          export GRAFT_TOKEN
+          unset jwt
+
+          graft --endpoint "$GRAFT_ENDPOINT" --repo "$GRAFT_REPO" attest \
+            --changeset "$changeset" \
+            --check "$CHECK_NAME" \
+            --status "$status" \
+            --url "$RUN_URL"
+
+      - name: fail if the check failed
+        if: ${{ steps.check.outcome != 'success' && !cancelled() }}
+        run: exit 1

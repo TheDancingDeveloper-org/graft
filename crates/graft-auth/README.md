@@ -77,3 +77,18 @@ names no path. Denials carry the needed scope and the path, never a token.
 `Token`, `SigningKey` and `VerifyingKey` redact themselves in `Debug`, and
 none implements `Display`. `AuthError` never carries a token. The tests in
 `tests/redaction.rs` check `Debug`/`Display` output and captured JSON logs.
+
+## CI exchange (`oidc`)
+
+`graft_auth::oidc` turns a CI job's identity token (GitHub Actions OIDC, or a
+Woodpecker job token) into a short graft token with `kind = ci`. The caller
+supplies the issuer's already-fetched JWKS; the module does no network I/O.
+`Exchange::exchange` checks, in order: size and shape, `alg` (`RS256` or
+`EdDSA`; `none`, HMAC and everything else are refused before a key is looked
+at), the named `kid`, the signature, `iss`, `aud`, `exp` (no leeway),
+`nbf`/`iat` (60 s leeway), the lifetime, then the `Binding` for the token's
+repository, ref and workflow. A valid token for a repository with no binding
+is `PermissionDenied`; an invalid one is `Unauthenticated`. The minted token
+carries exactly the binding's `read`/`write` scopes and expires at the
+earlier of 15 minutes and the CI token's own `exp`. See `ci/README.md` for the
+workflow side and the trust model.

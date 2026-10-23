@@ -1,0 +1,129 @@
+# Reusable workflow: pre-land checks for graft-managed repositories.
+#
+# Runs the repository's required checks on a `graft/*` branch that the mirror
+# pushed for a draft, then reports each result to graft as an Attest, so a
+# line whose policy is `attested` (docs/design.md section 8.3) can land the
+# draft. See ci/README.md for setup, and caller-pre-land.yml for the caller.
+#
+# This file is a template for graft-managed repositories. It is not run by
+# this repository's own CI. Put it in the shared workflow repository the
+# graft server's binding pins (`job_workflow_ref`), not in each repository.
+name: graft pre-land
+
+on:
+  workflow_call:
+    inputs:
+      checks:
+        description: >-
+          JSON array of the required checks, for example
+          [{"name":"ci/build","run":"cargo build --locked"},
+          {"name":"ci/test","run":"cargo nextest run"}]. Each name must
+          match a check the line's `attested` policy names.
+        type: string
+        required: true
+      graft-endpoint:
+        description: The graft server, for example https://graft.example.com
+        type: string
+        required: true
+      graft-repo:
+        description: The graft repository this GitHub repository is bound to.
+        type: string
+        required: true
+      audience:
+        description: >-
+          The audience the graft server's issuer rule expects. A value
+          specific to this graft deployment, never a shared one.
+        type: string
+        required: true
+      runner:
+        description: JSON for runs-on.
+        type: string
+        default: '["self-hosted"]'
+      timeout-minutes:
+        type: number
+        default: 30
+
+# The caller grants these. `id-token: write` lets a job ask GitHub for the
+# OIDC token that the graft server exchanges; it gives no access to GitHub.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  check:
+    name: ${{ matrix.check.name }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(inputs.checks) }}
+    # A new push to the branch replaces the run: an Attest for a head that
+    # is no longer the head is useless.
+    concurrency:
+      group: graft-pre-land-${{ github.ref }}-${{ matrix.check.name }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: ${{ matrix.check.name }}
+        id: check
+        continue-on-error: true
+        env:
+          CHECK_RUN: ${{ matrix.check.run }}
+        run: bash -euo pipefail -c "$CHECK_RUN"
+
+      # One step holds the JWT and the graft token in shell variables only:
+      # neither goes to a file, to GITHUB_ENV, or to another step. Both are
+      # masked in the log. The graft token is read from the environment, never
+      # from an argument, and lives at most as long as this job's OIDC token.
+      - name: attest
+        if: ${{ !cancelled() }}
+        env:
+          CHECK_NAME: ${{ matrix.check.name }}
+          CHECK_OUTCOME: ${{ steps.check.outcome }}
+          GRAFT_ENDPOINT: ${{ inputs.graft-endpoint }}
+          GRAFT_REPO: ${{ inputs.graft-repo }}
+          AUDIENCE: ${{ inputs.audience }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The mirror exports every draft with a Graft-Changeset trailer; the
+          # head commit of the branch names the stack head that is attested.
+          changeset="$(git log -1 --format='%(trailers:key=Graft-Changeset,valueonly)' | head -n1 | tr -d '[:space:]')"
+          if [ -z "$changeset" ]; then
+            echo "::error::the branch head has no Graft-Changeset trailer; nothing to attest"
+            exit 1
+          fi
+
+          if [ "$CHECK_OUTCOME" = success ]; then status=passed; else status=failed; fi
+
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::no OIDC token available; the caller must grant 'id-token: write'"
+            exit 1
+          fi
+          query="$(jq -rn --arg a "$AUDIENCE" '$a | @uri')"
+          jwt="$(curl -fsS --max-time 30 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${query}" | jq -r '.value')"
+          echo "::add-mask::$jwt"
+
+          GRAFT_TOKEN="$(printf '%s' "$jwt" | graft --endpoint "$GRAFT_ENDPOINT" ci exchange --provider github)"
+          echo "::add-mask::$GRAFT_TOKEN"
+          export GRAFT_TOKEN
+          unset jwt
+
+          graft --endpoint "$GRAFT_ENDPOINT" --repo "$GRAFT_REPO" attest \
+            --changeset "$changeset" \
+            --check "$CHECK_NAME" \
+            --status "$status" \
+            --url "$RUN_URL"
+
+      # The Actions UI shows the real result, not only the attestation.
+      - name: fail if the check failed
+        if: ${{ steps.check.outcome != 'success' && !cancelled() }}
+        run: exit 1

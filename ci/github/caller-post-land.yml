@@ -1,0 +1,26 @@
+# Caller: copy to .github/workflows/graft-post-land.yml in a graft-managed
+# repository. Runs on the pushes the mirror makes to a line's branch after a
+# land, and attests the results to graft for the auto-revert bot.
+name: graft post-land
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  post-land:
+    uses: SHARED-ORG/graft-ci/.github/workflows/graft-post-land.yml@refs/heads/main
+    with:
+      graft-endpoint: https://graft.example.com
+      graft-repo: myrepo
+      audience: https://graft.example.com
+      mirror-actor: graft-mirror[bot]
+      checks: >-
+        [
+          {"name": "build", "run": "cargo build --workspace --locked"},
+          {"name": "test", "run": "cargo nextest run --workspace --locked"}
+        ]

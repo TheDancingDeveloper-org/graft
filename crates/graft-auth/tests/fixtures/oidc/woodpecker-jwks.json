@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "kid": "wp-test-1",
+      "use": "sig",
+      "alg": "EdDSA",
+      "x": "_Yw4CgxyYX8b4Ycqi3DkIokLQq0YzH4AzgmNLQ7rHTw"
+    }
+  ]
+}
