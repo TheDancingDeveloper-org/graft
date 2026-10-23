@@ -64,6 +64,7 @@ crates/
   graft-lsp           LSP server over the API traits
   graft-git           git import, export and mapping (the only git-aware crate)
   graft-mirror        bin: git and GitHub mirror
+  graft-attester      bin: trial attester, builds and tests drafts, posts Attest
   graft-testkit       test fixtures and harnesses (dev only)
 ```
 

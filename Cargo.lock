@@ -1829,6 +1829,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "graft-attester"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "graft-client",
+ "graft-engine",
+ "graft-model",
+ "graft-proto",
+ "graft-store",
+ "graft-testkit",
+ "rustix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "graft-auth"
 version = "0.0.0"
 dependencies = [
