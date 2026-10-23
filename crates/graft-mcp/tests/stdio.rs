@@ -61,6 +61,18 @@ async fn the_handshake_and_tool_list_match_the_design() {
 }
 
 #[tokio::test]
+async fn land_defaults_to_a_line_merge_in_its_schema() {
+    let client = connect(Fake::standard()).await;
+    let tools = client.list_all_tools().await.expect("tools/list");
+    let land = tools.iter().find(|t| t.name == "graft_land").unwrap();
+    let schema = serde_json::to_value(&*land.input_schema).unwrap();
+    let merge = &schema["properties"]["merge"];
+    assert_eq!(merge["default"], "line", "{merge}");
+    let described = merge["description"].as_str().unwrap();
+    assert!(described.starts_with("`line` (default)"), "{described}");
+}
+
+#[tokio::test]
 async fn a_call_round_trips_over_the_framing() {
     let client = connect(Fake::standard()).await;
     let result = call(
