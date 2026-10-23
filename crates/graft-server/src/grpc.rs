@@ -106,7 +106,7 @@ fn req_cid(b: Vec<u8>, field: &'static str) -> Result<ChangesetId, Status> {
 /// owns `ws` nor administers its repository is refused before the operation
 /// runs, and learns nothing of it. A workspace that does not exist is left
 /// to the operation to answer.
-async fn own_workspace(
+pub(crate) async fn own_workspace(
     e: &ServerEngine,
     cx: &CallContext,
     ws: &WorkspaceRef,

@@ -16,7 +16,11 @@ use graft_model::{
 use graft_proto::{
     ApiError, CallContext, Frame, PrincipalKind,
     api::{RepoApi, WorkspaceApi},
-    types::{CreateChangeset, Land, Landed, MergeMode, OpenWorkspace, WorkspaceRef, WorkspaceView},
+    types::{
+        ConflictReason, ConflictSide, ConflictView, CreateChangeset, GetConflicts, Land, Landed,
+        MergeMode, OpenWorkspace, Page, PathResolution, Resolution, ResolvedContent, Revert,
+        WorkspaceRef, WorkspaceView,
+    },
 };
 use rmcp::{
     ErrorData, RoleServer, handler::server::wrapper::Parameters, model::CallToolResult,
@@ -26,8 +30,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::render::{FIELD_MAX_BYTES, ToolError, bounded, clip};
-use crate::server::{McpServer, parse_path, respond, state_name};
+use crate::render::{FIELD_MAX_BYTES, ToolError, bounded, clip, fit};
+use crate::server::{McpServer, kind_name, parse_path, respond, state_name};
 use crate::workcopy::{WorkingCopyCommit, WorkingCopyLand, WorkingCopySync};
 
 /// Most files one inline commit names.
@@ -46,6 +50,12 @@ const LEASE_DEFAULT_MS: u64 = 60 * 60 * 1000;
 const PATHS_MAX: usize = 200;
 /// A pull request URL longer than this is clipped.
 const URL_MAX_BYTES: usize = 1024;
+/// Conflicting paths one `graft_conflicts` page asks for, by default and at
+/// most. The page shrinks further when the markers do not fit.
+const CONFLICTS_DEFAULT: u32 = 16;
+const CONFLICTS_MAX: u32 = 64;
+/// Marker text kept per path in a `graft_conflicts` result, in bytes.
+pub const CONFLICT_MARKERS_MAX_BYTES: usize = 16 * 1024;
 /// The working-copy metadata directory, never staged.
 const RESERVED_DIR: &str = ".graft";
 
@@ -210,7 +220,165 @@ pub struct WorkspaceArgs {
     pub keep_drafts: Option<bool>,
 }
 
+/// Arguments of `graft_conflicts`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConflictsArgs {
+    /// Repository name.
+    pub repo: String,
+    /// The workspace whose stack would be rebased.
+    pub workspace: String,
+    /// The target (an id or a ref name); the line tip when absent.
+    pub onto: Option<String>,
+    /// Conflicting paths per page (1 to 64, default 16).
+    pub limit: Option<u32>,
+    /// Resume token from a previous result's `next`.
+    pub cursor: Option<String>,
+}
+
+/// Arguments of `graft_resolve`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveArgs {
+    /// Repository name.
+    pub repo: String,
+    /// The workspace whose stack is rebased.
+    pub workspace: String,
+    /// The target, as `graft_conflicts` or a `conflict` error returned it.
+    pub onto: String,
+    /// The workspace head the caller saw (compare-and-swap).
+    pub expected_head: Option<String>,
+    /// One entry per conflicting path: `put` (default) with `content`, or
+    /// `delete`. The same shape and limits as `graft_commit`'s `files`.
+    pub resolutions: Vec<FileChange>,
+}
+
+/// Arguments of `graft_revert`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RevertArgs {
+    /// Repository name.
+    pub repo: String,
+    /// The changeset to invert (an id or a ref name).
+    pub changeset: String,
+    /// Where to apply the inverse (an id or a ref name). Defaults to the
+    /// workspace head, or its base when it has no drafts.
+    pub onto: Option<String>,
+    /// The workspace to hold the new draft.
+    pub workspace: Option<String>,
+}
+
 impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
+    async fn conflicts(
+        &self,
+        cx: &CallContext,
+        args: ConflictsArgs,
+    ) -> Result<CallToolResult, ToolError> {
+        check_name("repo", &args.repo)?;
+        check_name("workspace", &args.workspace)?;
+        let onto = match &args.onto {
+            Some(rev) => Some(self.resolve(cx, &args.repo, rev).await?),
+            None => None,
+        };
+        let size = match args.limit.unwrap_or(CONFLICTS_DEFAULT) {
+            n if (1..=CONFLICTS_MAX).contains(&n) => n,
+            n => {
+                return Err(invalid(&format!(
+                    "limit {n} is outside 1 to {CONFLICTS_MAX}"
+                )));
+            }
+        };
+        let workspace = ws_ref(&args.repo, &args.workspace);
+        fit(
+            size,
+            |limit| {
+                let req = GetConflicts {
+                    workspace: workspace.clone(),
+                    onto,
+                    page: Page {
+                        limit,
+                        token: args.cursor.clone(),
+                    },
+                };
+                self.api.get_conflicts(cx, req)
+            },
+            |c, _| {
+                json!({
+                    "onto": c.onto.to_string(),
+                    "draft": c.draft.map(|d| d.to_string()),
+                    "paths": c.paths.iter().map(conflict_json).collect::<Vec<_>>(),
+                    "next": c.next,
+                })
+            },
+        )
+        .await
+    }
+
+    async fn resolve_stack(
+        &self,
+        cx: &CallContext,
+        args: ResolveArgs,
+    ) -> Result<CallToolResult, ToolError> {
+        check_name("repo", &args.repo)?;
+        check_name("workspace", &args.workspace)?;
+        if args.resolutions.is_empty() {
+            return Err(invalid("`resolutions` names no paths"));
+        }
+        let resolutions = resolutions(&args.resolutions)?;
+        let onto = self.resolve(cx, &args.repo, &args.onto).await?;
+        let expected_head = match &args.expected_head {
+            Some(rev) => Some(self.resolve(cx, &args.repo, rev).await?),
+            None => None,
+        };
+        let req = graft_proto::types::Resolve {
+            workspace: ws_ref(&args.repo, &args.workspace),
+            onto,
+            expected_head,
+            resolutions,
+        };
+        let resolved = self.api.resolve(cx, req).await.map_err(ToolError::Api)?;
+        let mut value = json!({
+            "workspace": workspace_json(&resolved.workspace),
+            "head": resolved.head.to_string(),
+        });
+        put_paths(&mut value, "resolved_paths", &resolved.resolved_paths);
+        put_paths(&mut value, "merged_paths", &resolved.merged_paths);
+        bounded(value)
+    }
+
+    async fn revert(
+        &self,
+        cx: &CallContext,
+        args: RevertArgs,
+    ) -> Result<CallToolResult, ToolError> {
+        check_name("repo", &args.repo)?;
+        if let Some(ws) = &args.workspace {
+            check_name("workspace", ws)?;
+        }
+        let changeset = self.resolve(cx, &args.repo, &args.changeset).await?;
+        let onto = match (&args.onto, &args.workspace) {
+            (Some(rev), _) => self.resolve(cx, &args.repo, rev).await?,
+            (None, Some(ws)) => {
+                let ws = self.workspace(cx, &args.repo, ws).await?;
+                ws.head.unwrap_or(ws.base)
+            }
+            (None, None) => return Err(invalid("give `onto` or `workspace`")),
+        };
+        let req = Revert {
+            repo: args.repo,
+            changeset,
+            onto,
+            workspace: args.workspace.clone(),
+        };
+        let id = self.api.revert(cx, req).await.map_err(ToolError::Api)?;
+        bounded(json!({
+            "id": id.to_string(),
+            "reverted": changeset.to_string(),
+            "onto": onto.to_string(),
+            "workspace": args.workspace.as_deref().map(|w| clip(w, FIELD_MAX_BYTES).0),
+        }))
+    }
+
     async fn commit(
         &self,
         cx: &CallContext,
@@ -568,6 +736,75 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
     }
 
     #[tool(
+        name = "graft_conflicts",
+        description = "What a workspace's stack conflicts on against its line tip (or `onto`): per path the base, ours and theirs ids and kinds, and diff3 markers when all sides are text (clipped to 16 KiB; read larger sides with graft_read by id). Paged by path. Resolve with graft_resolve.",
+        annotations(
+            title = "Conflicts",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn graft_conflicts(
+        &self,
+        Parameters(args): Parameters<ConflictsArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(respond(async {
+            let cx = self.call_context(&ctx)?;
+            self.conflicts(&cx, args).await
+        })
+        .await)
+    }
+
+    #[tool(
+        name = "graft_resolve",
+        description = "Rebase a workspace's stack onto `onto` in one step, using your content (or delete) for each conflicting path; other paths line-merge as in graft_sync. Moves the workspace only if its head is `expected_head`. Then land with graft_land.",
+        annotations(
+            title = "Resolve",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn graft_resolve(
+        &self,
+        Parameters(args): Parameters<ResolveArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(respond(async {
+            let cx = self.call_context(&ctx)?;
+            self.resolve_stack(&cx, args).await
+        })
+        .await)
+    }
+
+    #[tool(
+        name = "graft_revert",
+        description = "Create a draft that inverts a changeset, applied on `onto` (default: the workspace head). Land it with graft_land.",
+        annotations(
+            title = "Revert",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn graft_revert(
+        &self,
+        Parameters(args): Parameters<RevertArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(respond(async {
+            let cx = self.call_context(&ctx)?;
+            self.revert(&cx, args).await
+        })
+        .await)
+    }
+
+    #[tool(
         name = "graft_workspace",
         description = "Open, read, renew or close a workspace. A workspace holds a stack of drafts on a line, under a lease.",
         annotations(
@@ -722,6 +959,72 @@ pub(crate) fn stage(files: &[FileChange]) -> Result<(Vec<Change>, Vec<Frame>), T
     }
     changes.sort_by(|a, b| a.path().cmp(b.path()));
     Ok((changes, frames))
+}
+
+/// Turns `graft_resolve` entries into resolutions, under `graft_commit`'s
+/// limits. Sizes are checked before anything is decoded.
+fn resolutions(files: &[FileChange]) -> Result<Vec<PathResolution>, ToolError> {
+    // `stage` applies every path, size and shape rule; its blob ids are not
+    // needed, only the decoded bytes below.
+    stage(files)?;
+    files
+        .iter()
+        .map(|file| {
+            let path = staged_path(&file.path)?;
+            let resolution = match file.op.unwrap_or_default() {
+                FileOp::Delete => Resolution::Delete,
+                FileOp::Put => {
+                    let content = file.content.as_deref().unwrap_or_default();
+                    let data = match file.encoding.unwrap_or_default() {
+                        Encoding::Utf8 => content.as_bytes().to_vec(),
+                        Encoding::Hex => unhex(content).unwrap_or_default(),
+                    };
+                    Resolution::Put {
+                        kind: match file.kind.unwrap_or_default() {
+                            FileKind::File => EntryKind::File,
+                            FileKind::Exec => EntryKind::Exec,
+                            FileKind::Symlink => EntryKind::Symlink,
+                        },
+                        content: ResolvedContent::Inline(data),
+                    }
+                }
+            };
+            Ok(PathResolution { path, resolution })
+        })
+        .collect()
+}
+
+fn side_json(side: Option<&ConflictSide>) -> Value {
+    side.map_or(
+        Value::Null,
+        |s| json!({"id": s.id.to_hex(), "kind": kind_name(s.kind)}),
+    )
+}
+
+/// One conflicting path: ids, kinds, and markers clipped to
+/// [`CONFLICT_MARKERS_MAX_BYTES`].
+fn conflict_json(c: &ConflictView) -> Value {
+    let markers = c.markers.as_deref().map(String::from_utf8_lossy);
+    let (text, cut) = markers.as_deref().map_or((None, false), |m| {
+        let (t, cut) = clip(m, CONFLICT_MARKERS_MAX_BYTES);
+        (Some(t), cut)
+    });
+    json!({
+        "path": c.path.as_str(),
+        "base": side_json(c.base.as_ref()),
+        "ours": side_json(c.ours.as_ref()),
+        "theirs": side_json(c.theirs.as_ref()),
+        "text_mergeable": c.text_mergeable,
+        "markers": text,
+        "markers_truncated": cut,
+        "reason": c.reason.map(|r| match r {
+            ConflictReason::Binary => "binary",
+            ConflictReason::TooLarge => "too-large",
+            ConflictReason::Kind => "kind",
+            ConflictReason::Clash => "clash",
+            _ => "unknown",
+        }),
+    })
 }
 
 /// Decodes exactly two ASCII hex digits per byte. `from_str_radix` would also

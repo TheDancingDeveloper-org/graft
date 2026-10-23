@@ -23,6 +23,7 @@ use graft_proto::types::*;
 use graft_proto::{ApiError, CallContext, RepoApi, WorkspaceApi};
 
 use crate::app::{App, CallError, Caller, ServerEngine};
+use crate::grpc::own_workspace;
 
 /// The `/mcp` route, behind bearer-token authentication.
 pub(crate) fn router(app: Arc<App>) -> Router {
@@ -278,19 +279,25 @@ impl WorkspaceApi for McpApi {
             .await)
     }
 
-    async fn get_conflicts(
-        &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::GetConflicts,
-    ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
-        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
+    // As on gRPC: only the workspace's owner (or a repository admin)
+    // reads its conflicts or resolves its stack.
+    async fn get_conflicts(&self, cx: &CallContext, req: GetConflicts) -> ApiResult<Conflicts> {
+        via!(
+            self,
+            "GetConflicts",
+            req.workspace.repo,
+            cx,
+            true,
+            |e, c| {
+                own_workspace(&e, &c, &req.workspace).await?;
+                e.get_conflicts(&c, req).await
+            }
+        )
     }
-
-    async fn resolve(
-        &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::Resolve,
-    ) -> graft_proto::error::ApiResult<graft_proto::types::Resolved> {
-        Err(graft_proto::ApiError::unimplemented("Resolve"))
+    async fn resolve(&self, cx: &CallContext, req: Resolve) -> ApiResult<Resolved> {
+        via!(self, "Resolve", req.workspace.repo, cx, true, |e, c| {
+            own_workspace(&e, &c, &req.workspace).await?;
+            e.resolve(&c, req).await
+        })
     }
 }

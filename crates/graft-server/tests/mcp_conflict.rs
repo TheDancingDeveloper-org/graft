@@ -1,9 +1,10 @@
-//! WI-2312 repro: can an agent that has only the server's `/mcp` endpoint
-//! (no working copy) finish a land that conflicted?
+//! WI-2312: an agent that has only the server's `/mcp` endpoint (no working
+//! copy) finishes a land that conflicted, with `graft_conflicts` and
+//! `graft_resolve`.
 //!
-//! Two agents edit the same line of one file on `main`. A lands first; B's
-//! land conflicts. The test then tries every MCP route B has and pins what
-//! each one does today. The finding, step by step, is in
+//! Two agents change one file on `main`. A lands first; B's land conflicts.
+//! B reads the conflict, resolves it, and lands. The cases are a same-line
+//! edit, delete/modify, and a binary file. The original finding is in
 //! `docs/notes/mcp-conflict-resolution.md`.
 
 mod common;
@@ -13,7 +14,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-use common::Site;
+use common::{Server, Site};
 use serde_json::{Value, json};
 
 const BASE: &str = "one\ntwo\nthree\n";
@@ -156,52 +157,56 @@ impl Agent {
         value
     }
 
-    /// `graft_read` of `f.txt` at `at`: the whole (small) file.
-    fn read(&self, at: &str) -> String {
-        let file = self.ok(
-            "graft_read",
-            json!({"repo": "r", "at": at, "path": "f.txt"}),
-        );
+    /// `graft_read` of `path` at `at`: the whole (small) file, as its
+    /// encoding and content.
+    fn read(&self, at: &str, path: &str) -> (String, String) {
+        let file = self.ok("graft_read", json!({"repo": "r", "at": at, "path": path}));
         assert_eq!(file["next_offset"], Value::Null, "one chunk");
-        file["content"].as_str().expect("utf8 content").to_owned()
+        (
+            file["encoding"].as_str().expect("encoding").to_owned(),
+            file["content"].as_str().expect("content").to_owned(),
+        )
     }
 
-    fn workspace(&self, name: &str) -> Value {
-        self.ok(
-            "graft_workspace",
-            json!({"repo": "r", "action": "get", "name": name}),
-        )["workspace"]
-            .clone()
-    }
-
-    fn commit(&self, ws: &str, parent: Option<&str>, content: &str) -> (bool, Value) {
-        let mut args = json!({
-            "repo": "r", "workspace": ws, "message": format!("edit by {ws}"),
-            "files": [{"path": "f.txt", "content": content}],
-        });
-        if let Some(parent) = parent {
-            args["parent"] = json!(parent);
-        }
-        self.call("graft_commit", args)
+    /// Commits one `graft_commit` file entry on the workspace head.
+    fn commit(&self, ws: &str, file: Value) -> String {
+        let draft = self.ok(
+            "graft_commit",
+            json!({"repo": "r", "workspace": ws, "message": format!("edit by {ws}"), "files": [file]}),
+        );
+        draft["id"].as_str().unwrap().to_owned()
     }
 }
 
-/// Asserts a typed `conflict` on `f.txt` against `onto`.
-fn assert_conflict(e: &Value, onto: &str) {
-    assert_eq!(e["kind"], "conflict", "{e}");
-    assert_eq!(e["paths"], json!(["f.txt"]), "{e}");
-    assert_eq!(e["onto"], onto, "{e}");
-    assert_eq!(e["retryable"], false, "{e}");
+/// What one case changes: the root file, A's change, B's change, and B's
+/// resolution, each a `graft_commit` file entry (or resolution) for `path`.
+struct Case {
+    path: &'static str,
+    root: Vec<u8>,
+    theirs: Value,
+    ours: Value,
+    resolution: Value,
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_only_agent_cannot_resolve_in_place_and_must_abandon_and_recommit() {
-    // `main` is `direct` explicitly, so the test does not depend on the
-    // default policy of `main` (D6 today).
-    let site = Site::new(
-        "server-mcp-conflict",
-        "[[lines]]\nname = \"main\"\npolicy = \"direct\"\n",
-    );
+/// The run after B's conflicting land: what B saw and what landed.
+struct Outcome {
+    onto: String,
+    draft_b: String,
+    conflict_error: Value,
+    conflicts: Value,
+    resolved: Value,
+    landed: Value,
+    agent: Agent,
+    secrets: Vec<String>,
+    // Kept alive until the case's last call.
+    _server: Server,
+    _site: Site,
+}
+
+/// Plays one case: A and B open workspaces on `main`, commit, A lands, B's
+/// land conflicts, then B resolves with only MCP tools and lands.
+async fn play(name: &str, case: Case) -> Outcome {
+    let site = Site::new(name, "[[lines]]\nname = \"main\"\npolicy = \"direct\"\n");
     let admin = site.mint(&["repo:r:admin"]);
     let scopes = ["repo:r:write", "repo:r:land:main"];
     let token_a = site.mint_as("agent-a", &scopes, 3600);
@@ -210,7 +215,7 @@ async fn mcp_only_agent_cannot_resolve_in_place_and_must_abandon_and_recommit() 
 
     let mut c = server.clients(Some(&admin)).await;
     c.create_repo("r").await.expect("create");
-    let files = BTreeMap::from([("f.txt".to_owned(), BASE.as_bytes().to_vec())]);
+    let files = BTreeMap::from([(case.path.to_owned(), case.root.clone())]);
     let root = c
         .commit("r", None, &BTreeMap::new(), &files, 0)
         .await
@@ -227,179 +232,218 @@ async fn mcp_only_agent_cannot_resolve_in_place_and_must_abandon_and_recommit() 
         );
         assert_eq!(opened["workspace"]["base"], base);
     }
-
-    // Both edit line 2 of f.txt.
-    let (failed, draft_a) = a.commit("wa", None, THEIRS);
-    assert!(!failed, "{draft_a}");
-    let (failed, draft_b) = b.commit("wb", None, OURS);
-    assert!(!failed, "{draft_b}");
-    let draft_b = draft_b["id"].as_str().unwrap().to_owned();
-
-    // A lands first.
+    a.commit("wa", case.theirs);
+    let draft_b = b.commit("wb", case.ours);
     let landed_a = a.ok("graft_land", json!({"repo": "r", "workspace": "wa"}));
     assert_eq!(landed_a["outcome"], "landed");
     let onto = landed_a["landed"].as_str().unwrap().to_owned();
 
-    // Step 1. B's land conflicts. The result is ids only: the path and the
-    // tip it failed against. No base/ours/theirs ids, no content, no markers.
-    let e = b.err("graft_land", json!({"repo": "r", "workspace": "wb"}));
-    assert_conflict(&e, &onto);
-    let keys: Vec<&str> = e.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(keys, ["kind", "onto", "paths", "retryable"]);
-    // `merge: file` (the stricter mode) conflicts the same way.
-    let e = b.err(
-        "graft_land",
-        json!({"repo": "r", "workspace": "wb", "merge": "file"}),
-    );
-    assert_conflict(&e, &onto);
+    // B's land conflicts, with ids only.
+    let conflict_error = b.err("graft_land", json!({"repo": "r", "workspace": "wb"}));
+    assert_eq!(conflict_error["kind"], "conflict", "{conflict_error}");
+    assert_eq!(conflict_error["paths"], json!([case.path]));
+    assert_eq!(conflict_error["onto"], onto.as_str());
+    assert_eq!(conflict_error["retryable"], false);
+    assert_eq!(conflict_error["sides"][0]["path"], case.path);
 
-    // Step 2. Sync hits the same conflict and moves nothing.
-    let e = b.err("graft_sync", json!({"repo": "r", "workspace": "wb"}));
-    assert_conflict(&e, &onto);
-    let e = b.err(
-        "graft_sync",
-        json!({"repo": "r", "workspace": "wb", "onto": onto}),
-    );
-    assert_conflict(&e, &onto);
-    let ws = b.workspace("wb");
-    assert_eq!(ws["base"], base, "sync left the base on the old tip");
-    assert_eq!(ws["head"], draft_b.as_str());
-
-    // Step 3. The three sides are readable, one `graft_read` each: base is
-    // the workspace base, ours the draft, theirs `onto` (or `main`). The
-    // agent must merge them itself; nothing renders conflict markers.
-    assert_eq!(b.read(&base), BASE);
-    assert_eq!(b.read(&draft_b), OURS);
-    assert_eq!(b.read(&onto), THEIRS);
-    assert_eq!(b.read("main"), THEIRS);
-    let diff = b.ok(
-        "graft_diff",
-        json!({"repo": "r", "from": base, "to": onto, "paths": ["f.txt"]}),
-    );
-    assert!(
-        diff["files"][0]["patch"]
-            .as_str()
-            .unwrap()
-            .contains("+two (from A)"),
-        "{diff}"
-    );
-
-    // Step 4. Committing the resolution on the workspace stacks it on top
-    // of the conflicting draft (the parent defaults to the head) ...
-    let (failed, fix) = b.commit("wb", None, RESOLVED);
-    assert!(!failed, "{fix}");
-    assert_eq!(fix["parent"], draft_b.as_str());
-    let fix = fix["id"].as_str().unwrap().to_owned();
-    // ... so the land still rebases the bottom draft first, and conflicts.
-    let e = b.err("graft_land", json!({"repo": "r", "workspace": "wb"}));
-    assert_conflict(&e, &onto);
-    let e = b.err("graft_sync", json!({"repo": "r", "workspace": "wb"}));
-    assert_conflict(&e, &onto);
-    // Landing the fix by `head` is the same stack.
-    let e = b.err(
-        "graft_land",
-        json!({"repo": "r", "workspace": "wb", "head": fix}),
-    );
-    assert_conflict(&e, &onto);
-    // Squash, which would collapse the stack to base -> resolved, is not
-    // built; it is refused before any rebase.
-    let e = b.err(
-        "graft_land",
-        json!({"repo": "r", "workspace": "wb", "squash": true}),
-    );
-    assert_eq!(e["kind"], "rejected", "{e}");
-    assert_eq!(e["policy"], "squash", "{e}");
-
-    // Step 5. A resolution parented on `onto` is refused on this workspace:
-    // the commit compare-and-swaps the head from `parents[0]`, and the head
-    // is the fix, not `onto`.
-    let (failed, e) = b.commit("wb", Some(&onto), RESOLVED);
-    assert!(failed, "{e}");
-    assert_eq!(e["kind"], "ref_conflict", "{e}");
-    assert_eq!(e["name"], "wb", "{e}");
-    assert_eq!(e["actual"], fix.as_str(), "{e}");
-    // Naming the line as the parent is the same refusal.
-    let (failed, e) = b.commit("wb", Some("main"), RESOLVED);
-    assert!(failed, "{e}");
-    assert_eq!(e["kind"], "ref_conflict", "{e}");
-
-    // Step 6. There is no tool to drop or replace drafts, to move the base,
-    // or to revert: `graft_revert` is in the design's tool table (§10.1) and
-    // in `graft_mcp::TOOLS`, but `/mcp` does not register it.
-    let listed = b.rpc("tools/list", json!({}));
-    let mut names: Vec<&str> = listed["result"]["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
-    names.sort_unstable();
+    // B reads the conflict ...
+    let conflicts = b.ok("graft_conflicts", json!({"repo": "r", "workspace": "wb"}));
+    assert_eq!(conflicts["onto"], onto.as_str(), "{conflicts}");
+    assert_eq!(conflicts["draft"], draft_b.as_str(), "{conflicts}");
+    assert_eq!(conflicts["next"], Value::Null);
     assert_eq!(
-        names,
-        [
-            "graft_blame",
-            "graft_commit",
-            "graft_diff",
-            "graft_land",
-            "graft_log",
-            "graft_ls",
-            "graft_read",
-            "graft_show",
-            "graft_status",
-            "graft_sync",
-            "graft_workspace",
-        ]
+        conflicts["paths"].as_array().unwrap().len(),
+        1,
+        "{conflicts}"
     );
-    let reply = b.rpc(
-        "tools/call",
-        json!({"name": "graft_revert", "arguments": {"repo": "r", "changeset": draft_b}}),
-    );
-    assert!(reply["result"].is_null(), "{reply}");
-    assert_eq!(reply["error"]["code"], -32602, "{reply}");
-    // `graft_workspace` opens on a line, never on a changeset off it: `at`
-    // must be on the line, so it cannot re-base a workspace onto a draft.
-    let e = b.err(
-        "graft_workspace",
-        json!({"repo": "r", "action": "open", "name": "wb-at-draft", "line": "main", "at": draft_b}),
-    );
-    assert_eq!(e["kind"], "invalid_change", "{e}");
+    let side = &conflicts["paths"][0];
+    assert_eq!(side["path"], case.path);
+    // The error and the conflict view name the same ids.
+    for k in ["base", "ours", "theirs"] {
+        assert_eq!(
+            conflict_error["sides"][0][k], side[k]["id"],
+            "{k}: {conflict_error} vs {side}"
+        );
+    }
 
-    // Step 7. The one route that works: give up the conflicting stack and
-    // re-commit the merged content on a fresh base. Close the workspace
-    // (its drafts become abandoned), open one on the new tip, commit the
-    // resolved file and land it. The result is a new changeset with no link
-    // to B's draft (no `graft.rebased-from`), and a stack of several drafts
-    // would have to be re-created by hand, draft by draft.
-    let closed = b.ok(
-        "graft_workspace",
-        json!({"repo": "r", "action": "close", "name": "wb", "keep_drafts": false}),
+    // ... resolves it against `onto`, under CAS on its head ...
+    let mut resolution = case.resolution;
+    resolution["path"] = json!(case.path);
+    let resolved = b.ok(
+        "graft_resolve",
+        json!({
+            "repo": "r", "workspace": "wb", "onto": onto,
+            "expected_head": draft_b, "resolutions": [resolution.clone()],
+        }),
     );
-    assert_eq!(closed["kept_drafts"], false);
-    let reopened = b.ok(
-        "graft_workspace",
-        json!({"repo": "r", "action": "open", "name": "wb", "line": "main"}),
+    assert_eq!(resolved["workspace"]["base"], onto.as_str(), "{resolved}");
+    assert_eq!(resolved["workspace"]["head"], resolved["head"]);
+    assert_eq!(resolved["resolved_paths"], json!([case.path]));
+    // A retry of the same request is a no-op success with the same head.
+    let again = b.ok(
+        "graft_resolve",
+        json!({
+            "repo": "r", "workspace": "wb", "onto": onto,
+            "expected_head": draft_b, "resolutions": [resolution],
+        }),
     );
-    assert_eq!(reopened["workspace"]["base"], onto.as_str());
-    assert_eq!(reopened["workspace"]["head"], Value::Null);
-    let (failed, redo) = b.commit("wb", None, RESOLVED);
-    assert!(!failed, "{redo}");
-    assert_eq!(redo["parent"], onto.as_str());
-    let landed_b = b.ok("graft_land", json!({"repo": "r", "workspace": "wb"}));
-    assert_eq!(landed_b["outcome"], "landed", "{landed_b}");
-    assert_eq!(landed_b["rebased"], false);
-    assert_eq!(landed_b["landed"], redo["id"]);
-    assert_eq!(b.read("main"), RESOLVED);
-    let shown = b.ok(
+    assert_eq!(again["head"], resolved["head"], "deterministic: {again}");
+
+    // ... and lands: a fast-forward of the resolved draft.
+    let landed = b.ok("graft_land", json!({"repo": "r", "workspace": "wb"}));
+    assert_eq!(landed["outcome"], "landed", "{landed}");
+    assert_eq!(landed["landed"], resolved["head"]);
+    assert_eq!(landed["rebased"], false);
+
+    let secrets = vec![token_a, token_b, admin];
+    Outcome {
+        onto,
+        draft_b,
+        conflict_error,
+        conflicts,
+        resolved,
+        landed,
+        agent: b,
+        secrets,
+        _server: server,
+        _site: site,
+    }
+}
+
+/// The landed changeset is B's draft rebased onto `onto`, with lineage.
+fn assert_lineage(o: &Outcome, path: &str) {
+    let shown = o.agent.ok(
         "graft_show",
-        json!({"repo": "r", "changeset": landed_b["landed"]}),
+        json!({"repo": "r", "changeset": o.landed["landed"]}),
     );
-    assert_eq!(shown["changeset"]["parents"], json!([onto]));
+    let cs = &shown["changeset"];
+    assert_eq!(cs["parents"], json!([o.onto]), "{shown}");
     assert_eq!(
-        shown["changeset"]["metadata"],
-        json!({}),
-        "no rebased-from link to the abandoned draft"
+        cs["metadata"]["graft.rebased-from"],
+        o.draft_b.as_str(),
+        "{shown}"
     );
-    // The original draft is abandoned, not landed.
-    let old = b.ok("graft_show", json!({"repo": "r", "changeset": draft_b}));
-    assert_eq!(old["changeset"]["state"], "abandoned");
+    assert_eq!(
+        cs["metadata"]["graft.resolved-paths"],
+        json!([path]).to_string(),
+        "{shown}"
+    );
+}
+
+/// No error payload carries file contents or a token.
+fn assert_clean(o: &Outcome, contents: &[&str]) {
+    let text = o.conflict_error.to_string();
+    for c in contents {
+        assert!(!text.contains(c), "error carries content {c:?}: {text}");
+    }
+    for t in &o.secrets {
+        for v in [&o.conflict_error, &o.conflicts, &o.resolved, &o.landed] {
+            assert!(!v.to_string().contains(t.as_str()), "a token leaked");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_only_agent_resolves_a_same_line_conflict() {
+    let o = play(
+        "server-mcp-conflict-line",
+        Case {
+            path: "f.txt",
+            root: BASE.as_bytes().to_vec(),
+            theirs: json!({"path": "f.txt", "content": THEIRS}),
+            ours: json!({"path": "f.txt", "content": OURS}),
+            resolution: json!({"content": RESOLVED}),
+        },
+    )
+    .await;
+    let side = &o.conflicts["paths"][0];
+    assert_eq!(side["text_mergeable"], true, "{side}");
+    assert_eq!(side["reason"], Value::Null);
+    assert_eq!(side["markers_truncated"], false);
+    let markers = side["markers"].as_str().expect("markers");
+    for needle in ["<<<<<<<", "two (from B)", "two (from A)", ">>>>>>>"] {
+        assert!(markers.contains(needle), "{needle} in {markers}");
+    }
+    assert_eq!(o.resolved["merged_paths"], json!([]));
+    // The oracle: exactly the resolved file is on `main`.
+    assert_eq!(
+        o.agent.read("main", "f.txt"),
+        ("utf8".into(), RESOLVED.into())
+    );
+    assert_lineage(&o, "f.txt");
+    assert_clean(&o, &["(from A)", "(from B)", "three"]);
+    // The old draft is superseded by the rebase, not landed.
+    let old = o
+        .agent
+        .ok("graft_show", json!({"repo": "r", "changeset": o.draft_b}));
+    assert_ne!(old["changeset"]["state"], "landed");
+
+    // `graft_revert` is served now: invert the landed change on the
+    // workspace and the line's file goes back to A's version.
+    let revert = o.agent.ok(
+        "graft_revert",
+        json!({"repo": "r", "changeset": o.landed["landed"], "workspace": "wb"}),
+    );
+    assert_eq!(revert["onto"], o.landed["landed"], "{revert}");
+    let landed = o
+        .agent
+        .ok("graft_land", json!({"repo": "r", "workspace": "wb"}));
+    assert_eq!(landed["landed"], revert["id"], "{landed}");
+    assert_eq!(
+        o.agent.read("main", "f.txt"),
+        ("utf8".into(), THEIRS.into())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_only_agent_resolves_modify_delete_by_deleting() {
+    let o = play(
+        "server-mcp-conflict-delete",
+        Case {
+            path: "f.txt",
+            root: BASE.as_bytes().to_vec(),
+            theirs: json!({"path": "f.txt", "content": THEIRS}),
+            ours: json!({"path": "f.txt", "op": "delete"}),
+            resolution: json!({"op": "delete"}),
+        },
+    )
+    .await;
+    let side = &o.conflicts["paths"][0];
+    assert_eq!(side["ours"], Value::Null, "{side}");
+    assert_eq!(side["markers"], Value::Null);
+    assert_eq!(side["reason"], "clash");
+    assert_eq!(o.conflict_error["sides"][0]["ours"], Value::Null);
+    // The oracle: the path is gone from `main`.
+    let e = o.agent.err(
+        "graft_read",
+        json!({"repo": "r", "at": "main", "path": "f.txt"}),
+    );
+    assert_eq!(e["kind"], "not_found", "{e}");
+    assert_lineage(&o, "f.txt");
+    assert_clean(&o, &["(from A)", "three"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_only_agent_resolves_a_binary_conflict_by_id_only() {
+    let o = play(
+        "server-mcp-conflict-binary",
+        Case {
+            path: "blob.bin",
+            root: vec![0xff, 0x00, 0x01],
+            theirs: json!({"path": "blob.bin", "content": "ff0002", "encoding": "hex"}),
+            ours: json!({"path": "blob.bin", "content": "ff0003", "encoding": "hex"}),
+            resolution: json!({"content": "ff0004", "encoding": "hex"}),
+        },
+    )
+    .await;
+    let side = &o.conflicts["paths"][0];
+    assert_eq!(side["text_mergeable"], false, "{side}");
+    assert_eq!(side["markers"], Value::Null);
+    assert_eq!(side["reason"], "binary");
+    assert_eq!(
+        o.agent.read("main", "blob.bin"),
+        ("hex".into(), "ff0004".into())
+    );
+    assert_lineage(&o, "blob.bin");
+    assert_clean(&o, &["ff0002", "ff0003"]);
 }
