@@ -1,0 +1,6 @@
+error: linking with `cc` failed: exit status: 1
+  = note: collect2: fatal error: ld terminated with signal 9 [Killed]
+error: could not compile `graft-node` (bin "graft-node") due to 1 previous error
+error: linking with `cc` failed: exit status: 1
+  = note: /usr/bin/ld: undefined reference to `foo'
+error: could not compile `graft-cli` (bin "graft") due to 1 previous error

@@ -1,0 +1,35 @@
+[1m[92m   Compiling[0m graft-attester v0.0.0 (/runner-work/_work/graft/graft/crates/graft-attester)
+[1m[92m   Compiling[0m opentelemetry-http v0.31.0
+[1m[92m   Compiling[0m opentelemetry-otlp v0.31.1
+[1m[92m   Compiling[0m graft-telemetry v0.0.0 (/runner-work/_work/graft/graft/crates/graft-telemetry)
+[1m[92m   Compiling[0m graft-mirror v0.0.0 (/runner-work/_work/graft/graft/crates/graft-mirror)
+[1m[92m   Compiling[0m thiserror v2.0.21
+[1m[92m   Compiling[0m serde_path_to_error v0.1.20
+[1m[92m   Compiling[0m thiserror-impl v2.0.21
+[1m[92m   Compiling[0m quick-error v1.2.3
+[1m[92m   Compiling[0m gix-error v0.5.1
+[1m[91merror[0m: could not compile `graft-mcp` (test "resources")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name resources --edition=2024 crates/graft-mcp/tests/resources.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m: could not compile `graft-mcp` (test "write")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name write --edition=2024 crates/graft-mcp/tests/write.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m: could not compile `graft-engine` (test "land")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name land --edition=2024 crates/graft-engine/tests/land.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m: could not compile `graft-engine` (test "rebase")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name rebase --edition=2024 crates/graft-engine/tests/rebase.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m: could not compile `graft-gc` (test "model")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name model --edition=2024 crates/graft-gc/tests/model.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m: could not compile `graft-attester` (bin "graft-attester")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name graft_attester --edition=2024 crates/graft-attester/src/main.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m: could not compile `graft-engine` (test "workspace_model")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name workspace_model --edition=2024 crates/graft-engine/tests/workspace_model.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m: could not compile `graft-engine` (test "errors")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name errors --edition=2024 crates/graft-engine/tests/errors.rs --error-format ...` (exit status: 2)
+[31;1merror[0m: command `[1mcargo '--color=always' test --no-run --message-format json-render-diagnostics --workspace --all-features[0m` exited with code [1m101[0m

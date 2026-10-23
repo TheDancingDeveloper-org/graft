@@ -1,0 +1,2 @@
+error: linking with `cc` failed: signal: 9, SIGKILL: kill
+error: could not compile `graft-node` (bin "graft-node") due to 1 previous error
