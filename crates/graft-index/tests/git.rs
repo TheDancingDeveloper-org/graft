@@ -47,8 +47,20 @@ impl Drop for TempDir {
 /// A git command in `dir`, isolated from the user's configuration.
 fn git_cmd(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
+    // Drop any GIT_* the runner sets (GIT_DIR, alternates, ...) so the repo
+    // in `dir` is the only one git sees.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(key);
+        }
+    }
+    // No background `gc --auto` or maintenance may repack or prune objects
+    // while the next command reads them.
     cmd.current_dir(dir)
+        .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
         .args(args)
+        .env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "t")
@@ -432,7 +444,7 @@ fn synthetic(dir: &Path, seed: u64, steps: usize) {
     let mut commit = |msg: &str| {
         n += 1;
         let date = format!("{} +0000", 1_700_000_000 + n);
-        git_cmd(dir, &["add", "-A"]).output().unwrap();
+        git(dir, &["add", "-A"]);
         let out = git_cmd(dir, &["commit", "-q", "--allow-empty", "-m", msg])
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_DATE", &date)

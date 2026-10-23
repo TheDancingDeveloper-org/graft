@@ -141,6 +141,16 @@ pub enum Error {
         /// The paths in the way.
         paths: Vec<RepoPath>,
     },
+    /// The stack conflicts with the line tip. `sync` moved the working copy
+    /// to the tip with the stack's changes on top and wrote the conflicts
+    /// into the files: resolve them, then `commit` and `land`.
+    Conflicted(Box<workcopy::Conflicts>),
+    /// These conflicts from a sync are not resolved yet: a marked file
+    /// still has markers, or a sidecar is still there.
+    Unresolved(Vec<RepoPath>),
+    /// An earlier update stopped half way (`WorkingCopy::finish`, or
+    /// `sync`, carries it on).
+    Unfinished,
 }
 
 /// Result alias for client calls.
@@ -177,6 +187,15 @@ impl fmt::Display for Error {
                 "landed {landed}, but {} paths have local changes; commit or revert them and run land again",
                 paths.len()
             ),
+            Error::Conflicted(c) => match c.unresolved().count() {
+                1 => write!(f, "1 file conflicts with {}", c.onto),
+                n => write!(f, "{n} files conflict with {}", c.onto),
+            },
+            Error::Unresolved(paths) => match paths.len() {
+                1 => f.write_str("1 conflict is not resolved yet"),
+                n => write!(f, "{n} conflicts are not resolved yet"),
+            },
+            Error::Unfinished => f.write_str("an earlier update did not finish; run sync"),
         }
     }
 }

@@ -101,19 +101,9 @@ pub(crate) const OPS: &[Op] = &[
         Surface::Excluded("the server rebases inside sync and land"),
         false,
     ),
-    op(
-        "revert",
-        "RepoApi",
-        Surface::Excluded("revert command (phase 3)"),
-        false,
-    ),
+    op("revert", "RepoApi", Surface::Command("revert"), false),
     op("land", "RepoApi", Surface::Command("land"), false),
-    op(
-        "attest",
-        "RepoApi",
-        Surface::Excluded("CI check results, attest (phase 3)"),
-        false,
-    ),
+    op("attest", "RepoApi", Surface::Command("attest"), false),
     op("watch", "RepoApi", Surface::Command("api"), true),
     op(
         "open_workspace",
@@ -146,14 +136,7 @@ pub(crate) const OPS: &[Op] = &[
         false,
     ),
     op("sync", "WorkspaceApi", Surface::Command("sync"), false),
-    op(
-        "stack",
-        "WorkspaceApi",
-        Surface::Excluded(
-            "reorder, squash, split and drop are stack commands in phase 3; `graft stack list` reads the stack",
-        ),
-        false,
-    ),
+    op("stack", "WorkspaceApi", Surface::Command("stack"), false),
     op(
         "close_workspace",
         "WorkspaceApi",

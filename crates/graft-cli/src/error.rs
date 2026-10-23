@@ -8,8 +8,9 @@ use std::fmt;
 use std::io;
 
 use graft_client::Error as ClientError;
+use graft_client::workcopy::Conflicts;
 use graft_proto::ApiError;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use crate::Exit;
 use crate::render;
@@ -25,6 +26,10 @@ pub(crate) struct Failure {
     pub(crate) message: String,
     /// Whether anything was already printed (so nothing more is).
     silent: bool,
+    /// More fields of the JSON error object (`onto`, `conflicts`).
+    detail: Map<String, Value>,
+    /// More lines for people, printed after the message.
+    notes: Vec<String>,
 }
 
 impl Failure {
@@ -35,7 +40,26 @@ impl Failure {
             kind,
             message: message.into(),
             silent: false,
+            detail: Map::new(),
+            notes: Vec::new(),
         }
+    }
+
+    /// Adds a field to the JSON error object.
+    pub(crate) fn with_detail(mut self, key: &str, value: Value) -> Self {
+        self.detail.insert(key.to_owned(), value);
+        self
+    }
+
+    /// Adds a line for people, printed after the message.
+    pub(crate) fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.notes.push(note.into());
+        self
+    }
+
+    /// The failure's kind.
+    pub(crate) fn kind(&self) -> &'static str {
+        self.kind
     }
 
     /// A usage error (exit 2).
@@ -50,6 +74,8 @@ impl Failure {
             kind: "silent",
             message: String::new(),
             silent: true,
+            detail: Map::new(),
+            notes: Vec::new(),
         }
     }
 
@@ -60,11 +86,18 @@ impl Failure {
             return self.exit;
         }
         if json {
-            let value = json!({"error": {"kind": self.kind, "message": self.message}});
+            let mut error = Map::new();
+            error.insert("kind".to_owned(), self.kind.into());
+            error.insert("message".to_owned(), self.message.into());
+            error.extend(self.detail);
+            let value = json!({ "error": error });
             // A failure to print the error is reported by the exit code alone.
             let _ = render::print_json(&value);
         } else {
             eprintln!("graft: {}", self.message);
+            for note in &self.notes {
+                eprintln!("  {note}");
+            }
         }
         self.exit
     }
@@ -106,8 +139,34 @@ pub(crate) fn api_exit(e: &ApiError) -> (Exit, &'static str) {
 impl From<ApiError> for Failure {
     fn from(e: ApiError) -> Self {
         let (exit, kind) = api_exit(&e);
-        Failure::new(exit, kind, e.to_string())
+        let failure = Failure::new(exit, kind, e.to_string());
+        match e {
+            ApiError::Conflict { paths, onto } => {
+                let mut failure = failure
+                    .with_detail("onto", onto.to_string().into())
+                    .with_detail(
+                        "conflicts",
+                        paths
+                            .iter()
+                            .map(|p| json!({"path": p.path, "mode": null}))
+                            .collect(),
+                    );
+                for p in &paths {
+                    failure = failure.with_note(format!("conflict {}", p.path));
+                }
+                failure
+            }
+            _ => failure,
+        }
     }
+}
+
+/// The conflicts a sync wrote, as the JSON error object's `conflicts`.
+pub(crate) fn conflicts_json(c: &Conflicts) -> Value {
+    c.files
+        .iter()
+        .map(|f| json!({"path": f.path.to_string(), "mode": f.mode.name()}))
+        .collect()
 }
 
 impl From<ClientError> for Failure {
@@ -146,6 +205,40 @@ impl From<ClientError> for Failure {
             e @ ClientError::LandedDirty { .. } => {
                 Failure::new(Exit::Conflict, "landed_dirty", e.to_string())
             }
+            ClientError::Conflicted(c) => {
+                let message = ClientError::Conflicted(c.clone()).to_string();
+                let mut failure = Failure::new(Exit::Conflict, "conflicted", message)
+                    .with_detail("onto", c.onto.to_string().into())
+                    .with_detail("conflicts", conflicts_json(&c));
+                for f in &c.files {
+                    failure = failure.with_note(format!("{:<8} {}", f.mode.name(), f.path));
+                }
+                failure.with_note(
+                    "edit the files (and delete any .graft-conflict sidecar), then `graft commit` and `graft land`",
+                )
+            }
+            ClientError::Unresolved(paths) => {
+                let message = format!(
+                    "{}: remove the markers and any .graft-conflict sidecar",
+                    ClientError::Unresolved(paths.clone())
+                );
+                let mut failure = Failure::new(Exit::Conflict, "unresolved", message).with_detail(
+                    "conflicts",
+                    paths
+                        .iter()
+                        .map(|p| json!({"path": p.to_string(), "mode": null}))
+                        .collect(),
+                );
+                for p in &paths {
+                    failure = failure.with_note(format!("unresolved {p}"));
+                }
+                failure
+            }
+            ClientError::Unfinished => Failure::new(
+                Exit::Failure,
+                "unfinished",
+                "an earlier update did not finish: run `graft sync`",
+            ),
             ClientError::Io(e) => e.into(),
             ClientError::Store(e) => {
                 Failure::new(Exit::Failure, "store", format!("object cache: {e:?}"))

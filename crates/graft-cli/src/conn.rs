@@ -7,8 +7,9 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use graft_client::fetch::FetchOptions;
 use graft_client::workcopy::GRAFT_DIR;
-use graft_client::workcopy::{Begun, Recovered, WorkingCopy};
+use graft_client::workcopy::{Begun, DEFAULT_CACHE_BYTES, Recovered, WorkingCopy};
 use graft_client::workspace::DEFAULT_LEASE_MS;
 use graft_client::{Endpoint, Remote, discover};
 use graft_model::ChangesetId;
@@ -202,6 +203,38 @@ impl Session {
             Some(Recovered::Finished(_)) => "finished".into(),
             Some(Recovered::RolledBack) => "rolled_back".into(),
         }
+    }
+
+    /// Finishes an update an earlier command left half done (a land, sync,
+    /// revert or stack operation whose files had not moved yet), before a
+    /// command that needs the working copy settled. `sync` and `land` do
+    /// this themselves.
+    pub(crate) async fn finish_unfinished(&mut self) -> Result<(), Failure> {
+        if !self.begun.unfinished {
+            return Ok(());
+        }
+        let cache = self.wc.open_cache(DEFAULT_CACHE_BYTES)?;
+        let moved = self
+            .wc
+            .finish(
+                &self.conn.remote,
+                &cache,
+                &self.cx,
+                DEFAULT_LEASE_MS,
+                &FetchOptions::default(),
+            )
+            .await?;
+        self.begun.unfinished = false;
+        if let Some(moved) = moved {
+            if let Some(conflicts) = moved.conflicts {
+                return Err(graft_client::Error::Conflicted(Box::new(conflicts)).into());
+            }
+            eprintln!(
+                "graft: finished an interrupted update ({} files)",
+                moved.update.changed
+            );
+        }
+        Ok(())
     }
 
     /// Tells people on standard error what happened to an interrupted

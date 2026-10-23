@@ -45,7 +45,7 @@ pub(crate) enum Exit {
 }
 
 /// Commands that are designed but not built yet (`docs/plan.md`).
-const PLANNED: &[&str] = &["mcp", "revert"];
+const PLANNED: &[&str] = &["mcp"];
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -95,6 +95,8 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         Command::Stack(args) => cmd::stack::run(g, args),
         Command::Sync => cmd::sync::run(g),
         Command::Land(args) => cmd::land::run(g, args),
+        Command::Revert(args) => cmd::revert::run(g, args),
+        Command::Attest(args) => cmd::attest::run(g, args),
         Command::Api(args) => api::run(g, args),
         Command::Version => cmd::version::run(g),
         Command::Lsp { args } => match cmd::lsp::run(args) {
