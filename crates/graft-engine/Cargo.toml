@@ -27,6 +27,7 @@ graft-store-fs.workspace = true
 graft-store-sqlite.workspace = true
 graft-testkit.workspace = true
 proptest.workspace = true
+rusqlite.workspace = true
 
 [[bench]]
 name = "land"

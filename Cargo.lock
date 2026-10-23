@@ -1902,6 +1902,7 @@ dependencies = [
  "graft-testkit",
  "imara-diff",
  "proptest",
+ "rusqlite",
 ]
 
 [[package]]

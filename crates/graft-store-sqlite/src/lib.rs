@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    ChangesetRecord, Lsn, MetaStore, MetaTxn, RecordState, RefRecord, RepoId, StoreError,
-    StoreResult, TxnOutcome, WorkspaceRecord,
+    ChangesetRecord, DoomMark, Lsn, MetaStore, MetaTxn, Protection, RecordState, RefRecord, RepoId,
+    StoreError, StoreResult, TimedRow, TxnOutcome, WorkspaceRecord,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -487,6 +487,92 @@ impl MetaStore for SqliteMetaStore {
             reader::holder_rows(c, repo, object, after, limit)
         })
         .await
+    }
+
+    async fn protection(&self, repo: RepoId, id: ChangesetId) -> StoreResult<Option<Protection>> {
+        self.read("protection", move |c| reader::protection(c, repo, id))
+            .await
+    }
+
+    async fn expired_records(
+        &self,
+        repo: RepoId,
+        now_ms: i64,
+        after: Option<(i64, ChangesetId)>,
+        limit: u32,
+    ) -> StoreResult<Vec<(i64, ChangesetId)>> {
+        self.read("expired_records", move |c| {
+            reader::expired_records(c, repo, now_ms, after, limit)
+        })
+        .await
+    }
+
+    async fn held_objects(
+        &self,
+        repo: RepoId,
+        holder: &str,
+        after: Option<ObjectId>,
+        limit: u32,
+    ) -> StoreResult<Vec<ObjectId>> {
+        let holder = holder.to_owned();
+        self.read("held_objects", move |c| {
+            reader::held_objects(c, repo, &holder, after, limit)
+        })
+        .await
+    }
+
+    async fn expired_rows(
+        &self,
+        repo: RepoId,
+        now_ms: i64,
+        after: Option<TimedRow>,
+        limit: u32,
+    ) -> StoreResult<Vec<TimedRow>> {
+        self.read("expired_rows", move |c| {
+            reader::expired_rows(c, repo, now_ms, after, limit)
+        })
+        .await
+    }
+
+    async fn doom_marks(
+        &self,
+        repo: RepoId,
+        ids: &[ObjectId],
+    ) -> StoreResult<Vec<(ObjectId, DoomMark)>> {
+        let ids = ids.to_vec();
+        self.read("doom_marks", move |c| reader::doom_marks(c, repo, &ids))
+            .await
+    }
+
+    async fn old_doomed(
+        &self,
+        repo: RepoId,
+        until_ms: i64,
+        after: Option<(i64, ObjectId)>,
+        limit: u32,
+    ) -> StoreResult<Vec<(ObjectId, DoomMark)>> {
+        self.read("old_doomed", move |c| {
+            reader::old_doomed(c, repo, until_ms, after, limit)
+        })
+        .await
+    }
+
+    async fn lapsed_workspaces(
+        &self,
+        repo: RepoId,
+        before_ms: i64,
+        after: Option<(i64, String)>,
+        limit: u32,
+    ) -> StoreResult<Vec<WorkspaceRecord>> {
+        self.read("lapsed_workspaces", move |c| {
+            reader::lapsed_workspaces(c, repo, before_ms, after, limit)
+        })
+        .await
+    }
+
+    async fn gc_protection(&self, repo: RepoId) -> StoreResult<bool> {
+        self.read("gc_protection", move |c| reader::gc_protection(c, repo))
+            .await
     }
 
     async fn land(

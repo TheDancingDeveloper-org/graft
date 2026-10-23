@@ -34,6 +34,14 @@ use crate::workspace::{
 };
 use crate::{Engine, errors, journal};
 
+/// A land-attempt lease: the holder of the candidates it writes, and the
+/// expiry they get when written (design §8.6).
+#[derive(Clone, Debug)]
+pub(crate) struct Lease {
+    pub(crate) holder: String,
+    pub(crate) expires_at_ms: i64,
+}
+
 /// The longest repository name.
 pub const MAX_REPO_NAME: usize = 64;
 
@@ -235,6 +243,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 RecordState::Draft,
                 Some(holder(&name)),
                 None,
+                None,
                 &mut txn,
             );
             txn.writes.push(Write::PutWorkspace(next));
@@ -290,13 +299,14 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     /// Stores a land candidate the server built, as a draft held by the
-    /// land-attempt lease `lease` (design §8.1, §8.6), checking its root
-    /// against `cs.root`. A changeset already stored keeps its record.
+    /// land-attempt lease `lease` and expiring with it (design §8.1, §8.6),
+    /// checking its root against `cs.root`. A changeset already stored
+    /// keeps its record.
     pub(crate) async fn insert_candidate(
         &self,
         repo: RepoId,
         cs: Changeset,
-        lease: String,
+        lease: Lease,
     ) -> Result<Created, ApiError> {
         let root = cs.root;
         self.insert(
@@ -327,6 +337,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// head moves to it in the same transaction, as a draft held by the
     /// land-attempt `lease`, or abandoned when nothing holds it. Returns the
     /// stored changeset on a retry.
+    ///
+    /// The same transaction writes its protection (design §8.6): a row for
+    /// every object on its changed paths, one pin on each non-landed parent
+    /// (guarded by the parent not being collected), and its expiry when it
+    /// is not a draft a workspace holds. Before it, the objects it
+    /// references are claimed and their frames checked.
     #[allow(clippy::too_many_arguments)]
     async fn insert(
         &self,
@@ -336,7 +352,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         inline: Vec<Upload>,
         roots: Roots,
         mut hold: Option<Hold<'_>>,
-        lease: Option<String>,
+        lease: Option<Lease>,
     ) -> Result<Created, ApiError> {
         // Rules 3, 8 and 9 (and portability); rule 2 waits for the id, so
         // that a retried root changeset still returns its id.
@@ -350,13 +366,18 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             _ => errors::violation(v),
         })?;
 
-        // Rule 1: every parent exists here.
+        // Rule 1: every parent exists here. The non-landed ones get a pin.
         let mut base = None;
+        let mut pinned = Vec::new();
         for (i, &parent) in cs.parents.iter().enumerate() {
-            match self.changeset_opt(repo, parent).await? {
-                None => return Err(ApiError::UnknownParent { id: parent }),
-                Some((p, _)) if i == 0 => base = model_root(p.root),
-                Some(_) => {}
+            let Some((p, record)) = self.changeset_opt(repo, parent).await? else {
+                return Err(ApiError::UnknownParent { id: parent });
+            };
+            if i == 0 {
+                base = model_root(p.root);
+            }
+            if record.state != RecordState::Landed && !pinned.contains(&parent) {
+                pinned.push(parent);
             }
         }
 
@@ -415,35 +436,85 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
 
         // Objects are durable before the metadata that references them.
-        self.store_uploads(repo, inline).await?;
         let mut new_trees = applied.new_trees;
         if applied.root.is_none() {
             new_trees.push((root, Tree::default()));
         }
-        for (tree_id, tree) in &new_trees {
+        let mut own: Vec<(ObjectId, Vec<u8>)> =
+            inline.into_iter().map(|u| (u.id, u.bytes)).collect();
+        own.extend(new_trees.iter().map(|(tree_id, tree)| {
             let frame = Frame::encode(ObjectKind::Tree, &tree.encode());
+            (tree_id.0, frame.to_bytes())
+        }));
+        for (object, frame) in &own {
             self.objects
-                .put(repo, tree_id.0, frame.to_bytes())
+                .put(repo, *object, frame.clone())
                 .await
                 .map_err(errors::store)?;
         }
 
+        // Claim what it references, then check every frame is there: one
+        // deleted since the checks above is put again, or reported missing
+        // when the caller named it (design §8.6, revival).
+        let own_ids: Vec<ObjectId> = own.iter().map(|(o, _)| *o).collect();
+        let named: Vec<ObjectId> = blobs
+            .iter()
+            .copied()
+            .filter(|id| !inline_ids.contains(id))
+            .collect();
+        self.claim_for_write(repo, &named, &own_ids, &id.0.to_hex()[..16])
+            .await?;
+        let mut referenced = own_ids.clone();
+        referenced.extend(named.iter().copied());
+        let present: HashSet<ObjectId> = self
+            .objects
+            .has(repo, &referenced)
+            .await
+            .map_err(errors::store)?
+            .into_iter()
+            .collect();
+        let missing: Vec<ObjectId> = named
+            .iter()
+            .copied()
+            .filter(|id| !present.contains(id))
+            .collect();
+        if !missing.is_empty() {
+            return Err(ApiError::MissingObjects { ids: missing });
+        }
+        for (object, frame) in own {
+            if !present.contains(&object) {
+                self.objects
+                    .put(repo, object, frame)
+                    .await
+                    .map_err(errors::store)?;
+            }
+        }
+
         let object_holder = id.to_string();
-        let state = match (&hold, &lease) {
-            (None, None) => RecordState::Abandoned,
-            _ => RecordState::Draft,
+        let now = self.clock.now().ms;
+        let (state, expires_at_ms) = match (&hold, &lease) {
+            (None, None) => (RecordState::Abandoned, self.retained_until(now)),
+            (Some(_), _) => (RecordState::Draft, None),
+            (None, Some(lease)) => (RecordState::Draft, Some(lease.expires_at_ms)),
         };
         let mut writes = vec![Write::PutChangeset {
             id,
             content: cs.encode(),
             record: ChangesetRecord {
                 lsn: 0,
-                received_at_ms: self.clock.now().ms,
+                received_at_ms: now,
                 state,
-                holder: hold.as_ref().map(|h| holder(&h.ws.name)).or(lease.clone()),
+                holder: hold
+                    .as_ref()
+                    .map(|h| holder(&h.ws.name))
+                    .or(lease.as_ref().map(|l| l.holder.clone())),
                 superseded_by: None,
             },
         }];
+        if expires_at_ms.is_some() {
+            writes.push(Write::SetExpiry { id, expires_at_ms });
+        }
+        writes.extend(pinned.iter().map(|&parent| Write::Pin(parent)));
         let mut held = HashSet::new();
         let introduced = blobs
             .into_iter()
@@ -461,10 +532,13 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         );
 
         for _ in 0..CAS_RETRIES {
+            // [absent, each pinned parent live, the workspace guard].
             let mut txn = MetaTxn {
                 preconditions: vec![Precondition::ChangesetAbsent(id)],
                 writes: Vec::new(),
             };
+            txn.preconditions
+                .extend(pinned.iter().map(|&p| Precondition::RecordLive(p)));
             match &hold {
                 // Without a workspace there is nothing to retry: move the
                 // writes rather than copy them.
@@ -479,7 +553,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             }
             let ws_name = hold.as_ref().map(|h| h.ws.name.as_str());
             txn.writes.push(match &lease {
-                Some(lease) => journal::candidate_created(id, lease),
+                Some(lease) => journal::candidate_created(id, &lease.holder),
                 None => journal::changeset_created(id, ws_name),
             });
             match self.meta.commit(repo, txn).await.map_err(errors::store)? {
@@ -494,6 +568,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 // A concurrent retry stored it first.
                 TxnOutcome::PreconditionFailed(0) => {
                     return self.existing(repo, id, root, parent, hold).await;
+                }
+                // A parent was collected after it was read: a collection
+                // and a new child of it never both commit.
+                TxnOutcome::PreconditionFailed(i) if i <= pinned.len() => {
+                    return Err(ApiError::Collected { id: pinned[i - 1] });
                 }
                 // The workspace changed: still ours, live, and at the parent?
                 TxnOutcome::PreconditionFailed(_) => {

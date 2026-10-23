@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 
 use crate::meta::{
-    ChangesetRecord, Lsn, MetaStore, MetaTxn, Precondition, RecordState, RefRecord, TxnOutcome,
-    WorkspaceRecord, Write,
+    ChangesetRecord, DoomMark, Lsn, MetaStore, MetaTxn, Precondition, Protection, RecordState,
+    RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
 };
 use crate::object::{ObjectStore, StoreStats};
 use crate::{RepoId, StoreError, StoreResult, page_limit};
@@ -28,6 +28,12 @@ struct Repo {
     line_pos: BTreeMap<(String, ChangesetId), u64>,
     line_paths: BTreeMap<(String, RepoPath), BTreeSet<(u64, ChangesetId)>>,
     holders: BTreeSet<(ObjectId, String)>,
+    /// The expiry of each timed holder row.
+    row_expiry: BTreeMap<(ObjectId, String), i64>,
+    /// Protection by changeset; an absent entry is the default.
+    protection: HashMap<ChangesetId, Protection>,
+    doomed: BTreeMap<ObjectId, DoomMark>,
+    gc_protection: bool,
     lands: BTreeMap<(ChangesetId, String), ChangesetId>,
     /// Entry `i` has LSN `i + 1`.
     journal: Vec<(Lsn, String, Vec<u8>)>,
@@ -76,7 +82,214 @@ impl Repo {
                 .changesets
                 .get(id)
                 .is_some_and(|(_, record)| record.state == *state),
+            Precondition::RecordLive(id) => self
+                .changesets
+                .get(id)
+                .is_some_and(|(_, record)| record.state != RecordState::Collected),
+            Precondition::RecordIs {
+                id,
+                record,
+                protection,
+            } => {
+                self.changesets.get(id).is_some_and(|(_, r)| r == record)
+                    && self.protection_of(id) == *protection
+            }
+            Precondition::ObjectDoomed(object) => {
+                self.doomed.get(object).is_some_and(|mark| !mark.deleting)
+            }
+            Precondition::ObjectUnheld(object) => self.rows_of(*object).next().is_none(),
         }
+    }
+
+    fn protection_of(&self, id: &ChangesetId) -> Protection {
+        self.protection.get(id).copied().unwrap_or_default()
+    }
+
+    fn state_of(&self, id: &ChangesetId) -> Option<RecordState> {
+        self.changesets.get(id).map(|(_, record)| record.state)
+    }
+
+    /// The holders of `object`.
+    fn rows_of(&self, object: ObjectId) -> impl Iterator<Item = &String> {
+        self.holders
+            .range((object, String::new())..)
+            .take_while(move |(o, _)| *o == object)
+            .map(|(_, holder)| holder)
+    }
+}
+
+/// Whether a record in `state` keeps protection: landed and collected
+/// records have none.
+fn protectable(state: RecordState) -> bool {
+    !matches!(state, RecordState::Landed | RecordState::Collected)
+}
+
+fn invalid(what: String) -> StoreError {
+    StoreError::Invalid(what)
+}
+
+/// The protection and object state a transaction's writes leave, as far as
+/// its checks need, over the stored state.
+struct Overlay<'r> {
+    repo: &'r Repo,
+    states: HashMap<ChangesetId, RecordState>,
+    pins: HashMap<ChangesetId, u32>,
+    rows: HashMap<(ObjectId, &'r str), bool>,
+    doomed: HashMap<ObjectId, Option<DoomMark>>,
+}
+
+impl<'r> Overlay<'r> {
+    fn new(repo: &'r Repo) -> Self {
+        Self {
+            repo,
+            states: HashMap::new(),
+            pins: HashMap::new(),
+            rows: HashMap::new(),
+            doomed: HashMap::new(),
+        }
+    }
+
+    fn state(&self, id: &ChangesetId) -> Option<RecordState> {
+        self.states
+            .get(id)
+            .copied()
+            .or_else(|| self.repo.state_of(id))
+    }
+
+    fn pins(&self, id: &ChangesetId) -> u32 {
+        self.pins
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| self.repo.protection_of(id).pins)
+    }
+
+    fn mark(&self, object: &ObjectId) -> Option<DoomMark> {
+        match self.doomed.get(object) {
+            Some(mark) => *mark,
+            None => self.repo.doomed.get(object).copied(),
+        }
+    }
+
+    fn held(&self, object: ObjectId) -> bool {
+        let added = self
+            .rows
+            .iter()
+            .any(|((o, _), present)| *o == object && *present);
+        added
+            || self
+                .repo
+                .rows_of(object)
+                .any(|h| self.rows.get(&(object, h.as_str())) != Some(&false))
+    }
+
+    fn add_row(&mut self, object: ObjectId, holder: &'r str) {
+        self.rows.insert((object, holder), true);
+        if self.mark(&object).is_some_and(|m| !m.deleting) {
+            self.doomed.insert(object, None);
+        }
+    }
+
+    /// Checks one protection or object write and records its effect.
+    fn check(&mut self, write: &'r Write) -> StoreResult<()> {
+        match write {
+            Write::PutChangeset { id, record, .. } => {
+                self.states.insert(*id, record.state);
+                self.pins.insert(*id, 0);
+            }
+            Write::SetRecord { id, record } => {
+                if self.state(id).is_none() {
+                    return Err(invalid(format!("no changeset {id} to update")));
+                }
+                self.states.insert(*id, record.state);
+                if !protectable(record.state) {
+                    self.pins.insert(*id, 0);
+                }
+            }
+            Write::SetExpiry { id, expires_at_ms } => match self.state(id) {
+                None => return Err(invalid(format!("no changeset {id} to expire"))),
+                Some(state) if !protectable(state) && expires_at_ms.is_some() => {
+                    return Err(invalid(format!("changeset {id} is {state:?}: no expiry")));
+                }
+                Some(_) => {}
+            },
+            Write::Pin(id) => match self.state(id) {
+                None | Some(RecordState::Collected) => {
+                    return Err(invalid(format!("no live changeset {id} to pin")));
+                }
+                Some(RecordState::Landed) => {}
+                Some(_) => {
+                    let pins = self
+                        .pins(id)
+                        .checked_add(1)
+                        .ok_or_else(|| invalid(format!("changeset {id} has too many pins")))?;
+                    self.pins.insert(*id, pins);
+                }
+            },
+            Write::Unpin(id) => match self.state(id) {
+                None | Some(RecordState::Collected) => {
+                    return Err(invalid(format!("no live changeset {id} to unpin")));
+                }
+                Some(RecordState::Landed) => {}
+                Some(_) => {
+                    self.pins.insert(*id, self.pins(id).saturating_sub(1));
+                }
+            },
+            Write::SetPins { id, pins } => match self.state(id) {
+                None => return Err(invalid(format!("no changeset {id} to pin"))),
+                Some(state) if !protectable(state) && *pins > 0 => {
+                    return Err(invalid(format!("changeset {id} is {state:?}: no pins")));
+                }
+                Some(_) => {
+                    self.pins.insert(*id, *pins);
+                }
+            },
+            Write::AddHolder { object, holder } | Write::AddHolderUntil { object, holder, .. } => {
+                self.add_row(*object, holder);
+            }
+            Write::RemoveHolder { object, holder } => {
+                self.rows.insert((*object, holder), false);
+            }
+            Write::Doom { object, since_ms } => {
+                if self.held(*object) {
+                    return Err(invalid(format!("object {} is held", object.to_hex())));
+                }
+                match self.mark(object) {
+                    Some(mark) if mark.deleting => {
+                        return Err(invalid(format!(
+                            "object {} is being deleted",
+                            object.to_hex()
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.doomed.insert(
+                            *object,
+                            Some(DoomMark {
+                                since_ms: *since_ms,
+                                deleting: false,
+                            }),
+                        );
+                    }
+                }
+            }
+            Write::MarkDeleting(object) => match self.mark(object) {
+                None => return Err(invalid(format!("object {} is not doomed", object.to_hex()))),
+                Some(mark) => {
+                    self.doomed.insert(
+                        *object,
+                        Some(DoomMark {
+                            deleting: true,
+                            ..mark
+                        }),
+                    );
+                }
+            },
+            Write::Undoom(object) => {
+                self.doomed.insert(*object, None);
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -85,41 +298,31 @@ impl Repo {
 fn validate(repo: &Repo, txn: &MetaTxn) -> StoreResult<()> {
     // Versions as the writes so far would leave them.
     let mut versions: HashMap<&str, u64> = HashMap::new();
-    let mut created: BTreeSet<ChangesetId> = BTreeSet::new();
+    let mut overlay = Overlay::new(repo);
     for write in &txn.writes {
-        match write {
-            Write::PutChangeset { id, .. } => {
-                created.insert(*id);
+        overlay.check(write)?;
+        if let Write::SetRef(record) = write {
+            let guarded = txn
+                .preconditions
+                .iter()
+                .any(|p| matches!(p, Precondition::RefIs { name, .. } if *name == record.name));
+            if !guarded {
+                return Err(StoreError::Invalid(format!(
+                    "ref {} is set without a RefIs precondition",
+                    record.name
+                )));
             }
-            Write::SetRecord { id, .. } => {
-                if !created.contains(id) && !repo.changesets.contains_key(id) {
-                    return Err(StoreError::Invalid(format!("no changeset {id} to update")));
-                }
+            let current = versions
+                .get(record.name.as_str())
+                .copied()
+                .unwrap_or_else(|| repo.refs.get(&record.name).map_or(0, |r| r.version));
+            if record.version != current + 1 {
+                return Err(StoreError::Invalid(format!(
+                    "ref {} version {} does not follow {current}",
+                    record.name, record.version
+                )));
             }
-            Write::SetRef(record) => {
-                let guarded = txn
-                    .preconditions
-                    .iter()
-                    .any(|p| matches!(p, Precondition::RefIs { name, .. } if *name == record.name));
-                if !guarded {
-                    return Err(StoreError::Invalid(format!(
-                        "ref {} is set without a RefIs precondition",
-                        record.name
-                    )));
-                }
-                let current = versions
-                    .get(record.name.as_str())
-                    .copied()
-                    .unwrap_or_else(|| repo.refs.get(&record.name).map_or(0, |r| r.version));
-                if record.version != current + 1 {
-                    return Err(StoreError::Invalid(format!(
-                        "ref {} version {} does not follow {current}",
-                        record.name, record.version
-                    )));
-                }
-                versions.insert(record.name.as_str(), record.version);
-            }
-            _ => {}
+            versions.insert(record.name.as_str(), record.version);
         }
     }
     Ok(())
@@ -152,16 +355,64 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
                     record.lsn = first_lsn;
                 }
                 repo.changesets.insert(id, (content, record));
+                repo.protection.remove(&id);
             }
             Write::SetRecord { id, mut record } => {
                 if has_journal {
                     record.lsn = first_lsn;
+                }
+                if !protectable(record.state) {
+                    repo.protection.remove(&id);
                 }
                 // Validated above: the changeset exists by now.
                 if let Some(slot) = repo.changesets.get_mut(&id) {
                     slot.1 = record;
                 }
             }
+            Write::SetExpiry { id, expires_at_ms } => {
+                repo.protection.entry(id).or_default().expires_at_ms = expires_at_ms;
+            }
+            Write::Pin(id) => {
+                if repo.state_of(&id).is_some_and(protectable) {
+                    repo.protection.entry(id).or_default().pins += 1;
+                }
+            }
+            Write::Unpin(id) => {
+                if repo.state_of(&id).is_some_and(protectable) {
+                    let p = repo.protection.entry(id).or_default();
+                    p.pins = p.pins.saturating_sub(1);
+                }
+            }
+            Write::SetPins { id, pins } => {
+                repo.protection.entry(id).or_default().pins = pins;
+            }
+            Write::AddHolderUntil {
+                object,
+                holder,
+                expires_at_ms,
+            } => {
+                revive(repo, object);
+                let row = (object, holder);
+                if !repo.holders.contains(&row) {
+                    repo.row_expiry.insert(row.clone(), expires_at_ms);
+                    repo.holders.insert(row);
+                }
+            }
+            Write::Doom { object, since_ms } => {
+                repo.doomed.entry(object).or_insert(DoomMark {
+                    since_ms,
+                    deleting: false,
+                });
+            }
+            Write::MarkDeleting(object) => {
+                if let Some(mark) = repo.doomed.get_mut(&object) {
+                    mark.deleting = true;
+                }
+            }
+            Write::Undoom(object) => {
+                repo.doomed.remove(&object);
+            }
+            Write::SetGcProtection(on) => repo.gc_protection = on,
             Write::SetRef(record) => {
                 repo.refs.insert(record.name.clone(), record);
             }
@@ -198,10 +449,13 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
                     .insert((pos, changeset));
             }
             Write::AddHolder { object, holder } => {
+                revive(repo, object);
                 repo.holders.insert((object, holder));
             }
             Write::RemoveHolder { object, holder } => {
-                repo.holders.remove(&(object, holder));
+                let row = (object, holder);
+                repo.row_expiry.remove(&row);
+                repo.holders.remove(&row);
             }
             Write::PutLand {
                 draft,
@@ -218,6 +472,13 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
         }
     }
     Ok(TxnOutcome::Committed(lsns))
+}
+
+/// Clears a doomed mark that is not `deleting`: the object is held again.
+fn revive(repo: &mut Repo, object: ObjectId) {
+    if repo.doomed.get(&object).is_some_and(|m| !m.deleting) {
+        repo.doomed.remove(&object);
+    }
 }
 
 /// An in-memory store implementing both ports.
@@ -308,7 +569,12 @@ impl MetaStore for MemoryStore {
             st.next_repo += 1;
             let id = RepoId(st.next_repo);
             st.names.insert(name.to_owned(), id);
-            st.repos.insert(id, Repo::default());
+            // A new repository has protection records from its first write.
+            let repo = Repo {
+                gc_protection: true,
+                ..Repo::default()
+            };
+            st.repos.insert(id, repo);
             Ok(id)
         }))
     }
@@ -588,5 +854,151 @@ impl MetaStore for MemoryStore {
                 .map(|(_, ws)| ws.clone())
                 .collect())
         }))
+    }
+
+    fn protection(
+        &self,
+        repo: RepoId,
+        id: ChangesetId,
+    ) -> impl Future<Output = StoreResult<Option<Protection>>> + Send {
+        ready(self.with(|st| {
+            let repo = st.repo(repo)?;
+            Ok(repo
+                .changesets
+                .contains_key(&id)
+                .then(|| repo.protection_of(&id)))
+        }))
+    }
+
+    fn expired_records(
+        &self,
+        repo: RepoId,
+        now_ms: i64,
+        after: Option<(i64, ChangesetId)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(i64, ChangesetId)>>> + Send {
+        ready(self.with(|st| {
+            let mut rows: Vec<(i64, ChangesetId)> = st
+                .repo(repo)?
+                .protection
+                .iter()
+                .filter(|(_, p)| p.pins == 0)
+                .filter_map(|(id, p)| p.expires_at_ms.map(|at| (at, *id)))
+                .filter(|row| row.0 <= now_ms && after.is_none_or(|a| *row > a))
+                .collect();
+            rows.sort();
+            rows.truncate(page_limit(limit));
+            Ok(rows)
+        }))
+    }
+
+    fn held_objects(
+        &self,
+        repo: RepoId,
+        holder: &str,
+        after: Option<ObjectId>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<ObjectId>>> + Send {
+        ready(self.with(|st| {
+            Ok(st
+                .repo(repo)?
+                .holders
+                .iter()
+                .filter(|(o, h)| h == holder && after.is_none_or(|a| *o > a))
+                .take(page_limit(limit))
+                .map(|(o, _)| *o)
+                .collect())
+        }))
+    }
+
+    fn expired_rows(
+        &self,
+        repo: RepoId,
+        now_ms: i64,
+        after: Option<TimedRow>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<TimedRow>>> + Send {
+        ready(self.with(|st| {
+            let mut rows: Vec<TimedRow> = st
+                .repo(repo)?
+                .row_expiry
+                .iter()
+                .filter(|(_, at)| **at <= now_ms)
+                .map(|((object, holder), at)| TimedRow {
+                    expires_at_ms: *at,
+                    object: *object,
+                    holder: holder.clone(),
+                })
+                .filter(|row| after.as_ref().is_none_or(|a| row > a))
+                .collect();
+            rows.sort();
+            rows.truncate(page_limit(limit));
+            Ok(rows)
+        }))
+    }
+
+    fn doom_marks(
+        &self,
+        repo: RepoId,
+        ids: &[ObjectId],
+    ) -> impl Future<Output = StoreResult<Vec<(ObjectId, DoomMark)>>> + Send {
+        ready(self.with(|st| {
+            let repo = st.repo(repo)?;
+            Ok(ids
+                .iter()
+                .filter_map(|id| repo.doomed.get(id).map(|mark| (*id, *mark)))
+                .collect())
+        }))
+    }
+
+    fn old_doomed(
+        &self,
+        repo: RepoId,
+        until_ms: i64,
+        after: Option<(i64, ObjectId)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(ObjectId, DoomMark)>>> + Send {
+        ready(self.with(|st| {
+            let mut rows: Vec<(i64, ObjectId, DoomMark)> = st
+                .repo(repo)?
+                .doomed
+                .iter()
+                .filter(|(o, m)| {
+                    m.since_ms <= until_ms && after.is_none_or(|a| (m.since_ms, **o) > a)
+                })
+                .map(|(o, m)| (m.since_ms, *o, *m))
+                .collect();
+            rows.sort_by_key(|(since, o, _)| (*since, *o));
+            rows.truncate(page_limit(limit));
+            Ok(rows.into_iter().map(|(_, o, m)| (o, m)).collect())
+        }))
+    }
+
+    fn lapsed_workspaces(
+        &self,
+        repo: RepoId,
+        before_ms: i64,
+        after: Option<(i64, String)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        ready(self.with(|st| {
+            let mut rows: Vec<&WorkspaceRecord> = st
+                .repo(repo)?
+                .workspaces
+                .values()
+                .filter(|ws| ws.lease_until_ms < before_ms)
+                .filter(|ws| {
+                    after
+                        .as_ref()
+                        .is_none_or(|(at, name)| (ws.lease_until_ms, &ws.name) > (*at, name))
+                })
+                .collect();
+            rows.sort_by(|a, b| (a.lease_until_ms, &a.name).cmp(&(b.lease_until_ms, &b.name)));
+            Ok(rows.into_iter().take(page_limit(limit)).cloned().collect())
+        }))
+    }
+
+    fn gc_protection(&self, repo: RepoId) -> impl Future<Output = StoreResult<bool>> + Send {
+        ready(self.with(|st| Ok(st.repo(repo)?.gc_protection)))
     }
 }

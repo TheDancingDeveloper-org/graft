@@ -62,6 +62,7 @@ use crate::policy::{
 use crate::rebase::{REBASED_FROM, Step};
 use crate::refs::check_ref_name;
 use crate::workspace::transition;
+use crate::write::Lease;
 use crate::{Engine, errors};
 
 /// Derived kind of a land's result, keyed by `(head, line)`.
@@ -569,8 +570,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     /// The land-attempt lease for attempt `attempt` of this call: its
-    /// expiry and a tag naming the call (design §8.6).
-    fn lease(&self, cx: &CallContext, head: ChangesetId, attempt: u32) -> String {
+    /// holder, naming its expiry and the call, and the expiry its
+    /// candidates get when written (design §8.6).
+    fn lease(&self, cx: &CallContext, head: ChangesetId, attempt: u32) -> Lease {
         let expires = self
             .clock
             .now()
@@ -581,7 +583,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             cx.principal.subject, cx.request_id
         );
         let tag = ObjectId::hash(ObjectKind::Blob, seed.as_bytes()).to_hex();
-        format!("land:{expires}:{}", &tag[..16])
+        Lease {
+            holder: format!("land:{expires}:{}", &tag[..16]),
+            expires_at_ms: expires,
+        }
     }
 
     pub(crate) async fn do_land(&self, cx: &CallContext, req: Land) -> Result<Landed, ApiError> {
@@ -866,6 +871,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         txn: &mut MetaTxn,
     ) -> Result<(), ApiError> {
         let mut below = tip;
+        let expires = self.retained_until(self.clock.now().ms);
         for step in steps {
             let successor = step.to.unwrap_or(below);
             if step.to != Some(step.from) {
@@ -877,6 +883,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         RecordState::Superseded,
                         None,
                         Some(successor),
+                        expires,
                         txn,
                     );
                 }

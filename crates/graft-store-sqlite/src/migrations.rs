@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -145,6 +145,36 @@ CREATE INDEX changesets_state ON changesets (repo, state);
 /// without sorting.
 const V3: &str = "
 CREATE INDEX changesets_state_id ON changesets (repo, state, id);
+";
+
+/// Version 4 (G3.11): GC protection records (design §8.6).
+///
+/// Records get parent `pins` and `expires_at`, with an index over exactly
+/// the records a collection may take (no pins, an expiry). Holder rows get
+/// an index by holder and an optional expiry (backfilled from the upload
+/// lease each `upload:<ms>:<who>` row names) with its own index. Doomed
+/// marks get `deleting` and an index by time. Repositories get the
+/// `gc_protection` marker, off for every repository that exists now: their
+/// pins and expiries are backfilled by the engine (`Engine::protect_repo`),
+/// which sets it. Repositories created from now on start with it on.
+const V4: &str = "
+ALTER TABLE repos ADD COLUMN gc_protection INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE changesets ADD COLUMN pins INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE changesets ADD COLUMN expires_at INTEGER;
+CREATE INDEX changesets_expiry ON changesets (repo, expires_at, id)
+    WHERE pins = 0 AND expires_at IS NOT NULL;
+
+ALTER TABLE holders ADD COLUMN expires INTEGER;
+UPDATE holders
+    SET expires = CAST(substr(holder, 8, instr(substr(holder, 8), ':') - 1) AS INTEGER)
+    WHERE substr(holder, 1, 7) = 'upload:' AND instr(substr(holder, 8), ':') > 1;
+CREATE INDEX holders_holder ON holders (repo, holder, object);
+CREATE INDEX holders_expiry ON holders (repo, expires, object, holder)
+    WHERE expires IS NOT NULL;
+
+ALTER TABLE doomed ADD COLUMN deleting INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX doomed_since ON doomed (repo, since, object);
 ";
 
 /// The database's schema version.

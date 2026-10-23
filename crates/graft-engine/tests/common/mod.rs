@@ -130,6 +130,13 @@ impl TempDir {
     }
 }
 
+impl TempDir {
+    /// The directory.
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -176,7 +183,16 @@ pub fn sqlite_with(config: EngineConfig) -> Fixture<SqliteMetaStore> {
 }
 
 pub fn build<M: MetaStore>(meta: Arc<M>, config: EngineConfig, dir: Option<TempDir>) -> Fixture<M> {
-    let objects = Faulty::default();
+    build_over(meta, Faulty::default(), config, dir)
+}
+
+/// As [`build`], over frames that already exist.
+pub fn build_over<M: MetaStore>(
+    meta: Arc<M>,
+    objects: Faulty,
+    config: EngineConfig,
+    dir: Option<TempDir>,
+) -> Fixture<M> {
     let clock = Arc::new(FakeClock::at(1_000_000));
     let engine = Engine::new(meta, Arc::new(objects.clone()), clock.clone(), config);
     Fixture {

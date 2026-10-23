@@ -9,6 +9,7 @@ use graft_proto::{ApiError, CallContext, Frame};
 use graft_store::{MetaStore, MetaTxn, ObjectStore, RepoId, Write};
 
 use crate::access::{Need, require};
+use crate::protect::DELETE_WAIT_MS;
 use crate::{Engine, errors};
 
 /// The holder an upload is recorded under until a changeset holds the
@@ -76,19 +77,31 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .map(|f| self.check_blob(f))
             .collect::<Result<Vec<_>, _>>()?;
         let ids: Vec<ObjectId> = uploads.iter().map(|u| u.id).collect();
+        let mut seen = HashSet::new();
+        let distinct: Vec<ObjectId> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
+
+        // Claim doomed objects before putting them: a frame that exists is
+        // not rewritten, so a doomed one must be held before the put
+        // returns. One being deleted is stored again once the delete is done
+        // (design §8.6, revival).
+        let tag = ObjectId::hash(ObjectKind::Blob, cx.request_id.as_bytes()).to_hex();
+        if !self.claim(repo, &distinct, &tag[..16]).await?.is_empty() {
+            return Err(ApiError::Unavailable {
+                retry_after_ms: DELETE_WAIT_MS,
+            });
+        }
         self.store_uploads(repo, uploads).await?;
 
         // Record the upload lease. No journal entry: an upload changes no
         // history, and the GC reads holders, not the journal.
         let lease = self.clock.now().ms + self.config.upload_lease_ms as i64;
         let holder = upload_holder(lease, &cx.principal.subject);
-        let mut seen = HashSet::new();
-        let writes = ids
+        let writes = distinct
             .iter()
-            .filter(|id| seen.insert(**id))
-            .map(|&object| Write::AddHolder {
+            .map(|&object| Write::AddHolderUntil {
                 object,
                 holder: holder.clone(),
+                expires_at_ms: lease,
             })
             .collect();
         self.meta
