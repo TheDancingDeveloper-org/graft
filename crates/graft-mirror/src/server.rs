@@ -1,8 +1,9 @@
 //! The graft server, as the mirror sees it: `graft-client`'s [`Remote`] for
-//! the object and repository services, plus the admin service, which the
-//! import needs (`ImportChangesets`, `CreateRepo`) and `Remote` does not
-//! speak yet. Every admin request carries the protocol version, the request
-//! id, the bearer token (marked sensitive) and a deadline, as `Remote`'s do.
+//! the object, repository and workspace services, plus the admin service,
+//! which the import needs (`ImportChangesets`, `CreateRepo`) and `Remote`
+//! does not speak yet. Every admin request carries the protocol version, the
+//! request id, the bearer token (marked sensitive) and a deadline, as
+//! `Remote`'s do.
 //! Once `Remote` implements `AdminApi`, this module reduces to that.
 
 use std::fmt;
@@ -11,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use graft_client::remote::{DEFAULT_TIMEOUT, MAX_MESSAGE_BYTES, REQUEST_ID_HEADER};
 use graft_client::{Endpoint, Remote};
 use graft_model::{ChangesetId, ObjectId};
-use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
+use graft_proto::api::{AdminApi, ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::error::ApiResult;
 use graft_proto::pb;
 use graft_proto::pb::admin_service_client::AdminServiceClient;
@@ -221,5 +222,53 @@ impl RepoApi for Server {
         land(Land) -> Landed;
         attest(Attest) -> ();
         watch(Watch) -> JournalPage;
+    }
+}
+
+impl WorkspaceApi for Server {
+    delegate! {
+        open_workspace(OpenWorkspace) -> WorkspaceView;
+        get_workspace(WorkspaceRef) -> WorkspaceView;
+        set_head(SetHead) -> WorkspaceView;
+    }
+    async fn list_workspaces(
+        &self,
+        cx: &CallContext,
+        repo: String,
+        page: Page,
+    ) -> ApiResult<Vec<WorkspaceView>> {
+        self.remote.list_workspaces(cx, repo, page).await
+    }
+    async fn renew_lease(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        lease_ms: u64,
+    ) -> ApiResult<WorkspaceView> {
+        self.remote.renew_lease(cx, req, lease_ms).await
+    }
+    async fn sync(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        onto: Option<ChangesetId>,
+    ) -> ApiResult<Synced> {
+        self.remote.sync(cx, req, onto).await
+    }
+    async fn stack(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        op: StackOp,
+    ) -> ApiResult<WorkspaceView> {
+        self.remote.stack(cx, req, op).await
+    }
+    async fn close_workspace(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        keep_drafts: bool,
+    ) -> ApiResult<()> {
+        self.remote.close_workspace(cx, req, keep_drafts).await
     }
 }

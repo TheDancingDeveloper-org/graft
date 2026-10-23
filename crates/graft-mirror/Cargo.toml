@@ -36,7 +36,10 @@ jsonwebtoken = "9"
 [dev-dependencies]
 graft-engine.workspace = true
 graft-store = { workspace = true, features = ["testkit"] }
+graft-store-fs.workspace = true
+graft-store-sqlite.workspace = true
 graft-testkit.workspace = true
+prometheus.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6.5"

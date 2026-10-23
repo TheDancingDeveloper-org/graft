@@ -204,6 +204,90 @@ impl Mirror {
         bearer: Option<&str>,
     ) -> Result<PushOutcome, GitCliError> {
         let spec = format!("{}:refs/heads/{branch}", sha.to_hex());
+        let out = git_env(
+            Some(&self.dir),
+            &["push", "-q", "--no-force", self.upstream.as_str(), &spec],
+            &self.auth_env(bearer),
+        )
+        .await?;
+        if out.code == Some(0) {
+            return Ok(PushOutcome::Pushed);
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+        if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
+            return Ok(PushOutcome::Rejected);
+        }
+        Err(failed("push", &out))
+    }
+
+    /// Pushes `sha` to `refs/heads/<branch>` on upstream with a lease
+    /// (`docs/design.md` §11.3): the push happens only if upstream's branch
+    /// is `expected` now (`None`: the branch must not exist). That is a
+    /// compare-and-swap on upstream's side, never a blind force. Anything
+    /// else upstream holds is [`PushOutcome::Rejected`], and nothing changes.
+    pub async fn push_lease(
+        &self,
+        branch: &str,
+        sha: GitSha,
+        expected: Option<GitSha>,
+        bearer: Option<&str>,
+    ) -> Result<PushOutcome, GitCliError> {
+        let target = format!("refs/heads/{branch}");
+        let lease = format!(
+            "--force-with-lease={target}:{}",
+            expected.map(|s| s.to_hex()).unwrap_or_default()
+        );
+        let spec = format!("{}:{target}", sha.to_hex());
+        let out = git_env(
+            Some(&self.dir),
+            &["push", "-q", &lease, self.upstream.as_str(), &spec],
+            &self.auth_env(bearer),
+        )
+        .await?;
+        if out.code == Some(0) {
+            return Ok(PushOutcome::Pushed);
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+        if stderr.contains("rejected")
+            || stderr.contains("stale info")
+            || stderr.contains("non-fast-forward")
+        {
+            return Ok(PushOutcome::Rejected);
+        }
+        Err(failed("push", &out))
+    }
+
+    /// Fetches `(remote ref, local ref)` pairs from upstream, forced into the
+    /// local refs, which must sit under the mirror's own namespace.
+    pub async fn fetch_refs(&self, refs: &[(String, String)]) -> Result<(), GitCliError> {
+        let specs: Vec<String> = refs
+            .iter()
+            .map(|(remote, local)| format!("+{remote}:{local}"))
+            .collect();
+        let mut args = vec!["fetch", "-q", "--no-tags", self.upstream.as_str()];
+        args.extend(specs.iter().map(String::as_str));
+        ok(Some(&self.dir), &args).await?;
+        Ok(())
+    }
+
+    /// The commit a local ref of the mirror names, if any.
+    pub async fn local_ref(&self, name: &str) -> Result<Option<GitSha>, GitCliError> {
+        let spec = format!("{name}^{{commit}}");
+        let out = git(
+            Some(&self.dir),
+            &["rev-parse", "-q", "--verify", "--end-of-options", &spec],
+        )
+        .await?;
+        if out.code != Some(0) {
+            return Ok(None);
+        }
+        Ok(GitSha::from_hex(
+            String::from_utf8_lossy(&out.stdout).trim(),
+        ))
+    }
+
+    /// The `http.extraHeader` environment for an HTTPS bearer token.
+    fn auth_env(&self, bearer: Option<&str>) -> Vec<(String, String)> {
         let mut env = Vec::new();
         if let Some(token) = bearer
             && self.is_https()
@@ -217,20 +301,7 @@ impl Mirror {
                 format!("Authorization: Basic {basic}"),
             ));
         }
-        let out = git_env(
-            Some(&self.dir),
-            &["push", "-q", "--no-force", self.upstream.as_str(), &spec],
-            &env,
-        )
-        .await?;
-        if out.code == Some(0) {
-            return Ok(PushOutcome::Pushed);
-        }
-        let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
-        if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
-            return Ok(PushOutcome::Rejected);
-        }
-        Err(failed("push", &out))
+        env
     }
 
     /// Whether `ancestor` is `descendant` or one of its ancestors. A commit

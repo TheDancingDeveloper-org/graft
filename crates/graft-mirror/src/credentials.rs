@@ -91,6 +91,25 @@ impl CredentialProvider for StaticToken {
     }
 }
 
+impl<T: CredentialProvider> CredentialProvider for &T {
+    async fn token(&self) -> Result<SecretToken, ForgeError> {
+        (**self).token().await
+    }
+}
+
+/// No credential: for an upstream reached by path or SSH, where git
+/// authenticates on its own. Asking it for a token is refused.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoCredentials;
+
+impl CredentialProvider for NoCredentials {
+    async fn token(&self) -> Result<SecretToken, ForgeError> {
+        Err(ForgeError::Refused(
+            "no GitHub credential is configured ([github] in the config)".to_owned(),
+        ))
+    }
+}
+
 /// The installation token the provider holds, and when it was minted.
 struct Cached {
     token: SecretToken,
