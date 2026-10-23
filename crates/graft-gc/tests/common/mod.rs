@@ -1019,8 +1019,16 @@ pub fn add(total: &mut SweepReport, r: &SweepReport) {
 pub struct Stored {
     pub id: ChangesetId,
     pub record: ChangesetRecord,
-    pub cs: Changeset,
+    /// The content; `None` for a collected tombstone, which keeps none.
+    pub cs: Option<Changeset>,
     pub protection: Protection,
+}
+
+impl Stored {
+    /// The content of a record that is not collected.
+    pub fn cs(&self) -> &Changeset {
+        self.cs.as_ref().expect("a live record has content")
+    }
 }
 
 pub fn all_records<M: MetaStore>(meta: &M, repo: RepoId) -> Vec<Stored> {
@@ -1046,10 +1054,16 @@ pub fn all_records<M: MetaStore>(meta: &M, repo: RepoId) -> Vec<Stored> {
                 let protection = block_on(meta.protection(repo, id))
                     .expect("protection")
                     .expect("stored");
+                let cs = if record.state == RecordState::Collected {
+                    assert!(content.is_empty(), "the tombstone {id} keeps content");
+                    None
+                } else {
+                    Some(Changeset::decode(&content).expect("decode"))
+                };
                 out.push(Stored {
                     id,
                     record,
-                    cs: Changeset::decode(&content).expect("decode"),
+                    cs,
                     protection,
                 });
             }
@@ -1127,7 +1141,7 @@ pub fn check<M: MetaStore, O: ObjectStore>(
             continue;
         }
         let mut seen = HashSet::new();
-        for p in &s.cs.parents {
+        for p in &s.cs().parents {
             if seen.insert(*p) {
                 *children.entry(*p).or_default() += 1;
             }
@@ -1172,9 +1186,9 @@ pub fn check<M: MetaStore, O: ObjectStore>(
             if link.record.state != RecordState::Landed && id != s.id && link.protection.pins == 0 {
                 return Err(format!("{id} on the chain of {} has no pin", s.id));
             }
-            at = link.cs.first_parent();
+            at = link.cs().first_parent();
         }
-        let objects = snapshot(frames, repo, s.cs.root.0)
+        let objects = snapshot(frames, repo, s.cs().root.0)
             .map_err(|e| format!("{} ({:?}): {e}", s.id, s.record.state))?;
         let unheld: Vec<String> = objects
             .iter()
@@ -1208,7 +1222,7 @@ pub fn landed_reach<M: MetaStore, O: ObjectStore>(
         .iter()
         .filter(|s| s.record.state != RecordState::Collected)
     {
-        out.extend(snapshot(frames, repo, s.cs.root.0)?);
+        out.extend(snapshot(frames, repo, s.cs().root.0)?);
     }
     Ok(out)
 }

@@ -1,7 +1,8 @@
 //! G3.2: the sweep (design §8.6), scenario by scenario, against the real
 //! engine on the memory and SQLite stores.
 //!
-//! - Refusals: no `gc_protection` marker, deletion off, a second sweep.
+//! - Refusals: no `gc_protection` marker, deletion off, a second sweep (in
+//!   this process or another, through the store lease).
 //! - A closed workspace's drafts are collected after the retention window,
 //!   and their objects deleted after the grace period; the reclaimed bytes
 //!   are exactly the deleted frames.
@@ -10,8 +11,10 @@
 //! - A parent with a live child is never collected; it goes in the same
 //!   pass as its last child.
 //! - A land candidate left by a crashed server is collected after its
-//!   lease, and its draft is untouched.
-//! - The lapse step closes lapsed workspaces as the engine does.
+//!   lease, and its draft is untouched; a land onto the same tip revives it.
+//! - The lapse step closes lapsed workspaces as the engine does, a stack
+//!   longer than `max_stack` included.
+//! - A collected record keeps no content; `Collected` carries the bytes.
 //! - The successor rule moves a superseded record's rows to its successor.
 //! - Collection reads follow the changes collected, not the history depth.
 //! - The dry run predicts the sweep; `--verify` catches a missing pin or
@@ -108,14 +111,40 @@ fn a_new_repository_has_deletion_off<M: MetaStore + 'static>(w: &World<M>) {
 
 fn one_sweep_per_repository<M: MetaStore + 'static>(w: &World<M>) {
     w.seed();
-    let held = w.gc.leases().try_acquire(w.repo).expect("free");
+    let held = block_on(w.gc.leases().try_acquire(&*w.meta, w.repo, w.now(), MINUTE))
+        .expect("read")
+        .expect("free");
     assert_eq!(
         block_on(w.gc.sweep(w.repo, &w.shape, false)),
         Err(GcError::Busy)
     );
-    drop(held);
+    block_on(held.release(&*w.meta)).expect("release");
     w.sweep();
     assert!(!w.gc.leases().is_held(w.repo), "released after the pass");
+}
+
+/// The lease is in the store: a sweeper in another process (its own lease
+/// set) is refused while it is held, and takes it once it lapses.
+fn the_store_lease_stops_a_second_process<M: MetaStore + 'static>(w: &World<M>) {
+    w.seed();
+    let other = graft_gc::SweepLeases::with_owner("other-process");
+    let held = block_on(other.try_acquire(&*w.meta, w.repo, w.now(), MINUTE))
+        .expect("read")
+        .expect("free");
+    assert_eq!(
+        block_on(w.gc.sweep(w.repo, &w.shape, false)),
+        Err(GcError::Busy),
+        "held by another process"
+    );
+    w.advance(MINUTE);
+    w.sweep();
+    drop(held);
+    // And this pass gave it back: the other process takes it at once.
+    assert!(
+        block_on(other.try_acquire(&*w.meta, w.repo, w.now(), MINUTE))
+            .expect("read")
+            .is_some()
+    );
 }
 
 on_both_stores!(
@@ -124,6 +153,7 @@ on_both_stores!(
     refuses_until_the_operator_turns_deletion_on,
     a_new_repository_has_deletion_off,
     one_sweep_per_repository,
+    the_store_lease_stops_a_second_process,
 );
 
 // ---------------------------------------------------------------------------
@@ -160,6 +190,23 @@ fn a_closed_draft_is_collected_then_deleted<M: MetaStore + 'static>(w: &World<M>
         "the dry run predicted the pass"
     );
     assert_eq!(w.record(a).state, RecordState::Collected);
+    let (content, _) = block_on(w.meta.changeset(w.repo, a))
+        .expect("read")
+        .expect("tombstone");
+    assert!(content.is_empty(), "a tombstone keeps no content");
+    let bytes: u64 = only_a.iter().map(|o| w.frames.sizes(w.repo)[o]).sum();
+    let collected: Vec<String> = journal_kinds(w)
+        .into_iter()
+        .filter(|(k, _)| k == "Collected")
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(
+        collected,
+        [format!(
+            r#"{{"ids":["{a}"],"objects":2,"bytes":{bytes},"moved":0}}"#
+        )],
+        "Collected carries the doomed frames' bytes"
+    );
     for o in &only_a {
         assert!(w.marks(*o).is_some(), "doomed");
         assert!(w.has_frame(*o), "not deleted yet");
@@ -190,6 +237,7 @@ fn a_closed_draft_is_collected_then_deleted<M: MetaStore + 'static>(w: &World<M>
 fn revival_during_grace_keeps_the_object<M: MetaStore + 'static>(w: &World<M>) {
     let (root, a) = draft(w);
     let a1 = blob_id(b"a1");
+    let a_tree = w.snapshot_of(a).expect("whole");
     w.close("w").expect("close");
     w.advance(RETENTION_PLUS);
     assert_eq!(w.sweep().collected, 1);
@@ -203,10 +251,7 @@ fn revival_during_grace_keeps_the_object<M: MetaStore + 'static>(w: &World<M>) {
         .expect("revives")
         .id;
     assert!(w.marks(a1).is_none(), "revived");
-    assert_eq!(
-        w.snapshot_of(a).expect("same tree"),
-        w.snapshot_of(b).expect("same tree")
-    );
+    assert_eq!(a_tree, w.snapshot_of(b).expect("same tree"));
     w.advance(GRACE_PLUS);
     let swept = w.sweep();
     assert_eq!(swept.deleted, 0, "{swept:?}");
@@ -352,20 +397,16 @@ fn a_crashed_land_candidate_is_collected_after_its_lease<M: MetaStore + 'static>
     );
     w.check().expect("protection");
     // Onto the same tip, a land derives the same candidate id, which is
-    // now a tombstone: the land's CAS refuses it.
+    // now a tombstone: the land writes it again (a revival) and lands,
+    // without waiting for the line to move.
     let same_tip = w.land(a);
     assert!(
-        matches!(same_tip, Err(ApiError::Contended { .. })),
+        matches!(same_tip, Ok(Landed::Landed { .. })),
         "{same_tip:?}"
     );
-    // Once the line moves, the draft lands.
-    let tip = w.commit(vec![moved], "c", b"c1", None).expect("c").id;
-    w.update_ref(Some(moved), tip).expect("move");
-    let relanded = w.land(a);
-    assert!(
-        matches!(relanded, Ok(Landed::Landed { .. })),
-        "{relanded:?}"
-    );
+    assert_eq!(w.record(candidate).state, RecordState::Landed);
+    w.snapshot_of(candidate)
+        .expect("the revived candidate is whole");
     w.check().expect("protection");
 }
 
@@ -477,6 +518,83 @@ fn the_successor_keeps_a_superseded_records_objects<M: MetaStore + 'static>(w: &
     w.sweep();
     w.snapshot_of(s).expect("the successor is whole");
     w.check().expect("protection");
+}
+
+/// A stack longer than `max_stack` is closed in parts, every draft of it
+/// abandoned, across passes when the budget runs out part-way.
+fn a_long_stack_is_closed_whole(budget: u32) {
+    let w = World::new(
+        std::sync::Arc::new(graft_store::memory::MemoryStore::new()),
+        Frames::default(),
+        None,
+        graft_gc::GcConfig {
+            max_stack: 2,
+            pass_budget: budget,
+            ..gc_config()
+        },
+    );
+    let root = w.seed();
+    w.open("w").expect("open");
+    let mut stack = Vec::new();
+    let mut at = root;
+    for i in 0..5 {
+        let data = format!("d{i}");
+        at = w
+            .commit(vec![at], &format!("f{i}"), data.as_bytes(), Some("w"))
+            .expect("draft")
+            .id;
+        stack.push(at);
+    }
+    w.advance(3 * HOUR);
+    let mut total = graft_gc::SweepReport::default();
+    for _ in 0..8 {
+        let r = w.sweep();
+        add(&mut total, &r);
+        if !r.more {
+            break;
+        }
+    }
+    assert_eq!((total.lapsed, total.abandoned), (1, 5), "{total:?}");
+    for id in &stack {
+        assert_eq!(w.record(*id).state, RecordState::Abandoned, "{id}");
+    }
+    assert!(
+        block_on(w.meta.workspace(w.repo, "w"))
+            .expect("read")
+            .is_none()
+    );
+    let parts: Vec<(String, String)> = journal_kinds(&w)
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("Workspace") && k != "WorkspaceOpened")
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            (
+                "WorkspaceLapsing".to_owned(),
+                r#"{"name":"w","abandoned":2}"#.to_owned()
+            ),
+            (
+                "WorkspaceLapsing".to_owned(),
+                r#"{"name":"w","abandoned":2}"#.to_owned()
+            ),
+            (
+                "WorkspaceClosed".to_owned(),
+                r#"{"name":"w","reason":"lease-expired","abandoned":1}"#.to_owned()
+            ),
+        ]
+    );
+    w.check().expect("protection");
+}
+
+#[test]
+fn a_long_stack_is_closed_whole_in_one_pass() {
+    a_long_stack_is_closed_whole(10_000);
+}
+
+#[test]
+fn a_long_stack_is_closed_whole_across_passes() {
+    a_long_stack_is_closed_whole(2);
 }
 
 on_both_stores!(

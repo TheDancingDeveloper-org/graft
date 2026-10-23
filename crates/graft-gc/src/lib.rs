@@ -9,7 +9,8 @@
 //!   against the ancestry walk;
 //! - the **sweep** ([`Collector::sweep`]): lapse, collect, expire uploads
 //!   and claims, and delete, each step one metadata transaction with its
-//!   journal entry, in batches, rate-limited, under a per-repository lease.
+//!   journal entry, in batches, rate-limited, under a per-repository store
+//!   lease.
 //!   It refuses a repository without the `gc_protection` marker, and one
 //!   whose deletion switch ([`set_deletion`]) the operator has not turned
 //!   on;
@@ -39,7 +40,9 @@ use graft_store::{
 };
 
 pub use ancestry::dry_run_report;
-pub use journal::{ADMIN_ACTION, COLLECTED, OBJECT_DELETED, ROWS_EXPIRED, WORKSPACE_CLOSED};
+pub use journal::{
+    ADMIN_ACTION, COLLECTED, OBJECT_DELETED, ROWS_EXPIRED, WORKSPACE_CLOSED, WORKSPACE_LAPSING,
+};
 pub use lease::{SweepLease, SweepLeases};
 pub use plan::{Plan, Verify};
 pub use sweep::SweepReport;
@@ -57,7 +60,8 @@ pub struct GcConfig {
     pub delete_grace: Duration,
     /// Rows per batch: the page size of every scan.
     pub batch: u32,
-    /// Most changesets the lapse step walks down one workspace's stack.
+    /// Most drafts the lapse step abandons in one transaction. A longer
+    /// stack is closed in several, from the head down.
     pub max_stack: u32,
     /// Most transactions one sweep pass commits. A pass that reaches it
     /// stops and says so ([`SweepReport::more`]); the next pass continues
@@ -65,6 +69,9 @@ pub struct GcConfig {
     pub pass_budget: u32,
     /// The pause after each batch of a sweep pass: the rate limit.
     pub pause: Duration,
+    /// How long the store sweep lease lasts; a pass renews it at each
+    /// pause. A sweeper that dies holding it blocks others this long.
+    pub sweep_lease: Duration,
 }
 
 impl Default for GcConfig {
@@ -78,6 +85,7 @@ impl Default for GcConfig {
             max_stack: 1000,
             pass_budget: 10_000,
             pause: Duration::from_millis(20),
+            sweep_lease: Duration::from_secs(600),
         }
     }
 }

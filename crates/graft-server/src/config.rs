@@ -22,6 +22,14 @@
 //!
 //! [ci]                               # CI token exchange: see `ci.rs`
 //!
+//! [gc]                               # the sweep scheduler (design §8.6)
+//! enabled = false                    # off by default
+//! interval_s = 3600                  # between passes
+//! repos = ["graft"]                  # the repositories it sweeps
+//! grace_s = 900                      # doomed-to-deleted grace
+//! retention_s = 604800               # abandoned and superseded drafts kept
+//! verify = true                      # check the plan before each pass
+//!
 //! [[lines]]                          # per-line land policy: see `lines.rs`
 //! name = "trial-1"
 //! policy = "attested"
@@ -105,6 +113,77 @@ pub(crate) struct ServerConfig {
     pub(crate) lines: Vec<crate::lines::LineSpec>,
     /// The policy of lines `lines` does not name.
     pub(crate) default_line: Option<crate::lines::LineSpec>,
+    /// The GC sweep scheduler.
+    pub(crate) gc: GcSection,
+}
+
+/// `[gc]`: the sweep scheduler. It is off by default, and even when it is
+/// on a sweep deletes nothing in a repository until the operator turns
+/// deletion on there (`admin gc deletion <repo> on`); until then each pass
+/// is refused and counted as `refused`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub(crate) struct GcSection {
+    /// Whether `serve` runs the scheduler.
+    pub(crate) enabled: bool,
+    /// Seconds between passes.
+    pub(crate) interval_s: u64,
+    /// The repositories it sweeps.
+    pub(crate) repos: Vec<String>,
+    /// Doomed-to-deleted grace, seconds; longer than any request deadline.
+    pub(crate) grace_s: u64,
+    /// How long abandoned and superseded drafts are kept, seconds.
+    pub(crate) retention_s: u64,
+    /// Check the plan against the ancestry walk before each pass, and
+    /// sweep nothing on a mismatch.
+    pub(crate) verify: bool,
+}
+
+impl Default for GcSection {
+    fn default() -> Self {
+        let d = graft_gc::GcConfig::default();
+        Self {
+            enabled: false,
+            interval_s: 3600,
+            repos: Vec::new(),
+            grace_s: d.delete_grace.as_secs(),
+            retention_s: d.draft_retention.as_secs(),
+            verify: true,
+        }
+    }
+}
+
+/// The shortest `grace_s`: a minute, which is still longer than the
+/// engine's request deadlines. A shorter grace could delete an object a
+/// write is about to reference.
+pub(crate) const MIN_GC_GRACE_S: u64 = 60;
+
+impl GcSection {
+    /// The collector's timings: the defaults with this section applied.
+    pub(crate) fn gc_config(&self) -> graft_gc::GcConfig {
+        graft_gc::GcConfig {
+            delete_grace: std::time::Duration::from_secs(self.grace_s),
+            draft_retention: std::time::Duration::from_secs(self.retention_s),
+            ..graft_gc::GcConfig::default()
+        }
+    }
+
+    fn check(&self) -> Result<(), ConfigError> {
+        if self.interval_s == 0 {
+            return Err(ConfigError("gc.interval_s must be positive".into()));
+        }
+        if self.grace_s < MIN_GC_GRACE_S {
+            return Err(ConfigError(format!(
+                "gc.grace_s must be at least {MIN_GC_GRACE_S}"
+            )));
+        }
+        if self.enabled && self.repos.is_empty() {
+            return Err(ConfigError(
+                "gc.enabled needs at least one repository in gc.repos".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for ServerConfig {
@@ -132,6 +211,7 @@ impl Default for ServerConfig {
             ci: crate::ci::CiConfig::default(),
             lines: Vec::new(),
             default_line: None,
+            gc: GcSection::default(),
         }
     }
 }
@@ -205,6 +285,7 @@ impl ServerConfig {
             }
         }
         crate::lines::check(&self.lines, self.default_line.as_ref()).map_err(ConfigError)?;
+        self.gc.check()?;
         self.ci.check().map_err(ConfigError)
     }
 
@@ -266,6 +347,37 @@ metrics = "0.0.0.0:9464"
         assert!(ServerConfig::parse("max_watches = 0").is_err());
         assert!(ServerConfig::parse("max_put_call_bytes = 10\nput_buffer_bytes = 5").is_err());
         assert!(ServerConfig::parse("min_free_fraction = 1.0").is_ok());
+    }
+
+    #[test]
+    fn the_gc_scheduler_is_off_by_default() {
+        let c = ServerConfig::parse("").expect("parses");
+        assert!(!c.gc.enabled);
+        let g = c.gc.gc_config();
+        assert_eq!(g.delete_grace, graft_gc::GcConfig::default().delete_grace);
+        assert_eq!(
+            g.draft_retention,
+            graft_gc::GcConfig::default().draft_retention
+        );
+        let c = ServerConfig::parse(
+            "[gc]\nenabled = true\nrepos = [\"r\"]\ninterval_s = 60\ngrace_s = 120\nretention_s = 3600\nverify = false\n",
+        )
+        .expect("parses");
+        assert!(c.gc.enabled && !c.gc.verify);
+        assert_eq!(c.gc.repos, ["r"]);
+        assert_eq!(c.gc.gc_config().delete_grace.as_secs(), 120);
+        assert_eq!(c.gc.gc_config().draft_retention.as_secs(), 3600);
+    }
+
+    #[test]
+    fn bad_gc_sections_are_refused() {
+        assert!(ServerConfig::parse("[gc]\ninterval_s = 0").is_err());
+        assert!(ServerConfig::parse("[gc]\ngrace_s = 59").is_err());
+        assert!(
+            ServerConfig::parse("[gc]\nenabled = true").is_err(),
+            "no repos"
+        );
+        assert!(ServerConfig::parse("[gc]\nenabld = true").is_err(), "typo");
     }
 
     #[test]

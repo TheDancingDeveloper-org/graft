@@ -59,6 +59,8 @@ where
     case!(old_doomed_page_in_time_order);
     case!(lapsed_workspaces_page_in_lease_order);
     case!(gc_protection_marker);
+    case!(derived_value_cas);
+    case!(a_collected_changeset_is_replaced);
 }
 
 fn cs(n: u8) -> ChangesetId {
@@ -1985,4 +1987,109 @@ async fn gc_protection_marker<O: ObjectStore, M: MetaStore>(_objects: &O, meta: 
     assert!(!meta.gc_protection(repo).await.expect("marker"));
     apply(meta, repo, vec![Write::SetGcProtection(true)]).await;
     assert!(meta.gc_protection(repo).await.expect("marker"));
+}
+
+async fn derived_value_cas<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "derived-cas").await;
+    let is = |value: Option<&[u8]>| Precondition::DerivedIs {
+        kind: "lease".to_owned(),
+        version: 1,
+        key: b"k".to_vec(),
+        value: value.map(<[u8]>::to_vec),
+    };
+    let put = |value: &[u8]| Write::PutDerived {
+        kind: "lease".to_owned(),
+        version: 1,
+        key: b"k".to_vec(),
+        value: value.to_vec(),
+    };
+    assert_eq!(
+        run_txn(meta, repo, txn(vec![is(Some(b"a"))], vec![put(b"b")])).await,
+        TxnOutcome::PreconditionFailed(0),
+        "an absent value is not a present one"
+    );
+    assert!(matches!(
+        run_txn(meta, repo, txn(vec![is(None)], vec![put(b"a")])).await,
+        TxnOutcome::Committed(_)
+    ));
+    assert_eq!(
+        run_txn(meta, repo, txn(vec![is(None)], vec![put(b"c")])).await,
+        TxnOutcome::PreconditionFailed(0),
+        "a second taker loses"
+    );
+    assert!(matches!(
+        run_txn(meta, repo, txn(vec![is(Some(b"a"))], vec![put(b"b")])).await,
+        TxnOutcome::Committed(_)
+    ));
+    assert_eq!(
+        meta.derived(repo, "lease", 1, b"k").await.expect("read"),
+        Some(b"b".to_vec())
+    );
+}
+
+async fn a_collected_changeset_is_replaced<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "replace").await;
+    apply(
+        meta,
+        repo,
+        vec![Write::PutChangeset {
+            id: cs(1),
+            content: b"content".to_vec(),
+            record: record(RecordState::Abandoned),
+        }],
+    )
+    .await;
+    // The sweep's tombstone: no content.
+    apply(
+        meta,
+        repo,
+        vec![Write::PutChangeset {
+            id: cs(1),
+            content: Vec::new(),
+            record: record(RecordState::Collected),
+        }],
+    )
+    .await;
+    let (content, rec) = meta
+        .changeset(repo, cs(1))
+        .await
+        .expect("read")
+        .expect("stored");
+    assert!(content.is_empty());
+    assert_eq!(rec.state, RecordState::Collected);
+    // A revival, guarded by the tombstone.
+    let revive = txn(
+        vec![Precondition::RecordStateIs {
+            id: cs(1),
+            state: RecordState::Collected,
+        }],
+        vec![
+            Write::PutChangeset {
+                id: cs(1),
+                content: b"content".to_vec(),
+                record: record(RecordState::Draft),
+            },
+            Write::SetExpiry {
+                id: cs(1),
+                expires_at_ms: Some(5),
+            },
+        ],
+    );
+    assert!(matches!(
+        run_txn(meta, repo, revive).await,
+        TxnOutcome::Committed(_)
+    ));
+    let (content, rec) = meta
+        .changeset(repo, cs(1))
+        .await
+        .expect("read")
+        .expect("stored");
+    assert_eq!(content, b"content");
+    assert_eq!(rec.state, RecordState::Draft);
+    let p = meta
+        .protection(repo, cs(1))
+        .await
+        .expect("read")
+        .expect("protection");
+    assert_eq!((p.pins, p.expires_at_ms), (0, Some(5)));
 }

@@ -453,9 +453,16 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let id = cs.id();
         let parent = cs.first_parent();
 
-        if self.changeset_opt(repo, id).await?.is_some() {
-            return self.existing(repo, id, root, parent, hold).await;
-        }
+        // A collected changeset written again is revived: stored afresh
+        // over its tombstone, with new protection, so a land that derives
+        // the candidate a crashed attempt left (and the sweep collected)
+        // lands rather than failing its CAS until the line moves.
+        let revive = match self.changeset_opt(repo, id).await {
+            Ok(Some(_)) => return self.existing(repo, id, root, parent, hold).await,
+            Ok(None) => false,
+            Err(ApiError::Collected { id: c }) if c == id => true,
+            Err(e) => return Err(e),
+        };
         if let Some(h) = &hold {
             self.check_extends(repo, &h.ws, parent).await?;
         }
@@ -563,9 +570,18 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         );
 
         for _ in 0..CAS_RETRIES {
-            // [absent, each pinned parent live, the workspace guard].
+            // [absent (or still a tombstone), each pinned parent live, the
+            // workspace guard].
+            let first = if revive {
+                Precondition::RecordStateIs {
+                    id,
+                    state: RecordState::Collected,
+                }
+            } else {
+                Precondition::ChangesetAbsent(id)
+            };
             let mut txn = MetaTxn {
-                preconditions: vec![Precondition::ChangesetAbsent(id)],
+                preconditions: vec![first],
                 writes: Vec::new(),
             };
             txn.preconditions
@@ -596,7 +612,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         state: draft_state(state),
                     });
                 }
-                // A concurrent retry stored it first.
+                // A concurrent retry stored (or revived) it first.
                 TxnOutcome::PreconditionFailed(0) => {
                     return self.existing(repo, id, root, parent, hold).await;
                 }

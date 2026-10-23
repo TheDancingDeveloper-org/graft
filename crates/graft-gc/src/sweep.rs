@@ -18,7 +18,7 @@ use graft_store::{
     StoreError, StoreResult, TxnOutcome, WorkspaceRecord, Write,
 };
 
-use crate::{Collector, GcError, Shape, distinct, held_by, held_objects, journal, ms};
+use crate::{Collector, GcError, Shape, SweepLease, distinct, held_by, held_objects, journal, ms};
 
 /// How many times a step re-reads and retries after a concurrent write
 /// added a row to an object it was about to doom.
@@ -59,6 +59,7 @@ struct Pass<'a, M, O, S> {
     shape: &'a S,
     budget: u32,
     report: SweepReport,
+    lease: SweepLease,
 }
 
 impl<M: MetaStore, O: ObjectStore> Collector<M, O> {
@@ -82,30 +83,30 @@ impl<M: MetaStore, O: ObjectStore> Collector<M, O> {
         if !crate::deletion_enabled(&self.meta, repo).await? {
             return Err(GcError::DeletionOff);
         }
-        let Some(_lease) = self.leases.try_acquire(repo) else {
+        let ttl = ms(self.config.sweep_lease);
+        let Some(lease) = self
+            .leases
+            .try_acquire(&self.meta, repo, self.now(), ttl)
+            .await?
+        else {
             return Err(GcError::Busy);
         };
-        if verify {
-            let v = self.verify(repo, self.now(), shape).await?;
-            if !v.matches() {
-                return Err(GcError::Mismatch {
-                    changesets: v.unsafe_changesets,
-                    objects: v.unsafe_objects,
-                });
-            }
-        }
         let mut pass = Pass {
             c: self,
             repo,
             shape,
             budget: self.config.pass_budget.max(1),
             report: SweepReport::default(),
+            lease,
         };
-        pass.lapse().await?;
-        pass.collect().await?;
-        pass.expire_rows().await?;
-        pass.delete().await?;
-        Ok(pass.report)
+        let result = pass.run(verify).await;
+        let Pass { report, lease, .. } = pass;
+        // Given back however the pass ended; a release that fails leaves
+        // the lease to lapse at its time.
+        let released = lease.release(&self.meta).await;
+        result?;
+        released?;
+        Ok(report)
     }
 
     /// Finishes every delete a crashed pass left `deleting`: the frame
@@ -182,11 +183,35 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
         true
     }
 
-    /// The rate limit, after each batch.
-    async fn pause(&self) {
+    /// With `verify`, the plan checked first; then the four steps.
+    async fn run(&mut self, verify: bool) -> Result<(), GcError> {
+        if verify {
+            let v = self.c.verify(self.repo, self.c.now(), self.shape).await?;
+            if !v.matches() {
+                return Err(GcError::Mismatch {
+                    changesets: v.unsafe_changesets,
+                    objects: v.unsafe_objects,
+                });
+            }
+        }
+        self.lapse().await?;
+        self.collect().await?;
+        self.expire_rows().await?;
+        self.delete().await?;
+        Ok(())
+    }
+
+    /// The rate limit, after each batch, and the lease renewal. A pass
+    /// that lost its lease (it lapsed and another sweeper took it) stops.
+    async fn pause(&mut self) -> StoreResult<()> {
         if !self.c.config.pause.is_zero() {
             self.c.pace.pause(self.c.config.pause).await;
         }
+        let ttl = ms(self.c.config.sweep_lease);
+        if !self.lease.renew(&self.c.meta, self.c.now(), ttl).await? {
+            self.budget = 0;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -211,7 +236,7 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
                 }
                 self.close(&ws).await?;
             }
-            self.pause().await;
+            self.pause().await?;
         }
     }
 
@@ -220,64 +245,108 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
     /// record goes, guarded by the workspace being unchanged (a renewal
     /// wins). The drafts are found from the head down first parents, so
     /// the cost is the stack's length.
+    ///
+    /// A stack longer than `max_stack` is closed in several transactions:
+    /// each abandons the next `max_stack` changesets from the head down and
+    /// moves the head below them (journalled `WorkspaceLapsing`), and the
+    /// last deletes the workspace. The workspace keeps its lapsed lease
+    /// throughout, so a pass that runs out of budget part-way leaves it in
+    /// the lapse scan for the next pass, and nothing is stranded.
     async fn close(&mut self, ws: &WorkspaceRecord) -> StoreResult<()> {
         let expires = ws
             .lease_until_ms
             .saturating_add(ms(self.c.config.draft_retention));
-        let mut txn = MetaTxn {
-            preconditions: vec![Precondition::WorkspaceIs {
-                name: ws.name.clone(),
-                expected: Some(ws.clone()),
-            }],
-            writes: Vec::new(),
-        };
-        let mut abandoned = 0;
-        let mut at = ws.head;
-        let mut walked = 0;
-        while let Some(id) = at {
-            if id == ws.base || walked >= self.c.config.max_stack {
-                break;
-            }
-            walked += 1;
-            let Some((content, record)) = self.meta().changeset(self.repo, id).await? else {
-                break;
+        let chunk = self.c.config.max_stack.max(1);
+        let mut current = ws.clone();
+        loop {
+            let mut txn = MetaTxn {
+                preconditions: vec![Precondition::WorkspaceIs {
+                    name: current.name.clone(),
+                    expected: Some(current.clone()),
+                }],
+                writes: Vec::new(),
             };
-            if matches!(record.state, RecordState::Landed | RecordState::Collected) {
-                break;
+            let mut abandoned = 0;
+            let mut at = current.head;
+            let mut walked = 0;
+            while let Some(id) = at {
+                if id == current.base {
+                    at = None;
+                    break;
+                }
+                if walked >= chunk {
+                    break;
+                }
+                walked += 1;
+                let Some((content, record)) = self.meta().changeset(self.repo, id).await? else {
+                    at = None;
+                    break;
+                };
+                if matches!(record.state, RecordState::Landed | RecordState::Collected) {
+                    at = None;
+                    break;
+                }
+                if held_by(&record, &current.name) {
+                    txn.preconditions.push(Precondition::RecordStateIs {
+                        id,
+                        state: RecordState::Draft,
+                    });
+                    txn.writes.push(Write::SetRecord {
+                        id,
+                        record: ChangesetRecord {
+                            state: RecordState::Abandoned,
+                            holder: None,
+                            superseded_by: None,
+                            ..record
+                        },
+                    });
+                    txn.writes.push(Write::SetExpiry {
+                        id,
+                        expires_at_ms: Some(expires),
+                    });
+                    abandoned += 1;
+                }
+                at = self.shape.parents(&content)?.first().copied();
             }
-            if held_by(&record, &ws.name) {
-                txn.preconditions.push(Precondition::RecordStateIs {
-                    id,
-                    state: RecordState::Draft,
-                });
-                txn.writes.push(Write::SetRecord {
-                    id,
-                    record: ChangesetRecord {
-                        state: RecordState::Abandoned,
-                        holder: None,
-                        superseded_by: None,
-                        ..record
-                    },
-                });
-                txn.writes.push(Write::SetExpiry {
-                    id,
-                    expires_at_ms: Some(expires),
-                });
-                abandoned += 1;
+            let next = at.map(|head| WorkspaceRecord {
+                head: Some(head),
+                ..current.clone()
+            });
+            match &next {
+                None => {
+                    txn.writes
+                        .push(Write::DeleteWorkspace(current.name.clone()));
+                    txn.writes
+                        .push(journal::workspace_closed(&current.name, abandoned));
+                }
+                Some(rest) => {
+                    txn.writes.push(Write::PutWorkspace(rest.clone()));
+                    txn.writes
+                        .push(journal::workspace_lapsing(&current.name, abandoned));
+                }
             }
-            at = self.shape.parents(&content)?.first().copied();
+            match self.meta().commit(self.repo, txn).await? {
+                TxnOutcome::Committed(_) => {
+                    self.report.abandoned += abandoned as u64;
+                }
+                TxnOutcome::PreconditionFailed(_) => {
+                    self.report.skipped += 1;
+                    return Ok(());
+                }
+            }
+            match next {
+                None => {
+                    self.report.lapsed += 1;
+                    return Ok(());
+                }
+                Some(rest) => {
+                    if !self.spend() {
+                        return Ok(());
+                    }
+                    current = rest;
+                }
+            }
         }
-        txn.writes.push(Write::DeleteWorkspace(ws.name.clone()));
-        txn.writes
-            .push(journal::workspace_closed(&ws.name, abandoned));
-        match self.meta().commit(self.repo, txn).await? {
-            TxnOutcome::Committed(_) => {
-                self.report.lapsed += 1;
-                self.report.abandoned += abandoned as u64;
-            }
-            TxnOutcome::PreconditionFailed(_) => self.report.skipped += 1,
-        }
-        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -311,7 +380,7 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
                     }
                 }
             }
-            self.pause().await;
+            self.pause().await?;
         }
     }
 
@@ -412,13 +481,23 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
                     doomed.push(*o);
                 }
             }
+            let mut bytes = 0;
+            for o in &doomed {
+                if let Some(frame) = self.c.objects.get(repo, *o).await? {
+                    bytes += frame.len() as u64;
+                }
+            }
             let since_ms = self.c.now();
             txn.writes.extend(doomed.iter().map(|o| Write::Doom {
                 object: *o,
                 since_ms,
             }));
-            txn.writes.push(Write::SetRecord {
+            // The tombstone keeps the record and drops the content: nothing
+            // reads a collected changeset's content, and a write of the same
+            // changeset again stores it afresh (a revival).
+            txn.writes.push(Write::PutChangeset {
                 id,
+                content: Vec::new(),
                 record: ChangesetRecord {
                     state: RecordState::Collected,
                     holder: None,
@@ -426,7 +505,7 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
                 },
             });
             txn.writes
-                .push(journal::collected(id, doomed.len(), moved.len()));
+                .push(journal::collected(id, doomed.len(), bytes, moved.len()));
 
             match self.meta().commit(repo, txn).await {
                 Ok(TxnOutcome::Committed(_)) => {
@@ -476,7 +555,7 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
                 }
                 self.expire(&holder, &objects).await?;
             }
-            self.pause().await;
+            self.pause().await?;
         }
     }
 
@@ -563,7 +642,7 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
                     TxnOutcome::PreconditionFailed(_) => self.report.skipped += 1,
                 }
             }
-            self.pause().await;
+            self.pause().await?;
         }
     }
 }

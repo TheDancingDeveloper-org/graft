@@ -193,6 +193,12 @@ fn holds(conn: &Connection, repo_id: RepoId, pre: &Precondition) -> StoreResult<
             Ok(doom_mark(conn, repo, *object)?.is_some_and(|m| !m.deleting))
         }
         Precondition::ObjectUnheld(object) => Ok(!is_held(conn, repo, *object)?),
+        Precondition::DerivedIs {
+            kind,
+            version,
+            key,
+            value,
+        } => Ok(crate::reader::derived(conn, repo_id, kind, *version, key)? == *value),
     }
 }
 
