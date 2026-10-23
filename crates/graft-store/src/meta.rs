@@ -247,6 +247,18 @@ pub enum Write {
         /// Position.
         pos: u64,
     },
+    /// Records that a new line forks from `parent` at position `pos`: the
+    /// line's own rows start at `pos + 1`, and reads below that fall through
+    /// to `parent` (`docs/notes/line-fork-point.md`). Written once, when the
+    /// line is created.
+    PutLineFork {
+        /// The new line.
+        line: String,
+        /// The line it forks from.
+        parent: String,
+        /// The fork point's position, on both lines.
+        pos: u64,
+    },
     /// Adds a line path index row for a path or directory prefix. The
     /// engine writes one row per prefix of each changed path.
     PutLinePath {
@@ -446,14 +458,16 @@ pub trait MetaStore: Send + Sync {
         version: u32,
         key: &[u8],
     ) -> impl Future<Output = StoreResult<Option<Vec<u8>>>> + Send;
-    /// Position of a changeset on a line.
+    /// Position of a changeset on a line, falling through a line's fork
+    /// point to its parent (one read per hop).
     fn line_pos(
         &self,
         repo: RepoId,
         line: &str,
         id: ChangesetId,
     ) -> impl Future<Output = StoreResult<Option<u64>>> + Send;
-    /// Line path index scan, newest first, positions below `before`.
+    /// Line path index scan, newest first, positions below `before`,
+    /// continuing on the parent line below a fork point.
     fn scan_line_path(
         &self,
         repo: RepoId,

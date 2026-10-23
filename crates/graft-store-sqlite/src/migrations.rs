@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -175,6 +175,19 @@ CREATE INDEX holders_expiry ON holders (repo, expires, object, holder)
 
 ALTER TABLE doomed ADD COLUMN deleting INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX doomed_since ON doomed (repo, since, object);
+";
+
+/// Version 5 (WI-2316): line fork points. A line created on existing
+/// history stores its parent line and fork position here instead of
+/// copying the parent's index rows (`docs/notes/line-fork-point.md`).
+const V5: &str = "
+CREATE TABLE line_forks (
+    repo   INTEGER NOT NULL REFERENCES repos(id),
+    line   TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    pos    INTEGER NOT NULL,
+    PRIMARY KEY (repo, line)
+) WITHOUT ROWID;
 ";
 
 /// The database's schema version.

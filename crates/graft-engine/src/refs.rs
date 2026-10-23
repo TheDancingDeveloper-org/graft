@@ -272,6 +272,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// `new`: line positions and path rows for every changeset the move
     /// adds, and their records marked landed. Refuses a move that is not a
     /// first-parent fast-forward, after O(log distance) skip-list reads.
+    ///
+    /// A new line forks from the line holding the nearest landed ancestor
+    /// of `new` and indexes only the unlanded stretch above it
+    /// (`docs/notes/line-fork-point.md`).
     pub(crate) async fn line_rows(
         &self,
         repo: RepoId,
@@ -281,11 +285,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         guards: &mut Vec<Precondition>,
     ) -> Result<Vec<Write>, ApiError> {
         let mut writes = Vec::new();
-        let new_skips = self.skips(repo, new, &mut writes).await?;
-        // How many changesets the move adds: back to `old`, or to the root.
-        let added = match old {
-            None => new_skips.depth + 1,
+        let chain = match old {
+            None => self.fork_rows(repo, line, new, &mut writes).await?,
             Some(old) => {
+                let new_skips = self.skips(repo, new, &mut writes).await?;
                 let old_skips = self.skips(repo, old, &mut writes).await?;
                 let Some(distance) = new_skips.depth.checked_sub(old_skips.depth) else {
                     return Err(rejected(format!("{new} does not descend from {old}")));
@@ -295,27 +298,27 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         "{old} is not on the first-parent chain of {new}"
                     )));
                 }
-                distance
+                // The added stretch, oldest first.
+                let mut chain: Vec<(Changeset, ChangesetRecord)> = Vec::new();
+                let mut cur = Some(new);
+                for _ in 0..distance {
+                    let id = cur.expect("the depth bounds the walk");
+                    let (cs, record) = self.changeset(repo, id).await?;
+                    cur = cs.first_parent();
+                    chain.push((cs, record));
+                }
+                chain.reverse();
+                let landed: Vec<Changeset> = chain.iter().map(|(cs, _)| cs.clone()).collect();
+                writes.extend(
+                    self.index
+                        .on_land(repo, line, &landed)
+                        .await
+                        .map_err(errors::store)?,
+                );
+                chain
             }
         };
 
-        // The added stretch, oldest first.
-        let mut chain: Vec<(Changeset, ChangesetRecord)> = Vec::new();
-        let mut cur = Some(new);
-        for _ in 0..added {
-            let id = cur.expect("the depth bounds the walk");
-            let (cs, record) = self.changeset(repo, id).await?;
-            cur = cs.first_parent();
-            chain.push((cs, record));
-        }
-        chain.reverse();
-        let landed: Vec<Changeset> = chain.iter().map(|(cs, _)| cs.clone()).collect();
-        writes.extend(
-            self.index
-                .on_land(repo, line, &landed)
-                .await
-                .map_err(errors::store)?,
-        );
         // Landing zeroes a record's own pins (the store does), and releases
         // the pins it holds on parents off the line: every pin comes from a
         // non-landed child (design §8.6). First parents are on the line, so
@@ -345,6 +348,79 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
         writes.extend(released.into_iter().map(Write::Unpin));
         Ok(writes)
+    }
+
+    /// The stretch a new line `line` at `new` adds, oldest first, with its
+    /// index rows pushed to `writes`. The walk stops at the first landed
+    /// first-parent ancestor: the line forks from a line holding it (one
+    /// `line_pos` read per line) and records that fork, so the cost is the
+    /// unlanded stretch, not the history.
+    async fn fork_rows(
+        &self,
+        repo: RepoId,
+        line: &str,
+        new: ChangesetId,
+        writes: &mut Vec<Write>,
+    ) -> Result<Vec<(Changeset, ChangesetRecord)>, ApiError> {
+        let mut chain: Vec<(Changeset, ChangesetRecord)> = Vec::new();
+        let mut cur = Some(new);
+        let mut fork_at = None;
+        while let Some(id) = cur {
+            let (cs, record) = self.changeset(repo, id).await?;
+            if record.state == RecordState::Landed {
+                fork_at = Some(id);
+                break;
+            }
+            cur = cs.first_parent();
+            chain.push((cs, record));
+        }
+        chain.reverse();
+        let start = match fork_at {
+            None => 0,
+            Some(at) => {
+                let (parent, pos) = self.line_holding(repo, at).await?;
+                writes.push(Write::PutLineFork {
+                    line: line.to_owned(),
+                    parent,
+                    pos,
+                });
+                pos + 1
+            }
+        };
+        for (pos, (cs, _)) in (start..).zip(&chain) {
+            let id = cs.id();
+            writes.push(Write::PutLinePos {
+                line: line.to_owned(),
+                changeset: id,
+                pos,
+            });
+            writes.extend(graft_index::line_path_rows(line, pos, id, cs));
+        }
+        Ok(chain)
+    }
+
+    /// A line holding the landed changeset `id`, and its position there.
+    /// Lines are a handful per repository (§4.6), so this reads one page of
+    /// refs and one position per line.
+    async fn line_holding(&self, repo: RepoId, id: ChangesetId) -> Result<(String, u64), ApiError> {
+        let refs = self
+            .meta
+            .list_refs(repo, "", MAX_PAGE)
+            .await
+            .map_err(errors::store)?;
+        for r in refs.into_iter().filter(|r| r.kind == StoredKind::Line) {
+            if let Some(pos) = self
+                .meta
+                .line_pos(repo, &r.name, id)
+                .await
+                .map_err(errors::store)?
+            {
+                return Ok((r.name, pos));
+            }
+        }
+        Err(errors::store(graft_store::StoreError::Corrupt(format!(
+            "landed changeset {id} is on no line"
+        ))))
     }
 
     /// A changeset's skip list, adding rows for any values the walk had to

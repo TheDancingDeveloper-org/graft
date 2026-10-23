@@ -17,6 +17,7 @@ const TABLES: &[&str] = &[
     "holders",
     "journal",
     "lands",
+    "line_forks",
     "line_paths",
     "line_pos",
     "refs",
@@ -221,4 +222,59 @@ fn the_expiry_scans_are_index_ranges() {
     for p in [&records, &rows, &held, &doomed] {
         assert!(!p.contains("TEMP B-TREE"), "no sort: {p}");
     }
+}
+
+/// Golden vector for the line fork record (WI-2316, version 5): the table
+/// shape and the stored row for `PutLineFork { line: "b", parent: "main",
+/// pos: 2 }`. Changing either is a durable format change.
+#[test]
+fn line_fork_record_golden_vector() {
+    let dir = TempDir::new("mig-fork");
+    let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
+    let repo = block_on(store.create_repo("forks")).expect("create");
+    let txn = MetaTxn {
+        preconditions: vec![],
+        writes: vec![
+            Write::PutLineFork {
+                line: "b".to_owned(),
+                parent: "main".to_owned(),
+                pos: 2,
+            },
+            Write::Journal {
+                kind: "RefMoved".to_owned(),
+                body: vec![],
+            },
+        ],
+    };
+    assert!(matches!(
+        block_on(store.commit(repo, txn)).expect("commit"),
+        TxnOutcome::Committed(_)
+    ));
+    let conn = Connection::open(dir.db()).expect("inspect");
+    let ddl: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'line_forks'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("ddl");
+    assert_eq!(
+        ddl,
+        "CREATE TABLE line_forks (
+    repo   INTEGER NOT NULL REFERENCES repos(id),
+    line   TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    pos    INTEGER NOT NULL,
+    PRIMARY KEY (repo, line)
+) WITHOUT ROWID"
+    );
+    let row: (i64, String, String, i64) = conn
+        .query_row("SELECT repo, line, parent, pos FROM line_forks", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .expect("row");
+    assert_eq!(
+        row,
+        (i64::from(repo.0), "b".to_owned(), "main".to_owned(), 2)
+    );
 }

@@ -309,6 +309,19 @@ pub(crate) fn derived(
     .map_err(sql_err)
 }
 
+/// The fork record of `line`: its parent line and fork position.
+fn line_fork(conn: &Connection, repo: RepoId, line: &str) -> StoreResult<Option<(String, u64)>> {
+    let row: Option<(String, i64)> = conn
+        .prepare_cached("SELECT parent, pos FROM line_forks WHERE repo = ?1 AND line = ?2")
+        .and_then(|mut s| {
+            s.query_row(params![repo.0, line], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()
+        })
+        .map_err(sql_err)?;
+    row.map(|(parent, pos)| Ok((parent, uint(pos)?)))
+        .transpose()
+}
+
 pub(crate) fn line_pos(
     conn: &Connection,
     repo: RepoId,
@@ -316,14 +329,28 @@ pub(crate) fn line_pos(
     id: ChangesetId,
 ) -> StoreResult<Option<u64>> {
     check_repo(conn, repo)?;
-    let pos: Option<i64> = conn
-        .prepare_cached("SELECT pos FROM line_pos WHERE repo = ?1 AND line = ?2 AND changeset = ?3")
-        .and_then(|mut s| {
-            s.query_row(params![repo.0, line, &id.0.0[..]], |r| r.get(0))
-                .optional()
-        })
-        .map_err(sql_err)?;
-    pos.map(uint).transpose()
+    let mut line = line.to_owned();
+    let mut bound = u64::MAX;
+    loop {
+        let pos: Option<i64> = conn
+            .prepare_cached(
+                "SELECT pos FROM line_pos WHERE repo = ?1 AND line = ?2 AND changeset = ?3",
+            )
+            .and_then(|mut s| {
+                s.query_row(params![repo.0, line, &id.0.0[..]], |r| r.get(0))
+                    .optional()
+            })
+            .map_err(sql_err)?;
+        if let Some(pos) = pos {
+            let pos = uint(pos)?;
+            return Ok((pos <= bound).then_some(pos));
+        }
+        let Some((parent, at)) = line_fork(conn, repo, &line)? else {
+            return Ok(None);
+        };
+        bound = bound.min(at);
+        line = parent;
+    }
 }
 
 pub(crate) fn scan_line_path(
@@ -335,26 +362,45 @@ pub(crate) fn scan_line_path(
     limit: u32,
 ) -> StoreResult<Vec<(u64, ChangesetId)>> {
     check_repo(conn, repo)?;
-    // Positions above the integer range are all "before" every stored one.
-    let before = int(before).unwrap_or(i64::MAX);
-    let limit = page_limit(limit) as i64;
-    let mut stmt = conn
-        .prepare_cached(
-            "SELECT pos, changeset FROM line_paths
-             WHERE repo = ?1 AND line = ?2 AND path = ?3 AND pos < ?4
-             ORDER BY pos DESC, changeset DESC LIMIT ?5",
-        )
-        .map_err(sql_err)?;
-    let rows = stmt
-        .query_map(params![repo.0, line, path.as_str(), before, limit], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })
-        .map_err(sql_err)?;
-    rows.map(|r| {
-        let (pos, id) = r.map_err(sql_err)?;
-        Ok((uint(pos)?, changeset_id(&id)?))
-    })
-    .collect()
+    let limit = page_limit(limit);
+    let mut out = Vec::new();
+    let mut line = line.to_owned();
+    let mut before = before;
+    loop {
+        // Positions above the integer range are all "before" every stored one.
+        let below = int(before).unwrap_or(i64::MAX);
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT pos, changeset FROM line_paths
+                 WHERE repo = ?1 AND line = ?2 AND path = ?3 AND pos < ?4
+                 ORDER BY pos DESC, changeset DESC LIMIT ?5",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    repo.0,
+                    line,
+                    path.as_str(),
+                    below,
+                    (limit - out.len()) as i64
+                ],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(sql_err)?;
+        for r in rows {
+            let (pos, id) = r.map_err(sql_err)?;
+            out.push((uint(pos)?, changeset_id(&id)?));
+        }
+        if out.len() == limit {
+            return Ok(out);
+        }
+        let Some((parent, at)) = line_fork(conn, repo, &line)? else {
+            return Ok(out);
+        };
+        before = before.min(at.saturating_add(1));
+        line = parent;
+    }
 }
 
 pub(crate) fn holders(conn: &Connection, repo: RepoId, object: ObjectId) -> StoreResult<u32> {

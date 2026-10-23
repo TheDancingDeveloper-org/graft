@@ -1,9 +1,9 @@
 # Line fork points: creating a line in O(1)
 
-Status: design note for WI-2316. This note doesn't change
-[design.md](../design.md) or [decisions.md](../decisions.md). The recommended
-option changes what stored line-index rows mean, so it needs an operator
-decision before any code lands (see §6).
+Status: implemented (WI-2316). The operator accepted option (a) on
+2026-10-23. graft has no users, so it ships with no migration, no rollback
+guard and no backfill: a plain schema bump (SQLite version 5) adds the
+`line_forks` table. design.md and decisions.md are updated in their own PR.
 
 ## 1. Problem
 
@@ -34,51 +34,48 @@ cost follows the change. Only creating a line *on existing history* is the bug.
   history, blame's version list, `is_ancestor` on a line, `merge_base`,
   rebase/sync onto a line position).
 
-## 3. Option (a): fork-point index (recommended)
+## 3. Option (a): fork-point index (chosen)
 
-When a line is created at `X`, find the nearest existing line `P` that has `X`
-on it: `line_pos(P, X) = Some(px)`. Store one fork record
-`line_forks(repo, line, parent = P, pos = px)` and write **no** `line_pos` or
-`line_paths` rows for positions `≤ px`. Later lands index only themselves, as
-today.
+A line created at `X` walks first parents from `X` while the records are not
+landed. That walk is the unlanded stretch, the only changesets the create
+lands. It stops at the first landed ancestor `a`, or at the root.
 
-Queries fall through:
+- At `a`: find a line `P` holding it (one page of refs, one `line_pos` read
+  per line; lines are a handful per repository, §4.6), and write one
+  `line_forks(repo, line, parent = P, pos = f)` row with `f = line_pos(P, a)`.
+  The stretch is indexed at `f + 1, f + 2, …`.
+- At the root: no fork row; the stretch is indexed from 0. That is a new
+  history, so its whole length is new lands.
 
-- `line_pos(L, id)`: look up `L`'s own rows; on a miss, if `L` has a fork
-  `(P, f)`, answer `line_pos(P, id)` only when the result is `≤ f`. Recursing
-  through a chain of forks costs one read per hop.
-- Range scans (`log`, path history, blame): scan `L`'s own rows from the top
-  down to `f + 1`, then continue on `P` from `f` downward. The result set is
-  unchanged, so the cost stays O(results) plus one read per fork hop.
-- Ancestry and merge base: unchanged algorithms over the fall-through
-  `line_pos`.
+Nothing at positions `≤ f` is copied. Later lands index only themselves, as
+before. Every line created on existing history forks; there is no second
+path that writes full rows.
 
-**Cost.** Create: one `line_pos` read per candidate parent line (a handful
-per repository, §4.6) plus one row. With no line holding `X` (a fresh root
-ref, or an `X` only on drafts), fork from the nearest landed ancestor: walk
-first parents from `X` until `line_pos(P, a)` hits, which costs the unlanded
-stretch, and index only that stretch. That is O(new lands). Queries add one
-hop per fork depth. Fork chains are short (integration lines fork from `main`),
-and the hop count can be capped by flattening: a new fork records the
-*root-most* parent line that holds the fork point.
+Reads fall through inside the store (`MetaStore::line_pos` and
+`scan_line_path`), so `graft-index` and every caller are unchanged:
 
-**Correctness across the fork.** The parent's rows at positions `≤ f` are the
-child's history exactly, because both lines' first-parent chains agree below
-`X`, and the parent never rewrites them. Log, blame and ancestry see the same
-rows they see today.
+- `line_pos(L, id)`: `L`'s own row; on a miss, follow `L`'s fork `(P, f)` and
+  accept a hit only at `≤ f` (the bound is the minimum over the hops).
+- `scan_line_path(L, path, before, limit)`: scan `L`'s own rows, then, while
+  the page is short, continue on `P` with `before = min(before, f + 1)`.
 
-**Parent moves.** The parent only moves forward. Its later rows have positions
-`> f` and are filtered out by the `≤ f` bound. No interaction.
+**Cost.** Create: the unlanded stretch (changeset reads and rows) plus one
+`line_pos` read per line. Queries: their results plus one fork read per hop.
+Log, path log, blame's version list, `is_ancestor`, `merge_base` and
+rebase/sync onto a line position all go through those two reads.
 
-**GC.** GC roots are ref targets and their first-parent chains (§8.6). It
-doesn't read line rows to decide liveness. The fork record holds no objects.
-No interaction, as long as lines stay non-deletable. If line deletion is ever
-added, deleting a line with forked children must either refuse or materialise
-the children's rows first.
+**Correctness across the fork.** Positions are first-parent depth, so a
+changeset has the same position on every line that holds it. The parent's
+rows at `≤ f` are exactly the child's history below the fork, and the parent
+never rewrites them (lines only fast-forward and can't be deleted). A fork of
+a fork works the same way, one hop at a time.
 
-**Migration.** Existing lines keep their full rows and have no fork record, so
-they read exactly as today. No backfill is needed. Compacting old lines' rows
-into forks would be optional and separate.
+**Parent moves.** The parent only moves forward; its later rows sit above
+`f` and the bound filters them out.
+
+**GC.** GC roots are ref targets and their chains (§8.6); it never reads
+line rows, and the fork row holds no objects. If line deletion is ever added,
+deleting a line with forked children must refuse, or copy their rows first.
 
 ## 4. Option (b): shared-prefix rows
 
@@ -98,46 +95,27 @@ Keep the full copy but write it in bounded batches. That fixes the single
 huge transaction but not the O(history) cost or the duplicated rows, and it
 breaks "one transaction per logical write" (rule 3). Rejected.
 
-## 6. Does it change a durable format?
+## 6. Durable format
 
-Option (a) changes no **encoding**: no id, tree, changeset, frame or token
-bytes, no derived-kind value encoding, and no change to the shape of a
-`line_pos` or `line_paths` row. It does change stored state in two ways:
+The stored line record is new and frozen by golden vectors:
 
-1. **A new stored record and table**: `line_forks(repo, line, parent, pos)`, a
-   new `Write::PutLineFork` and a `MetaStore::line_fork` read, a SQLite
-   migration, and the memory store.
-2. **The meaning of existing tables changes.** Today a line's `line_pos` and
-   `line_paths` rows are its *complete* history. Under (a), a forked line's
-   rows are only its own lands. A reader that doesn't know about forks does
-   not ignore the change safely: it answers `line_pos(L, id) = None` for
-   anything below the fork, so `is_ancestor` says false, `log` stops at the
-   fork, and blame loses versions. Rolling the server back past this change
-   would silently give wrong answers for every forked line.
+- `Write::PutLineFork { line, parent, pos }` in `graft-store`.
+- SQLite version 5: `line_forks(repo INTEGER, line TEXT, parent TEXT, pos
+  INTEGER, PRIMARY KEY (repo, line)) WITHOUT ROWID`. The DDL and a stored row
+  are pinned by `line_fork_record_golden_vector` in
+  `graft-store-sqlite/tests/migrations.rs`.
 
-So (a) is not the "new rows old readers ignore" case. Per the WI-2316 brief
-and AGENTS.md rule 1, it needs an operator decision before implementation.
+The meaning of `line_pos` and `line_paths` changed: a forked line's rows are
+only its own lands. No encoding changed (ids, trees, changesets, frames,
+tokens, derived values). With no users, there is no migration, no rollback
+guard and no backfill.
 
-**Decision asked.** Accept option (a), with:
+## 7. Tests
 
-- the `line_forks` table and the fall-through semantics recorded in
-  design.md §4.9 / §6.5 and a decisions.md entry;
-- a one-way schema bump: a store at the new schema version refuses to open
-  under an older binary, so a rollback fails loudly instead of answering
-  wrongly;
-- no backfill for existing lines.
-
-## 7. Implementation outline (after the decision)
-
-- `graft-store`: `Write::PutLineFork { line, parent, pos }`,
-  `MetaStore::line_fork(repo, line)`, memory store, conformance tests.
-- `graft-store-sqlite`: migration adding `line_forks` and the version bump.
-- `graft-index`: a `line_pos` wrapper and range-scan helpers that follow
-  forks; route `history.rs`, `ancestry.rs` and `blame.rs` through them.
-- `graft-engine`: `line_rows(old = None)` finds the fork line and writes the
-  fork record plus only the unlanded stretch. `workspace.rs` and `rebase.rs`
-  call the index wrapper instead of `meta.line_pos` directly.
-- Tests: a read-count test that creating a line at depth 10k and 100k writes
-  O(1) rows and does O(lines) reads; log, blame, `is_ancestor` and merge base
-  equal across a fork and an equivalent fully indexed line; existing
-  unforked lines unchanged. A bench assertion at WI-2304 scale.
+- `graft-store` conformance `line_forks_fall_through_to_the_parent`, on
+  memory and SQLite: positions and path scans through a fork and a fork of a
+  fork, bounded at each fork, paging across the hop.
+- `graft-engine/tests/line_fork.rs`: log, path log, `is_ancestor` and blame
+  across a fork of a fork on both stores; and on a 300-deep history, creating
+  a line at the tip writes one fork row and no position or path rows, while a
+  line at a two-draft stack writes two.

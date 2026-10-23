@@ -5,7 +5,7 @@
 //! [`MetaStore`] traits, so an implementation passes or fails on its
 //! behaviour alone. Each case gets fresh stores from the factory.
 
-use graft_model::{ChangesetId, ObjectId};
+use graft_model::{ChangesetId, ObjectId, RepoPath};
 
 use crate::meta::{
     ChangesetRecord, DoomMark, MetaStore, MetaTxn, Precondition, Protection, RecordState, RefKind,
@@ -47,6 +47,7 @@ where
     case!(land_records_are_idempotent);
     case!(derived_values_are_keyed_by_kind_version_and_key);
     case!(line_positions_are_per_line);
+    case!(line_forks_fall_through_to_the_parent);
     case!(pagination_is_bounded);
     case!(index_reads_page_in_order);
     case!(all_workspaces_page_in_name_order);
@@ -926,6 +927,90 @@ async fn line_positions_are_per_line<O: ObjectStore, M: MetaStore>(_objects: &O,
         meta.line_pos(repo, "other", cs(1)).await.expect("read"),
         None
     );
+}
+
+/// `main` holds positions 0..=4; `b` forks from it at 2 and lands 3 and 4;
+/// `c` forks from `b` at 3 and lands 4. Reads below a fork follow the parent,
+/// bounded by the fork position.
+async fn line_forks_fall_through_to_the_parent<O: ObjectStore, M: MetaStore>(
+    _objects: &O,
+    meta: &M,
+) {
+    let repo = new_repo(meta, "forks").await;
+    let path = RepoPath::new("a").expect("path");
+    let mut writes = Vec::new();
+    let mut land = |line: &str, pos: u64, id: ChangesetId| {
+        writes.push(Write::PutLinePos {
+            line: line.to_owned(),
+            changeset: id,
+            pos,
+        });
+        writes.push(Write::PutLinePath {
+            line: line.to_owned(),
+            path: path.clone(),
+            pos,
+            changeset: id,
+        });
+    };
+    for pos in 0..5u8 {
+        land("main", u64::from(pos), cs(10 + pos));
+    }
+    land("b", 3, cs(20));
+    land("b", 4, cs(21));
+    land("c", 4, cs(30));
+    writes.push(Write::PutLineFork {
+        line: "b".to_owned(),
+        parent: "main".to_owned(),
+        pos: 2,
+    });
+    writes.push(Write::PutLineFork {
+        line: "c".to_owned(),
+        parent: "b".to_owned(),
+        pos: 3,
+    });
+    writes.push(journal("LineFork"));
+    assert!(matches!(
+        run_txn(meta, repo, txn(vec![], writes)).await,
+        TxnOutcome::Committed(_)
+    ));
+
+    let pos = |line: &'static str, id: ChangesetId| async move {
+        meta.line_pos(repo, line, id).await.expect("read")
+    };
+    assert_eq!(pos("b", cs(12)).await, Some(2));
+    assert_eq!(pos("b", cs(13)).await, None, "above the fork on main");
+    assert_eq!(pos("b", cs(20)).await, Some(3));
+    assert_eq!(pos("c", cs(10)).await, Some(0), "a fork of a fork");
+    assert_eq!(pos("c", cs(20)).await, Some(3));
+    assert_eq!(pos("c", cs(21)).await, None, "above the fork on b");
+    assert_eq!(pos("c", cs(13)).await, None);
+    assert_eq!(pos("c", cs(30)).await, Some(4));
+    assert_eq!(
+        pos("main", cs(20)).await,
+        None,
+        "a parent never sees a child"
+    );
+
+    let scan = |before: u64, limit: u32| {
+        let path = path.clone();
+        async move {
+            meta.scan_line_path(repo, "c", &path, before, limit)
+                .await
+                .expect("scan")
+        }
+    };
+    assert_eq!(
+        scan(u64::MAX, 10).await,
+        vec![
+            (4, cs(30)),
+            (3, cs(20)),
+            (2, cs(12)),
+            (1, cs(11)),
+            (0, cs(10))
+        ]
+    );
+    assert_eq!(scan(u64::MAX, 2).await, vec![(4, cs(30)), (3, cs(20))]);
+    assert_eq!(scan(3, 2).await, vec![(2, cs(12)), (1, cs(11))]);
 }
 
 async fn pagination_is_bounded<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {

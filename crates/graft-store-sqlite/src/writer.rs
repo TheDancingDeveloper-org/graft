@@ -534,6 +534,14 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 .and_then(|mut s| s.execute(params![repo, line, &changeset.0.0[..], pos]))
                 .map_err(sql_err)?;
             }
+            Write::PutLineFork { line, parent, pos } => {
+                let pos = int(pos)?;
+                conn.prepare_cached(
+                    "INSERT INTO line_forks (repo, line, parent, pos) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .and_then(|mut s| s.execute(params![repo, line, parent, pos]))
+                .map_err(sql_err)?;
+            }
             Write::PutLinePath {
                 line,
                 path,
