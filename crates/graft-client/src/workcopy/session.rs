@@ -487,7 +487,7 @@ impl WorkingCopy {
     }
 
     /// The line's tip.
-    async fn tip<A: RepoApi>(&self, api: &A, cx: &CallContext) -> Result<ChangesetId> {
+    pub(crate) async fn tip<A: RepoApi>(&self, api: &A, cx: &CallContext) -> Result<ChangesetId> {
         Ok(api
             .resolve_ref(
                 cx,

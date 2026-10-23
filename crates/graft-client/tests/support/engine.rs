@@ -236,6 +236,29 @@ impl EngineRepo {
         out
     }
 
+    /// Runs the periodic lease sweep: ends every lapsed workspace.
+    /// Returns how many it ended.
+    pub async fn expire_leases(&self) -> u32 {
+        self.engine
+            .expire_leases(&self.name, 0)
+            .await
+            .expect("expire leases")
+    }
+
+    /// What collection would take now (the `Gc` dry run).
+    pub async fn gc_dry_run(&self) -> GcReport {
+        self.engine
+            .gc(
+                &self.admin(),
+                Gc {
+                    repo: self.name.clone(),
+                    dry_run: true,
+                },
+            )
+            .await
+            .expect("gc dry run")
+    }
+
     /// `main`'s tip.
     pub async fn tip(&self) -> ChangesetId {
         self.engine
@@ -939,10 +962,13 @@ impl WorkspaceApi for EngineRepo {
 
     async fn get_conflicts(
         &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::GetConflicts,
+        cx: &graft_proto::CallContext,
+        req: graft_proto::types::GetConflicts,
     ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
-        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
+        delegate!(self, "GetConflicts", cx, |c| self
+            .engine
+            .get_conflicts(&c, req)
+            .await)
     }
 
     async fn resolve(

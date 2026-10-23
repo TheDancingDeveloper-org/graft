@@ -139,6 +139,20 @@ The `main` line must be `direct` on that server (`[[lines]]` or
 `[default_line]` in `server.toml`). Server CPU and storage aren't
 sampled remotely beyond `/metrics`.
 
+## Many working copies (WI-2313)
+
+```sh
+python3 -m graftbench --scales 10 --many-copies 1,8,32
+```
+
+This runs instead of the full bench. For each N and shape (full, and sparse
+on one package) it starts N `graft clone`s at once and compares them with one
+git clone plus N-1 `git worktree add`. It reports wall time, per-clone
+latency, and bytes on disk split into files, cache and other state. It gates
+only on the counts: every copy exists and matches the model. Times are
+reported, not gated. graft-node is not started. See
+`docs/notes/many-working-copies.md`.
+
 ## Live awareness (WI-2311)
 
 `--live-awareness` adds a deterministic scenario that measures whether
@@ -206,6 +220,7 @@ conflict rule and the merge3 regions behave as the scenarios assume.
 | `graftbench/site.py` | the local server (temp dir, ephemeral port) or a remote one |
 | `graftbench/bench.py` | one scale: generate, import, replay, operations, verify |
 | `graftbench/conc.py` | the concurrent-writer scenarios and the tip poller |
+| `graftbench/copies.py` | the many-working-copies scenario (`--many-copies`) |
 | `graftbench/livea.py` | the live-awareness script, scheduler, policies and oracle |
 | `graftbench/mcp.py` | a minimal MCP client for `/mcp` |
 | `graftbench/report.py` | machine info and the Markdown summary |

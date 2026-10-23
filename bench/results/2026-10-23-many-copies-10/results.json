@@ -1,0 +1,409 @@
+{
+  "label": "many copies, scale 10",
+  "started": "2026-10-23T16:12:03+00:00",
+  "seed": 2294,
+  "writers": 8,
+  "rounds": 5,
+  "iterations": 5,
+  "server": "local",
+  "machine": {
+    "host": "vogt-prod",
+    "os": "Linux 7.0.0-38-generic",
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13700",
+    "cpus": 24,
+    "mem_gib": 62.6,
+    "python": "3.14.4",
+    "git": "git version 2.53.0",
+    "graft_version": "graft 0.0.0 (protocol 0.1)",
+    "graft_commit": "867431da098f7280c1dfefc54de695d0b3005467",
+    "graft_tree_dirty": true
+  },
+  "scales": [
+    {
+      "kind": "many_copies",
+      "scale": 10,
+      "seed": 2294,
+      "repo": "bench-10-copies",
+      "counts": [
+        1,
+        8,
+        32
+      ],
+      "repository": {
+        "stream_sha256": "6b3f58da5a0ad7cad351ac0084e6e26803f87c8aa6103e63e2d61a3ffac46852",
+        "files": 255,
+        "bytes": 301543,
+        "import_s": 2.067,
+        "sparse_prefix": "src/synthapp/audit_1237",
+        "sparse_files": 2,
+        "sparse_bytes": 2122
+      },
+      "runs": [
+        {
+          "system": "graft",
+          "shape": "full",
+          "n": 1,
+          "copies_ok": true,
+          "trees_match": 1,
+          "wall_s": 0.081,
+          "clone": {
+            "n": 1,
+            "p50_ms": 80.587,
+            "p95_ms": 80.587,
+            "p99_ms": 80.587,
+            "mean_ms": 80.587,
+            "max_ms": 80.587,
+            "total_s": 0.081
+          },
+          "bytes": {
+            "files": 301543,
+            "cache": 155977,
+            "meta": 43449,
+            "total": 500969
+          },
+          "bytes_per_copy": {
+            "files": 301543,
+            "cache": 155977,
+            "meta": 43449,
+            "total": 500969
+          }
+        },
+        {
+          "system": "git",
+          "shape": "full",
+          "n": 1,
+          "copies_ok": true,
+          "trees_match": 1,
+          "wall_s": 0.041,
+          "clone": {
+            "n": 1,
+            "p50_ms": 40.447,
+            "p95_ms": 40.447,
+            "p99_ms": 40.447,
+            "mean_ms": 40.447,
+            "max_ms": 40.447,
+            "total_s": 0.04
+          },
+          "bytes": {
+            "files": 301543,
+            "cache": 0,
+            "meta": 223160,
+            "total": 524703,
+            "shared_store": 223160
+          },
+          "bytes_per_copy": {
+            "files": 301543,
+            "cache": 0,
+            "meta": 223160,
+            "total": 524703,
+            "shared_store": 223160
+          }
+        },
+        {
+          "system": "graft",
+          "shape": "full",
+          "n": 8,
+          "copies_ok": true,
+          "trees_match": 8,
+          "wall_s": 0.135,
+          "clone": {
+            "n": 8,
+            "p50_ms": 122.705,
+            "p95_ms": 131.918,
+            "p99_ms": 133.472,
+            "mean_ms": 121.652,
+            "max_ms": 133.86,
+            "total_s": 0.973
+          },
+          "bytes": {
+            "files": 2412344,
+            "cache": 1247816,
+            "meta": 347592,
+            "total": 4007752
+          },
+          "bytes_per_copy": {
+            "files": 301543,
+            "cache": 155977,
+            "meta": 43449,
+            "total": 500969
+          }
+        },
+        {
+          "system": "git",
+          "shape": "full",
+          "n": 8,
+          "copies_ok": true,
+          "trees_match": 8,
+          "wall_s": 0.132,
+          "clone": {
+            "n": 8,
+            "p50_ms": 13.445,
+            "p95_ms": 28.109,
+            "p99_ms": 32.232,
+            "mean_ms": 16.38,
+            "max_ms": 33.263,
+            "total_s": 0.131
+          },
+          "bytes": {
+            "files": 2412344,
+            "cache": 0,
+            "meta": 420420,
+            "total": 2832764,
+            "shared_store": 419846
+          },
+          "bytes_per_copy": {
+            "files": 301543,
+            "cache": 0,
+            "meta": 52552,
+            "total": 354095,
+            "shared_store": 52480
+          }
+        },
+        {
+          "system": "graft",
+          "shape": "full",
+          "n": 32,
+          "copies_ok": true,
+          "trees_match": 32,
+          "wall_s": 0.595,
+          "clone": {
+            "n": 32,
+            "p50_ms": 548.788,
+            "p95_ms": 577.641,
+            "p99_ms": 585.057,
+            "mean_ms": 538.154,
+            "max_ms": 586.829,
+            "total_s": 17.221
+          },
+          "bytes": {
+            "files": 9649376,
+            "cache": 4991264,
+            "meta": 1390368,
+            "total": 16031008
+          },
+          "bytes_per_copy": {
+            "files": 301543,
+            "cache": 155977,
+            "meta": 43449,
+            "total": 500969
+          }
+        },
+        {
+          "system": "git",
+          "shape": "full",
+          "n": 32,
+          "copies_ok": true,
+          "trees_match": 32,
+          "wall_s": 0.428,
+          "clone": {
+            "n": 32,
+            "p50_ms": 11.582,
+            "p95_ms": 16.235,
+            "p99_ms": 38.097,
+            "mean_ms": 13.262,
+            "max_ms": 47.89,
+            "total_s": 0.424
+          },
+          "bytes": {
+            "files": 9649376,
+            "cache": 0,
+            "meta": 1096802,
+            "total": 10746178,
+            "shared_store": 1094229
+          },
+          "bytes_per_copy": {
+            "files": 301543,
+            "cache": 0,
+            "meta": 34275,
+            "total": 335818,
+            "shared_store": 34194
+          }
+        },
+        {
+          "system": "graft",
+          "shape": "sparse",
+          "n": 1,
+          "copies_ok": true,
+          "trees_match": 1,
+          "wall_s": 0.029,
+          "clone": {
+            "n": 1,
+            "p50_ms": 28.548,
+            "p95_ms": 28.548,
+            "p99_ms": 28.548,
+            "mean_ms": 28.548,
+            "max_ms": 28.548,
+            "total_s": 0.029
+          },
+          "bytes": {
+            "files": 2122,
+            "cache": 1855,
+            "meta": 551,
+            "total": 4528
+          },
+          "bytes_per_copy": {
+            "files": 2122,
+            "cache": 1855,
+            "meta": 551,
+            "total": 4528
+          }
+        },
+        {
+          "system": "git",
+          "shape": "sparse",
+          "n": 1,
+          "copies_ok": true,
+          "trees_match": 1,
+          "wall_s": 0.03,
+          "clone": {
+            "n": 1,
+            "p50_ms": 29.324,
+            "p95_ms": 29.324,
+            "p99_ms": 29.324,
+            "mean_ms": 29.324,
+            "max_ms": 29.324,
+            "total_s": 0.029
+          },
+          "bytes": {
+            "files": 6433,
+            "cache": 0,
+            "meta": 76081,
+            "total": 82514,
+            "shared_store": 76081
+          },
+          "bytes_per_copy": {
+            "files": 6433,
+            "cache": 0,
+            "meta": 76081,
+            "total": 82514,
+            "shared_store": 76081
+          }
+        },
+        {
+          "system": "graft",
+          "shape": "sparse",
+          "n": 8,
+          "copies_ok": true,
+          "trees_match": 8,
+          "wall_s": 0.032,
+          "clone": {
+            "n": 8,
+            "p50_ms": 29.9,
+            "p95_ms": 30.404,
+            "p99_ms": 30.448,
+            "mean_ms": 29.499,
+            "max_ms": 30.459,
+            "total_s": 0.236
+          },
+          "bytes": {
+            "files": 16976,
+            "cache": 14840,
+            "meta": 4408,
+            "total": 36224
+          },
+          "bytes_per_copy": {
+            "files": 2122,
+            "cache": 1855,
+            "meta": 551,
+            "total": 4528
+          }
+        },
+        {
+          "system": "git",
+          "shape": "sparse",
+          "n": 8,
+          "copies_ok": true,
+          "trees_match": 8,
+          "wall_s": 0.079,
+          "clone": {
+            "n": 8,
+            "p50_ms": 6.694,
+            "p95_ms": 22.836,
+            "p99_ms": 29.418,
+            "mean_ms": 9.611,
+            "max_ms": 31.063,
+            "total_s": 0.077
+          },
+          "bytes": {
+            "files": 51464,
+            "cache": 0,
+            "meta": 276351,
+            "total": 327815,
+            "shared_store": 275763
+          },
+          "bytes_per_copy": {
+            "files": 6433,
+            "cache": 0,
+            "meta": 34543,
+            "total": 40976,
+            "shared_store": 34470
+          }
+        },
+        {
+          "system": "graft",
+          "shape": "sparse",
+          "n": 32,
+          "copies_ok": true,
+          "trees_match": 32,
+          "wall_s": 0.049,
+          "clone": {
+            "n": 32,
+            "p50_ms": 33.533,
+            "p95_ms": 37.35,
+            "p99_ms": 37.974,
+            "mean_ms": 33.485,
+            "max_ms": 38.23,
+            "total_s": 1.072
+          },
+          "bytes": {
+            "files": 67904,
+            "cache": 59360,
+            "meta": 17632,
+            "total": 144896
+          },
+          "bytes_per_copy": {
+            "files": 2122,
+            "cache": 1855,
+            "meta": 551,
+            "total": 4528
+          }
+        },
+        {
+          "system": "git",
+          "shape": "sparse",
+          "n": 32,
+          "copies_ok": true,
+          "trees_match": 32,
+          "wall_s": 0.268,
+          "clone": {
+            "n": 32,
+            "p50_ms": 7.309,
+            "p95_ms": 8.964,
+            "p99_ms": 25.964,
+            "mean_ms": 8.147,
+            "max_ms": 33.57,
+            "total_s": 0.261
+          },
+          "bytes": {
+            "files": 205856,
+            "cache": 0,
+            "meta": 963053,
+            "total": 1168909,
+            "shared_store": 960418
+          },
+          "bytes_per_copy": {
+            "files": 6433,
+            "cache": 0,
+            "meta": 30095,
+            "total": 36528,
+            "shared_store": 30013
+          }
+        }
+      ],
+      "server_storage_growth_bytes": 0,
+      "node": "not run: graft-node needs the server's public key, which graft-server admin does not print",
+      "ok": true
+    }
+  ],
+  "elapsed_s": 5.5
+}

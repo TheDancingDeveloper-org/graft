@@ -6,6 +6,7 @@
 
 mod render;
 mod server;
+mod upstream;
 mod workcopy;
 mod write;
 
@@ -14,9 +15,10 @@ pub use server::{
     Auth, BlameArgs, Caller, DiffArgs, LogArgs, LsArgs, MAX_REQUEST_BYTES, McpServer, ReadArgs,
     ShowArgs, StatusArgs, http_config, request_auth, streamable_http_service,
 };
+pub use upstream::UpstreamArgs;
 pub use workcopy::{
     WorkingCopyCommit, WorkingCopyError, WorkingCopyFuture, WorkingCopyLand, WorkingCopySync,
-    WorkingCopyTools,
+    WorkingCopyTools, WorkingCopyUpstream,
 };
 pub use write::{
     COMMIT_MAX_BYTES, COMMIT_MAX_FILES, COMMIT_MESSAGE_MAX_BYTES, CONFLICT_MARKERS_MAX_BYTES,
@@ -71,6 +73,11 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "graft_status",
         description: "Working-copy status (stdio only).",
+        read_only: true,
+    },
+    ToolSpec {
+        name: "graft_upstream",
+        description: "What changed on the line since the base, and whether your work would merge onto its tip.",
         read_only: true,
     },
     ToolSpec {

@@ -65,7 +65,7 @@ pub(crate) fn call_context() -> CallContext {
             work_item: None,
             scopes: Vec::new(),
         },
-        request_id: format!("cli-{}-{n}", std::process::id()),
+        request_id: graft_client::request_id("cli", n),
         deadline_ms: None,
     }
 }

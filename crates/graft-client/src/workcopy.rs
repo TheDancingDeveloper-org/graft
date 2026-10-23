@@ -10,6 +10,7 @@
 //!   index    path → kind, blob id, stat         (one entry per line)
 //!   conflict the conflicts a sync wrote, until they are committed
 //!   cache/   local object frames (graft-store-fs, LRU mode)
+//!   .gitignore  `*`, so a surrounding git checkout ignores `.graft/`
 //! ```
 //!
 //! Every file is replaced by an atomic rename. The index records each file's
@@ -47,17 +48,30 @@ mod commit;
 mod conflict;
 mod rewrite;
 mod session;
+mod upstream;
 
 pub use commit::{CommitLimits, CommitOptions, Committed, UploadStats};
 pub use conflict::{ConflictFile, ConflictMode, Conflicts, sidecar_path};
 pub use rewrite::{Reverted, Rewritten};
 pub use session::{Begun, LandOptions, LandOutcome, Moved, Recovered, SyncOutcome};
+pub use upstream::{MAX_OWN_PATHS, Outcome, Overlap, Upstream, UpstreamChange, predict};
 
 /// The working copy's state directory.
 pub const GRAFT_DIR: &str = ".graft";
 
 /// The default bound of the local object cache.
 pub const DEFAULT_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Other tools' version-control metadata at the root of a working copy: a
+/// git checkout's `.git` (a directory, or the pointer file of a linked git
+/// worktree), and the same for Mercurial, Jujutsu and Subversion. graft
+/// never lists, reads or commits them, so a working copy can share its
+/// directory with another tool's checkout.
+pub const FOREIGN_METADATA: [&str; 4] = [".git", ".hg", ".jj", ".svn"];
+
+/// The ignore file written into `.graft/` and what it holds: a surrounding
+/// git checkout then ignores the whole directory with no rule of its own.
+const SELF_IGNORE: (&str, &str) = (".gitignore", "# graft working-copy state\n*\n");
 
 const CONFIG_FILE: &str = "config";
 const STATE_FILE: &str = "state";
@@ -281,6 +295,7 @@ impl WorkingCopy {
             sparse,
             index: Index::default(),
         };
+        write_atomic(&dir.join(SELF_IGNORE.0), SELF_IGNORE.1.as_bytes())?;
         write_atomic(&dir.join(CONFIG_FILE), wc.config_text().as_bytes())?;
         wc.save_state()?;
         write_atomic(&dir.join(SPARSE_FILE), wc.sparse.to_text().as_bytes())?;
@@ -1165,6 +1180,7 @@ fn entry_path(prefix: Option<&RepoPath>, entry: &fs::DirEntry) -> Option<RepoPat
         return None;
     }
     match prefix {
+        None if FOREIGN_METADATA.contains(&name) => None,
         None => RepoPath::new(name).ok(),
         Some(p) => p.join(name).ok(),
     }

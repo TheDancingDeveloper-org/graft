@@ -47,7 +47,12 @@ pub(crate) enum Command {
     /// Open a workspace and lay out a sparse working copy
     Clone(CloneArgs),
     /// Working-copy changes against the head draft, else the base (no server needed)
-    Status,
+    ///
+    /// With --upstream it also asks the server, without moving anything,
+    /// how far the line tip is ahead of the base, which files changed there,
+    /// and whether the files you changed (uncommitted edits and the stack)
+    /// would merge onto the tip or conflict, with the conflicting lines.
+    Status(StatusArgs),
     /// Diff the working copy, or two changesets
     Diff(DiffArgs),
     /// First-parent history
@@ -122,6 +127,19 @@ pub(crate) struct CloneArgs {
     /// With `--path`, also include the files at the repository root
     #[arg(long)]
     pub(crate) root_files: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct StatusArgs {
+    /// Also compare with the line tip (read-only; contacts the server)
+    #[arg(long)]
+    pub(crate) upstream: bool,
+    /// With --upstream: the most entries in each list
+    #[arg(long, default_value_t = PAGE_DEFAULT, requires = "upstream")]
+    pub(crate) limit: u32,
+    /// With --upstream: resume token for the line's changed files
+    #[arg(long, value_name = "TOKEN", requires = "upstream")]
+    pub(crate) cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]

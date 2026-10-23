@@ -114,9 +114,14 @@ macro_rules! via {
 
 impl RepoApi for McpApi {
     async fn create_changeset(&self, cx: &CallContext, req: CreateChangeset) -> ApiResult<Created> {
-        via!(self, "CreateChangeset", req.repo, cx, true, |e, c| e
-            .create_changeset(&c, req)
-            .await)
+        // As on gRPC: a commit into a workspace moves its head, so only its
+        // owner (or a repository admin) may.
+        via!(self, "CreateChangeset", req.repo, cx, true, |e, c| {
+            if let Some(name) = &req.workspace {
+                own_workspace(&e, &c, &ws_ref(&req.repo, name)).await?;
+            }
+            e.create_changeset(&c, req).await
+        })
     }
     async fn get_changesets(&self, cx: &CallContext, req: GetChangesets) -> ApiResult<Changesets> {
         via!(self, "GetChangesets", req.repo, cx, false, |e, c| e
@@ -193,11 +198,7 @@ impl RepoApi for McpApi {
         // its owner (or a repository admin) may.
         via!(self, "Revert", req.repo, cx, true, |e, c| {
             if let Some(name) = &req.workspace {
-                let ws = WorkspaceRef {
-                    repo: req.repo.clone(),
-                    name: name.clone(),
-                };
-                own_workspace(&e, &c, &ws).await?;
+                own_workspace(&e, &c, &ws_ref(&req.repo, name)).await?;
             }
             e.revert(&c, req).await
         })
@@ -222,6 +223,17 @@ impl RepoApi for McpApi {
     }
 }
 
+/// The workspace `name` in `repo`.
+fn ws_ref(repo: &str, name: &str) -> WorkspaceRef {
+    WorkspaceRef {
+        repo: repo.to_owned(),
+        name: name.to_owned(),
+    }
+}
+
+// As on gRPC: a workspace is its owner's (`docs/design.md` §7.2). Every
+// operation on a named workspace, reads included, runs `own_workspace`
+// first, so another principal learns nothing of it.
 impl WorkspaceApi for McpApi {
     async fn open_workspace(
         &self,
@@ -233,9 +245,10 @@ impl WorkspaceApi for McpApi {
             .await)
     }
     async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
-        via!(self, "GetWorkspace", req.repo, cx, false, |e, c| e
-            .get_workspace(&c, req)
-            .await)
+        via!(self, "GetWorkspace", req.repo, cx, false, |e, c| {
+            own_workspace(&e, &c, &req).await?;
+            e.get_workspace(&c, req).await
+        })
     }
     async fn list_workspaces(
         &self,
@@ -253,14 +266,16 @@ impl WorkspaceApi for McpApi {
         req: WorkspaceRef,
         lease_ms: u64,
     ) -> ApiResult<WorkspaceView> {
-        via!(self, "RenewLease", req.repo, cx, true, |e, c| e
-            .renew_lease(&c, req, lease_ms)
-            .await)
+        via!(self, "RenewLease", req.repo, cx, true, |e, c| {
+            own_workspace(&e, &c, &req).await?;
+            e.renew_lease(&c, req, lease_ms).await
+        })
     }
     async fn set_head(&self, cx: &CallContext, req: SetHead) -> ApiResult<WorkspaceView> {
-        via!(self, "SetHead", req.workspace.repo, cx, true, |e, c| e
-            .set_head(&c, req)
-            .await)
+        via!(self, "SetHead", req.workspace.repo, cx, true, |e, c| {
+            own_workspace(&e, &c, &req.workspace).await?;
+            e.set_head(&c, req).await
+        })
     }
     async fn sync(
         &self,
@@ -268,9 +283,10 @@ impl WorkspaceApi for McpApi {
         req: WorkspaceRef,
         onto: Option<ChangesetId>,
     ) -> ApiResult<Synced> {
-        via!(self, "Sync", req.repo, cx, true, |e, c| e
-            .sync(&c, req, onto)
-            .await)
+        via!(self, "Sync", req.repo, cx, true, |e, c| {
+            own_workspace(&e, &c, &req).await?;
+            e.sync(&c, req, onto).await
+        })
     }
     async fn stack(
         &self,
@@ -278,9 +294,10 @@ impl WorkspaceApi for McpApi {
         req: WorkspaceRef,
         op: StackOp,
     ) -> ApiResult<WorkspaceView> {
-        via!(self, "Stack", req.repo, cx, true, |e, c| e
-            .stack(&c, req, op)
-            .await)
+        via!(self, "Stack", req.repo, cx, true, |e, c| {
+            own_workspace(&e, &c, &req).await?;
+            e.stack(&c, req, op).await
+        })
     }
     async fn close_workspace(
         &self,
@@ -288,13 +305,12 @@ impl WorkspaceApi for McpApi {
         req: WorkspaceRef,
         keep_drafts: bool,
     ) -> ApiResult<()> {
-        via!(self, "CloseWorkspace", req.repo, cx, true, |e, c| e
-            .close_workspace(&c, req, keep_drafts)
-            .await)
+        via!(self, "CloseWorkspace", req.repo, cx, true, |e, c| {
+            own_workspace(&e, &c, &req).await?;
+            e.close_workspace(&c, req, keep_drafts).await
+        })
     }
 
-    // As on gRPC: only the workspace's owner (or a repository admin)
-    // reads its conflicts or resolves its stack.
     async fn get_conflicts(&self, cx: &CallContext, req: GetConflicts) -> ApiResult<Conflicts> {
         via!(
             self,

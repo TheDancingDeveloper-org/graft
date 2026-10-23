@@ -22,6 +22,21 @@ pub mod workspace;
 pub use remote::Remote;
 pub use sparse::Sparse;
 
+/// A request id for call `n` of this process: `prefix`, the process id, a
+/// random per-process nonce, and `n`. The server names an unnamed
+/// workspace from the principal and the request id, and answers a second
+/// open under the same name with the first workspace (a retried open). Two
+/// processes under one token (two containers, both pid 7) must therefore
+/// never send the same id, or their working copies share a workspace.
+pub fn request_id(prefix: &str, n: u64) -> String {
+    use std::hash::{BuildHasher, RandomState};
+    use std::sync::OnceLock;
+    static NONCE: OnceLock<u64> = OnceLock::new();
+    // `RandomState` keys come from the OS's random source, once per process.
+    let nonce = NONCE.get_or_init(|| RandomState::new().hash_one(std::process::id()));
+    format!("{prefix}-{}-{nonce:016x}-{n}", std::process::id())
+}
+
 /// Where the client sends requests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Endpoint {
@@ -118,7 +133,10 @@ pub enum Error {
     /// content could be committed.
     Unstable(RepoPath),
     /// The server's workspace head is not the one this working copy holds:
-    /// someone else moved it.
+    /// someone else moved it. This is also the answer when two directories
+    /// bind one workspace (a reused `--workspace` name or a copied
+    /// `.graft/`): every write moves the head by compare-and-swap, so the
+    /// first writer wins and the other gets this, with nothing overwritten.
     Diverged {
         /// The workspace.
         workspace: String,
@@ -177,7 +195,8 @@ impl fmt::Display for Error {
                 local,
             } => write!(
                 f,
-                "workspace {workspace} moved on the server (head {}, this working copy has {})",
+                "workspace {workspace} moved on the server (head {}, this working copy has {}); \
+                 another working copy may share it: give each directory its own clone",
                 id_or_none(*server),
                 id_or_none(*local)
             ),
@@ -226,6 +245,19 @@ impl From<StoreError> for Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn request_ids_differ_per_call_and_carry_a_nonce() {
+        let a = super::request_id("cli", 1);
+        let b = super::request_id("cli", 2);
+        assert_ne!(a, b);
+        assert_eq!(a.rsplit_once('-').unwrap().0, b.rsplit_once('-').unwrap().0);
+        // prefix, pid, 16 hex digits of nonce, n.
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[2].len(), 16);
+        assert!(a.len() <= 64);
+    }
+
     use super::*;
 
     #[test]
