@@ -59,13 +59,7 @@ fn attester_principal() -> Principal {
         kind: PrincipalKind::Service,
         session: None,
         work_item: None,
-        scopes: vec![
-            format!("repo:{REPO}:read"),
-            format!("repo:{REPO}:attest"),
-            // Until WI-2272 is on main, Attest takes a write scope; with it,
-            // `attest` alone does and this line goes.
-            format!("repo:{REPO}:write"),
-        ],
+        scopes: vec![format!("repo:{REPO}:read"), format!("repo:{REPO}:attest")],
     }
 }
 
