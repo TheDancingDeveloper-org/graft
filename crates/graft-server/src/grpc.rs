@@ -612,6 +612,21 @@ impl pb::repo_service_server::RepoService for Services {
         )
     }
 
+    async fn create_line(
+        &self,
+        request: Request<pb::CreateLineRequest>,
+    ) -> Result<Response<pb::RefView>, Status> {
+        unary!(
+            self,
+            request,
+            "CreateLine",
+            true,
+            CreateLine,
+            |e, cx, req| e.create_line(&cx, req).await,
+            pb::RefView::from
+        )
+    }
+
     async fn stat(&self, request: Request<pb::PathAt>) -> Result<Response<pb::EntryView>, Status> {
         unary!(
             self,

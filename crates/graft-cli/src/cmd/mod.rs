@@ -9,6 +9,7 @@ pub(crate) mod clone;
 pub(crate) mod commit;
 pub(crate) mod diff;
 pub(crate) mod land;
+pub(crate) mod line;
 pub(crate) mod log;
 pub(crate) mod ls;
 pub(crate) mod lsp;

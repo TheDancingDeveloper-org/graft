@@ -205,6 +205,23 @@ pub struct UpdateRef {
     pub kind: RefKind,
 }
 
+/// `CreateLine` request: fork line `name` at `from`.
+///
+/// A compare-and-swap from absent to `from`, journalled as a `RefMoved`
+/// entry in the same transaction. It never overwrites a ref: when `name`
+/// exists the answer is `RefConflict { actual: Some(target) }`, and nothing
+/// moves. A bad name is `InvalidChange { rule: "ref-name" }`; an unknown
+/// `from` is `NotFound`. Needs `repo:<r>:admin` or `repo:<r>:land:<name>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateLine {
+    /// Repository.
+    pub repo: String,
+    /// The new line's name.
+    pub name: String,
+    /// The changeset the line starts at.
+    pub from: ChangesetId,
+}
+
 // ---- snapshot reads -------------------------------------------------------
 
 /// `Stat`, `ReadFile` request: a path in a changeset's snapshot.

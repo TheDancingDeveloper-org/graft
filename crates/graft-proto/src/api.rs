@@ -65,6 +65,17 @@ pub trait RepoApi: Send + Sync {
         cx: &CallContext,
         req: UpdateRef,
     ) -> impl Future<Output = ApiResult<RefView>> + Send;
+    /// Forks a line at a changeset: CAS from absent, never an overwrite.
+    /// See [`CreateLine`] for the contract. Implementations that cannot
+    /// create lines keep the default, which answers `Unavailable`.
+    fn create_line(
+        &self,
+        cx: &CallContext,
+        req: CreateLine,
+    ) -> impl Future<Output = ApiResult<RefView>> + Send {
+        let _ = (cx, req);
+        async { Err(crate::ApiError::Unavailable { retry_after_ms: 0 }) }
+    }
     /// Stats a path.
     fn stat(
         &self,

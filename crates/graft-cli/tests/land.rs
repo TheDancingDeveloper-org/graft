@@ -682,3 +682,81 @@ fn land_line_merge_still_refuses_edits_to_the_same_line() {
         "fn a() {}\nfn b() {}\nfn c() { 2 }\n"
     );
 }
+
+#[test]
+fn line_create_then_list_then_land_on_the_new_line() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let outside = |args: &[&str]| {
+        graft(dir.path())
+            .args(["--endpoint", &s.url, "--repo", "demo"])
+            .args(args)
+            .assert()
+    };
+
+    let made = json_out(
+        outside(&["--json", "line", "create", "batch-1", "--from", "main"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("line", &made);
+    assert_eq!(made["name"], json!("batch-1"));
+    assert_eq!(made["version"], json!(1));
+    let human = stdout(&outside(&["line", "create", "batch-2", "--from", "main"]).success());
+    assert!(human.starts_with("created line batch-2 at "), "{human}");
+
+    let list = json_out(outside(&["--json", "line", "list"]).success().get_output());
+    assert_valid("line-list", &list);
+    let names: Vec<_> = list["lines"]
+        .as_array()
+        .expect("lines")
+        .iter()
+        .map(|l| l["name"].as_str().expect("name").to_owned())
+        .collect();
+    assert_eq!(names, ["batch-1", "batch-2", "main"]);
+    assert_eq!(list["lines"][0]["target"], list["lines"][2]["target"]);
+    let page = json_out(
+        outside(&["--json", "line", "list", "--limit", "1"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("line-list", &page);
+    assert_eq!(page["next"], json!("batch-1"));
+    let rest = json_out(
+        outside(&[
+            "--json", "line", "list", "--limit", "5", "--cursor", "batch-1", "--prefix", "batch",
+        ])
+        .success()
+        .get_output(),
+    );
+    assert_eq!(rest["lines"][0]["name"], json!("batch-2"));
+    assert_eq!(rest["lines"].as_array().map(Vec::len), Some(1));
+
+    // Creating it again is refused, and nothing moves.
+    let again = outside(&["--json", "line", "create", "batch-1", "--from", "main"]).failure();
+    assert_eq!(error_of(&again)["kind"], json!("ref_conflict"));
+    let bad = outside(&["--json", "line", "create", "has space", "--from", "main"]).code(2);
+    assert_eq!(error_of(&bad)["kind"], json!("invalid_change"));
+
+    // A land on the new line moves it and leaves main alone.
+    graft(dir.path())
+        .args([
+            "--endpoint",
+            &s.url,
+            "clone",
+            "demo",
+            "app",
+            "--line",
+            "batch-1",
+        ])
+        .assert()
+        .success();
+    let app = dir.path().join("app");
+    fs::write(app.join("README.md"), "batch\n").unwrap();
+    json_run(&app, &["commit", "-m", "batch work"]);
+    let landed = json_run(&app, &["land"]);
+    assert_valid("land", &landed);
+    let after = json_out(outside(&["--json", "line", "list"]).success().get_output());
+    assert_eq!(after["lines"][0]["version"], json!(2));
+    assert_eq!(after["lines"][2], list["lines"][2], "main did not move");
+}
