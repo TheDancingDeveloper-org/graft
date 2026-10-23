@@ -59,8 +59,8 @@ jobs:
 
   # Attests from a job that never checks out or runs the branch's code. It
   # holds the only `id-token: write` in this workflow, takes each result from
-  # `needs` (not from anything the check wrote), and keeps the OIDC token and
-  # the graft token in this step's shell variables, masked.
+  # `needs` (not from anything the check wrote), and keeps the OIDC token in
+  # this step's shell variables, masked, and the graft token in a 0600 file.
   #
   # The graft server maps the job's commit (the OIDC `sha` claim) to the
   # changeset the mirror exported for it and mints a token for that changeset
@@ -69,15 +69,32 @@ jobs:
   attest:
     needs: [build, test]
     if: ${{ !cancelled() }}
-    # EDIT: a runner the check jobs cannot modify (an ephemeral runner, or a
-    # separate runner group). On a shared persistent host, branch code could
-    # replace `graft`, `curl` or `jq` before this job runs.
-    runs-on: [self-hosted]
+    # A GitHub-hosted runner: fresh for every job, so nothing the check jobs
+    # ran can have replaced `graft`, `curl` or `jq` here. The graft endpoint
+    # must be reachable from it. If you move this to a self-hosted runner, it
+    # must be ephemeral or in a runner group the check jobs cannot use.
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
     steps:
+      # EDIT: where to fetch the graft CLI, and its checksum. Pinning the
+      # checksum keeps a changed download from running with `id-token`.
+      - name: install graft
+        env:
+          GRAFT_CLI_URL: https://example.com/releases/graft-x86_64-linux
+          GRAFT_CLI_SHA256: 0000000000000000000000000000000000000000000000000000000000000000
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/graft-bin"
+          mkdir -p "$bin"
+          curl -fsSL --max-time 120 -o "$bin/graft" "$GRAFT_CLI_URL"
+          echo "$GRAFT_CLI_SHA256  $bin/graft" | sha256sum -c -
+          chmod 0755 "$bin/graft"
+          echo "$bin" >> "$GITHUB_PATH"
+
       - name: attest
         env:
           NEEDS: ${{ toJSON(needs) }}
@@ -110,10 +127,13 @@ jobs:
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${query}" | jq -r '.value')"
           echo "::add-mask::$jwt"
 
-          GRAFT_TOKEN="$(printf '%s' "$jwt" | graft --endpoint "$GRAFT_ENDPOINT" \
-            ci exchange --provider github --changeset "$changeset")"
-          echo "::add-mask::$GRAFT_TOKEN"
-          export GRAFT_TOKEN
+          # The graft token goes to a private file and is read from there by
+          # `--token-file`: never stdout, an argument or the environment.
+          umask 077
+          token_file="$(mktemp "$RUNNER_TEMP/graft-token.XXXXXX")"
+          trap 'rm -f "$token_file"' EXIT
+          printf '%s' "$jwt" | graft --endpoint "$GRAFT_ENDPOINT" \
+            ci exchange --provider github --changeset "$changeset" --out "$token_file"
           unset jwt
 
           failed=0
@@ -121,15 +141,13 @@ jobs:
             name="${check_name[$job]:-}"
             [ -n "$name" ] || { echo "::error::no check name for job $job"; failed=1; continue; }
             case "$result" in
-              success) status=passed ;;
-              failure) status=failed; failed=1 ;;
+              success) result_flag=--pass ;;
+              failure) result_flag=--fail; failed=1 ;;
               *) echo "::warning::$job is $result; not attested"; failed=1; continue ;;
             esac
-            graft --endpoint "$GRAFT_ENDPOINT" --repo "$GRAFT_REPO" attest \
-              --changeset "$changeset" \
-              --check "$name" \
-              --status "$status" \
-              --url "$RUN_URL"
+            graft --endpoint "$GRAFT_ENDPOINT" --repo "$GRAFT_REPO" \
+              --token-file "$token_file" attest "$changeset" \
+              --check "$name" "$result_flag" --url "$RUN_URL"
           done < <(printf '%s' "$NEEDS" | jq -r 'to_entries[] | "\(.key) \(.value.result)"')
 
           # The Actions UI shows the real result, not only the attestation.
