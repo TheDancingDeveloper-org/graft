@@ -8,7 +8,7 @@
 //! server has accepted its changeset, so a restart re-walks at most the batch
 //! that was in flight, and the server answers those retries idempotently.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use graft_git::map::{ImportedCommit, MirrorMap, RawTree};
@@ -165,6 +165,7 @@ pub struct SwitchRecord {
 /// The mirror DB. One per mirrored graft repository.
 pub struct MirrorDb {
     conn: Mutex<Connection>,
+    path: PathBuf,
 }
 
 impl std::fmt::Debug for MirrorDb {
@@ -204,7 +205,13 @@ impl MirrorDb {
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         Ok(MirrorDb {
             conn: Mutex::new(conn),
+            path: path.to_owned(),
         })
+    }
+
+    /// The file this DB was opened from.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
