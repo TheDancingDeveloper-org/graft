@@ -126,7 +126,7 @@ What it does:
   | Check | Command |
   |---|---|
   | `ci/fmt` | `cargo fmt --all -- --check` |
-  | `ci/clippy` | `cargo clippy --workspace --exclude rtbit-desktop --all-targets --no-default-features --features default-tls -- -D warnings` |
+  | `ci/clippy` | `cargo clippy --workspace --exclude rtbit-desktop --no-default-features --features default-tls -- -D warnings` |
   | `ci/test` | `cargo test --workspace --exclude rtbit-desktop --locked --no-default-features --features default-tls` |
 
   It posts `Attest` for each, passed or failed. As in a CI job, a check
