@@ -133,6 +133,42 @@ pub trait Forge: Send + Sync {
     fn token(&self) -> impl Future<Output = Result<SecretToken, ForgeError>> + Send;
 }
 
+/// An open PR as the PR import reads it (`docs/design.md` §11.3, mode B).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenPull {
+    /// The PR number.
+    pub number: u64,
+    /// Its web address.
+    pub url: String,
+    /// The head commit (40-hex).
+    pub head_sha: String,
+    /// The head branch's name (in whichever repository holds it).
+    pub head_ref: String,
+    /// The branch it merges into.
+    pub base_ref: String,
+}
+
+/// The calls the PR import needs from GitHub.
+pub trait PullSource: Send + Sync {
+    /// Open PRs into `base`, oldest first, at most `limit` of them.
+    fn open_pulls(
+        &self,
+        base: &str,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<OpenPull>, ForgeError>> + Send;
+    /// Whether PR `number` is approved: some reviewer's latest review
+    /// approves it and none requests changes.
+    fn approved(&self, number: u64) -> impl Future<Output = Result<bool, ForgeError>> + Send;
+    /// Reads PR `number`.
+    fn pull(&self, number: u64) -> impl Future<Output = Result<Pull, ForgeError>> + Send;
+    /// Comments `comment` on PR `number`, then closes it.
+    fn close_pull(
+        &self,
+        number: u64,
+        comment: &str,
+    ) -> impl Future<Output = Result<(), ForgeError>> + Send;
+}
+
 /// Keeps a repository owner or name to what GitHub accepts.
 fn check_slug(what: &str, s: &str) -> Result<(), MirrorError> {
     let ok = !s.is_empty()
@@ -513,6 +549,116 @@ impl<C: CredentialProvider> Forge for HttpForge<C> {
     }
 }
 
+#[derive(Deserialize)]
+struct RawOpenPull {
+    number: u64,
+    html_url: String,
+    head: RawRef,
+    base: RawRef,
+}
+
+#[derive(Deserialize)]
+struct RawRef {
+    sha: String,
+    #[serde(rename = "ref")]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct RawReview {
+    #[serde(default)]
+    user: Option<RawUser>,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct RawUser {
+    id: u64,
+}
+
+/// Whether reviews (oldest first) approve: each reviewer's latest deciding
+/// review counts, a comment does not change it.
+fn reviews_approve(reviews: &[RawReview]) -> bool {
+    let mut latest: Vec<(u64, &str)> = Vec::new();
+    for r in reviews {
+        let Some(user) = &r.user else { continue };
+        let state = r.state.as_str();
+        if !matches!(state, "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED") {
+            continue;
+        }
+        match latest.iter_mut().find(|(id, _)| *id == user.id) {
+            Some(slot) => slot.1 = state,
+            None => latest.push((user.id, state)),
+        }
+    }
+    latest.iter().any(|(_, s)| *s == "APPROVED")
+        && !latest.iter().any(|(_, s)| *s == "CHANGES_REQUESTED")
+}
+
+impl<C: CredentialProvider> PullSource for HttpForge<C> {
+    async fn open_pulls(&self, base: &str, limit: u32) -> Result<Vec<OpenPull>, ForgeError> {
+        let query = [
+            ("state", "open".to_owned()),
+            ("base", base.to_owned()),
+            ("sort", "created".to_owned()),
+            ("direction", "asc".to_owned()),
+            ("per_page", limit.clamp(1, 100).to_string()),
+        ];
+        let path = format!("{}/pulls", self.repo_path());
+        let v = self.send(reqwest::Method::GET, &path, &query, None).await?;
+        let raw: Vec<RawOpenPull> = serde_json::from_value(v).map_err(|_| {
+            ForgeError::Refused("GitHub's pull list has an unexpected shape".into())
+        })?;
+        let mut out = Vec::with_capacity(raw.len());
+        for p in raw {
+            if !is_sha(&p.head.sha) {
+                return Err(ForgeError::Refused(
+                    "GitHub gave a malformed commit id".into(),
+                ));
+            }
+            out.push(OpenPull {
+                number: p.number,
+                url: p.html_url,
+                head_sha: p.head.sha,
+                head_ref: clean(&p.head.name, MESSAGE_CHARS),
+                base_ref: clean(&p.base.name, MESSAGE_CHARS),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn approved(&self, number: u64) -> Result<bool, ForgeError> {
+        let path = format!("{}/pulls/{number}/reviews", self.repo_path());
+        let v = self
+            .send(
+                reqwest::Method::GET,
+                &path,
+                &[("per_page", "100".to_owned())],
+                None,
+            )
+            .await?;
+        let raw: Vec<RawReview> = serde_json::from_value(v)
+            .map_err(|_| ForgeError::Refused("GitHub's reviews have an unexpected shape".into()))?;
+        Ok(reviews_approve(&raw))
+    }
+
+    async fn pull(&self, number: u64) -> Result<Pull, ForgeError> {
+        self.get_pull(number).await
+    }
+
+    async fn close_pull(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        let path = format!("{}/issues/{number}/comments", self.repo_path());
+        let body = json!({ "body": comment });
+        self.send(reqwest::Method::POST, &path, &[], Some(&body))
+            .await?;
+        let path = format!("{}/pulls/{number}", self.repo_path());
+        let body = json!({ "state": "closed" });
+        self.send(reqwest::Method::PATCH, &path, &[], Some(&body))
+            .await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +668,26 @@ mod tests {
     fn cleaning_drops_control_characters_and_caps() {
         assert_eq!(clean("a\u{7}b\nc", 10), "abc");
         assert_eq!(clean("abcdef", 3), "abc");
+    }
+
+    #[test]
+    fn the_latest_review_of_each_reviewer_decides() {
+        let r = |id: u64, state: &str| RawReview {
+            user: Some(RawUser { id }),
+            state: state.to_owned(),
+        };
+        assert!(!reviews_approve(&[]));
+        assert!(reviews_approve(&[r(1, "APPROVED"), r(1, "COMMENTED")]));
+        assert!(!reviews_approve(&[
+            r(1, "APPROVED"),
+            r(2, "CHANGES_REQUESTED")
+        ]));
+        assert!(reviews_approve(&[
+            r(2, "CHANGES_REQUESTED"),
+            r(1, "APPROVED"),
+            r(2, "APPROVED")
+        ]));
+        assert!(!reviews_approve(&[r(1, "APPROVED"), r(1, "DISMISSED")]));
     }
 
     #[test]

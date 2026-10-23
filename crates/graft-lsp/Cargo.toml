@@ -13,4 +13,13 @@ workspace = true
 
 [dependencies]
 graft-client.workspace = true
+graft-model.workspace = true
 graft-proto.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+graft-engine.workspace = true
+graft-store = { workspace = true, features = ["testkit"] }
+graft-testkit.workspace = true
+tempfile.workspace = true

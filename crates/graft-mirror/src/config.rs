@@ -25,6 +25,7 @@ use graft_git::GitSha;
 use serde::Deserialize;
 
 use crate::MirrorError;
+use crate::export::ExportConfig;
 use crate::follow::{FollowConfig, FollowLine, POLL_INTERVAL};
 
 /// The parsed file.
@@ -65,6 +66,23 @@ pub struct FileConfig {
     /// it the mirror follows and imports but does not bridge.
     #[serde(default)]
     pub github: Option<GithubFile>,
+    /// Graft-primary export settings (`graft-mirror export --config`).
+    #[serde(default)]
+    pub export: Option<ExportFile>,
+}
+
+/// Graft-primary export settings.
+///
+/// ```toml
+/// [export]
+/// import_pulls = true   # import GitHub PRs as drafts; needs [github]
+/// ```
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportFile {
+    /// Import open GitHub PRs as drafts in `github-pr/<n>` workspaces.
+    #[serde(default)]
+    pub import_pulls: bool,
 }
 
 /// The PR bridge's GitHub repository and how it authenticates.
@@ -212,6 +230,9 @@ impl FileConfig {
                 return Err(bad("[github] needs an owner and a repo"));
             }
         }
+        if config.export.as_ref().is_some_and(|e| e.import_pulls) && config.github.is_none() {
+            return Err(bad("[export] import_pulls needs a [github] section"));
+        }
         Ok(config)
     }
 
@@ -222,18 +243,32 @@ impl FileConfig {
         FileConfig::parse(&text)
     }
 
+    /// The followed (or exported) lines: each upstream branch and its graft
+    /// line.
+    pub fn lines(&self) -> Vec<FollowLine> {
+        self.lines
+            .iter()
+            .map(|l| FollowLine {
+                branch: l.branch.clone(),
+                line: l.line.clone().unwrap_or_else(|| l.branch.clone()),
+            })
+            .collect()
+    }
+
+    /// The export settings.
+    pub fn export(&self) -> ExportConfig {
+        let mut config = ExportConfig::new(self.repo.clone(), self.lines());
+        if let Some(secs) = self.poll_interval_secs {
+            config.interval = Duration::from_secs(secs);
+        }
+        config
+    }
+
     /// The follow settings.
     pub fn follow(&self) -> Result<FollowConfig, MirrorError> {
         Ok(FollowConfig {
             repo: self.repo.clone(),
-            lines: self
-                .lines
-                .iter()
-                .map(|l| FollowLine {
-                    branch: l.branch.clone(),
-                    line: l.line.clone().unwrap_or_else(|| l.branch.clone()),
-                })
-                .collect(),
+            lines: self.lines(),
             allow_lossy: parse_shas(&self.allow_lossy)?,
             batch: self.batch.unwrap_or(256).max(1),
             interval: self
@@ -310,6 +345,11 @@ db = "/var/lib/m.sqlite"
         assert!(FileConfig::parse(&line("a b")).is_err());
         let twice = format!("{}{}", line("main"), "[[lines]]\nbranch = \"main\"\n");
         assert!(FileConfig::parse(&twice).is_err());
+        let pulls = format!("{}[export]\nimport_pulls = true\n", line("main"));
+        assert!(
+            FileConfig::parse(&pulls).is_err(),
+            "PR import without [github]"
+        );
         let unknown = format!("{BASE}token = \"secret\"\n[[lines]]\nbranch = \"main\"\n");
         assert!(FileConfig::parse(&unknown).is_err(), "no inline token");
     }

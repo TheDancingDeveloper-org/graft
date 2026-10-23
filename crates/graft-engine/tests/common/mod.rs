@@ -24,6 +24,8 @@ use graft_store::{MetaStore, ObjectStore, RepoId, StoreError, StoreResult, Store
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
 use graft_testkit::clock::FakeClock;
 
+pub mod race;
+
 struct Unpark(thread::Thread);
 
 impl Wake for Unpark {
@@ -140,6 +142,18 @@ pub struct Fixture<M> {
     pub objects: Faulty,
     pub clock: Arc<FakeClock>,
     _dir: Option<TempDir>,
+}
+
+impl<M: MetaStore> Fixture<M> {
+    /// The same fixture with its engine rebuilt by `f` (to install hooks).
+    pub fn map_engine(self, f: impl FnOnce(Engine<M, Faulty>) -> Engine<M, Faulty>) -> Self {
+        Fixture {
+            engine: f(self.engine),
+            objects: self.objects,
+            clock: self.clock,
+            _dir: self._dir,
+        }
+    }
 }
 
 pub fn memory() -> Fixture<MemoryStore> {

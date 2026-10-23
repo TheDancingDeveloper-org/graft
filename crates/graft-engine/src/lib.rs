@@ -5,6 +5,10 @@
 //! G2.7 (rebase and sync), G3.1 (land and policies), G3.7 (revert, stacks,
 //! line merge).
 //!
+//! G3.1 adds `Land` and `Attest` with the `direct`, `attested` and
+//! `queued` policies and path rules ([`policy`]); the land loop is in
+//! `land.rs`.
+//!
 //! G2.7 adds file-level `Rebase` and `Sync` ([`rebase`]).
 //!
 //! G2.1 adds the workspace API (`OpenWorkspace`, `GetWorkspace`,
@@ -36,6 +40,7 @@ mod errors;
 mod gc;
 mod history;
 pub mod journal;
+mod land;
 mod objects;
 pub mod policy;
 mod read;
@@ -46,6 +51,10 @@ mod workspace;
 mod write;
 
 pub use diff::MAX_CONTEXT;
+pub use land::{
+    ATTESTATION, LAND_RESULT, MAX_ATTEST_URL, MAX_CHECK_NAME, REBASED_HOPS, Sleeper, ThreadSleeper,
+};
+pub use policy::{LandHooks, LineConfig};
 pub use rebase::REBASED_FROM;
 pub use refs::MAX_REF_NAME;
 pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
@@ -62,6 +71,17 @@ pub struct EngineConfig {
     pub max_inline_bytes: u64,
     /// Land attempt budget.
     pub land_attempts: u32,
+    /// Land-attempt lease on a candidate, ms; longer than any land deadline.
+    pub land_lease_ms: u64,
+    /// Land backoff base after a lost CAS, ms.
+    pub land_backoff_base_ms: u64,
+    /// Land backoff cap, ms.
+    pub land_backoff_cap_ms: u64,
+    /// Per-line land configuration.
+    pub lines: Vec<LineConfig>,
+    /// The configuration of lines `lines` does not name (its `name` is
+    /// replaced by the line's).
+    pub default_line: LineConfig,
     /// Default workspace lease, ms.
     pub default_lease_ms: u64,
     /// Longest workspace lease a request may ask for, ms.
@@ -108,6 +128,12 @@ impl Default for EngineConfig {
             max_changes: 100_000,
             max_inline_bytes: 4 << 20,
             land_attempts: 16,
+            land_lease_ms: 10 * 60 * 1000,
+            land_backoff_base_ms: 2,
+            land_backoff_cap_ms: 200,
+            // Decision D6.
+            lines: vec![LineConfig::d6("main")],
+            default_line: LineConfig::direct(""),
             default_lease_ms: 2 * 3600 * 1000,
             max_lease_ms: 24 * 3600 * 1000,
             max_stack: 1000,
@@ -137,6 +163,8 @@ pub struct Engine<M, O> {
     objects: Arc<O>,
     clock: Arc<dyn Clock>,
     config: EngineConfig,
+    hooks: Arc<dyn LandHooks>,
+    sleeper: Arc<dyn Sleeper>,
 }
 
 impl<M, O> Engine<M, O>
@@ -153,7 +181,21 @@ where
             objects,
             clock,
             config,
+            hooks: Arc::new(policy::NoHooks),
+            sleeper: Arc::new(ThreadSleeper),
         }
+    }
+
+    /// Installs the CI hooks `Land` and `Attest` call.
+    pub fn with_land_hooks(mut self, hooks: Arc<dyn LandHooks>) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// Installs the sleeper the land backoff uses.
+    pub fn with_sleeper(mut self, sleeper: Arc<dyn Sleeper>) -> Self {
+        self.sleeper = sleeper;
+        self
     }
 
     /// The configuration.
@@ -253,11 +295,11 @@ where
     async fn revert(&self, _cx: &CallContext, _req: Revert) -> ApiResult<ChangesetId> {
         todo!("G3.7")
     }
-    async fn land(&self, _cx: &CallContext, _req: Land) -> ApiResult<Landed> {
-        todo!("G3.1")
+    async fn land(&self, cx: &CallContext, req: Land) -> ApiResult<Landed> {
+        self.do_land(cx, req).await
     }
-    async fn attest(&self, _cx: &CallContext, _req: Attest) -> ApiResult<()> {
-        todo!("G3.1")
+    async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
+        self.do_attest(cx, req).await
     }
     async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
         self.do_watch(cx, req).await

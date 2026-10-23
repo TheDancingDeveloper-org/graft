@@ -21,7 +21,13 @@ graft-store.workspace = true
 imara-diff.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 graft-store = { workspace = true, features = ["testkit"] }
+graft-store-fs.workspace = true
 graft-store-sqlite.workspace = true
 graft-testkit.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "land"
+harness = false

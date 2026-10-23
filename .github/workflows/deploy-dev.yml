@@ -1,0 +1,37 @@
+name: deploy-dev
+
+# Deploy the graft-dev stack (deploy/) on the graft-dev VM, from the runner
+# that lives on that VM (labels self-hosted, graft-dev). It runs deploy/up.sh,
+# which pulls the image pinned in deploy/image.env and brings the stack up.
+#
+# - push to main touching deploy/**: a repin of deploy/image.env or a config
+#   change deploys itself once it lands.
+# - workflow_dispatch: redeploy by hand (for example after a VM rebuild).
+# Not a required check. Secrets stay on the VM under /etc/graft; this
+# workflow passes none to the script.
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/**
+      - .github/workflows/deploy-dev.yml
+  workflow_dispatch:
+
+# The image is public on GHCR, so the pull needs no registry login.
+permissions:
+  contents: read
+
+# One deploy at a time, in order; never cancel one half-way.
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [graft-dev]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy
+        run: deploy/up.sh

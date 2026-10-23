@@ -48,7 +48,7 @@ fn view(r: RefRecord) -> RefView {
 }
 
 /// A ref name: 1 to 255 bytes, no whitespace or control characters.
-fn check_ref_name(name: &str) -> Result<(), ApiError> {
+pub(crate) fn check_ref_name(name: &str) -> Result<(), ApiError> {
     let ok = !name.is_empty()
         && name.len() <= MAX_REF_NAME
         && !name.chars().any(|c| c.is_whitespace() || c.is_control());
@@ -224,7 +224,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// `new`: line positions and path rows for every changeset the move
     /// adds, and their records marked landed. Refuses a move that is not a
     /// first-parent fast-forward, after O(log distance) skip-list reads.
-    async fn line_rows(
+    pub(crate) async fn line_rows(
         &self,
         repo: RepoId,
         line: &str,
@@ -276,6 +276,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 });
                 record.state = RecordState::Landed;
                 record.holder = None;
+                record.superseded_by = None;
                 writes.push(Write::SetRecord {
                     id: cs.id(),
                     record,

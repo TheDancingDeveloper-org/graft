@@ -51,23 +51,23 @@ use crate::{Engine, errors, journal};
 pub const REBASED_FROM: &str = "graft.rebased-from";
 
 /// What became of one draft.
-struct Step {
+pub(crate) struct Step {
     /// The draft.
-    from: ChangesetId,
+    pub(crate) from: ChangesetId,
     /// Its successor: the draft itself when its parent did not move, a new
     /// changeset, or `None` when all its changes were already there.
-    to: Option<ChangesetId>,
+    pub(crate) to: Option<ChangesetId>,
 }
 
 /// A planned rebase: nothing is written yet.
-struct Plan {
+pub(crate) struct Plan {
     /// One step per draft, bottom first.
-    steps: Vec<Step>,
+    pub(crate) steps: Vec<Step>,
     /// The changesets to store, bottom first.
-    new: Vec<Changeset>,
+    pub(crate) new: Vec<Changeset>,
     /// The new top: the last successor, or the target when every draft
     /// disappeared.
-    head: ChangesetId,
+    pub(crate) head: ChangesetId,
     /// Its snapshot root.
     head_root: TreeId,
 }
@@ -107,7 +107,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// Plans the rebase of `stack` (bottom first; each draft's first parent
     /// is the one below it) onto `onto`. Reads only; fails with `Conflict`
     /// at the first draft that conflicts.
-    async fn plan(
+    pub(crate) async fn plan(
         &self,
         repo: RepoId,
         stack: &[(ChangesetId, Changeset)],
@@ -242,7 +242,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// The drafts `Rebase` moves for `head`: its first-parent chain down to,
     /// not including, the first landed changeset or `onto`, bottom first.
     /// `head` itself is always moved. At most `max_stack` drafts.
-    async fn chain(
+    pub(crate) async fn chain(
         &self,
         repo: RepoId,
         head: ChangesetId,
