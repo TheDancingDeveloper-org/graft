@@ -10,6 +10,12 @@ This is the visual companion to [design.md](design.md). It shows four things:
 The diagrams are Mermaid, which GitHub renders. Where this page and the design
 disagree, the design wins.
 
+> **Phase note ([D22](decisions.md#d22-phase-1-is-a-git-alternative)).** In
+> phase 1, lines are `direct` and nothing runs CI in the land path. The
+> attester and attestation flows in section 4 are phase 2, built but switched
+> off. Topology 3b (graft-primary `main` with GitHub as the mirror) is not
+> planned; GitHub delivery is the batch PR of 3c (D21).
+
 ---
 
 ## 1. Code layout
