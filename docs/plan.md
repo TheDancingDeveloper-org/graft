@@ -53,6 +53,26 @@ state. In priority order:
 New items follow the work item format below. Each names its crates, and new
 items keep the rule of one area per branch.
 
+### Phase 2 inventory (parked)
+
+Built or raised, and left as it is until the operator starts phase 2. The
+built parts stay in the tree and are tested by CI like everything else, but
+no line in `deploy/server.toml` uses them and the `attester` compose profile
+is off.
+
+| Item | What | State |
+| --- | --- | --- |
+| G3.1 (policy hooks) | `attested` and `queued` gates, `Attest` | built, off |
+| G3.7 (`attest_merged`) | re-attest line-merged results | built, off |
+| G3.8 (WI-2265) | CI integration: OIDC exchange, attest workflow, post-land CI | built, off |
+| G3.8b (WI-2271) | `ExchangeCiToken` RPC and `graft ci exchange` | built, off |
+| WI-2272 | `repo:<r>:attest` scope; `Attest` pinned to its changeset | built, off |
+| WI-2273 | CI exchange commit check from graft-mirror | built, off |
+| WI-2276, WI-2292 | `graft-attester` on graft-dev | built, off |
+| WI-2285 | attester hardening | parked |
+| WI-2293 | attester: a failed `GetWorkspace` stalls the journal read | parked |
+| Auto-revert | the post-land auto-revert bot | not started |
+
 ## How the work is run
 
 ### Work item format
@@ -750,7 +770,7 @@ run at once.
   `attest_merged` forces re-attesting.
 - Test: proptest; concurrency tests reused from G3.1.
 
-**G3.8 CI integration.**
+**G3.8 CI integration.** *Phase 2 under D22: built, switched off.*
 - Crates: `graft-auth` (OIDC exchange), workflow templates in `ci/`
 - Needs: G3.1, G3.3
 - Deliver: exchange GitHub Actions OIDC (and Woodpecker job) tokens for short

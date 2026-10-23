@@ -28,9 +28,11 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
    `g workspace renew` extends its lease if you are idle for long.
 2. **Edit** the files with your normal tools. `g status` lists your changes;
    `g diff` shows them.
-3. **Check** before you commit, with the commands the attester runs. They
-   are rustTorrent CI's Rust job without the Tauri crate `rtbit-desktop` and
-   with only `default-tls`. Cap parallelism on shared hosts:
+3. **Check** before you commit. `trial-1` lands directly (decision D22): no
+   check runs when you land, and GitHub CI runs only on the batch PR, so a
+   broken land breaks the whole batch. Run rustTorrent CI's Rust job
+   yourself, without the Tauri crate `rtbit-desktop` and with only
+   `default-tls`. Cap parallelism on shared hosts:
    ```sh
    export CARGO_BUILD_JOBS=4
    cargo fmt --all -- --check                                                    # ci/fmt
@@ -41,14 +43,15 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
    ```
    For a quick loop, narrow to the crates you touched (`-p <crate>` instead of
    `--workspace --exclude rtbit-desktop`), but run the full commands once
-   before you land: a failure there is attested and blocks the land.
+   before you land.
 4. **Commit** a draft: `g commit -m "<message>" --author-kind agent --meta vogt.work_item=WI-<n>`.
    More edits? Commit again (a stack of drafts), or `g commit --amend`.
    `g stack` lists the drafts; `g stack squash` makes them one.
 5. **Sync** to pick up what others landed: `g sync`. Exit 0 means you are on
    the line tip (your stack is rebased). Exit 3 means conflicts, see below.
 6. **Land**: `g land` (add `--squash` to land the stack as one changeset).
-7. **Wait for the attestation**, see "Land results" for exit 5.
+   Landing is immediate: there is no attestation to wait for. Exit 0 means
+   your change is on `trial-1`.
 
 ## Conflicts (exit 3 from `g sync` or `g land`)
 
@@ -74,26 +77,10 @@ conflicts written into the files:
 | 0 | landed (`landed <id> on trial-1`) | done |
 | 3 | conflict, or `dirty` | resolve as above, then commit and land |
 | 4 | contended (another land won the race) | run `g land` again; `--wait 120` retries longer |
-| 5 | rejected by the line policy | `trial-1` is `attested`: the stack head needs passing `ci/fmt`, `ci/clippy` and `ci/test`. The message names what is missing. Wait for the attester, then run `g land` again. Do not attest checks yourself |
+| 5 | rejected by the line policy | not expected: `trial-1` is `direct`. Report blocked with the message. Do not attest checks yourself |
 | 6 | not authorized (token expired or missing scope) | stop and report blocked |
 | 7 | unavailable / transport error | retry `g land` (it is idempotent); after 3 tries report blocked |
 | 1, 2 | other failure / usage error | read the message; fix the command or report blocked |
-
-### Waiting for the attestation
-
-The attester on graft-dev attests the changeset you committed (it runs the
-three checks above, one draft at a time, so allow tens of minutes). After your last `g commit`, retry
-`g land` about every 60 seconds while it exits 5, for up to 60 minutes (three cargo
-checks on a shared VM are slow):
-
-```sh
-for i in $(seq 60); do g land; rc=$?; [ $rc -ne 5 ] && break; sleep 60; done; echo "exit $rc"
-```
-
-If you amend, squash or re-commit after a sync conflict, the head changes and
-the attester must check it again. If a check fails (not merely missing), fix the
-code, commit, and land again. If it is still exit 5 after 60 minutes, report
-blocked with the last message.
 
 ## Reading history
 

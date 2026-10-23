@@ -881,12 +881,17 @@ base with no way to move.
 
 ### 8.3 Land policies (per line)
 
-The default gate on `main` is an operator decision ([D6](decisions.md#d6-landing-gate)).
+**Phase 1 default ([D22](decisions.md#d22-phase-1-is-a-git-alternative)):
+`direct` on every line, `main` included.** A land is rebase, line merge and
+CAS, and no build, test or check runs in the land path. `attested` and
+`queued` are phase 2. Their code exists, but it is optional and switched off,
+and the gate on `main` that [D6](decisions.md#d6-landing-gate-on-main)
+chose (`attested`, with post-land CI and auto-revert) is the phase 2 design.
 graft supports all of these:
 
 | Policy | Meaning |
 | --- | --- |
-| `direct` | Scion's model. Land at once. Post-land CI and an auto-revert bot catch breakage |
+| `direct` | Scion's model, and the phase 1 default (D22). Land at once. In phase 2, post-land CI and an auto-revert bot catch breakage; in phase 1, under D21, GitHub CI runs on the batch PR |
 | `attested` | The stack's head (pre-rebase) must carry passing attestations for the named checks (`ci/build`, `ci/test`), posted by CI through `Attest { changeset, check, status, url }`. Rebase-only changes onto a newer tip do not need re-attesting. The line-merge result can be required to re-attest (`attest_merged = true`) |
 | `queued` | The merge-queue equivalent. The candidate is tested after rebase and before the CAS, by a CI hook, in batches. This is the slowest option, and it exists for lines that need it (release lines) |
 
