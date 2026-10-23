@@ -11,7 +11,7 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 | `image.env` | `GRAFT_IMAGE`, the image pinned by `@sha256` digest |
 | `server.toml` | graft-server config (`max_token_ttl_s = 2592000`, 30 days) |
 | `mirror.toml` | graft-mirror follows rustTorrent `main` into repo `rusttorrent` |
-| `up.sh` | idempotent deploy: bootstrap secrets, pull, `up -d --wait`, health check |
+| `up.sh` | idempotent deploy: bootstrap secrets, pull, config pre-flight, `up -d --wait`, readiness gate with rollback, health check |
 | `backup/` | backup script, systemd timer, `install.sh`, `restore-rehearsal.sh` (WI-2307) |
 | `monitoring/` | Prometheus alert rules and scrape config for the ops repo (WI-2307) |
 | `attester/Dockerfile` | the trial attester's image (profile `attester`, off by default; see below) |
@@ -184,6 +184,34 @@ Turning it off: remove `GRAFT_ATTESTER=1`, then
 `docker compose --env-file deploy/image.env -f deploy/compose.yml --profile attester rm -sf graft-attester`.
 A push that changes only `crates/graft-attester` does not redeploy (the
 workflow watches `deploy/**`). Run `deploy/up.sh` or the workflow by hand.
+
+## Deploy safety: pre-flight and rollback (WI-2291)
+
+A config can need a newer image than `image.env` pins (after #77,
+graft-server refused an unknown `[[lines]]` field and crash-looped). `up.sh`
+guards both sides of the swap:
+
+- **Pre-flight.** After pulling the pinned image and before touching the
+  running stack, it checks `server.toml` and `mirror.toml` with that image's
+  own binaries, in throwaway containers with no network and no secrets.
+  graft-server loads its config before dispatching, so
+  `graft-server --config server.toml admin` exits 78 on a bad config and 64
+  (usage) on a good one. graft-mirror has no check command; `follow` with no
+  token mounted gets as far as reading the token file only if its config
+  parsed. A failure stops the deploy; the running stack is unchanged.
+- **Readiness gate and rollback.** After `compose up --wait` it waits up to
+  `GRAFT_READY_WAIT` seconds (default 120) for `/readyz`. If the server or
+  the stack doesn't come up, it copies the last good `image.env`,
+  `server.toml` and `mirror.toml` back into the checkout, brings that stack
+  up, and exits non-zero either way.
+- **Last good.** A deploy that passes `/healthz` and `/readyz` records its
+  `image.env`, `server.toml` and `mirror.toml` under
+  `/etc/graft/last-good/` (root-owned, 0644; no secrets). The first deploy
+  with this script has none to roll back to, and says so.
+
+`deploy-dev.yml` fails the run when `up.sh` exits non-zero: an `::error::`
+annotation names the cause, and the job summary says the deploy was refused
+or rolled back.
 
 ## Deploy by hand
 

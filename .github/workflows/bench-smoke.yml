@@ -1,0 +1,84 @@
+name: bench-smoke
+
+# The bench correctness smoke (WI-2305): bench/ at scale 10 against git and
+# the model. It is e2e, so per the delivery process it runs in the merge
+# queue only, not on every pull request push. It gates on the harness exit
+# status (0 pass, 1 correctness failure, 2 harness error), never on timings:
+# timings on a shared CI runner are noise.
+on:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: bench-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  bench-smoke:
+    runs-on: [self-hosted]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Only main writes the cache back (a workflow_dispatch on main seeds
+      # it); the merge queue restores what main saved.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The self-hosted image ships no language runtime.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Quarantine (WI-2314, docs/known-flakes.md): retry the build once
+      # only when the log matches the OOM-kill signature. Remove with the
+      # host fix.
+      - name: build release binaries
+        shell: bash
+        run: |
+          set +e
+          build() {
+            cargo build --release -p graft-cli -p graft-server -p graft-mirror 2>&1 \
+              | tee "$RUNNER_TEMP/build.log"
+            return "${PIPESTATUS[0]}"
+          }
+          build; status=$?
+          if [ "$status" -ne 0 ] && .github/scripts/oom-flake-signature.sh "$RUNNER_TEMP/build.log"; then
+            echo "::warning::known OOM flake (WI-2314): rustc killed with no diagnostic; retrying once"
+            build; status=$?
+          fi
+          exit "$status"
+      # Exit 1 is a correctness failure, 2 a harness error; either fails the
+      # job. The harness drives git too, so give it a commit identity.
+      - name: bench correctness smoke (scale 10)
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: graft-bench
+          GIT_AUTHOR_EMAIL: graft-bench@invalid
+          GIT_COMMITTER_NAME: graft-bench
+          GIT_COMMITTER_EMAIL: graft-bench@invalid
+        run: |
+          cd bench
+          python3 -m graftbench --scales 10 --writers 4 --rounds 2 --iterations 2 \
+            --out "$RUNNER_TEMP/bench"
+      - name: summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/bench/summary.md" ]; then
+            cat "$RUNNER_TEMP/bench/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-smoke
+          path: |
+            ${{ runner.temp }}/bench/summary.md
+            ${{ runner.temp }}/bench/results.json
+          if-no-files-found: warn
