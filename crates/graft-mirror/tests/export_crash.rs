@@ -161,6 +161,41 @@ fn setup(dir: &Path) {
     });
 }
 
+/// Waits until no process but this one works in `dir`. `kill -9` takes the
+/// child, not the `git push`, `receive-pack` or `fast-import` it started:
+/// those finish on their own, and until they do they hold ref locks and can
+/// move GitHub's branch after the child is gone, which would make the next
+/// run's push fail by timing alone. Waits on that state, not on a delay.
+fn wait_for_orphans(dir: &Path) {
+    let me = std::process::id().to_string();
+    let dir = dir.to_str().unwrap();
+    let busy = || {
+        std::fs::read_dir("/proc").unwrap().flatten().any(|p| {
+            let name = p.file_name();
+            let Some(pid) = name
+                .to_str()
+                .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            else {
+                return false;
+            };
+            if pid == me {
+                return false;
+            }
+            let cwd = std::fs::read_link(p.path().join("cwd")).ok();
+            let cmd = std::fs::read(p.path().join("cmdline")).unwrap_or_default();
+            cwd.is_some_and(|c| c.starts_with(dir)) || String::from_utf8_lossy(&cmd).contains(dir)
+        })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while busy() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a process the killed child started never finished"
+        );
+        std::thread::yield_now();
+    }
+}
+
 /// Checks GitHub against graft's line: an exact prefix (all of it when
 /// `complete`), every acknowledged push still on it, and no stop.
 fn verify(dir: &Path, acked_pushes: &[String], complete: bool) {
@@ -211,7 +246,6 @@ fn verify(dir: &Path, acked_pushes: &[String], complete: bool) {
 }
 
 #[test]
-#[ignore = "flaky under CI load, WI-2262"]
 fn kill_9_at_any_point_resumes_with_no_duplicate_and_no_gap() {
     if let Some(c) = crash::child() {
         runtime().block_on(child(&c.dir));
@@ -232,6 +266,7 @@ fn kill_9_at_any_point_resumes_with_no_duplicate_and_no_gap() {
                 .filter_map(|a| a.strip_prefix("P "))
                 .map(str::to_owned),
         );
+        wait_for_orphans(dir.path());
         verify(dir.path(), &acked, false);
     }
     assert!(killed > ITERATIONS / 2, "most children were killed mid-run");

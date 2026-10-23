@@ -1,0 +1,179 @@
+---
+source: crates/graft-cli/tests/land.rs
+expression: table
+---
+== landed (land )
+exit 0
+stdout:
+landed c8a97237d489d on main
+
+stderr:
+
+json:
+{
+  "changed": 0,
+  "landed": "c8a97237d489dda1dc0f65ba920d05eafee4584f25fa2211ae0104eac6f6a915e",
+  "line": "main",
+  "outcome": "landed",
+  "pr_url": null,
+  "rebased": false,
+  "recovered": null
+}
+
+== landed, rebased over a racing land (land )
+exit 0
+stdout:
+landed cb903c3fc636c on main (rebased onto the tip; 1 file updated)
+
+stderr:
+
+json:
+{
+  "changed": 1,
+  "landed": "cb903c3fc636c62ba440787c8c89f5e6a16257e5b2ced0fab76b22ea904d1feb4",
+  "line": "main",
+  "outcome": "landed",
+  "pr_url": null,
+  "rebased": true,
+  "recovered": null
+}
+
+== conflict with a racing land (land )
+exit 3
+stdout:
+
+stderr:
+graft: 1 paths conflict onto ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08
+  conflict README.md
+  nothing changed: run `graft sync` (or `graft land --sync`) to write the conflicts into the files
+
+json:
+{
+  "error": {
+    "conflicts": [
+      {
+        "mode": null,
+        "path": "README.md"
+      }
+    ],
+    "kind": "conflict",
+    "message": "1 paths conflict onto ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
+    "onto": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08"
+  }
+}
+
+== conflict with --sync: the conflicts are written (land --sync)
+exit 3
+stdout:
+
+stderr:
+graft: 1 file conflicts with ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08
+  markers  README.md
+  edit the files (and delete any .graft-conflict sidecar), then `graft commit` and `graft land`
+
+json:
+{
+  "error": {
+    "conflicts": [
+      {
+        "mode": "markers",
+        "path": "README.md"
+      }
+    ],
+    "kind": "conflicted",
+    "message": "1 file conflicts with ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
+    "onto": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08"
+  }
+}
+
+== contended past the wait (land --wait 0)
+exit 4
+stdout:
+
+stderr:
+graft: line main is contended
+  retryable: run `graft land` again, or wait longer with --wait
+
+json:
+{
+  "error": {
+    "kind": "contended",
+    "message": "line main is contended"
+  }
+}
+
+== rejected: no attestation (D6) (land )
+exit 5
+stdout:
+
+stderr:
+graft: rejected by attested: c8a97237d489dda1dc0f65ba920d05eafee4584f25fa2211ae0104eac6f6a915e has no passing ci/build attestation
+
+json:
+{
+  "error": {
+    "kind": "rejected",
+    "message": "rejected by attested: c8a97237d489dda1dc0f65ba920d05eafee4584f25fa2211ae0104eac6f6a915e has no passing ci/build attestation"
+  }
+}
+
+== rejected: a failing attestation (D6) (land )
+exit 5
+stdout:
+
+stderr:
+graft: rejected by attested: ci/test failed on c8a97237d489dda1dc0f65ba920d05eafee4584f25fa2211ae0104eac6f6a915e (https://ci.example/run/7)
+
+json:
+{
+  "error": {
+    "kind": "rejected",
+    "message": "rejected by attested: ci/test failed on c8a97237d489dda1dc0f65ba920d05eafee4584f25fa2211ae0104eac6f6a915e (https://ci.example/run/7)"
+  }
+}
+
+== permission denied: no land scope (land )
+exit 6
+stdout:
+
+stderr:
+graft: permission denied: needs repo:demo:land:main
+
+json:
+{
+  "error": {
+    "kind": "permission_denied",
+    "message": "permission denied: needs repo:demo:land:main"
+  }
+}
+
+== unauthenticated (land )
+exit 6
+stdout:
+
+stderr:
+graft: unauthenticated
+
+json:
+{
+  "error": {
+    "kind": "unauthenticated",
+    "message": "unauthenticated"
+  }
+}
+
+== unavailable: the reply was lost after the line moved (land )
+exit 7
+stdout:
+
+stderr:
+graft: unavailable; retry after 0 ms
+  retryable: land is idempotent, so run `graft land` again
+
+json:
+{
+  "error": {
+    "kind": "unavailable",
+    "message": "unavailable; retry after 0 ms"
+  }
+}

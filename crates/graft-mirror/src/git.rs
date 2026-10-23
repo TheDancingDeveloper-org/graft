@@ -43,6 +43,17 @@ pub enum PushOutcome {
     Rejected,
 }
 
+/// Whether a failed push's lowercased stderr says upstream's branch holds
+/// other commits: a lease that no longer matches, or a non-fast-forward.
+/// A `[remote rejected]` for any other reason (a ref lock held by upstream's
+/// own housekeeping, a hook) says nothing about the branch, so it stays an
+/// error for the caller to retry, never a divergence.
+fn is_rejection(stderr: &str) -> bool {
+    stderr.contains("[rejected]")
+        || stderr.contains("stale info")
+        || stderr.contains("non-fast-forward")
+}
+
 /// The local bare mirror of one upstream.
 #[derive(Clone, Debug)]
 pub struct Mirror {
@@ -214,7 +225,7 @@ impl Mirror {
             return Ok(PushOutcome::Pushed);
         }
         let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
-        if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
+        if is_rejection(&stderr) {
             return Ok(PushOutcome::Rejected);
         }
         Err(failed("push", &out))
@@ -248,10 +259,7 @@ impl Mirror {
             return Ok(PushOutcome::Pushed);
         }
         let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
-        if stderr.contains("rejected")
-            || stderr.contains("stale info")
-            || stderr.contains("non-fast-forward")
-        {
+        if is_rejection(&stderr) {
             return Ok(PushOutcome::Rejected);
         }
         Err(failed("push", &out))
