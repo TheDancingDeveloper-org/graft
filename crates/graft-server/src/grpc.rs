@@ -547,7 +547,17 @@ impl pb::repo_service_server::RepoService for Services {
             "CreateChangeset",
             true,
             CreateChangeset,
-            |e, cx, req| e.create_changeset(&cx, req).await,
+            |e, cx, req| {
+                // A commit into a workspace moves its head: owner only.
+                if let Some(name) = &req.workspace {
+                    let ws = WorkspaceRef {
+                        repo: req.repo.clone(),
+                        name: name.clone(),
+                    };
+                    own_workspace(&e, &cx, &ws).await?;
+                }
+                e.create_changeset(&cx, req).await
+            },
             pb::Created::from
         )
     }
