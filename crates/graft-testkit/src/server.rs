@@ -801,7 +801,7 @@ struct Line {
 }
 
 /// A small in-memory repository to serve: [`FakeApi`] holds the objects and
-/// changesets; this adds lines (`ResolveRef`, `ListRefs`), `Diff`, and a
+/// changesets; this adds lines (`ResolveRef`, `ListRefs`, `CreateLine`), `Diff`, and a
 /// model of workspaces, drafts and land (`CreateChangeset`, `Land` and the
 /// `WorkspaceApi`; see the `snapshot_workspaces` module). Other repository
 /// operations answer `Rejected { policy: "fake" }`. Like [`FakeApi`], it
@@ -1146,6 +1146,39 @@ impl RepoApi for SnapshotRepo {
 
     async fn update_ref(&self, _cx: &CallContext, _req: UpdateRef) -> ApiResult<RefView> {
         rejected()
+    }
+
+    /// Forks a line at another line's tip (the fake knows files only
+    /// there); an existing name is a `RefConflict`, as in the engine.
+    async fn create_line(&self, _cx: &CallContext, req: CreateLine) -> ApiResult<RefView> {
+        let mut lines = self.lines.lock().expect("lines");
+        if let Some(l) = lines.get(&req.name) {
+            return Err(ApiError::RefConflict {
+                name: req.name,
+                actual: Some(l.tip),
+            });
+        }
+        let files = lines
+            .values()
+            .find(|l| l.tip == req.from)
+            .map(|l| l.files.clone())
+            .ok_or_else(|| ApiError::NotFound {
+                what: format!("changeset {}", req.from),
+            })?;
+        lines.insert(
+            req.name.clone(),
+            Line {
+                tip: req.from,
+                version: 1,
+                files,
+            },
+        );
+        Ok(RefView {
+            name: req.name,
+            target: req.from,
+            version: 1,
+            kind: RefKind::Line,
+        })
     }
 
     async fn stat(&self, _cx: &CallContext, _req: PathAt) -> ApiResult<EntryView> {

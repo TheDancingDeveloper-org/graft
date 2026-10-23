@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use common::{D6_MAIN, Site};
 use graft_proto::pb;
-use graft_proto::types::{Attest, RefKind, UpdateRef};
+use graft_proto::types::{Attest, CreateLine, RefKind, UpdateRef};
 use serde_json::{Value, json};
 
 /// One POST to `/mcp`. Returns the status, the session id the server names,
@@ -425,4 +425,88 @@ async fn mcp_refuses_writes_by_a_revoked_token_and_still_serves_its_reads() {
     );
     assert!(!failed, "{file}");
     assert_eq!(file["content"], "hello\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graft_line_create_forks_a_line_under_land_or_admin_scope() {
+    // WI-2301: no import workaround; the new line takes the default policy.
+    let site = Site::new("server-line-create", "");
+    let admin = site.mint(&["repo:r:admin"]);
+    let writer = site.mint(&["repo:r:write", "repo:r:land:main"]);
+    let lander = site.mint(&["repo:r:write", "repo:r:land:batch-1"]);
+    let server = site.start();
+
+    let mut c = server.clients(Some(&admin)).await;
+    c.create_repo("r").await.expect("create");
+    let files = BTreeMap::from([("README.md".to_owned(), b"hello\n".to_vec())]);
+    let root = c
+        .commit("r", None, &BTreeMap::new(), &files, 0)
+        .await
+        .expect("root");
+    c.set_line("r", "main", root.id).await.expect("main");
+
+    // Over gRPC, the admin forks a line; a second create is refused.
+    let made = c
+        .repo
+        .create_line(pb::CreateLineRequest::from(CreateLine {
+            repo: "r".into(),
+            name: "rel".into(),
+            from: root.id,
+        }))
+        .await
+        .expect("grpc create")
+        .into_inner();
+    assert_eq!(made.version, 1);
+    let again = c
+        .repo
+        .create_line(pb::CreateLineRequest::from(CreateLine {
+            repo: "r".into(),
+            name: "rel".into(),
+            from: root.id,
+        }))
+        .await;
+    assert!(again.is_err(), "{again:?}");
+
+    // Over MCP, land on another line is not enough.
+    let (failed, refused) = Session::open(server.addr, &writer).call(
+        "graft_line_create",
+        json!({"repo": "r", "name": "batch-1", "from": "main"}),
+    );
+    assert!(failed);
+    assert_eq!(refused["kind"], "permission_denied");
+
+    let land = Session::open(server.addr, &lander);
+    let (failed, created) = land.call(
+        "graft_line_create",
+        json!({"repo": "r", "name": "batch-1", "from": "main"}),
+    );
+    assert!(!failed, "{created}");
+    assert_eq!(created["name"], "batch-1");
+    assert_eq!(created["target"], root.id.to_string());
+    assert_eq!(created["version"], 1);
+    let (failed, exists) = land.call(
+        "graft_line_create",
+        json!({"repo": "r", "name": "batch-1", "from": "main"}),
+    );
+    assert!(failed);
+    assert_eq!(exists["kind"], "ref_conflict");
+
+    // A land on the new line works.
+    let (failed, opened) = land.call(
+        "graft_workspace",
+        json!({"repo": "r", "action": "open", "line": "batch-1"}),
+    );
+    assert!(!failed, "{opened}");
+    let ws = opened["workspace"]["name"].as_str().unwrap().to_owned();
+    let (failed, committed) = land.call(
+        "graft_commit",
+        json!({
+            "repo": "r", "workspace": ws, "message": "batch",
+            "files": [{"path": "README.md", "content": "batch\n"}],
+        }),
+    );
+    assert!(!failed, "{committed}");
+    let (failed, landed) = land.call("graft_land", json!({"repo": "r", "workspace": ws}));
+    assert!(!failed, "{landed}");
+    assert_eq!(landed["outcome"], "landed");
 }

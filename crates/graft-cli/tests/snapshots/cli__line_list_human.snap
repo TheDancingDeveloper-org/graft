@@ -1,0 +1,6 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: text(human.get_output())
+---
+main                     ceb9d51a431ef  v3
+side                     ceb9d51a431ef  v1

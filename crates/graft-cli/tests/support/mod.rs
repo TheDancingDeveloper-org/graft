@@ -220,6 +220,10 @@ impl RepoApi for Fixture {
         self.repo.update_ref(cx, req).await
     }
 
+    async fn create_line(&self, cx: &CallContext, req: CreateLine) -> ApiResult<RefView> {
+        self.repo.create_line(cx, req).await
+    }
+
     async fn stat(&self, _cx: &CallContext, req: PathAt) -> ApiResult<EntryView> {
         let (kind, id) = self
             .entry(req.at, &req.path)

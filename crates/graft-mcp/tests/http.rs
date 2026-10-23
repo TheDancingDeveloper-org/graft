@@ -98,6 +98,7 @@ async fn the_service_serves_tools_over_loopback_http() {
             "graft_commit",
             "graft_diff",
             "graft_land",
+            "graft_line_create",
             "graft_log",
             "graft_ls",
             "graft_read",
@@ -112,6 +113,7 @@ async fn the_service_serves_tools_over_loopback_http() {
         let writes = [
             "graft_commit",
             "graft_land",
+            "graft_line_create",
             "graft_sync",
             "graft_workspace",
         ];

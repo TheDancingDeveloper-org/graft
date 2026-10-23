@@ -78,7 +78,11 @@ fn create_then_list_then_land_on_the_new_line<M: MetaStore>(f: &Fixture<M>) {
     );
     let entry = r.journal().pop().expect("journalled");
     assert_eq!(entry.kind, "RefMoved");
-    assert!(entry.body.contains("\"name\":\"batch-1\""), "{}", entry.body);
+    assert!(
+        entry.body.contains("\"name\":\"batch-1\""),
+        "{}",
+        entry.body
+    );
     assert!(entry.body.contains("\"old\":null"), "{}", entry.body);
 
     // A land on the new line takes the default (direct) policy and moves

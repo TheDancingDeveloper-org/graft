@@ -16,7 +16,10 @@ use graft_model::{
 use graft_proto::{
     ApiError, CallContext, Frame, PrincipalKind,
     api::{RepoApi, WorkspaceApi},
-    types::{CreateChangeset, Land, Landed, MergeMode, OpenWorkspace, WorkspaceRef, WorkspaceView},
+    types::{
+        CreateChangeset, CreateLine, Land, Landed, MergeMode, OpenWorkspace, WorkspaceRef,
+        WorkspaceView,
+    },
 };
 use rmcp::{
     ErrorData, RoleServer, handler::server::wrapper::Parameters, model::CallToolResult,
@@ -174,6 +177,18 @@ pub struct LandArgs {
     pub merge: Option<MergeArg>,
 }
 
+/// Arguments of `graft_line_create`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LineCreateArgs {
+    /// Repository name.
+    pub repo: String,
+    /// The new line's name.
+    pub name: String,
+    /// Where the line starts: a changeset id or a ref name.
+    pub from: String,
+}
+
 /// What `graft_workspace` does.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -298,6 +313,34 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             "files": files,
             "lsn": created.lsn,
             "state": state_name(created.state),
+        }))
+    }
+
+    async fn line_create(
+        &self,
+        cx: &CallContext,
+        args: LineCreateArgs,
+    ) -> Result<CallToolResult, ToolError> {
+        check_name("repo", &args.repo)?;
+        check_name("name", &args.name)?;
+        check_name("from", &args.from)?;
+        let from = self.resolve(cx, &args.repo, &args.from).await?;
+        let view = self
+            .api
+            .create_line(
+                cx,
+                CreateLine {
+                    repo: args.repo,
+                    name: args.name,
+                    from,
+                },
+            )
+            .await
+            .map_err(ToolError::Api)?;
+        bounded(json!({
+            "name": view.name,
+            "target": view.target.to_string(),
+            "version": view.version,
         }))
     }
 
@@ -563,6 +606,29 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         Ok(respond(async {
             let cx = self.call_context(&ctx)?;
             self.land(&cx, args).await
+        })
+        .await)
+    }
+
+    #[tool(
+        name = "graft_line_create",
+        description = "Fork a new line at a changeset (an id or a ref name). Never overwrites: an existing line is a ref_conflict naming its target. Needs land on the new line, or admin.",
+        annotations(
+            title = "Create line",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn graft_line_create(
+        &self,
+        Parameters(args): Parameters<LineCreateArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(respond(async {
+            let cx = self.call_context(&ctx)?;
+            self.line_create(&cx, args).await
         })
         .await)
     }
