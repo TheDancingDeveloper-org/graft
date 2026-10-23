@@ -23,16 +23,24 @@ shutdown_grace_s = 20
 # optional [default_line] table replaces the direct default. Global to the
 # server for now (not per repository). Keys: crates/graft-server/src/lines.rs.
 #
-# The WI-2270 trial line, enabled by oversight:
-#
-# [[lines]]
-# name = "trial-1"
-# policy = "attested"                      # direct | attested | queued
-# checks = ["ci/fmt", "ci/clippy", "ci/test"]
-# attest_merged = false                    # attested only
-# authority = "graft-primary"              # git-primary | graft-primary
-# # path_rules = [{ prefix = "deploy", checks = ["ci/deploy"], human_review = true }]
-# # post_land = { checks = ["ci/test"], auto_revert = true }
-#
-# [default_line]
-# policy = "direct"
+# `main` is decision D6 as the engine defaults it (attested on ci/build and
+# ci/test, the same checks post-land with auto-revert) but git-primary, so the
+# mirror's main stays what GitHub says. Listed so the authority is explicit.
+[[lines]]
+name = "main"
+policy = "attested"
+checks = ["ci/build", "ci/test"]
+attest_merged = false
+authority = "git-primary"
+post_land = { checks = ["ci/build", "ci/test"], auto_revert = true }
+
+# The WI-2270 trial line (decision D21): agents land here; the attester on this
+# VM (deploy/README.md) provides the checks. The operator merges the batch PR
+# that `graft-mirror pr-batch trial-1` opens. Create the line with
+# trial/create-trial-line.sh.
+[[lines]]
+name = "trial-1"
+policy = "attested"
+checks = ["ci/fmt", "ci/clippy", "ci/test"]
+attest_merged = false
+authority = "graft-primary"

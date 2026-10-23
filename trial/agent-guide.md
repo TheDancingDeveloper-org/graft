@@ -3,7 +3,8 @@
 **This overrides the repository `AGENTS.md` git workflow for the trial.**
 Deliver through graft only. No `git push`. No GitHub PRs. No branches. Do not
 create `g<phase>-…` or `wi-…` branches, do not run `git commit`, and do not
-open or wait for a PR. Your change reaches `main` only through `graft land`.
+open or wait for a PR. Your change reaches the trial line `trial-1` only through `graft land`. You
+cannot land on `main`; the operator merges the finished batch on GitHub.
 
 Your token is `~/.config/graft/trial-N.token` (N is in your brief). Never print
 it, never put it in a command's arguments, never copy it into the checkout.
@@ -21,16 +22,26 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
 
 1. **Clone** into `Active/rt-trial-N` (the N from your brief), and work only there:
    ```sh
-   g clone rusttorrent-trial Active/rt-trial-N && cd Active/rt-trial-N
+   g clone rusttorrent Active/rt-trial-N --line trial-1 && cd Active/rt-trial-N
    ```
    A working copy is also your workspace. `g workspace` shows it, and
    `g workspace renew` extends its lease if you are idle for long.
 2. **Edit** the files with your normal tools. `g status` lists your changes;
    `g diff` shows them.
-3. **Check** before you commit. The repository's own `AGENTS.md`/`CLAUDE.md`
-   (in the clone) names the test commands. Run targeted ones, for example
-   `cargo fmt --all -- --check`, `cargo clippy -p <crate> --all-targets -- -D warnings`
-   and `cargo nextest run -p <crate>` (cap with `CARGO_BUILD_JOBS=4`).
+3. **Check** before you commit, with the commands the attester runs. They
+   are rustTorrent CI's Rust job without the Tauri crate `rtbit-desktop` and
+   with only `default-tls`. Cap parallelism on shared hosts:
+   ```sh
+   export CARGO_BUILD_JOBS=4
+   cargo fmt --all -- --check                                                    # ci/fmt
+   cargo clippy --workspace --exclude rtbit-desktop --all-targets \
+     --no-default-features --features default-tls -- -D warnings                 # ci/clippy
+   cargo test --workspace --exclude rtbit-desktop --locked \
+     --no-default-features --features default-tls                                # ci/test
+   ```
+   For a quick loop, narrow to the crates you touched (`-p <crate>` instead of
+   `--workspace --exclude rtbit-desktop`), but run the full commands once
+   before you land: a failure there is attested and blocks the land.
 4. **Commit** a draft: `g commit -m "<message>" --author-kind agent --meta vogt.work_item=WI-<n>`.
    More edits? Commit again (a stack of drafts), or `g commit --amend`.
    `g stack` lists the drafts; `g stack squash` makes them one.
@@ -60,26 +71,28 @@ conflicts written into the files:
 
 | Exit | Meaning | What to do |
 | --- | --- | --- |
-| 0 | landed (`landed <id> on main`) | done |
+| 0 | landed (`landed <id> on trial-1`) | done |
 | 3 | conflict, or `dirty` | resolve as above, then commit and land |
 | 4 | contended (another land won the race) | run `g land` again; `--wait 120` retries longer |
-| 5 | rejected by the line policy | `main` is `attested`: the stack head needs passing `ci/build` and `ci/test`. The message names what is missing. Wait for CI to attest, then run `g land` again. Do not attest checks yourself |
+| 5 | rejected by the line policy | `trial-1` is `attested`: the stack head needs passing `ci/fmt`, `ci/clippy` and `ci/test`. The message names what is missing. Wait for the attester, then run `g land` again. Do not attest checks yourself |
 | 6 | not authorized (token expired or missing scope) | stop and report blocked |
 | 7 | unavailable / transport error | retry `g land` (it is idempotent); after 3 tries report blocked |
 | 1, 2 | other failure / usage error | read the message; fix the command or report blocked |
 
 ### Waiting for the attestation
 
-CI attests the changeset you committed. After your last `g commit`, retry
-`g land` about every 60 seconds while it exits 5, for up to 30 minutes:
+The attester on graft-dev attests the changeset you committed (it runs the
+three checks above, one draft at a time, so allow tens of minutes). After your last `g commit`, retry
+`g land` about every 60 seconds while it exits 5, for up to 60 minutes (three cargo
+checks on a shared VM are slow):
 
 ```sh
-for i in $(seq 30); do g land; rc=$?; [ $rc -ne 5 ] && break; sleep 60; done; echo "exit $rc"
+for i in $(seq 60); do g land; rc=$?; [ $rc -ne 5 ] && break; sleep 60; done; echo "exit $rc"
 ```
 
 If you amend, squash or re-commit after a sync conflict, the head changes and
-CI must attest it again. If a check fails (not merely missing), fix the
-code, commit, and land again. If it is still exit 5 after 30 minutes, report
+the attester must check it again. If a check fails (not merely missing), fix the
+code, commit, and land again. If it is still exit 5 after 60 minutes, report
 blocked with the last message.
 
 ## Reading history

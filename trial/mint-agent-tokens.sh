@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Mint N agent tokens for the rusttorrent-trial repository on graft-dev and
+# Mint N agent tokens for the rusttorrent repository on graft-dev and
 # store them on THIS machine as ~/.config/graft/trial-<i>.token (mode 0600).
 #
 #   trial/mint-agent-tokens.sh [--session ses_…] [--work-item WI-…] [--ttl SECS] N
 #
-# Each token is kind agent, scopes repo:rusttorrent-trial:read, :write and
-# :land:main, valid for one day by default. Minting runs on the VM through
+# Each token is kind agent, scopes repo:rusttorrent:read, :write and
+# :land:trial-1 (never main), valid for one day by default. Minting runs on the VM through
 # `tailscale ssh sprooty@graft-dev`; the token travels back on the ssh stdout
 # straight into the file. It is never printed, never in argv, never in a
 # variable. Re-running replaces the files with fresh tokens.
@@ -16,7 +16,8 @@ set -euo pipefail
 
 host=${GRAFT_TRIAL_HOST:-sprooty@graft-dev}
 dir=${GRAFT_TRIAL_DIR:-$HOME/.config/graft}
-repo=rusttorrent-trial
+repo=rusttorrent
+line=trial-1
 ttl=86400
 session=
 work_item=
@@ -60,7 +61,7 @@ for i in $(seq 1 "$n"); do
   # shellcheck disable=SC2086 # $extra is validated words, split on purpose
   if ! tailscale ssh "$host" docker exec graft-dev-server graft-server admin token mint \
       --subject "trial-agent-$i" --kind agent \
-      --scope "repo:$repo:read" --scope "repo:$repo:write" --scope "repo:$repo:land:main" \
+      --scope "repo:$repo:read" --scope "repo:$repo:write" --scope "repo:$repo:land:$line" \
       --ttl "$ttl" $extra >"$tmp"; then
     rm -f "$tmp"
     die "mint $i failed (nothing written for it)"
