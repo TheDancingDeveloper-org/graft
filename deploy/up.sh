@@ -103,6 +103,8 @@ elif [ -n "$(find "$token" -mtime "+$renew_days" 2>/dev/null)" ]; then
   log "mirror token is older than $renew_days days: re-minting"
   mint=1
 fi
+# Whether the mirror already runs: only then does a new token need a restart.
+mirror_was_up=$(compose ps -q graft-mirror)
 if [ "$mint" = 1 ]; then
   compose exec -T graft-server graft-server admin token mint \
     --subject graft-mirror-rusttorrent --kind service \
@@ -112,8 +114,8 @@ fi
 
 log "starting the stack"
 compose up -d --wait --remove-orphans
-if [ "$mint" = 1 ]; then
-  # A new token: restart the mirror so it reads it.
+if [ "$mint" = 1 ] && [ -n "$mirror_was_up" ]; then
+  # A new token for a mirror that was running: restart it so it reads it.
   compose up -d --wait --no-deps --force-recreate graft-mirror
 fi
 
