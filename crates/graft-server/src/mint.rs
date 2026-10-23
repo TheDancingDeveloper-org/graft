@@ -99,6 +99,10 @@ pub(crate) fn mint_for(
         };
         graft_auth::authorize(caller, &scope, path)?;
     }
+    // Identity before lifetime: a refused delegation is always a denial,
+    // not a ttl error that depends on how much life the caller has left.
+    let (subject, kind, session, work_item) =
+        identity(caller, req.subject, req.session, req.work_item)?;
     let remaining = u64::try_from(caller_exp_s.saturating_sub(now_s)).unwrap_or(0);
     let limit = max_ttl_s.min(remaining);
     if req.ttl_s > limit {
@@ -107,8 +111,6 @@ pub(crate) fn mint_for(
             max: limit,
         });
     }
-    let (subject, kind, session, work_item) =
-        identity(caller, req.subject, req.session, req.work_item)?;
     mint(
         key,
         MintRequest {
@@ -273,6 +275,33 @@ mod tests {
         assert_eq!(claims.exp, 1_030);
         // A caller whose token has expired mints nothing.
         assert!(mint_for(&key, &vogt, 1_000, ask(&["repo:r:read"], 0), 3600, 1_000).is_err());
+    }
+
+    #[test]
+    fn a_refused_delegation_is_denied_however_much_life_the_caller_has_left() {
+        let key = SigningKey::from_seed(&[7; 32]);
+        let agent = Principal {
+            subject: "ses_1".into(),
+            kind: PrincipalKind::Agent,
+            session: Some("ses_1".into()),
+            work_item: None,
+            scopes: vec!["repo:r:write".into()],
+        };
+        let mut req = ask(&["repo:r:write"], 600);
+        req.subject = "alice".into();
+        req.session = None;
+        req.work_item = None;
+        // Exactly the ttl asked, and a tick short of it: the identity
+        // refusal must not lose to the ttl cap.
+        for caller_exp_s in [1_000 + 600, 1_000 + 599, 1_000 + 1] {
+            assert!(
+                matches!(
+                    mint_for(&key, &agent, caller_exp_s, req.clone(), 3600, 1_000),
+                    Err(ApiError::PermissionDenied { .. })
+                ),
+                "exp {caller_exp_s}"
+            );
+        }
     }
 
     #[test]
