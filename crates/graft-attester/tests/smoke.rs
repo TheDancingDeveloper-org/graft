@@ -802,3 +802,47 @@ async fn a_workspace_reopened_on_another_line_is_not_checked() {
     draft_on(&engine, root, "w", "main", &[("src.txt", "main\n")]).await;
     assert_eq!(a.poll(0).await.expect("poll"), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_amended_draft_is_checked() {
+    let (engine, root) = repo().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_server, mut a, _) = attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    let first = draft(&engine, root, "w", &[("src.txt", "first\n")]).await;
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    let (id, _) = checked(a.run_next().await.expect("run"));
+    assert_eq!(id, first);
+    // `graft commit --amend`: the replacement is created outside the
+    // workspace, so its `ChangesetCreated` says abandoned, and `SetHead`
+    // adopts it, superseding `first`.
+    let amended = commit(&engine, Some(root), &[("src.txt", "amended\n")], None).await;
+    engine
+        .set_head(
+            &admin(),
+            SetHead {
+                workspace: WorkspaceRef {
+                    repo: REPO.to_owned(),
+                    name: "w".to_owned(),
+                },
+                expected: Some(first),
+                new: Some(amended),
+            },
+        )
+        .await
+        .expect("set head");
+    assert_eq!(
+        a.poll(0).await.expect("poll"),
+        1,
+        "the head move queues the amended draft"
+    );
+    let (id, results) = checked(a.run_next().await.expect("run"));
+    assert_eq!(id, amended);
+    assert!(results.iter().all(|r| r.outcome.passed()), "{results:?}");
+    assert!(a.run_next().await.expect("nothing left").is_none());
+    assert!(
+        attestations(&engine)
+            .await
+            .iter()
+            .any(|(c, ..)| *c == amended.to_string())
+    );
+}
