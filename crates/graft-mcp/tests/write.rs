@@ -355,10 +355,10 @@ impl WorkspaceApi for Rig {
 
     async fn get_conflicts(
         &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::GetConflicts,
+        cx: &graft_proto::CallContext,
+        req: graft_proto::types::GetConflicts,
     ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
-        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
+        self.engine.get_conflicts(cx, req).await
     }
 
     async fn resolve(
@@ -868,4 +868,134 @@ async fn working_copy_commits_need_stdio() {
         )
         .await;
     assert_eq!(refused["kind"], "needs_working_copy");
+}
+
+/// Lands `README.md` = `content` on `main` directly, as another writer.
+async fn advance_readme(rig: &Rig, content: &str) -> ChangesetId {
+    let cx = admin();
+    let tip = rig
+        .engine
+        .resolve_ref(
+            &cx,
+            ResolveRef {
+                repo: REPO.into(),
+                name: "main".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .target;
+    let blob = content.as_bytes();
+    let id = rig
+        .engine
+        .create_changeset(
+            &cx,
+            CreateChangeset {
+                repo: REPO.into(),
+                parents: vec![tip],
+                changes: vec![Change::Put {
+                    path: RepoPath::new("README.md").unwrap(),
+                    kind: EntryKind::File,
+                    id: BlobId::hash(blob).0,
+                }],
+                author: Author {
+                    name: "other".into(),
+                    email: "other@example.com".into(),
+                    kind: AuthorKind::Agent,
+                },
+                authored_at: Timestamp {
+                    ms: NOW_MS,
+                    offset_min: 0,
+                },
+                message: "theirs".into(),
+                metadata: Metadata::new(),
+                inline_blobs: vec![Frame::encode(ObjectKind::Blob, blob)],
+                workspace: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    rig.engine
+        .update_ref(
+            &cx,
+            UpdateRef {
+                repo: REPO.into(),
+                name: "main".into(),
+                expected: Some(tip),
+                new: id,
+                kind: RefKind::Line,
+            },
+        )
+        .await
+        .unwrap();
+    id
+}
+
+/// WI-2309: `graft_upstream` on a workspace's drafts, without a working
+/// copy: up to date, a clean line merge, a conflict with its lines, and
+/// nothing moves.
+#[tokio::test]
+async fn upstream_predicts_the_merge_of_a_workspaces_drafts_without_moving_anything() {
+    let (rig, _) = Rig::new().await;
+    let addr = serve(rig.clone()).await;
+    let mut agent = Agent::connect(addr, token("agent-1", WRITER)).await;
+    let ws = agent.open().await;
+    let args = json!({"repo": REPO, "workspace": ws});
+
+    let fresh = agent.ok("graft_upstream", args.clone()).await;
+    assert_eq!(fresh["up_to_date"], true);
+    assert_eq!(fresh["behind"], 0);
+
+    // Mine: line 1. Theirs: line 3. Merges.
+    agent
+        .ok(
+            "graft_commit",
+            json!({
+                "repo": REPO, "workspace": ws, "message": "mine",
+                "files": [{"path": "README.md", "content": "# mine\n\nThe fixture repository.\n"}],
+            }),
+        )
+        .await;
+    advance_readme(&rig, "# r\n\nThe fixture repository, theirs.\n").await;
+    let clean = agent.ok("graft_upstream", args.clone()).await;
+    assert_eq!(clean["behind"], 1);
+    assert_eq!(
+        clean["changed"],
+        json!([{"path": "README.md", "status": "changed"}])
+    );
+    assert_eq!(clean["overlaps"][0]["outcome"], "clean", "{clean}");
+    assert_eq!(clean["clean"], true);
+    assert_eq!(clean["stack_conflict"], Value::Null);
+
+    // Theirs now also rewrites line 1: a conflict there.
+    let tip = advance_readme(&rig, "# theirs\n\nThe fixture repository, theirs.\n").await;
+    let ws_ref = WorkspaceRef {
+        repo: REPO.into(),
+        name: ws.clone(),
+    };
+    let before = rig
+        .engine
+        .get_workspace(&admin(), ws_ref.clone())
+        .await
+        .unwrap();
+    let conflict = agent.ok("graft_upstream", args.clone()).await;
+    let after = rig.engine.get_workspace(&admin(), ws_ref).await.unwrap();
+    assert_eq!((before.base, before.head), (after.base, after.head));
+    assert_eq!(conflict["tip"], tip.to_string());
+    assert_eq!(conflict["behind"], 2);
+    let o = &conflict["overlaps"][0];
+    assert_eq!(o["outcome"], "conflict", "{conflict}");
+    assert_eq!(o["hunks"], json!([[1, 1]]));
+    assert_eq!(conflict["clean"], false);
+    assert_eq!(conflict["stack_conflict"], before.head.unwrap().to_string());
+
+    // Bounded: a limit outside the range is refused.
+    agent
+        .fails(
+            "graft_upstream",
+            json!({"repo": REPO, "workspace": ws, "limit": 1000}),
+        )
+        .await;
+    agent.fails("graft_upstream", json!({"repo": REPO})).await;
 }

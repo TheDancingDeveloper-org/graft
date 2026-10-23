@@ -263,7 +263,9 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             api,
             principal,
             working_copy: None,
-            tool_router: Self::tool_router() + Self::write_tool_router(),
+            tool_router: Self::tool_router()
+                + Self::write_tool_router()
+                + Self::upstream_tool_router(),
         }
     }
 

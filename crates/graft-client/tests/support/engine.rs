@@ -939,10 +939,13 @@ impl WorkspaceApi for EngineRepo {
 
     async fn get_conflicts(
         &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::GetConflicts,
+        cx: &graft_proto::CallContext,
+        req: graft_proto::types::GetConflicts,
     ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
-        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
+        delegate!(self, "GetConflicts", cx, |c| self
+            .engine
+            .get_conflicts(&c, req)
+            .await)
     }
 
     async fn resolve(

@@ -69,6 +69,9 @@
     "unfinished": {
       "description": "An update stopped half way; the next sync or land finishes it.",
       "type": "boolean"
+    },
+    "upstream": {
+      "$ref": "#/$defs/upstream"
     }
   },
   "$defs": {
@@ -90,6 +93,175 @@
             "merged",
             "skipped"
           ]
+        }
+      }
+    },
+    "upstream": {
+      "description": "With --upstream: the line tip against the base, read from the server without moving anything. graft_upstream returns the same shape.",
+      "type": "object",
+      "required": [
+        "line",
+        "workspace",
+        "base",
+        "head",
+        "tip",
+        "up_to_date",
+        "behind",
+        "behind_more",
+        "changed",
+        "next",
+        "overlaps",
+        "overlaps_truncated",
+        "stack_conflict",
+        "uncommitted_checked",
+        "clean"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "line": {
+          "type": "string"
+        },
+        "workspace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "head": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z][0-9a-f]{64}$",
+              "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tip": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "up_to_date": {
+          "type": "boolean"
+        },
+        "behind": {
+          "description": "Changesets on the line after the base, counted up to the limit.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "behind_more": {
+          "type": "boolean"
+        },
+        "changed": {
+          "description": "One page of the files the line changed since the base.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "status"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "changed",
+                  "deleted"
+                ]
+              }
+            }
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overlaps": {
+          "description": "Files you changed that the line changed too, with the predicted line merge (decision D16).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "uncommitted",
+              "outcome",
+              "hunks",
+              "reason"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "uncommitted": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "enum": [
+                  "clean",
+                  "conflict"
+                ]
+              },
+              "hunks": {
+                "description": "Conflicting line ranges in your version, 1-based and inclusive.",
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              },
+              "reason": {
+                "description": "Why there is no line merge, when there is none; `stack` when a draft below conflicts.",
+                "enum": [
+                  "clash",
+                  "kind",
+                  "binary",
+                  "too_large",
+                  "stack",
+                  null
+                ]
+              }
+            }
+          }
+        },
+        "overlaps_truncated": {
+          "type": "boolean"
+        },
+        "stack_conflict": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z][0-9a-f]{64}$",
+              "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uncommitted_checked": {
+          "type": "boolean"
+        },
+        "clean": {
+          "type": "boolean"
         }
       }
     }

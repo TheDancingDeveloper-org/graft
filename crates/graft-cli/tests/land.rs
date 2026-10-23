@@ -683,6 +683,65 @@ fn land_line_merge_still_refuses_edits_to_the_same_line() {
     );
 }
 
+/// WI-2309: `graft status --upstream` predicts the land without moving
+/// anything: an uncommitted edit that merges, then one that conflicts on
+/// the same line, each checked against an immediate land.
+#[test]
+fn status_upstream_predicts_the_land_and_moves_nothing() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    let state = || fs::read_to_string(app.join(".graft/state")).unwrap();
+
+    let fresh = json_run(&app, &["status", "--upstream"]);
+    assert_valid("status", &fresh);
+    assert_eq!(fresh["upstream"]["up_to_date"], json!(true));
+
+    fs::write(app.join("src/lib.rs"), "fn A() {}\nfn b() {}\nfn c() {}\n").unwrap();
+    s.rt.block_on(
+        s.repo
+            .advance(put("src/lib.rs", "fn a() {}\nfn b() {}\nfn C() {}\n")),
+    );
+    let before = (state(), fs::read(app.join("src/lib.rs")).unwrap());
+    let tip = s.rt.block_on(s.repo.tip());
+    let clean = json_run(&app, &["status", "--upstream"]);
+    assert_valid("status", &clean);
+    assert_eq!(before, (state(), fs::read(app.join("src/lib.rs")).unwrap()));
+    assert_eq!(s.rt.block_on(s.repo.tip()), tip);
+    let up = &clean["upstream"];
+    assert_eq!(up["behind"], json!(1));
+    assert_eq!(
+        up["changed"],
+        json!([{"path": "src/lib.rs", "status": "changed"}])
+    );
+    assert_eq!(
+        up["overlaps"],
+        json!([{"path": "src/lib.rs", "uncommitted": true, "outcome": "clean", "hunks": [], "reason": null}])
+    );
+    let text = stdout(&run(&app, &["status", "--upstream"]).success());
+    assert!(text.contains("1 changeset(s) ahead"), "{text}");
+    assert!(text.contains("merges   src/lib.rs (uncommitted)"), "{text}");
+    json_run(&app, &["commit", "-m", "mine"]);
+    let landed = json_run(&app, &["land"]);
+    assert_eq!(landed["outcome"], json!("landed"), "{landed}");
+
+    fs::write(app.join("README.md"), "mine\n").unwrap();
+    s.rt.block_on(s.repo.advance(put("README.md", "theirs\n")));
+    let conflict = json_run(&app, &["status", "--upstream"]);
+    assert_valid("status", &conflict);
+    let o = &conflict["upstream"]["overlaps"][0];
+    assert_eq!(o["outcome"], json!("conflict"), "{conflict}");
+    assert_eq!(o["hunks"], json!([[1, 1]]));
+    assert_eq!(conflict["upstream"]["clean"], json!(false));
+    let text = stdout(&run(&app, &["status", "--upstream"]).success());
+    assert!(
+        text.contains("conflict README.md (uncommitted) lines 1"),
+        "{text}"
+    );
+    json_run(&app, &["commit", "-m", "mine"]);
+    run(&app, &["land"]).code(3);
+}
+
 #[test]
 fn line_create_then_list_then_land_on_the_new_line() {
     let s = serve(Policy::Direct);
