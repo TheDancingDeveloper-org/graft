@@ -50,6 +50,8 @@ struct Pr {
     url: String,
     /// The drafts exported, bottom to top.
     stack: Vec<ChangesetId>,
+    /// The merge mode the land asked for.
+    merge: MergeMode,
 }
 
 /// The engine, with land and sync answered by a fake mirror.
@@ -210,6 +212,7 @@ impl Rig {
             line: req.line,
             url: url.clone(),
             stack,
+            merge: req.merge,
         });
         Ok(Landed::Queued { pr_url: url })
     }
@@ -602,6 +605,39 @@ async fn a_checkout_less_agent_reads_commits_and_lands_through_the_pr_bridge() {
         )
         .await;
     assert_eq!(closed["kept_drafts"], true);
+}
+
+#[tokio::test]
+async fn land_asks_for_a_line_merge_unless_told_file() {
+    let (rig, _) = Rig::new().await;
+    let addr = serve(rig.clone()).await;
+    let mut agent = Agent::connect(addr, token("agent-1", WRITER)).await;
+    let ws = agent.open().await;
+    let commit = |path: &str| {
+        json!({
+            "repo": REPO,
+            "workspace": ws,
+            "message": "m",
+            "files": [{"path": path, "content": "x\n"}],
+        })
+    };
+
+    // No `merge` argument: a three-way line merge (D16).
+    agent.ok("graft_commit", commit("a.txt")).await;
+    agent
+        .ok("graft_land", json!({"repo": REPO, "workspace": ws}))
+        .await;
+    // An explicit `file` still asks for file-level merging.
+    agent.ok("graft_commit", commit("b.txt")).await;
+    agent
+        .ok(
+            "graft_land",
+            json!({"repo": REPO, "workspace": ws, "merge": "file"}),
+        )
+        .await;
+
+    let modes: Vec<MergeMode> = rig.prs().iter().map(|pr| pr.merge).collect();
+    assert_eq!(modes, [MergeMode::Line, MergeMode::File]);
 }
 
 #[tokio::test]
