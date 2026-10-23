@@ -66,7 +66,7 @@ The pin only has an effect where `Attest` is checked: **the server (or engine)
 must refuse an `Attest` from a `ci` principal whose subject is not pinned to
 `req.changeset`**. `graft-engine`'s `do_attest` does not do this yet; it is the
 one change in another crate that this design needs before CI bindings go live
-(tracked with the exchange RPC, WI-2271). Until it does, a CI write token can
+(tracked as WI-2272, with the dedicated `attest` scope below). Until it does, a CI write token can
 attest any changeset in its repository for its 15 minutes.
 
 ### Server configuration (what an operator sets)
@@ -101,10 +101,12 @@ that prefix, which should be a path nothing real lives under), **but it can
 open, move, adopt and close draft stacks and workspaces in that repository**
 for its 15 minutes. The changeset pin limits `Attest` only.
 
-That is the exposure of using `write` for CI today. The tidier fix is a
-dedicated `attest` scope, which changes the scope grammar and the engine
-(`graft-auth` and `graft-engine`); until then, enabling a write binding is an
-operator decision.
+That is the exposure of using `write` for CI today. The operator has decided
+on a dedicated `repo:<r>:attest` scope, which grants `Attest` and nothing else;
+it, and the engine's pin check, are WI-2272. Once it lands, CI bindings carry
+`repo:<r>:read` and `repo:<r>:attest` and no `write` at all, and the paragraph
+above no longer applies. Until then, enabling a write binding is an operator
+decision.
 
 ### Trust model
 
@@ -121,29 +123,34 @@ operator decision.
   has a different `sha`, so no token is minted.
 - **Checks and attest are different jobs.** The check jobs run the branch's
   code with `contents: read` only. The attest job holds `id-token: write`,
-  never checks out the branch, and takes results from `needs`. On a persistent
-  self-hosted runner, the attest job must run on a runner the check jobs cannot
-  modify (an ephemeral runner, or a separate runner group), or branch code
-  could replace `graft`, `curl` or `jq`.
-- The graft token and the OIDC token stay inside the attest step's shell
-  variables and are masked. The graft token reaches `graft` through the
-  environment, never through an argument.
+  never checks out the branch, and takes results from `needs`. It runs on a
+  GitHub-hosted runner by default, which is fresh for every job; on a
+  persistent self-hosted runner, branch code could replace `graft`, `curl` or
+  `jq` before it runs, so a self-hosted attest runner must be ephemeral or in a
+  runner group the check jobs cannot use. It installs the `graft` CLI from a
+  URL and SHA-256 you set in the template, and the graft endpoint must be
+  reachable from GitHub's runners.
+- The OIDC token stays in the attest step's shell variables and is masked. The
+  graft token is written by `graft ci exchange --out` to a 0600 file and read
+  from there with `--token-file`: never stdout, an argument or the environment.
 - Re-running a job reuses the same commit, so an old failing run can be
   re-run to pass: that attests a real pass of the real checks. Nothing in the
   token lets it be attested for a different commit.
 
 ## What the templates expect from the `graft` CLI
 
-Neither exists yet. They belong to `graft-cli` and `graft-server` (WI-2271):
+`graft attest <rev> --check NAME --pass|--fail [--url URL]` exists (G3.5).
+The templates call it with `--token-file`, as the global option takes the
+bearer token from a file.
 
-- `graft ci exchange --provider github|woodpecker --changeset <id>`: reads the
-  CI JWT on stdin, calls a server RPC that runs
+`graft ci exchange` does not exist yet; it belongs to `graft-cli` and
+`graft-server` (WI-2271), and the templates expect this form:
+
+- `graft ci exchange --provider github|woodpecker --changeset <id> --out PATH`:
+  reads the CI JWT on stdin, calls a server RPC that runs
   `graft_auth::oidc::Exchange::exchange_pinned` (its commit check is the
-  mirror map's "git sha is the export of this changeset"), prints the graft
-  token on stdout.
-- `graft attest --changeset <id> --check <name> --status passed|failed --url <url>`:
-  calls `Attest` with `GRAFT_TOKEN` (or `--token-file`) as the bearer token.
-  (`attest` is `Surface::Excluded` in `graft-cli/src/api.rs` today.)
+  mirror map's "git sha is the export of this changeset"), and writes the
+  graft token to `PATH`, created 0600. It never prints the token.
 
 ## Woodpecker
 
@@ -160,8 +167,8 @@ Woodpecker template.
 
 The plan asks for one live rehearsal of a draft gaining an attestation from a
 real or `act`-run workflow. It is not done: `act` is not installed on the
-build host, and the `graft ci exchange` and `graft attest` commands above do
-not exist yet. Follow-up, once they do: run `graft-pre-land.yml` under `act`
+build host, and `graft ci exchange` and the server's exchange RPC (WI-2271)
+do not exist yet. Follow-up, once they do: run `graft-pre-land.yml` under `act`
 against a scratch repository whose binding trusts a locally served JWKS, land
 the draft with an `attested` policy before and after, and check `Rejected`
 then `Landed`. `crates/graft-auth/tests/oidc.rs` covers the exchange itself

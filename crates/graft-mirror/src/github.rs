@@ -322,7 +322,15 @@ impl<C: CredentialProvider> HttpForge<C> {
             == Some("0");
         let reset = header_u64(&resp, "x-ratelimit-reset").map(reset_wait);
         if status.is_success() {
-            return match resp.json::<Value>().await {
+            let body = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => return Answer::Transient(None, format!("no answer ({})", kind(&e))),
+            };
+            // 204 No Content (a DELETE) has no body.
+            if body.is_empty() {
+                return Answer::Done(Value::Null);
+            }
+            return match serde_json::from_slice::<Value>(&body) {
                 Ok(v) if graphql_rate_limited(&v) => {
                     Answer::Transient(None, "GraphQL rate limit".to_owned())
                 }
@@ -349,6 +357,89 @@ impl<C: CredentialProvider> HttpForge<C> {
             return Answer::Transient(retry_after, format!("status {}", status.as_u16()));
         }
         Answer::Refused(format!("status {}: {message}", status.as_u16()))
+    }
+}
+
+/// A repository ruleset, as the authority gate reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ruleset {
+    /// The ruleset's id.
+    pub id: u64,
+    /// The ids of the actors that may bypass it.
+    pub bypass: Vec<u64>,
+}
+
+/// Rulesets one listing reads. The gate's ruleset is found by name among
+/// the repository's own rulesets, which are few.
+const RULESETS_PAGE: u32 = 100;
+
+impl<C: CredentialProvider> HttpForge<C> {
+    /// The repository ruleset named `name`, if there is one. Reads one page
+    /// of the repository's own rulesets, then the match.
+    pub async fn ruleset_named(&self, name: &str) -> Result<Option<Ruleset>, ForgeError> {
+        #[derive(Deserialize)]
+        struct Listed {
+            id: u64,
+            name: String,
+        }
+        #[derive(Deserialize)]
+        struct Actor {
+            actor_id: Option<u64>,
+        }
+        #[derive(Deserialize)]
+        struct Full {
+            id: u64,
+            #[serde(default)]
+            bypass_actors: Vec<Actor>,
+        }
+        let path = format!("{}/rulesets", self.repo_path());
+        let query = [
+            ("per_page", RULESETS_PAGE.to_string()),
+            ("includes_parents", "false".to_owned()),
+        ];
+        let v = self.send(reqwest::Method::GET, &path, &query, None).await?;
+        let listed: Vec<Listed> = serde_json::from_value(v).map_err(|_| {
+            ForgeError::Refused("GitHub's rulesets have an unexpected shape".into())
+        })?;
+        let Some(found) = listed.into_iter().find(|r| r.name == name) else {
+            return Ok(None);
+        };
+        let path = format!("{}/rulesets/{}", self.repo_path(), found.id);
+        let v = self.send(reqwest::Method::GET, &path, &[], None).await?;
+        let full: Full = serde_json::from_value(v)
+            .map_err(|_| ForgeError::Refused("GitHub's ruleset has an unexpected shape".into()))?;
+        Ok(Some(Ruleset {
+            id: full.id,
+            bypass: full
+                .bypass_actors
+                .into_iter()
+                .filter_map(|a| a.actor_id)
+                .collect(),
+        }))
+    }
+
+    /// Creates a repository ruleset (`id` `None`) or replaces ruleset `id`
+    /// with `body`.
+    pub async fn put_ruleset(&self, id: Option<u64>, body: &Value) -> Result<(), ForgeError> {
+        let (method, path) = match id {
+            None => (
+                reqwest::Method::POST,
+                format!("{}/rulesets", self.repo_path()),
+            ),
+            Some(id) => (
+                reqwest::Method::PUT,
+                format!("{}/rulesets/{id}", self.repo_path()),
+            ),
+        };
+        self.send(method, &path, &[], Some(body)).await.map(drop)
+    }
+
+    /// Deletes ruleset `id`.
+    pub async fn delete_ruleset(&self, id: u64) -> Result<(), ForgeError> {
+        let path = format!("{}/rulesets/{id}", self.repo_path());
+        self.send(reqwest::Method::DELETE, &path, &[], None)
+            .await
+            .map(drop)
     }
 }
 
