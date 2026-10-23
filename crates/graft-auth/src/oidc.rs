@@ -78,8 +78,8 @@ pub enum OidcError {
     /// A good token for a bound repository, from a workflow the binding does
     /// not allow.
     WorkflowNotAllowed,
-    /// The binding grants `write`, which can attest, but the call did not
-    /// pin the token to a changeset. Use [`Exchange::exchange_pinned`].
+    /// The binding grants `attest`, but the call did not pin the token to a
+    /// changeset. Use [`Exchange::exchange_pinned`].
     PinRequired,
     /// The CI job did not run on the commit that belongs to the changeset
     /// it asked to attest: the token has no commit claim, or the caller's
@@ -558,8 +558,9 @@ impl Binding {
     /// Binds `ci_repo` (`owner/name`) to `graft_repo`, granting `scopes`.
     ///
     /// Fails with `Malformed` when a scope does not parse, names another
-    /// repository, or is `admin` or `land` (CI attests and reads; it never
-    /// lands or administers), or when no scope is given.
+    /// repository, or is anything but `read` or `attest` (CI reads and
+    /// attests; it never writes, lands or administers), or when no scope is
+    /// given.
     pub fn new(
         provider: Provider,
         ci_repo: &str,
@@ -571,7 +572,7 @@ impl Binding {
         }
         for text in scopes {
             let scope = Scope::parse(text)?;
-            let allowed = matches!(scope, Scope::Read { .. } | Scope::Write { .. });
+            let allowed = matches!(scope, Scope::Read { .. } | Scope::Attest { .. });
             if !allowed || scope.repo() != Some(graft_repo) {
                 return Err(AuthError::Malformed);
             }
@@ -622,11 +623,11 @@ impl Binding {
         &self.graft_repo
     }
 
-    /// Whether jobs under this binding can attest or otherwise write.
-    fn grants_write(&self) -> bool {
+    /// Whether jobs under this binding can attest.
+    fn grants_attest(&self) -> bool {
         self.scopes
             .iter()
-            .any(|s| matches!(Scope::parse(s), Ok(Scope::Write { .. })))
+            .any(|s| matches!(Scope::parse(s), Ok(Scope::Attest { .. })))
     }
 
     fn matches_repo(&self, id: &CiIdentity) -> bool {
@@ -724,10 +725,10 @@ impl Exchange {
     }
 
     /// Verifies `jwt` and, if its repository is bound, mints a graft token
-    /// (kind `ci`) at `now_s` for a binding that grants no `write`.
+    /// (kind `ci`) at `now_s` for a binding that grants no `attest`.
     ///
-    /// A binding with `write` can attest, and such a token must be pinned
-    /// to one changeset: this fails with `PinRequired` for it. Use
+    /// A token from a binding with `attest` must be pinned to one
+    /// changeset: this fails with `PinRequired` for it. Use
     /// [`Exchange::exchange_pinned`].
     ///
     /// The token carries exactly the binding's scopes. Its life is the
@@ -738,14 +739,14 @@ impl Exchange {
     pub fn exchange(&self, key: &SigningKey, jwt: &str, now_s: i64) -> Result<Token, OidcError> {
         let id = self.verify(jwt, now_s)?;
         let binding = self.select(&id)?;
-        if binding.grants_write() {
+        if binding.grants_attest() {
             return Err(OidcError::PinRequired);
         }
         let subject = format!("{}{}", id.provider.subject_prefix(), id.repo);
         self.mint(key, &id, binding, subject, now_s)
     }
 
-    /// Like [`Exchange::exchange`], for a binding that grants `write`, and
+    /// Like [`Exchange::exchange`], for a binding that grants `attest`, and
     /// the only way to get such a token. The job asks to attest `changeset`,
     /// and `commit_is(sha)` must say that the commit the job ran on (the
     /// token's `sha` claim) is the one the mirror exported for that
@@ -755,15 +756,15 @@ impl Exchange {
     /// Without this, anyone who can push a branch could run a workflow on a
     /// commit that carries another draft's trailer and attest that draft.
     ///
-    /// A write binding must also name its refs, and for GitHub the pinned
+    /// An attest binding must also name its refs, and for GitHub the pinned
     /// reusable workflow (`job_workflow_ref`): a Woodpecker pipeline is the
-    /// branch's own file and cannot be pinned, so Woodpecker write bindings
+    /// branch's own file and cannot be pinned, so Woodpecker attest bindings
     /// are refused with `WorkflowNotAllowed`.
     ///
     /// The subject is `ci:<provider>:<repo>#<changeset>`; see
     /// [`pinned_changeset`]. The holder of the token may attest that
-    /// changeset only, if the server enforces the pin where it checks
-    /// `Attest`.
+    /// changeset only: the engine refuses an `Attest` by a `ci` principal
+    /// pinned to any other.
     pub fn exchange_pinned(
         &self,
         key: &SigningKey,
@@ -780,7 +781,7 @@ impl Exchange {
         }
         let id = self.verify(jwt, now_s)?;
         let binding = self.select(&id)?;
-        if binding.grants_write() {
+        if binding.grants_attest() {
             if binding.refs.is_empty() {
                 return Err(OidcError::RefNotAllowed);
             }
@@ -863,7 +864,7 @@ impl Exchange {
 /// (`ci:<provider>:<repo>#<changeset>`, as minted by
 /// [`Exchange::exchange_pinned`]). `None` for any other subject.
 ///
-/// A server must refuse an `Attest` by a `ci` principal whose subject is
+/// The engine refuses an `Attest` by a `ci` principal whose subject is
 /// pinned to a different changeset, and one whose subject is not pinned.
 pub fn pinned_changeset(subject: &str) -> Option<&str> {
     let rest = subject.strip_prefix("ci:")?;

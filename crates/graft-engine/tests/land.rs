@@ -138,8 +138,24 @@ impl<'f, M: MetaStore> T<'f, M> {
         let mut cx = self.r.cx.clone();
         cx.principal.kind = kind;
         cx.principal.subject = format!("{kind:?}").to_lowercase();
+        if kind == PrincipalKind::Ci {
+            // A CI token as the OIDC exchange mints it (WI-2272): attest
+            // only, pinned to the changeset it attests. An unpinned admin
+            // CI principal no longer passes.
+            cx = ci_cx(id);
+        }
+        self.attest_as_cx(&cx, id, check, passed)
+    }
+
+    fn attest_as_cx(
+        &self,
+        cx: &CallContext,
+        id: ChangesetId,
+        check: &str,
+        passed: bool,
+    ) -> ApiResult<()> {
         block_on(self.r.e().attest(
-            &cx,
+            cx,
             Attest {
                 repo: "r".to_owned(),
                 changeset: id,
@@ -183,6 +199,22 @@ impl<'f, M: MetaStore> T<'f, M> {
     fn kinds(&self) -> Vec<String> {
         self.r.journal().into_iter().map(|e| e.kind).collect()
     }
+}
+
+/// A `ci` principal as the OIDC exchange mints it: `read` and `attest` on
+/// `r`, pinned to `pin`.
+fn ci_cx(pin: ChangesetId) -> CallContext {
+    let mut cx = cx(&["repo:r:read", "repo:r:attest"]);
+    cx.principal.kind = PrincipalKind::Ci;
+    cx.principal.subject = format!("ci:github:o/r#{pin}");
+    cx
+}
+
+fn denied_attest() -> ApiResult<()> {
+    Err(ApiError::PermissionDenied {
+        scope: "repo:r:attest".to_owned(),
+        path: None,
+    })
 }
 
 fn land_req(head: ChangesetId, line: &str) -> Land {
@@ -536,6 +568,93 @@ fn agents_cannot_attest<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
     assert_eq!(kinds.iter().filter(|k| *k == "Attested").count(), 3);
 }
 
+fn attest_needs_the_attest_scope<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+    let t = T::new(&f, &[("a", b"1")]);
+    let draft = t.commit(t.root, &[("b", b"2")]);
+    // `write` used to admit `Attest`; it no longer does (WI-2272), on any
+    // prefix, and neither do `read` or `land`.
+    for scopes in [
+        &["repo:r:write"][..],
+        &["repo:r:write:.ci"],
+        &["repo:r:read", "repo:r:land:main"],
+        &["repo:s:attest"],
+    ] {
+        assert_eq!(
+            t.attest_as_cx(&cx(scopes), draft, "ci/test", true),
+            denied_attest(),
+            "{scopes:?}"
+        );
+    }
+    // `attest` on its own, or `admin`, does.
+    t.attest_as_cx(&cx(&["repo:r:attest"]), draft, "ci/test", true)
+        .expect("attest scope");
+    t.attest_as_cx(&cx(&["repo:r:admin"]), draft, "ci/test", true)
+        .expect("admin");
+}
+
+fn attest_only_cannot_commit_or_land<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+    let t = T::new(&f, &[("a", b"1")]);
+    let draft = t.commit(t.root, &[("b", b"2")]);
+    let attester = cx(&["repo:r:attest"]);
+    let commit = block_on(t.r.e().create_changeset(
+        &attester,
+        commit_req("r", vec![t.root], vec![put("c", b"3")]),
+    ));
+    assert!(
+        matches!(commit, Err(ApiError::PermissionDenied { .. })),
+        "{commit:?}"
+    );
+    assert!(matches!(
+        t.land_as(&attester, draft, "trunk"),
+        Err(ApiError::PermissionDenied { .. })
+    ));
+    // Nor can the CI token, which also reads.
+    assert!(matches!(
+        t.land_as(&ci_cx(draft), draft, "trunk"),
+        Err(ApiError::PermissionDenied { .. })
+    ));
+    assert_eq!(t.tip("trunk").target, t.root);
+}
+
+fn ci_attests_only_its_pinned_changeset<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+    let t = T::new(&f, &[("a", b"1")]);
+    let draft = t.commit(t.root, &[("b", b"2")]);
+    let other = t.commit(t.root, &[("c", b"3")]);
+    let pinned = ci_cx(draft);
+    assert_eq!(
+        t.attest_as_cx(&pinned, other, "ci/test", true),
+        denied_attest()
+    );
+    // Not pinned at all: refused, even with admin.
+    for subject in ["ci:github:o/r", "ci:github:o/r#", "ci-bot"] {
+        let mut unpinned = cx(&["repo:r:admin"]);
+        unpinned.principal.kind = PrincipalKind::Ci;
+        unpinned.principal.subject = subject.to_owned();
+        assert_eq!(
+            t.attest_as_cx(&unpinned, draft, "ci/test", true),
+            denied_attest(),
+            "{subject}"
+        );
+    }
+    // A pin that names a prefix of the id, not the id, is no pin.
+    let mut prefix = ci_cx(draft);
+    prefix.principal.subject = format!("ci:github:o/r#{}", &draft.to_string()[..13]);
+    assert_eq!(
+        t.attest_as_cx(&prefix, draft, "ci/test", true),
+        denied_attest()
+    );
+    // The refusal comes before the changeset is looked up, so it says
+    // nothing about which changesets exist.
+    let missing = ChangesetId(graft_model::ObjectId([9; 32]));
+    assert_eq!(
+        t.attest_as_cx(&pinned, missing, "ci/test", true),
+        denied_attest()
+    );
+    assert_eq!(t.kinds().iter().filter(|k| *k == "Attested").count(), 0);
+    t.attest_as_cx(&pinned, draft, "ci/test", true)
+        .expect("pinned changeset");
+}
+
 fn path_rules_need_their_checks_and_a_person<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
     let t = T::new(&f, &[("a", b"1")]);
     // Outside every rule: direct.
@@ -736,6 +855,9 @@ on_both![
     attested_main_needs_passing_checks,
     attestations_survive_a_file_level_rebase,
     agents_cannot_attest,
+    attest_needs_the_attest_scope,
+    attest_only_cannot_commit_or_land,
+    ci_attests_only_its_pinned_changeset,
     path_rules_need_their_checks_and_a_person,
     queued_lines_land_attested_candidates,
     queued_lines_ask_the_ci_hook,
