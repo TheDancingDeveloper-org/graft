@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use graft_engine::{Engine, EngineConfig};
+use graft_engine::Engine;
 use graft_model::SystemClock;
 use graft_store_fs::{FsMode, FsObjectStore};
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore, StoreObserver};
@@ -126,7 +126,7 @@ async fn run(config: ServerConfig) -> Result<(), String> {
         Arc::new(meta),
         Arc::new(objects),
         Arc::new(SystemClock),
-        EngineConfig::default(),
+        config.engine_config(),
     ));
     let mut volumes = vec![("objects", config.objects_dir.clone())];
     if let Some(dir) = config

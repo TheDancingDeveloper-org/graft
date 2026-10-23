@@ -21,6 +21,11 @@
 //! put_idle_ms = 30000                # longest gap between PutObjects messages (≤ 1 h)
 //!
 //! [ci]                               # CI token exchange: see `ci.rs`
+//!
+//! [[lines]]                          # per-line land policy: see `lines.rs`
+//! name = "trial-1"
+//! policy = "attested"
+//! checks = ["ci/fmt", "ci/clippy", "ci/test"]
 //! ```
 //!
 //! Unknown keys are refused, so a typo fails at start-up rather than being
@@ -93,6 +98,11 @@ pub(crate) struct ServerConfig {
     pub(crate) put_idle_ms: u64,
     /// CI token exchange: trusted issuers and repository bindings.
     pub(crate) ci: crate::ci::CiConfig,
+    /// Per-line land policy; absent means the engine defaults (`main` is D6,
+    /// every other line direct). Global to the server, not per repository.
+    pub(crate) lines: Vec<crate::lines::LineSpec>,
+    /// The policy of lines `lines` does not name.
+    pub(crate) default_line: Option<crate::lines::LineSpec>,
 }
 
 impl Default for ServerConfig {
@@ -118,6 +128,8 @@ impl Default for ServerConfig {
             put_wait_ms: 10_000,
             put_idle_ms: 30_000,
             ci: crate::ci::CiConfig::default(),
+            lines: Vec::new(),
+            default_line: None,
         }
     }
 }
@@ -190,7 +202,13 @@ impl ServerConfig {
                 )));
             }
         }
+        crate::lines::check(&self.lines, self.default_line.as_ref()).map_err(ConfigError)?;
         self.ci.check().map_err(ConfigError)
+    }
+
+    /// The engine configuration: the defaults with the line sections applied.
+    pub(crate) fn engine_config(&self) -> graft_engine::EngineConfig {
+        crate::lines::engine_config(&self.lines, self.default_line.as_ref())
     }
 
     /// The `Watch` bounds.
@@ -273,5 +291,112 @@ metrics = "0.0.0.0:9464"
         assert!(cap(clamp + 1).is_err(), "one past the clamp is refused");
         // The largest integer TOML takes; the clamp check is what refuses it.
         assert!(cap(i64::MAX as u64).is_err(), "i64::MAX is refused");
+    }
+
+    fn lines_of(text: &str) -> Vec<graft_engine::policy::LineConfig> {
+        ServerConfig::parse(text)
+            .expect("parses")
+            .engine_config()
+            .lines
+    }
+
+    #[test]
+    fn without_line_sections_the_engine_defaults_stand() {
+        let c = ServerConfig::parse("").expect("parses");
+        let want = graft_engine::EngineConfig::default();
+        let got = c.engine_config();
+        assert_eq!(got.lines, want.lines);
+        assert_eq!(got.default_line, want.default_line);
+    }
+
+    #[test]
+    fn a_trial_line_maps_into_the_engine_config() {
+        use graft_engine::policy::{Authority, LandPolicy};
+        let c = ServerConfig::parse(
+            r#"
+[[lines]]
+name = "trial-1"
+policy = "attested"
+checks = ["ci/fmt", "ci/clippy", "ci/test"]
+attest_merged = false
+authority = "graft-primary"
+
+[[lines]]
+name = "release"
+policy = "queued"
+checks = ["ci/build"]
+authority = "git-primary"
+path_rules = [{ prefix = "deploy", checks = ["ci/deploy"], human_review = true }]
+post_land = { checks = ["ci/build"], auto_revert = true }
+
+[default_line]
+policy = "attested"
+checks = ["ci/test"]
+"#,
+        )
+        .expect("parses");
+        let e = c.engine_config();
+        // main keeps D6; the two configured lines follow it.
+        let names: Vec<_> = e.lines.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["main", "trial-1", "release"]);
+        let trial = &e.lines[1];
+        assert_eq!(
+            trial.policy,
+            LandPolicy::Attested {
+                checks: vec!["ci/fmt".into(), "ci/clippy".into(), "ci/test".into()],
+                attest_merged: false
+            }
+        );
+        assert_eq!(trial.authority, Authority::GraftPrimary);
+        let release = &e.lines[2];
+        assert!(matches!(release.policy, LandPolicy::Queued { .. }));
+        assert_eq!(release.authority, Authority::GitPrimary);
+        assert_eq!(release.path_rules.len(), 1);
+        assert!(release.path_rules[0].human_review);
+        assert!(release.post_land.as_ref().unwrap().auto_revert);
+        assert!(matches!(e.default_line.policy, LandPolicy::Attested { .. }));
+    }
+
+    #[test]
+    fn a_configured_main_replaces_the_d6_default() {
+        let lines = lines_of("[[lines]]\nname = \"main\"\n");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].policy, graft_engine::policy::LandPolicy::Direct);
+    }
+
+    #[test]
+    fn bad_line_sections_are_refused() {
+        let bad = [
+            // Unknown keys, at every level.
+            "[[lines]]\nname = \"a\"\nchek = []",
+            "[[lines]]\nname = \"a\"\npost_land = { checks = [\"c\"], revert = true }",
+            "[[lines]]\nname = \"a\"\npath_rules = [{ prefix = \"x\", checks = [\"c\"], nope = 1 }]",
+            "[default_line]\nbogus = 1",
+            "[[line]]\nname = \"a\"",
+            // Unknown values.
+            "[[lines]]\nname = \"a\"\npolicy = \"fast\"",
+            "[[lines]]\nname = \"a\"\nauthority = \"both\"",
+            // Names.
+            "[[lines]]\npolicy = \"direct\"",
+            "[[lines]]\nname = \"\"",
+            "[[lines]]\nname = \"a b\"",
+            "[[lines]]\nname = \"a\"\n[[lines]]\nname = \"a\"",
+            "[default_line]\nname = \"a\"",
+            // Invalid combinations.
+            "[[lines]]\nname = \"a\"\npolicy = \"attested\"",
+            "[[lines]]\nname = \"a\"\npolicy = \"queued\"",
+            "[[lines]]\nname = \"a\"\npolicy = \"direct\"\nchecks = [\"c\"]",
+            "[[lines]]\nname = \"a\"\nattest_merged = true",
+            "[[lines]]\nname = \"a\"\npolicy = \"queued\"\nchecks = [\"c\"]\nattest_merged = true",
+            "[[lines]]\nname = \"a\"\npolicy = \"attested\"\nchecks = [\"c\", \"c\"]",
+            "[[lines]]\nname = \"a\"\npolicy = \"attested\"\nchecks = [\"\"]",
+            "[[lines]]\nname = \"a\"\npath_rules = [{ prefix = \"x\" }]",
+            "[[lines]]\nname = \"a\"\npath_rules = [{ prefix = \"/x\", human_review = true }]",
+            "[[lines]]\nname = \"a\"\npost_land = { auto_revert = true }",
+            "[default_line]\npolicy = \"attested\"",
+        ];
+        for text in bad {
+            assert!(ServerConfig::parse(text).is_err(), "accepted: {text}");
+        }
     }
 }

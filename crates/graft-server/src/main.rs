@@ -18,6 +18,7 @@ mod fsck;
 mod grpc;
 mod http;
 mod keys;
+mod lines;
 mod mcp;
 mod mint;
 mod serve;
