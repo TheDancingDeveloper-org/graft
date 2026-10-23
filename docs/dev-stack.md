@@ -241,11 +241,14 @@ other line lands directly.
 | `post_land` | `{ checks, auto_revert }`: post-land testing |
 
 An entry replaces the default for its name, so a `[[lines]]` entry for `main`
-replaces D6; `main` keeps D6 unless listed. `[default_line]` takes the same
+replaces D6; `main` keeps D6 unless listed. Under
+[D22](decisions.md#d22-phase-1-is-a-git-alternative) phase 1 lands every line
+`direct`, so `deploy/server.toml` lists `main` and `trial-1` as `direct`;
+`attested`, `queued` and `post_land` are phase 2. `[default_line]` takes the same
 keys (no `name`) and applies to every line no entry names. Unknown keys and
 invalid combinations stop the server at start-up. The config is global: every
-repository gets the same lines. Per-repository configs can come later. A
-commented `trial-1` example is in `deploy/server.toml`.
+repository gets the same lines. Per-repository configs can come later. The
+`trial-1` entry is in `deploy/server.toml`.
 
 ## Open items
 

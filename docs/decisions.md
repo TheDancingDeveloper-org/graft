@@ -32,6 +32,10 @@ Already decided by the operator (2026-10-22):
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure; line-level merge in rebase for text
   files under 1 MiB. Each section below names the rejected options.
+- **D22** (operator, 2026-10-23): phase 1 is a git alternative, and CI
+  checks are phase 2 or later. Lines default to `direct`, and nothing is
+  built or tested in the land path. For phase 1 it supersedes D6's
+  `attested` default on `main`.
 
 | # | Decision | Recommendation | Blocks |
 | --- | --- | --- | --- |
@@ -40,7 +44,7 @@ Already decided by the operator (2026-10-22):
 | D3 | Storage backend | **Decided:** SQLite + filesystem through phase 3, Litestream for off-box WAL | — |
 | D4 | Wire protocol | **Decided:** gRPC (tonic, prost) plus a read-only JSON facade | — |
 | D5 | At-rest codec | **Decided:** store the gzip wire frame (zero transcode); benchmark zstd in the pilot | — |
-| D6 | Landing gate on `main` | **Decided:** `attested` (pre-land CI on the draft) plus post-land CI with auto-revert on failure | — |
+| D6 | Landing gate on `main` | **Superseded for phase 1 by D22.** Was: `attested` (pre-land CI on the draft) plus post-land CI with auto-revert on failure; it stands as the phase 2 design | — |
 | D7 | Hash function | **Decided:** BLAKE3 | — |
 | D8 | GitHub mirror identity | **Decided:** a GitHub App on the org, with ruleset bypass on `main`; key in Infisical | — |
 | D9 | GitHub change notification | Poll every 15 s in phase 1; add webhooks in phase 2 if lag matters | Phase 1 (G1.12) |
@@ -56,6 +60,7 @@ Already decided by the operator (2026-10-22):
 | D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
 | D20 | Pilot period | **Decided:** none; G1.18 dropped, phase 2 not gated (replaces D18's gate) | — |
 | D21 | Batch PR export | **Decided:** agents land on a graft integration line; each batch goes to GitHub as one squashed PR the operator merges | — |
+| D22 | What phase 1 is | **Decided:** phase 1 is a git alternative with `direct` lands; CI checks (attestation, the attester, post-land CI, auto-revert) are phase 2 or later | — |
 
 ---
 
@@ -180,6 +185,11 @@ measures decompression share of checkout time, and we revisit if it exceeds
 
 **Decided (operator, 2026-10-23): `attested` on `main`, with post-land CI and
 an auto-revert on failure.**
+
+**Superseded for phase 1 by [D22](#d22-phase-1-is-a-git-alternative)
+(operator, 2026-10-23).** In phase 1 every line, `main` included, lands
+`direct`, and no check runs in the land path. The choice below is kept as the
+phase 2 design: it applies again only when the operator starts phase 2.
 
 Today every PR goes through a GitHub merge queue with required checks. Scion
 drops the global queue and relies on post-merge testing.
@@ -446,3 +456,58 @@ batch reaches GitHub as one squashed PR, which the operator merges.**
   - Graft-primary `main` with direct export (mode B). It needs the authority
     switch and ruleset bypass first, and the operator gives up the merge
     button.
+
+## D22. Phase 1 is a git alternative
+
+**Decided (operator, 2026-10-23): phase 1 is a git alternative. CI checks
+are phase 2 or later. For phase 1 this supersedes
+[D6](#d6-landing-gate-on-main)'s `attested` default on `main`.**
+
+- **Phase 1** is source control: correct storage and history, fast sparse
+  clone and sync, workspaces, server-side rebase, line merge (D16) and
+  lock-free CAS land, conflicts handed back to the client as git does, the
+  CLI, MCP and LSP, git import and export, and GitHub delivery as one
+  squashed batch PR (D21). Lines land `direct`. No build, test or CI runs
+  in the land path.
+- **Phase 2 or later** is CI checks: the `attested` and `queued` policies,
+  the attester, the CI OIDC exchange, post-land runners and auto-revert.
+  That code exists and stays in the tree, but it is optional and switched
+  off. It is not extended, depended on or prioritised until the operator
+  starts phase 2.
+
+Why:
+
+- The rustTorrent trial (WI-2270) spent its time in the attestation path
+  (the attester, its queue and its checks), not in source control. That
+  measured CI, not graft.
+- git works without CI. A git alternative has to stand on storage, history,
+  merge and land, so that is what phase 1 measures: land latency and
+  contention, merge and conflict correctness, sync and clone speed, history
+  integrity, and comparisons against git (the WI-2294 harness).
+- Scion and OpenScion have no pre-land gate either. They land at once and
+  rely on post-merge testing.
+- Under D21, GitHub CI already runs once per batch on the squashed PR, and
+  the operator merges it. Breakage is caught there, before it reaches
+  GitHub's `main`.
+
+The other options are rejected:
+
+- Keep D6 for phase 1 (`attested` on every agent line). Every land waits
+  for a build, so the trial measures the attester, not graft.
+- `queued` on the integration line. It serializes lands and adds minutes of
+  latency for the same reason.
+- Delete the CI layer. It is built and tested, and phase 2 will want it.
+  Parking it costs nothing.
+
+Consequences:
+
+- Every line defaults to `direct`, and `deploy/server.toml` lists `main`
+  and `trial-1` as `direct`. The engine's built-in default for `main` is
+  still D6 until a code change moves it, so a deployment states it.
+- The attester's compose profile stays off. The agent guide has no
+  attestation wait: a land is immediate.
+- [plan.md](plan.md#phasing-d22) is re-phased: phase 1 is what is built for
+  source control plus the remaining core work; phase 2 holds the CI items,
+  marked built-but-parked or not started.
+- D6 is kept as the phase 2 design. D16's `graft.merged-paths` metadata is
+  still recorded; `attest_merged` matters only in phase 2.

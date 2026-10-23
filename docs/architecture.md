@@ -7,6 +7,11 @@ This is the visual companion to [design.md](design.md). It shows four things:
 3. The deployment topologies, including CI.
 4. What an **attester** is, and how graft fits with GitHub, with and without CI.
 
+Phase 1 is a git alternative ([D22](decisions.md#d22-phase-1-is-a-git-alternative)):
+every line lands `direct`, and a land is rebase, line merge (merge3) and a
+CAS, with no checks. The land policy gate, the attester and CI attestation
+are phase 2. Their code exists, but it is off by default.
+
 The diagrams are Mermaid, which GitHub renders. Where this page and the design
 disagree, the design wins.
 
@@ -108,7 +113,7 @@ flowchart LR
     api["gRPC API<br/>+ /v1 JSON (read-only)<br/>+ /mcp"]
     authz["auth: token check,<br/>scopes, jti denylist"]
     eng["graft-engine"]
-    pol["Land policy gate<br/>direct / attested / queued"]
+    pol["Land policy gate<br/>phase 1: direct<br/>(attested / queued: phase 2, off)"]
     gcs["GC sweep"]
     meta[("SQLite<br/>metadata, journal,<br/>leases, attestations")]
     objs[("object store<br/>(filesystem frames)")]
@@ -124,7 +129,7 @@ flowchart LR
     bridge["PR bridge / PR import"]
   end
 
-  subgraph CI["CI (outside graft)"]
+  subgraph CI["CI (outside graft; phase 2, off by default)"]
     attester["Attester<br/>runs checks, posts Attest"]
   end
 
@@ -145,9 +150,33 @@ flowchart LR
 
 The server is the only writer to its stores. Everything else is a client:
 people, agents, the mirror and the attester. Each authenticates with its own
-token and scopes.
+token and scopes. In phase 1 there is no attester: the policy gate passes
+every `direct` land, and nothing outside the server takes part in a land.
 
-### One land, step by step
+### One land, step by step (phase 1: `direct`)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as Agent (graft CLI)
+  participant S as graft-server
+  participant M as graft-mirror
+
+  A->>S: open workspace, commit (draft changeset)
+  Note over S: draft is held by the workspace
+  A->>S: land
+  S->>S: rebase onto tip (+ line merge, merge3)
+  alt clean
+    S->>S: CAS move of the line
+    S-->>A: Landed
+    S-->>M: journal RefMoved(line)
+  else conflict
+    S-->>A: Conflict {paths, tip}, nothing moves; the client syncs and resolves, as with git
+  end
+  Note over M: D21: pr-batch sends the line to GitHub as one squashed PR
+```
+
+### One land with an attested policy (phase 2, off by default)
 
 ```mermaid
 sequenceDiagram
@@ -191,7 +220,7 @@ flowchart TB
   subgraph VM["graft-dev VM (trigproxmox, VM 110, 4 vCPU)"]
     srv["graft-server :17888"]
     mir["graft-mirror (follow rustTorrent)"]
-    att["trial attester<br/>(profile: attester)"]
+    att["trial attester<br/>(profile: attester,<br/>off: phase 2)"]
     runner["GitHub runner<br/>label graft-dev"]
     etc[("/etc/graft<br/>keys + tokens, 0600")]
     mir --> srv
@@ -212,7 +241,9 @@ flowchart TB
 
 - GitHub isn't written. `rusttorrent` follows GitHub read-only.
   `rusttorrent-trial` is graft-primary with no export.
-- The attester stands in for CI, because the trial runs no GitHub Actions.
+- Under D22 the trial line `trial-1` is `direct`, and the attester profile
+  is off. When it is on (phase 2), it stands in for CI, because the trial
+  runs no GitHub Actions.
 
 ### 3b. Target topology: graft-primary with GitHub as the mirror
 
@@ -288,6 +319,14 @@ sequenceDiagram
 ---
 
 ## 4. The attester, and GitHub with or without CI
+
+**Phase 2, off by default ([D22](decisions.md#d22-phase-1-is-a-git-alternative)).**
+In phase 1 every line is `direct`: a land is rebase, line merge and CAS, and
+it runs no checks. The attester (`graft-attester`, the `attester` compose
+profile), the `attested` and `queued` policies, the CI OIDC exchange,
+post-land CI and auto-revert are built but parked. This section describes
+them for phase 2. In phase 1, GitHub CI runs once per batch on the squashed
+PR (D21).
 
 ### What an attester is
 

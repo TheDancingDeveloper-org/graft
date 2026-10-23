@@ -1,7 +1,17 @@
 # graft build plan
 
-- **Status:** Draft 1 (2026-10-22)
+- **Status:** Draft 2 (2026-10-23), re-phased by [D22](decisions.md#d22-phase-1-is-a-git-alternative)
 - **Design:** [design.md](design.md) · **Decisions:** [decisions.md](decisions.md)
+
+**Re-phased by D22 (operator, 2026-10-23).** Phase 1 is a **git
+alternative**, and CI checks are **phase 2** or later. The delivery phases
+are in [Phasing (D22)](#phasing-d22), with what is built, what is parked,
+and the phase 1 exit criteria. The sections from "Phase 1: read pilot" to
+"Phase 3" below are the original build order. Their items keep their
+`G<phase>.<n>` numbers, because those are Vogt items and branch names, but
+the headings no longer name delivery phases.
+
+The original build phases, kept for the item numbering:
 
 Every phase ends in something we can ship and use. Phase 1 is a **read
 pilot** on a mirrored real repository (rustTorrent). Each later phase moves
@@ -16,6 +26,97 @@ git and GitHub until phase 3's authority switch, which can be rolled back.
 | 3 | **Native landing:** server rebase and land; graft becomes authoritative for rustTorrent `main`, exported to GitHub. GC, LSP, CI attestations | Authority switch back to git-primary (§11.3 of the design) |
 | 4 | **Breadth:** per-line combiner, prefetch, auto-revert, symbol index, a second repository, the export drill | Per repository, as for phase 3 |
 | 5 | **Later:** regional tier, virtual checkouts, chunked blobs, code search, publish decision | — |
+
+## Phasing (D22)
+
+graft is source control first. Phase 1 measures it as source control: land
+latency and contention, merge and conflict correctness, sync and clone
+speed, history integrity, and comparisons against git. Lines land `direct`,
+and no build, test or CI runs in the land path. Under D21, GitHub CI runs
+once per batch, on the squashed PR the operator merges. The CI layer is
+phase 2: its code stays in the tree, optional and switched off, and it isn't
+extended, depended on or prioritised until the operator starts phase 2.
+
+### Phase 1: a git alternative
+
+**Goal:** correct storage and history; fast sparse clone and sync;
+workspaces; server-side rebase, line merge (merge3, D16) and lock-free CAS
+land; conflicts handed back to the client as git does; CLI, MCP and LSP; git
+import and export; GitHub delivery as one squashed batch PR (D21).
+
+Built:
+
+| Item | What | Vogt |
+| --- | --- | --- |
+| G1.1–G1.15 | Model, stores, protocol, derived data, engine reads, git import, auth and telemetry, history queries, client, server, CLI read commands, mirror follow, MCP read tools | done |
+| G1.16 | Pilot harness and crash suite | done (WI-2192) |
+| G1.D | Local dev stack | done (WI-2215) |
+| G2.1–G2.8 | Workspaces and drafts, git export, node daemon, server workspaces and tokens, client write commands, PR bridge, file-level rebase and Sync, MCP write tools | done |
+| G3.1 | Native `Land` (rebase, CAS, idempotency, backoff). Phase 1 uses its `direct` policy; its `attested` and `queued` hooks and `Attest` are phase 2 | done (WI-2254) |
+| G3.3 | Export mode (graft-primary), divergence stop, reconcile, PR import | done (WI-2255) |
+| G3.4, G3.7 | merge3, and line merge in Rebase, Sync and Land (D16), with Revert and stack ops. `attest_merged` is phase 2 | done (WI-2256, WI-2264, WI-2283) |
+| G3.5 | Client and CLI: native land, conflicts, revert, stack. `graft attest` is phase 2 | done (WI-2259) |
+| G3.6 | LSP server | done (WI-2257) |
+| G3.9 | Authority switch tooling and rehearsal | done (WI-2266) |
+| G3.11 | GC protection records | done (WI-2260) |
+| G3.2 | GC sweep in `graft-gc` (deletion off per repository) | done (WI-2263); server wiring open, below |
+| D21 | Batch PR export, `graft-mirror pr-batch` | done (WI-2284) |
+| WI-2288 | Per-line land policy from `server.toml` | done |
+
+Left for phase 1:
+
+| Item | What | Vogt |
+| --- | --- | --- |
+| Harness | Repeatable multi-agent load harness (a synthetic Python project, generated commit streams of 10 to 100,000) that measures land, merge, sync and history against git, instead of live agent runs | WI-2294, open |
+| GC sweep wiring | G3.2b: the sweep in the server (`do_gc`, admin `gc`, scheduler, metrics) | WI-2274, open |
+| Stack-ops follow-ups | Review follow-ups to G3.5 and G3.7 stack operations | no item yet |
+| Deploy safety | deploy-dev can deploy a config ahead of the image that parses it | WI-2291, open |
+| `main` default | The engine's built-in default for `main` is still D6 (`attested`). Deployments list `main` as `direct` until it moves | no item yet |
+
+**Exit criteria (phase 1).** Proposed with D22; the operator confirms or
+tightens them before they are scored. All must hold, measured by the WI-2294
+harness and the G1.16 harness on the graft-dev VM:
+
+1. History integrity: 100% of rustTorrent commits pass the import fidelity
+   invariant, every snapshot matches `git checkout`, and export after import
+   is the identity. Zero acknowledged writes lost across 100 `kill -9`
+   restarts.
+2. Merge and conflict correctness: line merge agrees with `git merge-file`
+   on the corpus, and in the harness every land that git would merge cleanly
+   lands, and every one git would conflict on returns `Conflict` with its
+   paths. No land is lost, and a line never moves backwards.
+3. Land latency and contention: uncontended `direct` land p50 at most 15 ms.
+   Under the harness's racing streams, every land ends `Landed` or
+   `Conflict` within the client's wait, and none is left `Contended`.
+4. Sync and clone speed: the read targets in
+   [Phase 1 exit and kill criteria](#phase-1-exit-and-kill-criteria), and
+   `sync` after others' lands costs O(changes), not O(history).
+5. Against git: the harness reports each scenario next to git on the same
+   host, and graft is no slower than git on clone, sync, log, diff and blame.
+6. D21 delivery: a batch from the integration line reaches GitHub as one
+   squashed PR, and its merge is recorded on the next follow.
+
+### Phase 2 or later: CI checks (parked)
+
+Not started until the operator starts phase 2. The built parts stay in the
+tree, are tested by CI like everything else, and are off by default:
+`deploy/server.toml` lists no `attested` or `queued` line, and the
+`attester` compose profile is off.
+
+| Item | What | State |
+| --- | --- | --- |
+| G3.1 (policy hooks) | `attested` and `queued` gates, `Attest` | built, parked |
+| G3.8 | CI integration: OIDC exchange, attest workflow, post-land CI | built, parked (WI-2265) |
+| G3.8b | `ExchangeCiToken` RPC and `graft ci exchange` | built, parked (WI-2271) |
+| WI-2272 | `repo:<r>:attest` scope; `Attest` pinned to its changeset | built, parked |
+| WI-2273 | CI exchange commit check from graft-mirror | built, parked |
+| Attester | `graft-attester` on graft-dev (WI-2276, WI-2292) | built, parked |
+| Attester follow-ups | Hardening (WI-2285); a failed `GetWorkspace` stalls the journal read (WI-2293) | not started |
+| Post-land auto-revert | The auto-revert bot (phase 4 table below) | not started |
+| D6 on `main` | `attested` with post-land CI and auto-revert | the phase 2 design |
+
+G3.10 (the rustTorrent cutover) is not scheduled: under D21 `main` stays
+git-primary.
 
 ## How the work is run
 
@@ -694,7 +795,7 @@ run at once.
   `attest_merged` forces re-attesting.
 - Test: proptest; concurrency tests reused from G3.1.
 
-**G3.8 CI integration.**
+**G3.8 CI integration.** *Phase 2 under D22: built, parked.*
 - Crates: `graft-auth` (OIDC exchange), workflow templates in `ci/`
 - Needs: G3.1, G3.3
 - Deliver: exchange GitHub Actions OIDC (and Woodpecker job) tokens for short
@@ -717,7 +818,8 @@ run at once.
 
 ### Wave 3.D
 
-**G3.10 Cutover of rustTorrent.**
+**G3.10 Cutover of rustTorrent.** *Not scheduled: under D21 `main` stays
+git-primary, and its "policy checks" are phase 2 under D22.*
 - Crates: none (operations)
 - Needs: G3.1–G3.9, G3.11, D6, D8 (decided)
 - Deliver: rustTorrent `main` flipped to graft-primary in a scheduled window;
@@ -737,7 +839,7 @@ Each becomes items in waves of three when phase 3 exits.
 | --- | --- | --- |
 | Per-line land combiner | `graft-engine` | 64 racing lands: total time at most 2× the single-land time; same results as without the combiner |
 | Node prefetch via `Watch` | `graft-node` | A fresh clone of the tip hits the node cache at 99% or more |
-| Auto-revert bot | `graft-mirror` or a new `graft-bots` crate | A failing post-land check produces a revert draft that lands within its SLA |
+| Auto-revert bot (phase 2 under D22) | `graft-mirror` or a new `graft-bots` crate | A failing post-land check produces a revert draft that lands within its SLA |
 | Symbol index (derived `symbols`) for LSP and MCP | `graft-index`, `graft-lsp`, `graft-mcp` | Workspace symbols across the whole repository from a sparse checkout |
 | Filesystem watcher for status | `graft-client` | Status in O(changed files) on a 100,000-file synthetic tree |
 | Postgres `MetaStore` (if D3 says so) | `graft-store-postgres` | Passes conformance and the crash suite; two server replicas land concurrently |
