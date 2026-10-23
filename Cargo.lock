@@ -1918,8 +1918,13 @@ dependencies = [
 name = "graft-gc"
 version = "0.0.0"
 dependencies = [
+ "graft-engine",
  "graft-model",
+ "graft-proto",
  "graft-store",
+ "graft-store-fs",
+ "graft-store-sqlite",
+ "graft-testkit",
  "proptest",
 ]
 

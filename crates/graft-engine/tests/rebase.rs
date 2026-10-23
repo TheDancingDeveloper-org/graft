@@ -267,7 +267,7 @@ fn a_conflict_creates_nothing<M: MetaStore>(f: &Fixture<M>) {
         r.repo.f.objects.frames.lock().expect("frames").len(),
         objects
     );
-    // Line mode answers at file level until line merge lands: still a
+    // Line mode cannot merge one-line edits of the same line: still a
     // clean conflict, still nothing written.
     let line = block_on(r.repo.e().rebase(
         &r.repo.cx,

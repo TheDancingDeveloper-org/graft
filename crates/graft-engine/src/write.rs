@@ -288,14 +288,44 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 
     /// Stores a changeset the server built (a rebased draft) with nothing
     /// holding it, checking its root against `cs.root`. A retry finds it.
+    /// `inline` carries blobs the server made (line merges), stored with it.
     pub(crate) async fn insert_unheld(
         &self,
         repo: RepoId,
         cs: Changeset,
+        inline: Vec<Upload>,
     ) -> Result<Created, ApiError> {
         let root = cs.root;
-        self.insert(repo, cs, Some(root), Vec::new(), Roots::IfEmpty, None, None)
+        self.insert(repo, cs, Some(root), inline, Roots::IfEmpty, None, None)
             .await
+    }
+
+    /// Stores a changeset the server built (a revert) as a draft on top of
+    /// workspace `name`, whose head moves to it by CAS, as `CreateChangeset`
+    /// with `workspace` does. Checks its root against `cs.root`.
+    pub(crate) async fn insert_held(
+        &self,
+        cx: &CallContext,
+        repo_name: &str,
+        repo: RepoId,
+        name: &str,
+        cs: Changeset,
+        inline: Vec<Upload>,
+    ) -> Result<Created, ApiError> {
+        check_name(name)?;
+        let ws = self.live_workspace(cx, repo_name, repo, name).await?;
+        let root = cs.root;
+        let hold = Hold { cx, repo_name, ws };
+        self.insert(
+            repo,
+            cs,
+            Some(root),
+            inline,
+            Roots::IfEmpty,
+            Some(hold),
+            None,
+        )
+        .await
     }
 
     /// Stores a land candidate the server built, as a draft held by the
@@ -307,13 +337,14 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         repo: RepoId,
         cs: Changeset,
         lease: Lease,
+        inline: Vec<Upload>,
     ) -> Result<Created, ApiError> {
         let root = cs.root;
         self.insert(
             repo,
             cs,
             Some(root),
-            Vec::new(),
+            inline,
             Roots::IfEmpty,
             None,
             Some(lease),
