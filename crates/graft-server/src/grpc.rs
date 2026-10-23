@@ -26,6 +26,7 @@ use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::app::{App, CallError, Caller, ServerEngine};
+use crate::exports;
 use crate::mint;
 
 /// Frame bytes per `GetObjects` stream message. A single frame larger than
@@ -198,16 +199,22 @@ impl Services {
             .max_decoding_message_size(MAX_MESSAGE);
         // Unauthenticated callers reach this one: it decodes no more than a
         // CI token.
-        let ci = pb::ci_service_server::CiServiceServer::new(self)
+        let ci = pb::ci_service_server::CiServiceServer::new(self.clone())
             .accept_compressed(gz)
             .send_compressed(gz)
             .max_decoding_message_size(CI_MESSAGE)
+            .max_encoding_message_size(CONTROL_MESSAGE);
+        let mirror = pb::mirror_service_server::MirrorServiceServer::new(self)
+            .accept_compressed(gz)
+            .send_compressed(gz)
+            .max_decoding_message_size(CONTROL_MESSAGE)
             .max_encoding_message_size(CONTROL_MESSAGE);
         tonic::service::Routes::new(objects)
             .add_service(repo)
             .add_service(workspaces)
             .add_service(admin)
             .add_service(ci)
+            .add_service(mirror)
     }
 
     /// Authenticates a gRPC call.
@@ -1141,6 +1148,84 @@ impl pb::ci_service_server::CiService for Services {
         Ok(Response::new(pb::Token {
             token: token.expose().to_owned(),
         }))
+    }
+}
+
+#[tonic::async_trait]
+impl pb::mirror_service_server::MirrorService for Services {
+    /// Records the commits graft-mirror exported for changesets
+    /// (`crate::exports`), which pinned CI exchanges check. Admin scope on
+    /// the repository, a write (the denylist and free-space floor apply),
+    /// and every changeset must be stored in the repository first.
+    async fn record_exports(
+        &self,
+        request: Request<pb::RecordExportsRequest>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        const OP: &str = "RecordExports";
+        let cx = self.cx(&request, OP)?;
+        let req = request.into_inner();
+        let refuse_wire =
+            |field: &'static str, reason: &'static str| Status::from(WireError { field, reason });
+        if req.exports.is_empty() {
+            return Err(refuse_wire("exports", "missing"));
+        }
+        if req.exports.len() > exports::MAX_RECORDS {
+            let e = ApiError::LimitExceeded {
+                limit: "record_exports".into(),
+                max: exports::MAX_RECORDS as u64,
+            };
+            self.app.refused(OP, &e);
+            return Err(e.into());
+        }
+        let mut records = Vec::with_capacity(req.exports.len());
+        for x in req.exports {
+            let id = req_cid(x.changeset, "exports.changeset")?;
+            let commit = exports::commit_id(&x.commit)
+                .ok_or_else(|| refuse_wire("exports.commit", "not a hex commit id"))?;
+            records.push((id, commit));
+        }
+        let repo = req.repo;
+        let store = self.app.exports.clone();
+        let now_s = self.app.now_s();
+        let count = records.len();
+        self.app
+            .call(OP, &repo.clone(), cx, true, move |e, cx| async move {
+                let admin = Scope::Admin { repo: repo.clone() };
+                graft_auth::authorize(&cx.principal, &admin, None)?;
+                // Objects are stored before metadata names them.
+                let mut ids: Vec<ChangesetId> = records.iter().map(|(id, _)| *id).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                let got = e
+                    .get_changesets(
+                        &cx,
+                        GetChangesets {
+                            repo: repo.clone(),
+                            ids,
+                        },
+                    )
+                    .await?;
+                if let Some(id) = got.missing.first().or(got.collected.first()) {
+                    return Err(ApiError::NotFound {
+                        what: format!("changeset {id}"),
+                    });
+                }
+                tokio::task::spawn_blocking(move || store.record(&repo, &records, now_s))
+                    .await
+                    .map_err(|_| ApiError::Unavailable {
+                        retry_after_ms: 1_000,
+                    })?
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "recording exports failed");
+                        ApiError::Unavailable {
+                            retry_after_ms: 1_000,
+                        }
+                    })
+            })
+            .await
+            .map_err(Status::from)?;
+        tracing::info!(op = OP, count, "recorded exported commits");
+        Ok(Response::new(pb::Empty {}))
     }
 }
 
