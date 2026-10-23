@@ -610,3 +610,75 @@ fn attest_records_a_check_for_ci() {
     // Both checks attested: the land goes through.
     assert_eq!(json_run(&app, &["land"])["landed"], json!(rev));
 }
+
+/// Two working copies in their own directories edit `src/lib.rs` and
+/// commit; the first, which changes the last function, lands. Returns the
+/// second working copy, its draft (`second`) not yet landed.
+fn two_writers_on_one_file(s: &Served, one: &Path, two: &Path, second: &str) -> PathBuf {
+    let first = clone_app(s, one);
+    let other = clone_app(s, two);
+    fs::write(
+        first.join("src/lib.rs"),
+        "fn a() {}\nfn b() {}\nfn c() { 1 }\n",
+    )
+    .unwrap();
+    json_run(&first, &["commit", "-m", "one"]);
+    fs::write(other.join("src/lib.rs"), second).unwrap();
+    json_run(&other, &["commit", "-m", "two"]);
+    assert_eq!(json_run(&first, &["land"])["rebased"], json!(false));
+    other
+}
+
+#[test]
+fn land_line_merges_edits_to_separate_regions_of_one_file() {
+    let s = serve(Policy::Direct);
+    let (one, two) = (scratch(), scratch());
+    let app = two_writers_on_one_file(
+        &s,
+        one.path(),
+        two.path(),
+        "fn a() { 2 }\nfn b() {}\nfn c() {}\n",
+    );
+
+    // `--merge file`: the stricter rebase refuses the file; nothing moves.
+    let a = wc_cmd(&app)
+        .args(["--json", "land", "--merge", "file"])
+        .assert()
+        .code(3);
+    assert_eq!(error_of(&a)["kind"], json!("conflict"));
+
+    // A plain land (no --sync) merges the file line by line (D16).
+    let value = json_run(&app, &["land"]);
+    assert_valid("land", &value);
+    assert_eq!(value["outcome"], json!("landed"));
+    assert_eq!(value["rebased"], json!(true));
+    let tip = s.rt.block_on(s.repo.tip());
+    assert_eq!(value["landed"], json!(tip.to_string()));
+    let merged = "fn a() { 2 }\nfn b() {}\nfn c() { 1 }\n";
+    let files = s.rt.block_on(s.repo.files(tip));
+    assert_eq!(files["src/lib.rs"], merged.as_bytes());
+    assert_eq!(fs::read_to_string(app.join("src/lib.rs")).unwrap(), merged);
+    assert_eq!(json_run(&app, &["status"])["clean"], json!(true));
+}
+
+#[test]
+fn land_line_merge_still_refuses_edits_to_the_same_line() {
+    let s = serve(Policy::Direct);
+    let (one, two) = (scratch(), scratch());
+    let app = two_writers_on_one_file(
+        &s,
+        one.path(),
+        two.path(),
+        "fn a() {}\nfn b() {}\nfn c() { 2 }\n",
+    );
+    let tip = s.rt.block_on(s.repo.tip());
+    let a = wc_cmd(&app).args(["--json", "land"]).assert().code(3);
+    let error = error_of(&a);
+    assert_eq!(error["kind"], json!("conflict"));
+    assert_eq!(error["onto"], json!(tip.to_string()));
+    assert_eq!(s.rt.block_on(s.repo.tip()), tip);
+    assert_eq!(
+        fs::read_to_string(app.join("src/lib.rs")).unwrap(),
+        "fn a() {}\nfn b() {}\nfn c() { 2 }\n"
+    );
+}

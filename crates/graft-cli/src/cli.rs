@@ -347,6 +347,18 @@ pub(crate) struct LandArgs {
     /// On a conflict, sync to the tip and write the conflicts into the files (still exits 3)
     #[arg(long)]
     pub(crate) sync: bool,
+    /// How the server's rebase treats a file both sides changed: `line` merges text files line by line (D16), `file` refuses any file changed on both sides
+    #[arg(long, value_enum, value_name = "MODE", default_value_t = LandMerge::Line)]
+    pub(crate) merge: LandMerge,
+}
+
+/// How `graft land` merges a file both sides changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum LandMerge {
+    /// Three-way line merge for text files under 1 MiB (decision D16)
+    Line,
+    /// Any file changed on both sides conflicts
+    File,
 }
 
 #[derive(Debug, Args)]
