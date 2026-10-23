@@ -1,0 +1,133 @@
+# graft-dev: the graft development stack on the graft-dev VM (WI-2251).
+#
+# Self-contained: no Komodo, no ops repo. deploy/up.sh runs it, by hand or from
+# the deploy-dev workflow on the VM's own runner. Read README.md first.
+#
+#   graft-server  gRPC, the /v1 JSON facade, /healthz, /readyz, /metrics
+#   graft-mirror  follows github.com/TheDancingDeveloper-org/rustTorrent main
+#                 into the graft repository `rusttorrent`
+#
+# Image: GRAFT_IMAGE from deploy/image.env, pinned by digest. Run compose with
+# `--env-file deploy/image.env` (up.sh does).
+#
+# Ports bind GRAFT_BIND_IP (default 127.0.0.1; set it to the VM's Tailscale
+# address in /etc/graft/deploy.env). 0.0.0.0 in the configs is the container's
+# own namespace.
+#   17888  graft-server: gRPC, /v1, /healthz, /readyz, /metrics
+#   17889  graft-server metrics listener: /metrics, /healthz, /readyz
+#   17890  graft-mirror /metrics
+#
+# Secrets: none in this file, the repo or the environment. Host files under
+# /etc/graft, mounted read-only; a missing file fails the start instead of
+# being created as a directory.
+#   /etc/graft/signing.key   server token signing key (0600, uid 10001)
+#   /etc/graft/mirror-token  graft-mirror's service token (0600, uid 10001)
+name: graft-dev
+
+x-graft: &graft
+  image: ${GRAFT_IMAGE:?set GRAFT_IMAGE (compose --env-file deploy/image.env)}
+  user: "10001:10001"
+  read_only: true
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 30s
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  networks: [graft-dev]
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "3"
+
+services:
+  graft-server:
+    <<: *graft
+    container_name: graft-dev-server
+    hostname: graft-dev-server
+    environment:
+      # The image bakes a dev config at /etc/graft/server.toml; this points
+      # serve and every `docker compose exec ... admin` at this stack's.
+      GRAFT_SERVER_CONFIG: /etc/graft/deploy/server.toml
+      # Set by up.sh to a hash of the configs, so a config change recreates
+      # the container (compose does not watch bind-mounted file contents).
+      GRAFT_DEPLOY_CONFIG_HASH: ${GRAFT_CONFIG_HASH:-}
+    command: ["graft-server", "serve"]
+    ports:
+      - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_SERVER_PORT:-17888}:7878"
+      - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_METRICS_PORT:-17889}:9464"
+    volumes:
+      - ./server.toml:/etc/graft/deploy/server.toml:ro
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/signing.key
+        target: /run/secrets/signing.key
+        read_only: true
+        bind:
+          create_host_path: false
+      - graft-dev-objects:/var/lib/graft/objects
+      - graft-dev-meta:/var/lib/graft/meta
+    # The image has no curl or wget; bash's /dev/tcp asks the metrics listener
+    # (plain HTTP/1.1) for /readyz and passes only on a 200.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9464 &&
+          printf 'GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          head -n1 <&3 | grep -q ' 200 '
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  graft-mirror:
+    <<: *graft
+    container_name: graft-dev-mirror
+    hostname: graft-dev-mirror
+    depends_on:
+      graft-server:
+        condition: service_healthy
+    environment:
+      GRAFT_DEPLOY_CONFIG_HASH: ${GRAFT_CONFIG_HASH:-}
+    command: ["graft-mirror", "follow", "--config", "/etc/graft/deploy/mirror.toml"]
+    ports:
+      - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_METRICS_PORT:-17890}:9465"
+    volumes:
+      - ./mirror.toml:/etc/graft/deploy/mirror.toml:ro
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token
+        target: /run/secrets/graft-mirror-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - graft-dev-mirror:/var/lib/graft/mirror
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9465 &&
+          printf 'GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          head -n1 <&3 | grep -q ' 200 '
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  graft-dev-objects:
+    name: graft-dev-objects
+  graft-dev-meta:
+    name: graft-dev-meta
+  graft-dev-mirror:
+    name: graft-dev-mirror
+
+networks:
+  graft-dev:
+    name: graft-dev
