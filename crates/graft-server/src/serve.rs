@@ -12,14 +12,23 @@
 //! `graft-server listening on <addr>` and `graft-server metrics on <addr>`,
 //! once the server is ready to answer, so a supervisor or a test can wait
 //! for it and learn a port chosen with `:0`.
+//!
+//! With `[gc] enabled = true` it also runs the GC sweep scheduler: one pass
+//! over each configured repository every `interval_s`, recorded in the
+//! `graft_gc_*` metrics. It is off by default, and a repository whose
+//! deletion switch is off refuses every pass.
 
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use graft_engine::Engine;
+use graft_engine::{Engine, GcSettings};
+use graft_gc::{Pace, SweepLeases, SweepReport};
 use graft_model::SystemClock;
+use graft_proto::error::ApiResult;
+use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
+use graft_store::{MetaStore, ObjectStore};
 use graft_store_fs::{FsMode, FsObjectStore};
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore, StoreObserver};
 use graft_telemetry::{Telemetry, TelemetryConfig};
@@ -122,12 +131,23 @@ async fn run(config: ServerConfig) -> Result<(), String> {
     let (meta, objects) = open_stores(&config, Some(telemetry.clone()))?;
     let signing =
         keys::load_or_create(&config.key_path()).map_err(|e| format!("signing key: {e}"))?;
-    let engine = Arc::new(Engine::new(
-        Arc::new(meta),
-        Arc::new(objects),
-        Arc::new(SystemClock),
-        config.engine_config(),
-    ));
+    let engine = Arc::new(
+        Engine::new(
+            Arc::new(meta),
+            Arc::new(objects),
+            Arc::new(SystemClock),
+            config.engine_config(),
+        )
+        .with_gc(gc_settings(&config, Arc::new(TokioPace))),
+    );
+    if config.gc.enabled {
+        tokio::spawn(gc_forever(
+            engine.clone(),
+            telemetry.clone(),
+            config.gc.clone(),
+            signal_rx.clone(),
+        ));
+    }
     let mut volumes = vec![("objects", config.objects_dir.clone())];
     if let Some(dir) = config
         .meta_db
@@ -253,6 +273,106 @@ async fn run(config: ServerConfig) -> Result<(), String> {
     }
 }
 
+/// The engine's collector settings from `[gc]`, pausing with `pace`.
+pub(crate) fn gc_settings(config: &ServerConfig, pace: Arc<dyn Pace>) -> GcSettings {
+    GcSettings {
+        config: config.gc.gc_config(),
+        pace,
+        leases: SweepLeases::new(),
+    }
+}
+
+/// The rate limit on the server's runtime timer.
+struct TokioPace;
+
+impl Pace for TokioPace {
+    fn pause(
+        &self,
+        pause: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        Box::pin(tokio::time::sleep(pause))
+    }
+}
+
+/// The context the scheduler sweeps `repo` with: the server itself,
+/// holding exactly that repository's admin scope.
+pub(crate) fn gc_context(repo: &str) -> CallContext {
+    CallContext {
+        principal: Principal {
+            subject: "graft-server-gc".into(),
+            kind: PrincipalKind::Service,
+            session: None,
+            work_item: None,
+            scopes: vec![format!("repo:{repo}:admin")],
+        },
+        request_id: "gc".into(),
+        deadline_ms: None,
+    }
+}
+
+/// The scheduler: a pass over each repository every `interval_s`, until
+/// the server stops. The first pass waits one interval, so start-up is not
+/// slowed by a sweep.
+async fn gc_forever<M: MetaStore, O: ObjectStore>(
+    engine: Arc<Engine<M, O>>,
+    telemetry: Arc<Telemetry>,
+    gc: crate::config::GcSection,
+    mut stop: watch::Receiver<bool>,
+) {
+    let interval = Duration::from_secs(gc.interval_s);
+    loop {
+        tokio::select! {
+            _ = stop.wait_for(|s| *s) => return,
+            () = tokio::time::sleep(interval) => {}
+        }
+        for repo in &gc.repos {
+            // Logged and counted; the next interval tries again.
+            let _ = gc_pass(&engine, &telemetry, repo, gc.verify).await;
+        }
+    }
+}
+
+/// One scheduled pass over `repo`, logged and recorded in the metrics.
+pub(crate) async fn gc_pass<M: MetaStore, O: ObjectStore>(
+    engine: &Engine<M, O>,
+    telemetry: &Telemetry,
+    repo: &str,
+    verify: bool,
+) -> ApiResult<SweepReport> {
+    let result = engine.gc_sweep(&gc_context(repo), repo, verify).await;
+    record_sweep(telemetry.metrics(), &result);
+    match &result {
+        Ok(r) => tracing::info!(
+            repo,
+            collected = r.collected,
+            doomed = r.doomed,
+            deleted = r.deleted,
+            bytes = r.bytes,
+            more = r.more,
+            "gc pass"
+        ),
+        Err(e) => tracing::info!(repo, error = %e, "gc pass refused or failed"),
+    }
+    result
+}
+
+/// A pass's outcome in the `graft_gc_*` metrics.
+pub(crate) fn record_sweep(m: &graft_telemetry::Metrics, result: &ApiResult<SweepReport>) {
+    let outcome = match result {
+        Ok(r) => {
+            m.gc_collected_total.inc_by(r.collected);
+            m.gc_doomed_total.inc_by(r.doomed);
+            m.gc_deleted_total.inc_by(r.deleted + r.recovered);
+            m.gc_reclaimed_bytes_total.inc_by(r.bytes);
+            "ok"
+        }
+        Err(ApiError::Unavailable { .. }) => "busy",
+        Err(ApiError::Rejected { .. }) => "refused",
+        Err(_) => "failed",
+    };
+    m.gc_sweeps_total.with_label_values(&[outcome]).inc();
+}
+
 async fn bind(addr: &str) -> Result<TcpListener, String> {
     TcpListener::bind(addr)
         .await
@@ -325,6 +445,46 @@ impl Shutdown {
 mod tests {
     use super::*;
     use tonic::codegen::tokio_stream::StreamExt;
+
+    #[test]
+    fn sweep_outcomes_are_counted() {
+        let (registry, m) = graft_telemetry::registry().expect("registry");
+        let report = SweepReport {
+            collected: 2,
+            doomed: 3,
+            deleted: 1,
+            recovered: 1,
+            bytes: 40,
+            ..SweepReport::default()
+        };
+        record_sweep(&m, &Ok(report));
+        record_sweep(&m, &Err(ApiError::Unavailable { retry_after_ms: 1 }));
+        record_sweep(
+            &m,
+            &Err(ApiError::Rejected {
+                policy: "gc".into(),
+                detail: "deletion is off for this repository".into(),
+            }),
+        );
+        let text = graft_telemetry::encode(&registry);
+        for line in [
+            "graft_gc_collected_total 2",
+            "graft_gc_doomed_total 3",
+            "graft_gc_deleted_total 2",
+            "graft_gc_reclaimed_bytes_total 40",
+            r#"graft_gc_sweeps_total{outcome="ok"} 1"#,
+            r#"graft_gc_sweeps_total{outcome="busy"} 1"#,
+            r#"graft_gc_sweeps_total{outcome="refused"} 1"#,
+        ] {
+            assert!(text.contains(line), "{line} in\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_scheduler_context_holds_only_the_repositorys_admin_scope() {
+        let cx = gc_context("r");
+        assert_eq!(cx.principal.scopes, ["repo:r:admin"]);
+    }
 
     #[tokio::test]
     async fn accepted_connections_have_nodelay() {

@@ -179,6 +179,18 @@ pub enum Precondition {
     ObjectDoomed(ObjectId),
     /// No row holds the object.
     ObjectUnheld(ObjectId),
+    /// The derived value at `(kind, version, key)` is `value`, or absent
+    /// for `None`. The compare in a derived-value CAS (the GC sweep lease).
+    DerivedIs {
+        /// Kind name.
+        kind: String,
+        /// Kind version.
+        version: u32,
+        /// Key bytes.
+        key: Vec<u8>,
+        /// Expected value.
+        value: Option<Vec<u8>>,
+    },
 }
 
 /// One write inside a transaction.
@@ -186,7 +198,10 @@ pub enum Precondition {
 pub enum Write {
     /// Insert content and its record. Stores set `record.lsn` to the LSN of
     /// the transaction's first `Journal` write, when there is one. The new
-    /// record has no pins and no expiry.
+    /// record has no pins and no expiry. A stored changeset is replaced
+    /// outright: the sweep writes a collected tombstone with no content
+    /// this way, and a write of a collected changeset revives it (both
+    /// guarded by a precondition on the record).
     PutChangeset {
         /// Id.
         id: ChangesetId,

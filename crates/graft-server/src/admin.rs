@@ -5,7 +5,10 @@
 //! only signs, the second writes one row through SQLite. `fsck` opens the
 //! object store, which one process owns at a time, so it runs with the
 //! server stopped (as after a restore). `backup` snapshots the metadata
-//! while the server runs.
+//! while the server runs. `gc` opens the object store too, so it also runs
+//! with the server stopped; the sweep lease is in the metadata store, so
+//! even a second process could not sweep a repository the server is
+//! sweeping.
 
 use std::io::Read as _;
 use std::sync::Arc;
@@ -13,6 +16,7 @@ use std::sync::Arc;
 use graft_auth::{NoDenylist, Token};
 use graft_engine::{Engine, EngineConfig};
 use graft_model::{ObjectId, SystemClock};
+use graft_proto::types::Gc;
 use graft_proto::{AdminApi as _, CallContext, Principal, PrincipalKind};
 use graft_store::{ObjectStore, RepoId, StoreError, StoreResult, StoreStats};
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
@@ -48,10 +52,8 @@ pub(crate) fn run(config: &ServerConfig, args: &[String]) -> Result<(), Failure>
         ["repo", "create", name] => repo_create(config, name),
         ["fsck", repo] => fsck(config, repo),
         ["backup", dir, rest @ ..] => backup(config, dir, rest),
-        ["gc", ..] => Err(Failure(
-            "gc is not implemented in this release (docs/plan.md, G2.9)".into(),
-            2,
-        )),
+        ["gc", "deletion", repo, switch] => gc_deletion(config, repo, switch),
+        ["gc", repo, rest @ ..] => gc(config, repo, rest),
         _ => Err(Failure::usage(crate::USAGE)),
     }
 }
@@ -197,6 +199,99 @@ fn fsck(config: &ServerConfig, repo: &str) -> Result<(), Failure> {
     } else {
         Err(Failure::failed(format!("fsck {repo}: not clean")))
     }
+}
+
+/// `gc <repo> [--dry-run] [--verify]`: one sweep pass (design §8.6), or
+/// with `--dry-run` what one would collect. A pass is refused until the
+/// operator turns deletion on for the repository (`gc deletion`).
+fn gc(config: &ServerConfig, repo: &str, args: &[&str]) -> Result<(), Failure> {
+    let (mut dry_run, mut verify) = (false, false);
+    for flag in args {
+        match *flag {
+            "--dry-run" => dry_run = true,
+            "--verify" => verify = true,
+            _ => return Err(Failure::usage("gc <repo> [--dry-run] [--verify]")),
+        }
+    }
+    let (meta, objects) = serve::open_stores(config, None)
+        .map_err(|e| Failure::failed(format!("{e} (gc needs the server stopped)")))?;
+    // One pass, run to its budget without the rate limit's pauses.
+    let engine = Engine::new(
+        Arc::new(meta),
+        Arc::new(objects),
+        Arc::new(SystemClock),
+        config.engine_config(),
+    )
+    .with_gc(serve::gc_settings(config, Arc::new(graft_gc::NoPace)));
+    let cx = serve::gc_context(repo);
+    let rt = runtime()?;
+    if dry_run {
+        let report = rt
+            .block_on(engine.gc(
+                &cx,
+                Gc {
+                    repo: repo.to_owned(),
+                    dry_run: true,
+                },
+            ))
+            .map_err(|e| Failure::failed(e.to_string()))?;
+        println!(
+            "gc {repo} (dry run): {} changesets collectable, {} objects doomable, {} bytes",
+            report.changesets, report.objects, report.bytes
+        );
+        return Ok(());
+    }
+    let r = rt
+        .block_on(engine.gc_sweep(&cx, repo, verify))
+        .map_err(|e| Failure::failed(e.to_string()))?;
+    println!(
+        "gc {repo}: {} workspaces lapsed ({} drafts abandoned), {} changesets collected, \
+         {} rows moved, {} rows expired, {} objects doomed, {} deleted ({} recovered), \
+         {} bytes reclaimed, {} skipped{}",
+        r.lapsed,
+        r.abandoned,
+        r.collected,
+        r.moved,
+        r.expired,
+        r.doomed,
+        r.deleted,
+        r.recovered,
+        r.bytes,
+        r.skipped,
+        if r.more {
+            "; more to do: run again"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+/// `gc deletion <repo> on|off`: the operator's deletion switch, journalled
+/// as an `AdminAction`. Off on every repository until turned on.
+fn gc_deletion(config: &ServerConfig, repo: &str, switch: &str) -> Result<(), Failure> {
+    let on = match switch {
+        "on" => true,
+        "off" => false,
+        _ => return Err(Failure::usage("gc deletion <repo> on|off")),
+    };
+    if !config.meta_db.exists() {
+        return Err(Failure::failed(format!(
+            "{} does not exist; start the server once first",
+            config.meta_db.display()
+        )));
+    }
+    let meta = SqliteMetaStore::open(SqliteConfig::new(&config.meta_db))
+        .map_err(|e| Failure::failed(format!("open {}: {e:?}", config.meta_db.display())))?;
+    let rt = runtime()?;
+    let id = rt
+        .block_on(graft_store::MetaStore::repo(&meta, repo))
+        .map_err(|e| Failure::failed(format!("{e:?}")))?
+        .ok_or_else(|| Failure::failed(format!("no repository {repo}")))?;
+    rt.block_on(graft_gc::set_deletion(&meta, id, on, "operator"))
+        .map_err(|e| Failure::failed(format!("{e:?}")))?;
+    println!("gc deletion for {repo} is {switch}");
+    Ok(())
 }
 
 fn backup(config: &ServerConfig, dir: &str, args: &[&str]) -> Result<(), Failure> {

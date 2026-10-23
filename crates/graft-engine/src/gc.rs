@@ -1,9 +1,11 @@
-//! `Gc` through `graft-gc` (`docs/design.md` §8.6). Only the dry run is
-//! built: the sweep is refused until G3.2, so no path here deletes.
+//! `Gc` through `graft-gc` (`docs/design.md` §8.6): the dry run, and one
+//! sweep pass. The sweep refuses a repository whose deletion switch the
+//! operator has not turned on, so nothing here deletes until they do.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use graft_gc::{GcConfig, Shape, dry_run_report};
+use graft_gc::{Collector, GcConfig, GcError, Pace, Shape, SweepLeases, SweepReport};
 use graft_model::{
     Changeset, ChangesetId, EntryKind, ObjectId, ObjectSource, SourceError, Tree, TreeEntry, TreeId,
 };
@@ -17,35 +19,111 @@ use crate::access::{Need, require};
 use crate::errors;
 use crate::source::Trees;
 
+/// How the engine runs the collector: its timings, the pause between
+/// batches, and the sweep leases every pass of this process shares.
+#[derive(Clone)]
+pub struct GcSettings {
+    /// Timings and limits.
+    pub config: GcConfig,
+    /// The rate limit's timer.
+    pub pace: Arc<dyn Pace>,
+    /// This process's sweep leases.
+    pub leases: SweepLeases,
+}
+
+impl Default for GcSettings {
+    fn default() -> Self {
+        Self {
+            config: GcConfig::default(),
+            pace: Arc::new(graft_gc::ThreadPace),
+            leases: SweepLeases::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for GcSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcSettings")
+            .field("config", &self.config)
+            .field("leases", &self.leases)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     pub(crate) async fn do_gc(&self, cx: &CallContext, req: Gc) -> ApiResult<GcReport> {
-        require(cx, &req.repo, Need::Admin)?;
-        if !req.dry_run {
-            return Err(ApiError::Rejected {
-                policy: "gc".to_owned(),
-                detail: "the GC sweep is not built yet (docs/plan.md, G3.2)".to_owned(),
+        if req.dry_run {
+            require(cx, &req.repo, Need::Admin)?;
+            let repo = self.repo_id(&req.repo).await?;
+            let report = self
+                .collector()
+                .dry_run(repo, self.clock.now().ms, &self.gc_shape())
+                .await
+                .map_err(gc_error)?;
+            return Ok(GcReport {
+                changesets: report.changesets,
+                objects: report.doomed,
+                bytes: report.bytes,
             });
         }
-        let repo = self.repo_id(&req.repo).await?;
-        let shape = GcShape {
+        let swept = self.gc_sweep(cx, &req.repo, false).await?;
+        Ok(GcReport {
+            changesets: swept.collected,
+            objects: swept.deleted + swept.recovered,
+            bytes: swept.bytes,
+        })
+    }
+
+    /// One sweep pass over the repository `repo` (design §8.6), for `Gc`,
+    /// `admin gc` and the server's scheduler, which records the report in
+    /// its metrics. With `verify`, the plan is checked against the ancestry
+    /// walk first. It needs the repository's admin scope, and is refused
+    /// while the operator has not turned deletion on.
+    pub async fn gc_sweep(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+        verify: bool,
+    ) -> ApiResult<SweepReport> {
+        require(cx, repo, Need::Admin)?;
+        let id = self.repo_id(repo).await?;
+        self.collector()
+            .sweep(id, &self.gc_shape(), verify)
+            .await
+            .map_err(gc_error)
+    }
+
+    fn collector(&self) -> Collector<Arc<M>, Arc<O>> {
+        Collector::new(
+            self.meta.clone(),
+            self.objects.clone(),
+            self.gc.config.clone(),
+        )
+        .with_clock(self.clock.clone())
+        .with_pace(self.gc.pace.clone())
+        .with_leases(self.gc.leases.clone())
+    }
+
+    fn gc_shape(&self) -> GcShape<'_, M, O> {
+        GcShape {
             meta: &self.meta,
             objects: &self.objects,
-        };
-        let report = dry_run_report(
-            &self.meta,
-            &self.objects,
-            &GcConfig::default(),
-            repo,
-            self.clock.now().ms,
-            &shape,
-        )
-        .await
-        .map_err(errors::store)?;
-        Ok(GcReport {
-            changesets: report.changesets,
-            objects: report.doomed,
-            bytes: report.bytes,
-        })
+        }
+    }
+}
+
+/// A collector refusal as the API reports it. Busy is retryable; the rest
+/// are the operator's to fix.
+fn gc_error(e: GcError) -> ApiError {
+    match e {
+        GcError::Store(e) => errors::store(e),
+        GcError::Busy => ApiError::Unavailable {
+            retry_after_ms: 60_000,
+        },
+        other => ApiError::Rejected {
+            policy: "gc".to_owned(),
+            detail: other.to_string(),
+        },
     }
 }
 

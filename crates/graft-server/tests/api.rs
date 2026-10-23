@@ -527,7 +527,41 @@ fn admin_commands_and_their_exit_codes() {
         String::from_utf8_lossy(&out.stdout)
     );
     assert_eq!(site.admin(&["fsck", "nope"]).status.code(), Some(1));
-    assert_eq!(site.admin(&["gc", "r"]).status.code(), Some(2));
+    // GC: the dry run works at once; a pass is refused until the
+    // operator turns deletion on for the repository.
+    let out = site.admin(&["gc", "r", "--dry-run"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("dry run"));
+    let out = site.admin(&["gc", "r"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("deletion is off"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(site.admin(&["gc", "deletion", "r", "on"]).status.success());
+    let out = site.admin(&["gc", "r", "--verify"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("0 changesets collected"));
+    assert!(site.admin(&["gc", "deletion", "r", "off"]).status.success());
+    assert_eq!(site.admin(&["gc", "r"]).status.code(), Some(1));
+    assert_eq!(site.admin(&["gc", "r", "--bogus"]).status.code(), Some(64));
+    assert_eq!(
+        site.admin(&["gc", "deletion", "r", "maybe"]).status.code(),
+        Some(64)
+    );
+    assert_eq!(
+        site.admin(&["gc", "nope", "--dry-run"]).status.code(),
+        Some(1)
+    );
     assert_eq!(site.admin(&["bogus"]).status.code(), Some(64));
     assert_eq!(
         site.admin(&["token", "mint", "--subject", "x"])
