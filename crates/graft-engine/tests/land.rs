@@ -22,7 +22,7 @@ use graft_store::{ChangesetRecord, MetaStore, RecordState};
 
 const LINES: &[&str] = &["main", "trunk", "rel", "gp"];
 
-/// `main` is D6, `trunk` is direct with path rules, `rel` is queued on
+/// `main` is D6 (opted in: the default is `direct`, D22), `trunk` is direct with path rules, `rel` is queued on
 /// `ci/test`, `gp` is git-primary. Other lines are direct.
 fn config() -> EngineConfig {
     let mut trunk = LineConfig::direct("trunk");
@@ -865,6 +865,37 @@ on_both![
     post_land_failures_request_a_revert,
     refused_lands,
 ];
+
+/// Decision D22: with the default config every line, `main` included, is
+/// `direct`. A draft lands on `main` with no attestations, nothing is
+/// queued for a candidate test and no post-land check runs. (D6 is opt-in:
+/// `attested_main_needs_passing_checks` configures it and still gates.)
+fn the_default_main_lands_directly<M: MetaStore>((f, hooks): (Fixture<M>, Arc<Recorder>)) {
+    assert!(EngineConfig::default().lines.is_empty());
+    assert_eq!(
+        EngineConfig::default().default_line.policy,
+        LandPolicy::Direct
+    );
+    let t = T::new(&f, &[("a", b"1")]);
+    let draft = t.commit(t.root, &[("b", b"2")]);
+    let (id, version, pos, rebased) = landed(t.land(draft, "main"));
+    assert_eq!((id, version, pos, rebased), (draft, 2, 1, false));
+    assert_eq!(t.tip("main").target, draft);
+    assert!(hooks.landed.lock().expect("landed").is_empty());
+    assert!(hooks.tested.lock().expect("tested").is_empty());
+    assert!(hooks.reverts.lock().expect("reverts").is_empty());
+}
+
+mod default_config {
+    #[test]
+    fn memory_store() {
+        super::the_default_main_lands_directly(super::hooked(super::memory()));
+    }
+    #[test]
+    fn sqlite_store() {
+        super::the_default_main_lands_directly(super::hooked(super::sqlite()));
+    }
+}
 
 /// Two lands of disjoint files, polled in lockstep, so both read the same
 /// tip before either commits: the second loses its CAS. With one attempt

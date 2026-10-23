@@ -89,10 +89,12 @@ of the service in `compose.yml`. `up.sh` does not create the line.
 
 To run the WI-2270 trial end to end:
 
-1. `deploy/server.toml` carries the `[[lines]]` entries: `trial-1` is
-   `attested` on `ci/fmt`, `ci/clippy` and `ci/test` (graft-primary), and
-   `main` keeps decision D6 but git-primary, so the mirror's `main` is
-   unchanged. The policy is global to the server (WI-2288), so every
+1. `deploy/server.toml` carries the `[[lines]]` entries: since decision D22
+   (phase 1, WI-2298) `trial-1` (graft-primary) and `main` (git-primary, so
+   the mirror's `main` is unchanged) are both `direct`, and the attester's
+   checks gate nothing. To gate `trial-1` on them again (phase 2), set it to
+   `attested` on `ci/fmt`, `ci/clippy` and `ci/test` (the file shows how, and
+   the commented-out D6 block for `main`). The policy is global to the server (WI-2288), so every
    repository gets these lines. A change to the file restarts the server on
    the next `up.sh`.
 2. Put `GRAFT_ATTESTER=1` in `/etc/graft/deploy.env` (the defaults already

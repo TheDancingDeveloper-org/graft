@@ -1,11 +1,14 @@
 //! Per-line land policy from `server.toml` (`[[lines]]`, `[default_line]`).
 //!
 //! The engine gates each land by the line's [`LineConfig`]. Without these
-//! sections the server runs [`EngineConfig::default`]: `main` is decision D6
-//! (attested on `ci/build` and `ci/test`, post-land with auto-revert) and every
-//! other line is `direct`. A `[[lines]]` entry replaces the default for its
-//! name; lines it does not name keep theirs (so `main` stays D6 unless listed).
-//! `[default_line]` replaces the config of every line no entry names.
+//! sections the server runs [`EngineConfig::default`]: every line, `main`
+//! included, is `direct` (decision D22: phase 1 is a git alternative, with no
+//! build, test or CI in the land path). A `[[lines]]` entry opts its line into
+//! `attested`, `queued` or `post_land` checks, the phase-2 setting; decision
+//! D6 for `main` (attested on `ci/build` and `ci/test`, post-land with
+//! auto-revert) is one such entry and is no longer implicit. Lines no entry
+//! names stay `direct`. `[default_line]` replaces the config of every line no
+//! entry names.
 //!
 //! The config is global to the server: every repository sees the same lines.
 //! Per-repository configs can come later.

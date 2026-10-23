@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-use common::Site;
+use common::{D6_MAIN, Site};
 use graft_proto::pb;
 use graft_proto::types::{Attest, RefKind, UpdateRef};
 use serde_json::{Value, json};
@@ -137,7 +137,8 @@ impl Session {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_takes_the_bearer_token_and_the_engine_scopes() {
-    let site = Site::new("server-mcp", "");
+    // `main` opted into D6 so the attested refusal below is exercised.
+    let site = Site::new("server-mcp", D6_MAIN);
     let admin = site.mint(&["repo:r:admin"]);
     let writer = site.mint(&["repo:r:write"]);
     let reader = site.mint(&["repo:r:read"]);
@@ -218,7 +219,7 @@ async fn mcp_takes_the_bearer_token_and_the_engine_scopes() {
     assert_eq!(refused["kind"], "permission_denied");
     assert_eq!(refused["scope"], "repo:r:land:main");
 
-    // With the land scope, `main`'s default gate (decision D6, `attested`)
+    // With the land scope, `main`'s configured gate (decision D6, `attested`)
     // refuses a draft that CI has not attested, as a typed policy refusal.
     let land = Session::open(server.addr, &lander);
     let (failed, refused) = land.call("graft_land", json!({"repo": "r", "workspace": ws}));
