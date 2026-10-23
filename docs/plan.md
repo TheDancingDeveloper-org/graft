@@ -14,7 +14,7 @@ phases are now set by D22:
 
 | Phase | Ships | State |
 | --- | --- | --- |
-| 1 | **A git alternative.** Correct storage and history; fast sparse clone and sync; workspaces; server-side rebase, line merge (D16) and lock-free CAS land; conflicts handed back to the client; CLI, MCP and LSP; git import and export; GitHub delivery as one squashed batch PR (D21). Lines default to `direct`; no build, test or CI runs in the land path | Built and in use (trial WI-2270). Remaining work in the backlog below |
+| 1 | **A git alternative.** Correct storage and history; fast sparse clone and sync; workspaces; server-side rebase, line merge (D16) and lock-free CAS land; conflicts handed back to the client; CLI, MCP and LSP; git import and export; GitHub delivery as one squashed batch PR (D21). Lines default to `direct`; no build, test or CI runs in the land path | Built and in use (trial WI-2270). Backlog nearly done; what remains is below |
 | 2 | **CI checks.** `attested` and `queued` policies, the attester, the CI token exchange, post-land runners, auto-revert | Code exists (G3.1, G3.8, the trial attester), switched off. Not extended until the operator starts phase 2 |
 | (3) | Folded into phases 1 and 2: native landing ships in phase 1 on `direct` lines; its policy gate and CI attestations are phase 2 | — |
 | 4 | **Breadth:** per-line combiner, prefetch, symbol index, a second repository, the export drill (auto-revert moves to phase 2) | Outline, WI-2214 (p4) |
@@ -31,25 +31,39 @@ and clone speed, history integrity.
 ### Phase 1 backlog
 
 The Vogt review WI-2297 holds this list; Vogt is the source of truth for its
-state. In priority order:
+state. Delivered on 2026-10-23 (#82 to #110), all done:
 
-| Item | P | What |
-| --- | --- | --- |
-| WI-2296 | p1 | `graft land` sends `MergeMode::Line` (D16); today a same-file land is refused unless `--sync` |
-| WI-2298 | p1 | every line defaults to `direct`; D6 becomes opt-in config |
-| WI-2270 | p1 | finish the rustTorrent trial: write-up, trial-1 config in the repo, batch PR #214 |
-| WI-2300 | p2 | `graft mcp` (stdio) in the CLI |
-| WI-2301 | p2 | create a line through the API, CLI and MCP |
-| WI-2303 | p2 | plain `log` is 2.5x slower than git |
-| WI-2304 | p2 | bench at 10k and 100k on the graft-dev VM |
-| WI-2291 | p2 | deploy-dev: config can deploy ahead of its image |
-| WI-2274 | p3 | wire the GC sweep into the server |
-| WI-2305 | p3 | bench correctness smoke in the merge queue |
-| WI-2306 | p3 | pr-batch: clear error for an empty mirror DB |
-| WI-2307 | p3 | graft-dev backups, restore rehearsal, alerts |
-| WI-2308 | p3 | graft-mirror import throughput |
-| WI-2302 | p3 | remove the `bridge` stub |
-| WI-2240 | p3 | estate token front for Vogt sessions (D10) |
+- WI-2296 `graft land` line-merges by default (#83, #84).
+- WI-2298 every line defaults to `direct` (#85).
+- WI-2299, WI-2295 D22 docs (#82, #89); WI-2321 D23 docs (#109).
+- WI-2294 bench harness (#81); WI-2311 live-awareness mode (#100);
+  WI-2305 correctness smoke in the merge queue (#94).
+- WI-2300 `graft mcp` over stdio (#87).
+- WI-2301 create a line (#98); WI-2316 fork-point line index, schema v5 (#107).
+- WI-2303 plain `log` reads each changeset once (#92).
+- WI-2291 deploy pre-flight, health gate and rollback (#96).
+- WI-2274 GC sweep in the server, off by default (#103).
+- WI-2306 pr-batch `Unmapped` diagnostics (#105).
+- WI-2308 concurrent blob upload in import (#104); WI-2318 batched engine
+  import writes, 18.9 → 6.2 s per 1k (#110).
+- WI-2302, WI-2320 `bridge` removed (#106, #108).
+- WI-2309 conflict preview, `graft status --upstream` (#99).
+- WI-2312 conflict resolution over the API and MCP (#86, #88, #90, #93).
+- WI-2313 many working copies per host (#102).
+- WI-2315 `/mcp` owner-or-admin checks (#101).
+
+What remains:
+
+| Item | What |
+| --- | --- |
+| WI-2310 | draft overlap (design note #95 merged; implementation open) |
+| WI-2323 | group-commit chained import inserts (note #111 in merge queue; implementation open) |
+| WI-2304 | bench at 10k and 100k on the graft-dev VM |
+| WI-2314 | CI OOM flake: quarantined (#91), root cause open |
+| WI-2307 | graft-dev alerts patch (blocked on the operator; backups #97 done) |
+| WI-2270 | rustTorrent trial batch PR #214 (blocked on the operator) |
+| WI-2317 | tailnet SSH (blocked on the operator) |
+| WI-2240 | estate token front for Vogt sessions (D10), deferred |
 
 New items follow the work item format below. Each names its crates, and new
 items keep the rule of one area per branch.
