@@ -47,8 +47,9 @@ pub const DEFAULT_MAX_LIFETIME_S: i64 = 3600;
 pub const DEFAULT_TOKEN_TTL_S: u64 = 900;
 /// Longest subject an exchanged token carries.
 const MAX_SUBJECT_BYTES: usize = 256;
-/// Longest changeset id text a pin accepts.
-const MAX_PIN_BYTES: usize = 64;
+/// Longest changeset id text a pin accepts: a changeset id as it prints,
+/// one kind letter and the hex of its hash.
+const MAX_PIN_BYTES: usize = 1 + graft_model::id::HEX_LEN;
 
 /// Why an exchange was refused. Never carries a token or a claim value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -879,4 +880,17 @@ fn peek_issuer(jwt: &str) -> Result<String, OidcError> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or(OidcError::Malformed)
+}
+
+#[cfg(test)]
+mod tests {
+    use graft_model::{ChangesetId, ObjectId};
+
+    use super::MAX_PIN_BYTES;
+
+    #[test]
+    fn a_pin_fits_a_real_changeset_id() {
+        let id = ChangesetId(ObjectId([0xab; 32])).to_string();
+        assert_eq!(id.len(), MAX_PIN_BYTES);
+    }
 }

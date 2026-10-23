@@ -19,6 +19,8 @@
 //! put_buffer_bytes = 536870912       # PutObjects buffered by all calls
 //! put_wait_ms = 10000                # longest wait for that budget (≤ 1 h)
 //! put_idle_ms = 30000                # longest gap between PutObjects messages (≤ 1 h)
+//!
+//! [ci]                               # CI token exchange: see `ci.rs`
 //! ```
 //!
 //! Unknown keys are refused, so a typo fails at start-up rather than being
@@ -89,6 +91,8 @@ pub(crate) struct ServerConfig {
     /// The longest gap between two `PutObjects` messages before the call
     /// answers `Unavailable` and gives its budget back, ms.
     pub(crate) put_idle_ms: u64,
+    /// CI token exchange: trusted issuers and repository bindings.
+    pub(crate) ci: crate::ci::CiConfig,
 }
 
 impl Default for ServerConfig {
@@ -113,6 +117,7 @@ impl Default for ServerConfig {
             put_buffer_bytes: 512 << 20,
             put_wait_ms: 10_000,
             put_idle_ms: 30_000,
+            ci: crate::ci::CiConfig::default(),
         }
     }
 }
@@ -185,7 +190,7 @@ impl ServerConfig {
                 )));
             }
         }
-        Ok(())
+        self.ci.check().map_err(ConfigError)
     }
 
     /// The `Watch` bounds.

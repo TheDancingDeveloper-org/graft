@@ -31,6 +31,7 @@ use tonic::transport::server::TcpIncoming;
 
 use crate::admission::Admission;
 use crate::app::{App, PutBudget};
+use crate::ci::CiExchange;
 use crate::config::ServerConfig;
 use crate::denylist::Denylist;
 use crate::grpc::{self, Services};
@@ -136,19 +137,29 @@ async fn run(config: ServerConfig) -> Result<(), String> {
     }
     let admission = Admission::new(volumes, config.min_free_fraction, config.min_free_bytes);
     let denylist = Denylist::open(&config.meta_db)?;
-    let app = Arc::new(App::new(
-        engine,
-        signing,
-        admission,
-        telemetry,
-        config.max_token_ttl_s,
-        Watches::new(config.watch_limits()),
-        PutBudget::new(config.max_put_call_bytes, config.put_buffer_bytes).with_waits(
-            std::time::Duration::from_millis(config.put_wait_ms),
-            std::time::Duration::from_millis(config.put_idle_ms),
-        ),
-        denylist,
-    ));
+    let ci = CiExchange::load(&config.ci)?.map(Arc::new);
+    if let Some(ci) = &ci {
+        // Fetched before the server is ready, so the first CI job does not
+        // wait on it; a failure is logged and retried on the timer.
+        ci.refresh_all().await;
+        tokio::spawn(ci.clone().refresh_forever());
+    }
+    let app = Arc::new(
+        App::new(
+            engine,
+            signing,
+            admission,
+            telemetry,
+            config.max_token_ttl_s,
+            Watches::new(config.watch_limits()),
+            PutBudget::new(config.max_put_call_bytes, config.put_buffer_bytes).with_waits(
+                std::time::Duration::from_millis(config.put_wait_ms),
+                std::time::Duration::from_millis(config.put_idle_ms),
+            ),
+            denylist,
+        )
+        .with_ci(ci),
+    );
 
     if std::env::var_os(HOLD_START_UP_ENV).is_some() {
         // Test hook: hold start-up here until a stop is requested, so a test

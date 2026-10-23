@@ -7,8 +7,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fds = protox::compile([proto], ["proto"])?;
     tonic_prost_build::configure()
         .btree_map(".")
-        // Tokens never appear in `Debug` output; `pb.rs` redacts this one.
-        .skip_debug(["graft.v1.Token"])
+        // Tokens never appear in `Debug` output; `pb.rs` redacts these.
+        .skip_debug(["graft.v1.Token", "graft.v1.ExchangeCiTokenRequest"])
         .compile_fds(fds)?;
     Ok(())
 }
