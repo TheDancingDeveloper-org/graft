@@ -84,21 +84,24 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
     }
 
     /// `K`'s value for `cs` (whose id is `id`), which need not be stored yet.
+    /// `known` holds values not to read (ones not committed yet); it gains
+    /// every value read or computed, `id`'s included.
     pub(crate) async fn derive_new<K: ParentDerived>(
         &self,
         repo: RepoId,
         id: ChangesetId,
         cs: &Changeset,
+        known: &mut HashMap<ChangesetId, K::Value>,
     ) -> StoreResult<Derived<K::Value>> {
-        let mut known = HashMap::new();
         let mut rows = Vec::new();
         let parents = needed_parents(K::PARENTS, cs);
         for &p in parents {
-            self.walk::<K>(repo, p, &mut known, &mut rows).await?;
+            self.walk::<K>(repo, p, known, &mut rows).await?;
         }
         let values: Vec<_> = parents.iter().map(|p| known[p].clone()).collect();
         let value = K::derive(cs, &values);
         rows.push(row::<K>(changeset_key(id), &value));
+        known.insert(id, value.clone());
         Ok(Derived { value, rows })
     }
 
@@ -157,20 +160,23 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
     }
 
     /// The skip list for `cs` (whose id is `id`), which need not be stored.
+    /// `known` is as for [`Self::derive_new`]: the lists of first-parent
+    /// ancestors at every jump distance are looked up there first.
     pub(crate) async fn skip_list_new(
         &self,
         repo: RepoId,
         id: ChangesetId,
         cs: &Changeset,
+        known: &mut HashMap<ChangesetId, Skips>,
     ) -> StoreResult<Derived<Skips>> {
-        let mut known = HashMap::new();
         let mut rows = Vec::new();
         let parent = match cs.first_parent() {
             None => None,
-            Some(p) => Some((p, self.skips_walk(repo, p, &mut known, &mut rows).await?)),
+            Some(p) => Some((p, self.skips_walk(repo, p, known, &mut rows).await?)),
         };
-        let value = self.next_skips(repo, parent, &mut known).await?;
+        let value = self.next_skips(repo, parent, known).await?;
         rows.push(row::<SkipList>(changeset_key(id), &value));
+        known.insert(id, value.clone());
         Ok(Derived { value, rows })
     }
 
@@ -188,6 +194,10 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
         let mut base = None;
         let mut cur = Some(target);
         while let Some(id) = cur {
+            if let Some(v) = known.get(&id) {
+                base = Some((id, v.clone()));
+                break;
+            }
             if let Some(v) = self.get::<SkipList>(repo, &changeset_key(id)).await? {
                 known.insert(id, v.clone());
                 base = Some((id, v));

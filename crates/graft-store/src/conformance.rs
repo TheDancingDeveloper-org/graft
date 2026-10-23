@@ -36,6 +36,7 @@ where
     case!(ref_cas_absent_stale_and_success);
     case!(ref_version_is_monotonic);
     case!(failed_transactions_write_nothing);
+    case!(commit_run_chains_and_stops_at_a_failure);
     case!(journal_lsns_are_monotonic_and_gap_free);
     case!(workspace_head_cas);
     case!(workspace_leases);
@@ -511,6 +512,59 @@ async fn failed_transactions_write_nothing<O: ObjectStore, M: MetaStore>(_object
     );
     assert_eq!(meta.get_ref(repo, name).await.expect("read"), None);
     assert!(meta.journal(repo, 1, 10).await.expect("journal").is_empty());
+}
+
+async fn commit_run_chains_and_stops_at_a_failure<O: ObjectStore, M: MetaStore>(
+    _objects: &O,
+    meta: &M,
+) {
+    let repo = new_repo(meta, "run").await;
+    let put = |n: u8, parent: Option<u8>| {
+        let mut preconditions = vec![Precondition::ChangesetAbsent(cs(n))];
+        preconditions.extend(parent.map(|p| Precondition::RecordLive(cs(p))));
+        txn(
+            preconditions,
+            vec![
+                Write::PutChangeset {
+                    id: cs(n),
+                    content: vec![n],
+                    record: record(RecordState::Abandoned),
+                },
+                journal("ChangesetCreated"),
+            ],
+        )
+    };
+    assert_eq!(
+        meta.commit_run(repo, Vec::new()).await.expect("empty run"),
+        Vec::new()
+    );
+    // The child sees its parent written earlier in the run; the third is
+    // a duplicate and fails; the fourth is not attempted.
+    let outcomes = meta
+        .commit_run(
+            repo,
+            vec![put(1, None), put(2, Some(1)), put(1, None), put(4, Some(2))],
+        )
+        .await
+        .expect("run");
+    assert_eq!(
+        outcomes,
+        vec![
+            TxnOutcome::Committed(vec![1]),
+            TxnOutcome::Committed(vec![2]),
+            TxnOutcome::PreconditionFailed(0),
+        ]
+    );
+    assert!(meta.changeset(repo, cs(2)).await.expect("read").is_some());
+    assert_eq!(meta.changeset(repo, cs(4)).await.expect("read"), None);
+    assert_eq!(lsns_of(meta, repo).await, vec![1, 2]);
+    // A precondition on a parent that is not there fails the first.
+    let outcomes = meta
+        .commit_run(repo, vec![put(5, Some(9)), put(6, None)])
+        .await
+        .expect("run");
+    assert_eq!(outcomes, vec![TxnOutcome::PreconditionFailed(1)]);
+    assert_eq!(meta.changeset(repo, cs(6)).await.expect("read"), None);
 }
 
 async fn journal_lsns_are_monotonic_and_gap_free<O: ObjectStore, M: MetaStore>(

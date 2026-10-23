@@ -713,6 +713,44 @@ fn import_runs<M: MetaStore>(f: &Fixture<M>) {
         "the last snapshot comes back whole"
     );
 
+    // Skip lists and generations built from in-run (uncommitted) parents
+    // answer ancestry across the whole chain.
+    for (a, b) in [(0, 11), (3, 10), (5, 6)] {
+        let pair = |a: usize, b: usize| graft_proto::types::Pair {
+            repo: repo.name.clone(),
+            a: ids[a],
+            b: ids[b],
+        };
+        assert!(block_on(repo.e().is_ancestor(&repo.cx, pair(a, b))).expect("ancestor"));
+        assert!(!block_on(repo.e().is_ancestor(&repo.cx, pair(b, a))).expect("not ancestor"));
+    }
+
+    // The same changeset twice in one request is stored once, and both
+    // answers name it.
+    let dup = Repo::new(f, "dup");
+    dup.upload(&blobs.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    let twice = vec![
+        batch[0].clone(),
+        batch[1].clone(),
+        batch[2].clone(),
+        batch[1].clone(),
+        batch[3].clone(),
+    ];
+    let got = block_on(dup.e().import_changesets(
+        &dup.cx,
+        ImportChangesets {
+            repo: dup.name.clone(),
+            changesets: twice,
+        },
+    ))
+    .expect("import with a duplicate");
+    assert_eq!(
+        got.iter().map(|c| c.id).collect::<Vec<_>>(),
+        [ids[0], ids[1], ids[2], ids[1], ids[3]]
+    );
+    assert_eq!(got[1], got[3]);
+    assert_eq!(dup.journal().len(), 4, "stored once each");
+
     // A wrong root at 7: 0 to 6 stay committed.
     let other = Repo::new(f, "partial");
     other.upload(&blobs.iter().map(Vec::as_slice).collect::<Vec<_>>());

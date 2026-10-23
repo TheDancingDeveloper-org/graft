@@ -315,7 +315,7 @@ impl MetaStore for SqliteMetaStore {
             .await?
         {
             Written::Repo(id) => Ok(id),
-            Written::Txn(_) => Err(StoreError::Backend("unexpected writer reply".to_owned())),
+            _ => Err(StoreError::Backend("unexpected writer reply".to_owned())),
         }
     }
 
@@ -327,7 +327,22 @@ impl MetaStore for SqliteMetaStore {
     async fn commit(&self, repo: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcome> {
         match self.write("commit", WriteOp::Commit(repo, txn)).await? {
             Written::Txn(outcome) => Ok(outcome),
-            Written::Repo(_) => Err(StoreError::Backend("unexpected writer reply".to_owned())),
+            _ => Err(StoreError::Backend("unexpected writer reply".to_owned())),
+        }
+    }
+
+    /// One writer job: the run shares the batch's one `COMMIT` (one fsync
+    /// under `synchronous=FULL`) instead of paying one per transaction.
+    async fn commit_run(&self, repo: RepoId, txns: Vec<MetaTxn>) -> StoreResult<Vec<TxnOutcome>> {
+        if txns.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self
+            .write("commit_run", WriteOp::CommitRun(repo, txns))
+            .await?
+        {
+            Written::Run(outcomes) => Ok(outcomes),
+            _ => Err(StoreError::Backend("unexpected writer reply".to_owned())),
         }
     }
 

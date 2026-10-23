@@ -31,6 +31,9 @@ pub(crate) const MAX_BATCH: usize = 256;
 pub(crate) enum WriteOp {
     CreateRepo(String),
     Commit(RepoId, MetaTxn),
+    /// A chained run: each txn in its own savepoint, stopping at the first
+    /// that is not committed.
+    CommitRun(RepoId, Vec<MetaTxn>),
 }
 
 /// What a write returns.
@@ -38,6 +41,7 @@ pub(crate) enum WriteOp {
 pub(crate) enum Written {
     Repo(RepoId),
     Txn(TxnOutcome),
+    Run(Vec<TxnOutcome>),
 }
 
 impl Written {
@@ -45,7 +49,7 @@ impl Written {
     fn keeps(&self) -> bool {
         matches!(
             self,
-            Written::Repo(_) | Written::Txn(TxnOutcome::Committed(_))
+            Written::Repo(_) | Written::Txn(TxnOutcome::Committed(_)) | Written::Run(_)
         )
     }
 }
@@ -117,7 +121,33 @@ fn apply(conn: &Connection, op: WriteOp) -> StoreResult<Written> {
     match op {
         WriteOp::CreateRepo(name) => create_repo(conn, &name).map(Written::Repo),
         WriteOp::Commit(repo, txn) => commit(conn, repo, txn).map(Written::Txn),
+        WriteOp::CommitRun(repo, txns) => commit_run(conn, repo, txns).map(Written::Run),
     }
+}
+
+/// Applies a run in order, each txn inside its own savepoint, and stops
+/// after the first that is not committed (its savepoint rolled back). The
+/// committed ones stay in the job's savepoint, and the batch's one `COMMIT`
+/// makes them durable together. An error fails the whole job, so its
+/// savepoint rolls the run back.
+fn commit_run(conn: &Connection, repo: RepoId, txns: Vec<MetaTxn>) -> StoreResult<Vec<TxnOutcome>> {
+    let mut out = Vec::with_capacity(txns.len());
+    for txn in txns {
+        conn.execute_batch("SAVEPOINT run_txn").map_err(sql_err)?;
+        let outcome = commit(conn, repo, txn);
+        let committed = matches!(outcome, Ok(TxnOutcome::Committed(_)));
+        let end = if committed {
+            "RELEASE run_txn"
+        } else {
+            "ROLLBACK TO run_txn; RELEASE run_txn"
+        };
+        conn.execute_batch(end).map_err(sql_err)?;
+        out.push(outcome?);
+        if !committed {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 fn create_repo(conn: &Connection, name: &str) -> StoreResult<RepoId> {
