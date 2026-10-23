@@ -652,3 +652,157 @@ pub struct MintToken {
     /// Vogt work item.
     pub work_item: Option<String>,
 }
+
+// ---- conflict resolution (WI-2312) ----------------------------------------
+
+/// The most bytes of rendered merge3 markers one [`ConflictView`] carries.
+/// A path whose rendering is larger gets ids only
+/// ([`ConflictReason::TooLarge`]); read its sides with `ReadFile` by id.
+pub const MAX_CONFLICT_MARKER_BYTES: usize = 64 * 1024;
+
+/// `GetConflicts` request: what a workspace's stack would conflict on if it
+/// were synced onto `onto`. Read-only; nothing is stored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GetConflicts {
+    /// The workspace.
+    pub workspace: WorkspaceRef,
+    /// Target; the line tip when absent.
+    pub onto: Option<ChangesetId>,
+    /// Page over conflicting paths, in path-byte order.
+    pub page: Page,
+}
+
+/// Why a conflicting path has no rendered markers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConflictReason {
+    /// A side is not text.
+    Binary,
+    /// A side, or the rendering, is over the D16 or marker byte limit.
+    TooLarge,
+    /// The sides disagree on entry kind (file, symlink, submodule).
+    Kind,
+    /// One side deleted or added the path (no three-way text merge applies).
+    Clash,
+}
+
+/// One side of a conflicting path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConflictSide {
+    /// The entry's object id.
+    pub id: ObjectId,
+    /// The entry's kind.
+    pub kind: EntryKind,
+}
+
+/// One conflicting path, by id, with merge3 markers when text-mergeable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictView {
+    /// The path.
+    pub path: RepoPath,
+    /// The entry in the merge base; `None` when absent there.
+    pub base: Option<ConflictSide>,
+    /// The entry on the draft's side; `None` when the draft deleted it.
+    pub ours: Option<ConflictSide>,
+    /// The entry on `onto`; `None` when `onto` deleted it.
+    pub theirs: Option<ConflictSide>,
+    /// Whether all three sides are text within the D16 limits.
+    pub text_mergeable: bool,
+    /// `merge3` output with diff3 markers, at most
+    /// [`MAX_CONFLICT_MARKER_BYTES`]. `None` when not text-mergeable or
+    /// over the cap; `reason` says which.
+    pub markers: Option<Vec<u8>>,
+    /// Why `markers` is `None`.
+    pub reason: Option<ConflictReason>,
+}
+
+/// `GetConflicts` response. Empty `paths` with no `next` means the stack
+/// syncs cleanly onto `onto`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflicts {
+    /// The target the conflicts were computed against.
+    pub onto: ChangesetId,
+    /// The bottom-most draft whose rebase failed, if any.
+    pub draft: Option<ChangesetId>,
+    /// This page of conflicting paths.
+    pub paths: Vec<ConflictView>,
+    /// Resume token for the next page.
+    pub next: Option<String>,
+}
+
+/// A caller-supplied resolution for one conflicting path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Resolution {
+    /// Put this content at the path.
+    Put {
+        /// File, exec or symlink.
+        kind: EntryKind,
+        /// The content.
+        content: ResolvedContent,
+    },
+    /// Delete the path.
+    Delete,
+}
+
+/// Where a [`Resolution::Put`]'s content comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResolvedContent {
+    /// An already stored blob (uploaded with `PutObjects`, or one side's id).
+    Blob(BlobId),
+    /// Bytes sent inline, under the same caps as `CreateChangeset`'s inline
+    /// blobs.
+    Inline(Vec<u8>),
+}
+
+/// A path and its resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathResolution {
+    /// The conflicting path.
+    pub path: RepoPath,
+    /// What to put there.
+    pub resolution: Resolution,
+}
+
+/// `Resolve` request: rebase the workspace's stack onto `onto`, using the
+/// caller's resolutions for the paths that conflict.
+///
+/// The engine runs it as **one transaction** (objects, rebased drafts, the
+/// workspace move and its journal entry). The workspace moves `base → onto`
+/// and `head → new head` **only by compare-and-swap** on `expected_head`;
+/// the line is not touched until `Land`. The new ids are content-only and so
+/// **deterministic**: the same stack, `onto` and resolutions give the same
+/// head, and a retry after success returns it.
+///
+/// Every rewritten draft records `graft.rebased-from` as any rebase does.
+/// The draft that took resolutions also records `graft.resolved-paths`, a
+/// sorted JSON array of path strings; the engine defines that key next to
+/// `graft.merged-paths` (`graft_engine::rebase`). Conflicting paths the
+/// caller doesn't resolve are tried with the D16 line merge; any that still
+/// conflict fail the call with `ApiError::Conflict` and nothing is written.
+/// A resolution for a path that doesn't conflict is refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolve {
+    /// The workspace.
+    pub workspace: WorkspaceRef,
+    /// The target, as returned by `GetConflicts` or a `Conflict` error.
+    pub onto: ChangesetId,
+    /// The head the caller saw (CAS).
+    pub expected_head: Option<ChangesetId>,
+    /// Resolutions, one per path.
+    pub resolutions: Vec<PathResolution>,
+}
+
+/// `Resolve` response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolved {
+    /// The workspace after the move (base `onto`, the new head).
+    pub workspace: WorkspaceView,
+    /// The new stack head.
+    pub head: ChangesetId,
+    /// Paths that took the caller's resolution, sorted.
+    pub resolved_paths: Vec<RepoPath>,
+    /// Paths merged by the D16 line merge, sorted.
+    pub merged_paths: Vec<RepoPath>,
+}

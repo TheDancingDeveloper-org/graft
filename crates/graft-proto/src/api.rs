@@ -188,6 +188,22 @@ pub trait WorkspaceApi: Send + Sync {
         req: WorkspaceRef,
         keep_drafts: bool,
     ) -> impl Future<Output = ApiResult<()>> + Send;
+    /// Reports, per path, what the stack would conflict on if synced onto
+    /// `onto` (the line tip by default): base, ours and theirs ids and
+    /// bounded merge3 markers. Read-only and paged.
+    fn get_conflicts(
+        &self,
+        cx: &CallContext,
+        req: GetConflicts,
+    ) -> impl Future<Output = ApiResult<Conflicts>> + Send;
+    /// Rebases the stack onto `onto` with the caller's resolutions, in one
+    /// transaction, moving the workspace only by CAS on `expected_head`.
+    /// See [`Resolve`] for the contract.
+    fn resolve(
+        &self,
+        cx: &CallContext,
+        req: Resolve,
+    ) -> impl Future<Output = ApiResult<Resolved>> + Send;
 }
 
 /// Admin operations.
