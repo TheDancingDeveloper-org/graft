@@ -804,3 +804,97 @@ fn ci_token_debug_is_redacted() {
     };
     assert!(!format!("{r:?}").contains("secret"));
 }
+
+#[test]
+fn conflict_types_round_trip() {
+    let side =
+        || prop::option::of((oid(), entry_kind()).prop_map(|(id, kind)| ConflictSide { id, kind }));
+    let reason = prop::option::of(prop_oneof![
+        Just(ConflictReason::Binary),
+        Just(ConflictReason::TooLarge),
+        Just(ConflictReason::Kind),
+        Just(ConflictReason::Clash)
+    ]);
+    let view = (
+        path(),
+        side(),
+        side(),
+        side(),
+        any::<bool>(),
+        prop::option::of(prop::collection::vec(any::<u8>(), 0..16)),
+        reason,
+    )
+        .prop_map(
+            |(path, base, ours, theirs, text_mergeable, markers, reason)| ConflictView {
+                path,
+                base,
+                ours,
+                theirs,
+                text_mergeable,
+                markers,
+                reason,
+            },
+        );
+    check::<GetConflicts, pb::GetConflictsRequest, _>(
+        "GetConflicts",
+        (workspace_ref(), ocid(), page()).prop_map(|(workspace, onto, page)| GetConflicts {
+            workspace,
+            onto,
+            page,
+        }),
+    );
+    check::<Conflicts, pb::Conflicts, _>(
+        "Conflicts",
+        (cid(), ocid(), prop::collection::vec(view, 0..3), otext()).prop_map(
+            |(onto, draft, paths, next)| Conflicts {
+                onto,
+                draft,
+                paths,
+                next,
+            },
+        ),
+    );
+    let resolution = prop_oneof![
+        Just(Resolution::Delete),
+        (entry_kind(), oid()).prop_map(|(kind, id)| Resolution::Put {
+            kind,
+            content: ResolvedContent::Blob(BlobId(id)),
+        }),
+        (entry_kind(), prop::collection::vec(any::<u8>(), 0..16)).prop_map(|(kind, b)| {
+            Resolution::Put {
+                kind,
+                content: ResolvedContent::Inline(b),
+            }
+        }),
+    ];
+    check::<Resolve, pb::ResolveRequest, _>(
+        "Resolve",
+        (
+            workspace_ref(),
+            cid(),
+            ocid(),
+            prop::collection::vec(
+                (path(), resolution)
+                    .prop_map(|(path, resolution)| PathResolution { path, resolution }),
+                0..3,
+            ),
+        )
+            .prop_map(|(workspace, onto, expected_head, resolutions)| Resolve {
+                workspace,
+                onto,
+                expected_head,
+                resolutions,
+            }),
+    );
+    check::<Resolved, pb::Resolved, _>(
+        "Resolved",
+        (workspace_view(), cid(), paths(), paths()).prop_map(
+            |(workspace, head, resolved_paths, merged_paths)| Resolved {
+                workspace,
+                head,
+                resolved_paths,
+                merged_paths,
+            },
+        ),
+    );
+}

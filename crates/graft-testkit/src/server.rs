@@ -741,6 +741,28 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi + 'static> pb::workspace_service_serv
         Ok(self.reply(out.into()))
     }
 
+    async fn get_conflicts(
+        &self,
+        req: Request<pb::GetConflictsRequest>,
+    ) -> Result<Response<pb::Conflicts>, Status> {
+        let cx = self.bind(&req)?;
+        let r: GetConflicts = conv(req.into_inner())?;
+        self.shared.record(Rpc::Workspace("GetConflicts"));
+        let out = self.api.get_conflicts(&cx, r).await?;
+        Ok(self.reply(out.into()))
+    }
+
+    async fn resolve(
+        &self,
+        req: Request<pb::ResolveRequest>,
+    ) -> Result<Response<pb::Resolved>, Status> {
+        let cx = self.bind(&req)?;
+        let r: Resolve = conv(req.into_inner())?;
+        self.shared.record(Rpc::Workspace("Resolve"));
+        let out = self.api.resolve(&cx, r).await?;
+        Ok(self.reply(out.into()))
+    }
+
     async fn sync(&self, req: Request<pb::SyncRequest>) -> Result<Response<pb::Synced>, Status> {
         let cx = self.bind(&req)?;
         let r = req.into_inner();
