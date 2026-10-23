@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft ci exchange --json",
+  "description": "Where the graft token was written. The token itself is never printed.",
+  "type": "object",
+  "required": [
+    "provider",
+    "token_file"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "provider": {
+      "enum": [
+        "github",
+        "woodpecker"
+      ]
+    },
+    "token_file": {
+      "type": "string"
+    }
+  }
+}
