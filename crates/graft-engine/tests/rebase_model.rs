@@ -294,12 +294,11 @@ proptest! {
 
         // The model, draft by draft, bottom up. A draft whose changes all
         // disappear leaves the target as the next draft's parent.
+        // The top records what the rebase merged in it and below it.
         let mut top_merged = BTreeSet::new();
         let mut expected = match model(&base, &ours, &onto, line) {
-            Outcome::Rebased(s, kept, merged) => {
-                if !kept.is_empty() {
-                    top_merged = merged;
-                }
+            Outcome::Rebased(s, _, merged) => {
+                top_merged = merged;
                 Ok(s)
             }
             other => Err(other),
@@ -307,8 +306,10 @@ proptest! {
         if let (true, Ok(r1)) = (c2 != c1, &expected) {
             expected = match model(&ours, &upper, r1, line) {
                 Outcome::Rebased(s, kept, merged) => {
+                    // When the second draft disappears, the top is the
+                    // first draft's successor.
                     if !kept.is_empty() {
-                        top_merged = merged;
+                        top_merged.extend(merged);
                     }
                     Ok(s)
                 }
@@ -323,7 +324,6 @@ proptest! {
                 // Compare roots: commit the model's snapshot on the target.
                 let want = commit_on(&repo, (o, &onto), snap);
                 prop_assert_eq!(repo.changeset(*id).changeset.root, repo.changeset(want).changeset.root);
-                // The top records the paths its own rebase merged.
                 if *id != o && *id != c2 {
                     let recorded = repo.changeset(*id).changeset.metadata.get(MERGED_PATHS).cloned();
                     let want_merged = (!top_merged.is_empty()).then(|| {

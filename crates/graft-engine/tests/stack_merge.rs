@@ -53,6 +53,7 @@ on_both!(
     the_executable_bit_follows_the_side_that_changed_it,
     sync_merges_by_line,
     attest_merged_forces_re_attesting,
+    attest_merged_covers_drafts_above_a_merge,
     attestations_survive_a_merge_without_attest_merged,
     revert_of_revert_restores_the_original_tree,
     revert_onto_a_later_tip_merges_by_line,
@@ -502,6 +503,61 @@ fn attest_merged_forces_re_attesting<M: MetaStore>(f: &Fixture<M>) {
         t.files(id)["a"],
         b"ONE\ntwo\nTHREE\nfour\nfive\nSIX\nseven\nEIGHT\n"
     );
+}
+
+/// A merge in a lower draft marks every draft above it, so the head of a
+/// rebased stack inherits no attestation from before the merge.
+fn attest_merged_covers_drafts_above_a_merge<M: MetaStore>(f: &Fixture<M>) {
+    let t = T::new(f, &[("a", BASE), ("b", b"b\n")]);
+    // Through `Rebase`: d1 edits `a` elsewhere than the tip, d2 edits `b`,
+    // and only d2 (the head) is attested.
+    let theirs = t.commit(t.root, &[("a", TOP)]);
+    t.attest(theirs, "ci/test");
+    landed(t.land(theirs, "att"));
+    let tip = t.tip("att");
+    let d1 = t.commit(t.root, &[("a", BOTTOM)]);
+    let d2 = t.commit(d1, &[("b", b"B\n")]);
+    t.attest(d2, "ci/test");
+    let head = t.rebase(d2, tip, MergeMode::Line).expect("rebase");
+    assert_eq!(t.cs(head).metadata[MERGED_PATHS], "[\"a\"]");
+    let lower = t.cs(head).first_parent().expect("parent");
+    assert_eq!(t.cs(lower).metadata[MERGED_PATHS], "[\"a\"]");
+    match t.land(head, "att") {
+        Err(ApiError::Rejected { policy, detail }) => {
+            assert_eq!(policy, "attested");
+            assert!(detail.contains("ci/test"), "{detail}");
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+    assert_eq!(t.tip("att"), tip);
+    t.attest(head, "ci/test");
+    let (id, _) = landed(t.land(head, "att"));
+    assert_eq!(id, head);
+
+    // Through `Sync`: the same shape in a workspace.
+    let ws = t.open("w", "att");
+    let s1 = t.commit_in(
+        "w",
+        ws.base,
+        &[("a", b"ONE\ntwo\nthree\nfour\nfive\nsix\nseven\nlast\n")],
+    );
+    let s2 = t.commit_in("w", s1, &[("c", b"c\n")]);
+    t.attest(s2, "ci/test");
+    let other = t.commit(
+        ws.base,
+        &[("a", b"first\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\n")],
+    );
+    t.attest(other, "ci/test");
+    landed(t.land(other, "att"));
+    let synced = t.sync("w").expect("sync").workspace.head.expect("head");
+    assert!(t.cs(synced).metadata.contains_key(MERGED_PATHS));
+    assert!(matches!(
+        t.land(synced, "att"),
+        Err(ApiError::Rejected { .. })
+    ));
+    t.attest(synced, "ci/test");
+    let (id, _) = landed(t.land(synced, "att"));
+    assert_eq!(id, synced);
 }
 
 fn attestations_survive_a_merge_without_attest_merged<M: MetaStore>(f: &Fixture<M>) {

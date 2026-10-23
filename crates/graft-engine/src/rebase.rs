@@ -23,7 +23,8 @@
 //! merged blob, taking the executable bit from the side that changed it; a
 //! merge whose result is already on the target is dropped. Anything else is a
 //! conflict at file level. A rebased changeset records the paths its own
-//! rebase merged in [`MERGED_PATHS`], a JSON array of path strings, so the
+//! rebase merged, in it or in any draft below it in the same stack, in
+//! [`MERGED_PATHS`], a JSON array of path strings, so the
 //! `attested` policy and reviewers can tell a merged result from its draft.
 //! Merged blobs stay in memory until the changeset that introduces them is
 //! stored, and go in with it, like `CreateChangeset`'s inline blobs. `Sync`
@@ -376,12 +377,14 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             parents.extend(c.parents.iter().skip(1).copied());
             let mut metadata = c.metadata.clone();
             metadata.insert(REBASED_FROM.to_owned(), id.to_string());
-            // The paths this rebase merged, not an earlier one's: a later
-            // file-level rebase of a merged result inherits its attestations.
-            if merged.is_empty() {
+            // The paths this rebase merged, in this draft or any below it in
+            // the stack: the content under a draft above a merge was never
+            // tested either. Not an earlier rebase's: a later file-level
+            // rebase of a merged result inherits its attestations.
+            if merged_all.is_empty() {
                 metadata.remove(MERGED_PATHS);
             } else {
-                metadata.insert(MERGED_PATHS.to_owned(), encode_paths(&merged));
+                metadata.insert(MERGED_PATHS.to_owned(), encode_paths(&merged_all));
             }
             let cs = Changeset {
                 parents,
