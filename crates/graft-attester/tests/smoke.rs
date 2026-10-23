@@ -4,7 +4,7 @@
 //! a failing draft gets a failing one (and its later check is attested
 //! failed without running); a check past its timeout is killed and failed.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use graft_attester::{Attester, Check, Config, Outcome, Report};
@@ -17,7 +17,7 @@ use graft_model::{
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::error::ApiResult;
 use graft_proto::types::*;
-use graft_proto::{CallContext, Frame, Principal, PrincipalKind};
+use graft_proto::{ApiError, CallContext, Frame, Principal, PrincipalKind};
 use graft_store::memory::MemoryStore;
 use graft_testkit::clock::FakeClock;
 use graft_testkit::server::TestServer;
@@ -30,6 +30,26 @@ type Eng = Engine<MemoryStore, MemoryStore>;
 /// the transport says: a service token with the scopes `up.sh` mints.
 struct AsAttester {
     engine: Arc<Eng>,
+    faults: Arc<Faults>,
+}
+
+/// Calls to fail with `Unavailable` before they reach the engine, as a
+/// restarting server would.
+#[derive(Default)]
+struct Faults {
+    get_objects: Mutex<u32>,
+    attest: Mutex<u32>,
+}
+
+impl Faults {
+    fn fire(counter: &Mutex<u32>) -> ApiResult<()> {
+        let mut left = counter.lock().expect("faults");
+        if *left == 0 {
+            return Ok(());
+        }
+        *left -= 1;
+        Err(ApiError::Unavailable { retry_after_ms: 1 })
+    }
 }
 
 fn attester_principal() -> Principal {
@@ -59,24 +79,30 @@ impl AsAttester {
 }
 
 macro_rules! delegate {
-    ($trait:ident: $($method:ident($req:ty) -> $out:ty;)*) => {
-        impl $trait for AsAttester {
-            $(
-                async fn $method(&self, cx: &CallContext, req: $req) -> ApiResult<$out> {
-                    self.engine.$method(&self.cx(cx), req).await
-                }
-            )*
-        }
+    ($($method:ident($req:ty) -> $out:ty;)*) => {
+        $(
+            async fn $method(&self, cx: &CallContext, req: $req) -> ApiResult<$out> {
+                self.engine.$method(&self.cx(cx), req).await
+            }
+        )*
     };
 }
 
-delegate! { ObjectApi:
-    get_objects(GetObjects) -> Objects;
-    has_objects(HasObjects) -> Vec<ObjectId>;
-    put_objects(PutObjects) -> Vec<ObjectId>;
+impl ObjectApi for AsAttester {
+    async fn get_objects(&self, cx: &CallContext, req: GetObjects) -> ApiResult<Objects> {
+        Faults::fire(&self.faults.get_objects)?;
+        self.engine.get_objects(&self.cx(cx), req).await
+    }
+    async fn has_objects(&self, cx: &CallContext, req: HasObjects) -> ApiResult<Vec<ObjectId>> {
+        self.engine.has_objects(&self.cx(cx), req).await
+    }
+    async fn put_objects(&self, cx: &CallContext, req: PutObjects) -> ApiResult<Vec<ObjectId>> {
+        self.engine.put_objects(&self.cx(cx), req).await
+    }
 }
 
-delegate! { RepoApi:
+impl RepoApi for AsAttester {
+    delegate! {
     create_changeset(CreateChangeset) -> Created;
     get_changesets(GetChangesets) -> Changesets;
     resolve_ref(ResolveRef) -> RefView;
@@ -93,8 +119,13 @@ delegate! { RepoApi:
     rebase(Rebase) -> ChangesetId;
     revert(Revert) -> ChangesetId;
     land(Land) -> Landed;
-    attest(Attest) -> ();
     watch(Watch) -> JournalPage;
+    }
+
+    async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
+        Faults::fire(&self.faults.attest)?;
+        self.engine.attest(&self.cx(cx), req).await
+    }
 }
 
 fn admin() -> CallContext {
@@ -182,7 +213,10 @@ async fn repo() -> (Arc<Eng>, ChangesetId) {
         &engine,
         None,
         &[
-            ("build.sh", "env | sort\necho building >&2\n"),
+            (
+                "build.sh",
+                "env | sort\necho building >&2\nif [ -n \"$RUNS\" ]; then echo run >> \"$RUNS\"; fi\n",
+            ),
             ("test.sh", "test \"$(cat verdict)\" = pass\n"),
             ("verdict", "pass\n"),
         ],
@@ -257,9 +291,11 @@ async fn attester(
     root: &std::path::Path,
     checks: &[&str],
     timeout: Duration,
-) -> (TestServer, Attester<Remote>) {
+) -> (TestServer, Attester<Remote>, Arc<Faults>) {
+    let faults = Arc::new(Faults::default());
     let server = TestServer::tcp(Arc::new(AsAttester {
         engine: engine.clone(),
+        faults: faults.clone(),
     }))
     .await;
     let remote = Remote::connect(Endpoint::Server(server.url().to_owned()))
@@ -271,11 +307,20 @@ async fn attester(
         .iter()
         .map(|c| Check::parse(c).expect("check"))
         .collect();
-    cfg.env = vec![("ATTESTER_SMOKE".to_owned(), "1".to_owned())];
+    cfg.env = vec![
+        ("ATTESTER_SMOKE".to_owned(), "1".to_owned()),
+        // build.sh appends a line per run here.
+        ("RUNS".to_owned(), root.join("runs").display().to_string()),
+    ];
     cfg.timeout = timeout;
     cfg.wait_ms = 0;
     cfg.idle = Duration::from_millis(10);
-    (server, Attester::new(remote, cfg).expect("attester"))
+    cfg.retry_delay = Duration::from_millis(1);
+    (
+        server,
+        Attester::new(remote, cfg).expect("attester"),
+        faults,
+    )
 }
 
 fn checked(report: Option<Report>) -> (ChangesetId, Vec<graft_attester::CheckResult>) {
@@ -292,7 +337,7 @@ async fn a_passing_draft_gets_two_passing_attests_and_a_failing_one_a_failing_at
     let bad = draft(&engine, root, "bad", &[("verdict", "fail\n")]).await;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let (_server, mut a) = attester(
+    let (_server, mut a, _) = attester(
         &engine,
         dir.path(),
         &["ci/build=sh build.sh", "ci/test=sh test.sh"],
@@ -368,7 +413,7 @@ async fn a_check_past_its_timeout_is_killed_and_the_rest_fail_unrun() {
     let (engine, root) = repo().await;
     let slow = draft(&engine, root, "slow", &[("src.txt", "slow\n")]).await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let (_server, mut a) = attester(
+    let (_server, mut a, _) = attester(
         &engine,
         dir.path(),
         &["ci/build=sh -c sleep${IFS}300", "ci/test=sh test.sh"],
@@ -402,7 +447,7 @@ async fn a_draft_that_is_no_longer_a_draft_is_skipped() {
     let (engine, root) = repo().await;
     let first = draft(&engine, root, "w", &[("src.txt", "one\n")]).await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let (_server, mut a) = attester(
+    let (_server, mut a, _) = attester(
         &engine,
         dir.path(),
         &["ci/build=true"],
@@ -430,4 +475,123 @@ async fn a_draft_that_is_no_longer_a_draft_is_skipped() {
         other => panic!("expected a skip, got {other:?}"),
     }
     assert!(attestations(&engine).await.is_empty());
+}
+
+/// `(check, passed)` of each attestation, in order.
+fn verdicts(got: &[(String, String, bool, String)]) -> Vec<(String, bool)> {
+    got.iter().map(|(_, k, p, _)| (k.clone(), *p)).collect()
+}
+
+fn both(passed: bool) -> Vec<(String, bool)> {
+    vec![
+        ("ci/build".to_owned(), passed),
+        ("ci/test".to_owned(), passed),
+    ]
+}
+
+const CHECKS: [&str; 2] = ["ci/build=sh build.sh", "ci/test=sh test.sh"];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_checkout_that_fails_transiently_is_retried() {
+    let (engine, root) = repo().await;
+    let good = draft(&engine, root, "w", &[("src.txt", "hello\n")]).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_server, mut a, faults) =
+        attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    // The server goes away during the checkout: the draft waits, unattested.
+    *faults.get_objects.lock().expect("faults") = 1;
+    assert!(a.run_next().await.is_err());
+    assert_eq!(a.queued(), 1, "the draft is back in the queue");
+    assert!(attestations(&engine).await.is_empty());
+    // The next turn checks it.
+    let (id, results) = checked(a.run_next().await.expect("retry"));
+    assert_eq!(id, good);
+    assert!(results.iter().all(|r| r.outcome.passed()), "{results:?}");
+    assert_eq!(verdicts(&attestations(&engine).await), both(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_checkout_that_keeps_failing_attests_every_check_failed() {
+    let (engine, root) = repo().await;
+    let bad = draft(&engine, root, "w", &[("src.txt", "hello\n")]).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_server, mut a, faults) =
+        attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    *faults.get_objects.lock().expect("faults") = u32::MAX;
+    let attempts = a.config().max_attempts;
+    for _ in 1..attempts {
+        assert!(a.run_next().await.is_err());
+    }
+    match a.run_next().await.expect("gives up") {
+        Some(Report::NotCheckedOut {
+            draft,
+            error,
+            results,
+        }) => {
+            assert_eq!(draft, bad);
+            assert!(
+                error.contains(&format!("gave up after {attempts} tries")),
+                "{error}"
+            );
+            assert!(results.iter().all(|r| r.attested.is_ok()), "{results:?}");
+        }
+        other => panic!("expected a failed checkout, got {other:?}"),
+    }
+    let got = attestations(&engine).await;
+    assert_eq!(verdicts(&got), both(false));
+    let log_path = got[0].3.strip_prefix("file://").expect("a file URL");
+    let log = std::fs::read_to_string(log_path).expect("log");
+    assert!(log.contains("checkout failed"), "{log}");
+    assert_eq!(a.queued(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_attest_is_posted_again_without_rerunning_the_checks() {
+    let (engine, root) = repo().await;
+    let good = draft(&engine, root, "w", &[("src.txt", "hello\n")]).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_server, mut a, faults) =
+        attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    let tries = a.config().attest_tries;
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    // ci/build's Attest fails on every in-place try; ci/test's goes through.
+    *faults.attest.lock().expect("faults") = tries;
+    assert!(
+        a.run_next().await.is_err(),
+        "an unposted result is an error"
+    );
+    assert_eq!(a.queued(), 1, "the draft is back in the queue");
+    assert_eq!(
+        verdicts(&attestations(&engine).await),
+        [("ci/test".to_owned(), true)]
+    );
+    // The next turn posts ci/build only, and runs nothing.
+    let (id, results) = checked(a.run_next().await.expect("post again"));
+    assert_eq!(id, good);
+    assert!(results.iter().all(|r| r.attested.is_ok()), "{results:?}");
+    let mut got = verdicts(&attestations(&engine).await);
+    got.sort();
+    assert_eq!(got, both(true));
+    let ran = std::fs::read_to_string(dir.path().join("runs")).expect("runs");
+    assert_eq!(ran.lines().count(), 1, "the build ran once");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tree_that_cannot_be_checked_out_attests_failed_at_once() {
+    let (engine, root) = repo().await;
+    // A name the client reserves for its own state: refused every time.
+    let bad = draft(&engine, root, "w", &[(".GRAFT/config", "x\n")]).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_server, mut a, _) = attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    match a.run_next().await.expect("first turn") {
+        Some(Report::NotCheckedOut { draft, error, .. }) => {
+            assert_eq!(draft, bad);
+            assert!(!error.contains("gave up"), "not retried: {error}");
+        }
+        other => panic!("expected a failed checkout, got {other:?}"),
+    }
+    assert_eq!(verdicts(&attestations(&engine).await), both(false));
 }

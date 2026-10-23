@@ -101,6 +101,14 @@ What it does:
   `docker exec graft-dev-attester cat /var/lib/graft-attester/logs/<draft>/ci-test.log`.
 - The read position is kept in `/var/lib/graft-attester/state/lsn`. A
   restart re-runs at most the drafts that were still queued.
+- Every draft that is still a draft gets one attestation per check, never
+  silence. A checkout that fails transiently (the server unavailable, the
+  token refused, a local I/O error) is retried up to 5 times, then each
+  check is attested failed, with a log saying why. A checkout that can never
+  work (a tree the client refuses) is attested failed at once. Each `Attest`
+  call is retried with backoff. If one still fails, the results are kept and
+  the draft goes back to the front of the queue, so the next turn posts only
+  what is missing and doesn't run the checks again.
 
 Containment:
 

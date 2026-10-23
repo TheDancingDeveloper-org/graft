@@ -14,6 +14,14 @@
 //!   cleared environment and a timeout; its output goes to a capped log
 //!   file. After a check fails, the rest are attested failed without
 //!   running (a build failure fails the tests too).
+//! - Every draft that is still a draft gets an attestation per check, never
+//!   silence. A checkout that fails transiently (the server unavailable,
+//!   the token refused, a local I/O error) is retried, up to
+//!   [`Config::max_attempts`]. One that fails for good, or past the limit,
+//!   attests every check failed, with a log saying why. `Attest` is retried
+//!   with backoff. If it still fails, the results are kept and the draft
+//!   goes back to the queue, so only the attestations are posted again,
+//!   without re-running the checks.
 //! - With [`Config::run_as`], the checked-out tree and the check processes
 //!   belong to that uid, so a check (a draft's build script or test) can't
 //!   read the token, which only the attester's own uid can.
@@ -22,7 +30,7 @@
 //! - The token is never printed. It lives in the API client (whose `Debug`
 //!   redacts it) and never reaches a check's environment or arguments.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
@@ -132,6 +140,13 @@ pub struct Config {
     pub wait_ms: u32,
     /// Pause after an empty read when the queue is empty too.
     pub idle: Duration,
+    /// Tries a draft gets when its checkout fails transiently, before its
+    /// checks are attested failed.
+    pub max_attempts: u32,
+    /// Tries per `Attest` call before the draft goes back to the queue.
+    pub attest_tries: u32,
+    /// First delay between `Attest` tries; it doubles each time.
+    pub retry_delay: Duration,
 }
 
 impl Config {
@@ -157,6 +172,9 @@ impl Config {
             log_retention: Duration::from_secs(14 * 24 * 3600),
             wait_ms: 20_000,
             idle: Duration::from_secs(2),
+            max_attempts: 5,
+            attest_tries: 5,
+            retry_delay: Duration::from_secs(1),
         }
     }
 }
@@ -170,6 +188,8 @@ pub struct Pending {
     pub workspace: String,
     /// Its `ChangesetCreated` entry's position.
     pub lsn: u64,
+    /// Earlier tries that failed with an error.
+    pub attempts: u32,
 }
 
 /// Reads a `ChangesetCreated` entry for a draft held by a workspace; any
@@ -188,6 +208,7 @@ pub fn parse_entry(entry: &JournalEntry) -> Option<Pending> {
         draft,
         workspace,
         lsn: entry.lsn,
+        attempts: 0,
     })
 }
 
@@ -270,6 +291,8 @@ pub enum Outcome {
     Skipped,
     /// Could not start, described.
     NotStarted(String),
+    /// Not run, because the draft could not be checked out, described.
+    NotCheckedOut(String),
 }
 
 impl Outcome {
@@ -288,6 +311,7 @@ impl fmt::Display for Outcome {
             Outcome::TimedOut => f.write_str("failed (timed out)"),
             Outcome::Skipped => f.write_str("failed (not run: an earlier check failed)"),
             Outcome::NotStarted(why) => write!(f, "failed (did not start: {why})"),
+            Outcome::NotCheckedOut(why) => write!(f, "failed (not checked out: {why})"),
         }
     }
 }
@@ -323,13 +347,24 @@ pub enum Report {
         /// Its state, described.
         state: String,
     },
-    /// Could not be checked out; nothing was attested.
+    /// Could not be checked out for good: every check attested failed.
     NotCheckedOut {
         /// The draft.
         draft: ChangesetId,
         /// Why, described (never file contents).
         error: String,
+        /// One failed result per check.
+        results: Vec<CheckResult>,
     },
+}
+
+impl Report {
+    fn results_mut(&mut self) -> &mut [CheckResult] {
+        match self {
+            Report::Checked { results, .. } | Report::NotCheckedOut { results, .. } => results,
+            Report::Skipped { .. } => &mut [],
+        }
+    }
 }
 
 /// An attester failure that stops a read or a run (not a failing check).
@@ -388,6 +423,8 @@ pub struct Attester<A> {
     queue: Queue,
     next_lsn: u64,
     running: Option<u64>,
+    /// Drafts whose checks ran but whose attestations are not all posted.
+    unposted: HashMap<ChangesetId, Report>,
 }
 
 impl<A: ObjectApi + RepoApi> Attester<A> {
@@ -407,6 +444,7 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
             cfg,
             next_lsn,
             running: None,
+            unposted: HashMap::new(),
         })
     }
 
@@ -478,7 +516,10 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
         let report = self.check_draft(&p).await;
         self.running = None;
         if report.is_err() {
-            self.queue.requeue(p);
+            self.queue.requeue(Pending {
+                attempts: p.attempts + 1,
+                ..p
+            });
         }
         self.save()?;
         self.prune_logs();
@@ -558,7 +599,12 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
             None => Some("missing".to_owned()),
         };
         if let Some(state) = state {
+            self.unposted.remove(&draft);
             return Ok(Report::Skipped { draft, state });
+        }
+        // Checked before, with attestations still to post: post only those.
+        if let Some(report) = self.unposted.remove(&draft) {
+            return self.post(draft, report).await;
         }
 
         let dir = self.cfg.work_dir.join(draft.to_string());
@@ -581,28 +627,54 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
             &FetchOptions::default(),
         )
         .await;
-        if let Err(e) = cloned {
+        let failed_checkout = match cloned {
+            Ok(_) => match self.cfg.run_as {
+                // The attester's own set-up, not the draft, but as
+                // permanent as a bad tree: attested failed, not retried.
+                Some((uid, gid)) => chown_tree(&dir, uid, gid)
+                    .err()
+                    .map(|e| format!("handing the tree to uid {uid}: {e}")),
+                None => None,
+            },
+            Err(e) => {
+                let tries = p.attempts + 1;
+                let transient = is_transient(&e);
+                if transient && tries < self.cfg.max_attempts.max(1) {
+                    self.remove_tree(&dir).await;
+                    return Err(match e {
+                        graft_client::Error::Api(e) => Error::Api(e),
+                        graft_client::Error::Io(e) => Error::Io(e),
+                        other => Error::Io(io::Error::other(other.to_string())),
+                    });
+                }
+                Some(if transient {
+                    format!("{e} (gave up after {tries} tries)")
+                } else {
+                    e.to_string()
+                })
+            }
+        };
+        if let Some(error) = failed_checkout {
             self.remove_tree(&dir).await;
-            return Ok(Report::NotCheckedOut {
+            let mut results = Vec::with_capacity(self.cfg.checks.len());
+            for check in &self.cfg.checks {
+                let mut file = File::create(logs.join(check.log_name()))?;
+                writeln!(file, "# graft-attester: {} on {draft}", check.name)?;
+                writeln!(file, "# graft-attester: checkout failed: {error}")?;
+                results.push(self.result(draft, check, Outcome::NotCheckedOut(error.clone())));
+            }
+            let report = Report::NotCheckedOut {
                 draft,
-                error: e.to_string(),
-            });
-        }
-        if let Some((uid, gid)) = self.cfg.run_as
-            && let Err(e) = chown_tree(&dir, uid, gid)
-        {
-            self.remove_tree(&dir).await;
-            return Ok(Report::NotCheckedOut {
-                draft,
-                error: format!("handing the tree to uid {uid}: {e}"),
-            });
+                error,
+                results,
+            };
+            return self.post(draft, report).await;
         }
 
         let mut results = Vec::with_capacity(self.cfg.checks.len());
         let mut failed = false;
         for check in self.cfg.checks.clone() {
-            let log_name = check.log_name();
-            let log_path = logs.join(&log_name);
+            let log_path = logs.join(check.log_name());
             let outcome = if failed {
                 write_skipped(&log_path, &check, draft)?;
                 Outcome::Skipped
@@ -610,29 +682,66 @@ impl<A: ObjectApi + RepoApi> Attester<A> {
                 self.run_check(&dir, &check, draft, &log_path).await?
             };
             failed |= !outcome.passed();
-            let url = format!("{}{draft}/{log_name}", self.cfg.log_url_prefix);
-            let attested = self
-                .api
-                .attest(
-                    &self.cx,
-                    Attest {
-                        repo: self.cfg.repo.clone(),
-                        changeset: draft,
-                        check: check.name.clone(),
-                        passed: outcome.passed(),
-                        url: url.clone(),
-                    },
-                )
-                .await;
-            results.push(CheckResult {
-                check: check.name.clone(),
-                outcome,
-                url,
-                attested,
-            });
+            results.push(self.result(draft, &check, outcome));
         }
         self.remove_tree(&dir).await;
-        Ok(Report::Checked { draft, results })
+        self.post(draft, Report::Checked { draft, results }).await
+    }
+
+    /// A result, not attested yet.
+    fn result(&self, draft: ChangesetId, check: &Check, outcome: Outcome) -> CheckResult {
+        CheckResult {
+            check: check.name.clone(),
+            outcome,
+            url: format!("{}{draft}/{}", self.cfg.log_url_prefix, check.log_name()),
+            attested: Err(ApiError::Unavailable { retry_after_ms: 0 }),
+        }
+    }
+
+    /// Posts every result of `report` not attested yet, retrying each with
+    /// backoff. If any still fails, keeps the report for the draft's next
+    /// turn and fails, so the draft goes back to the queue.
+    async fn post(&mut self, draft: ChangesetId, mut report: Report) -> Result<Report, Error> {
+        let mut last = None;
+        let tries = self.cfg.attest_tries.max(1);
+        for r in report.results_mut() {
+            if r.attested.is_ok() {
+                continue;
+            }
+            let req = Attest {
+                repo: self.cfg.repo.clone(),
+                changeset: draft,
+                check: r.check.clone(),
+                passed: r.outcome.passed(),
+                url: r.url.clone(),
+            };
+            let mut delay = self.cfg.retry_delay;
+            for tried in 1..=tries {
+                r.attested = self.api.attest(&self.cx, req.clone()).await;
+                match &r.attested {
+                    // Only a retryable error can pass on an immediate retry;
+                    // a refused token waits for the draft's next turn.
+                    Err(e) if e.is_retryable() && tried < tries => {
+                        tokio::time::sleep(delay).await;
+                        delay = delay.saturating_mul(2);
+                    }
+                    _ => break,
+                }
+            }
+            if let Err(e) = &r.attested {
+                last = Some(e.clone());
+            }
+        }
+        match last {
+            None => Ok(report),
+            Some(e) => {
+                log(&format!(
+                    "{draft}: attest failed; the results are kept and posted on its next turn: {e}"
+                ));
+                self.unposted.insert(draft, report);
+                Err(Error::Api(e))
+            }
+        }
     }
 
     async fn run_check(
@@ -866,6 +975,24 @@ pub fn chown_tree(root: &Path, uid: u32, gid: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether a checkout failure may pass on another try: the server or the
+/// network, the token (it is re-minted and the attester restarted), or the
+/// local disk. A bad tree, a budget or a refused path fails the same way
+/// every time.
+fn is_transient(e: &graft_client::Error) -> bool {
+    match e {
+        graft_client::Error::Api(e) => {
+            e.is_retryable()
+                || matches!(
+                    e,
+                    ApiError::Unauthenticated | ApiError::PermissionDenied { .. }
+                )
+        }
+        graft_client::Error::Io(_) | graft_client::Error::Store(_) => true,
+        _ => false,
+    }
+}
+
 fn backoff(errors: u32) -> Duration {
     Duration::from_secs(1u64 << errors.min(6))
 }
@@ -877,7 +1004,7 @@ pub fn log(msg: &str) {
 
 fn log_report(report: &Report) {
     match report {
-        Report::Checked { draft, results } => {
+        Report::Checked { draft, results } | Report::NotCheckedOut { draft, results, .. } => {
             for r in results {
                 let posted = match &r.attested {
                     Ok(()) => "attested".to_owned(),
@@ -890,11 +1017,6 @@ fn log_report(report: &Report) {
             }
         }
         Report::Skipped { draft, state } => log(&format!("{draft}: skipped, now {state}")),
-        Report::NotCheckedOut { draft, error } => {
-            log(&format!(
-                "{draft}: checkout failed, nothing attested: {error}"
-            ));
-        }
     }
 }
 
@@ -911,6 +1033,7 @@ mod tests {
             draft: id(b),
             workspace: ws.to_owned(),
             lsn,
+            attempts: 0,
         }
     }
 
@@ -945,7 +1068,8 @@ mod tests {
             Some(Pending {
                 draft: d,
                 workspace: "w".to_owned(),
-                lsn: 9
+                lsn: 9,
+                attempts: 0,
             })
         );
         for body in [
