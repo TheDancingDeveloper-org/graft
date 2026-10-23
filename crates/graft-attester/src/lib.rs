@@ -7,9 +7,13 @@
 //! `ci/test`.
 //!
 //! - Drafts come from `ChangesetCreated` entries held by a workspace on
-//!   [`Config::line`] (`GetWorkspace` names the line; the answer is cached
-//!   per workspace). Land candidates, abandoned changesets and drafts on
-//!   other lines are skipped. Before a draft runs, `GetChangesets` confirms
+//!   [`Config::line`]. A workspace's line comes from its `WorkspaceOpened`
+//!   entry, read in journal order with the drafts, and is forgotten at its
+//!   `WorkspaceClosed`, so a name closed and reopened on another line is
+//!   read right. For a workspace opened before the read position, the
+//!   attester asks `GetWorkspace`, and remembers only an answer that names
+//!   a line: "not found" is asked again next time. Land candidates,
+//!   abandoned changesets and drafts on other lines are skipped. Before a draft runs, `GetChangesets` confirms
 //!   it is still a draft.
 //! - The queue keeps the newest draft per workspace (a land needs the
 //!   stack's head attested, not every draft under it) and is bounded. The
@@ -57,6 +61,12 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 /// The journal entry kind that announces a new changeset.
 pub const CHANGESET_CREATED: &str = "ChangesetCreated";
+
+/// The journal entry kind that names a new workspace's line.
+pub const WORKSPACE_OPENED: &str = "WorkspaceOpened";
+
+/// The journal entry kind written when a workspace closes or lapses.
+pub const WORKSPACE_CLOSED: &str = "WorkspaceClosed";
 
 /// The repository attested when none is configured (decision D21).
 pub const DEFAULT_REPO: &str = "rusttorrent";
@@ -235,6 +245,23 @@ pub fn parse_entry(entry: &JournalEntry) -> Option<Pending> {
         lsn: entry.lsn,
         attempts: 0,
     })
+}
+
+/// Reads a `WorkspaceOpened` entry as `(name, Some(line))` and a
+/// `WorkspaceClosed` entry as `(name, None)`; any other entry is `None`.
+pub fn parse_workspace_entry(entry: &JournalEntry) -> Option<(String, Option<String>)> {
+    let opened = match entry.kind.as_str() {
+        WORKSPACE_OPENED => true,
+        WORKSPACE_CLOSED => false,
+        _ => return None,
+    };
+    let body: serde_json::Value = serde_json::from_str(&entry.body).ok()?;
+    let name = body.get("name")?.as_str()?.to_owned();
+    if !opened {
+        return Some((name, None));
+    }
+    let line = body.get("line")?.as_str()?.to_owned();
+    Some((name, Some(line)))
 }
 
 /// The drafts waiting, oldest first, at most one per workspace.
@@ -450,8 +477,8 @@ pub struct Attester<A> {
     running: Option<u64>,
     /// Drafts whose checks ran but whose attestations are not all posted.
     unposted: HashMap<ChangesetId, Report>,
-    /// Workspace → the line it tracks (`None`: closed before it was asked).
-    lines: HashMap<String, Option<String>>,
+    /// Workspace → the line it tracks. Only known lines are kept.
+    lines: HashMap<String, String>,
 }
 
 impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
@@ -505,7 +532,11 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
                     Watch {
                         repo: self.cfg.repo.clone(),
                         from_lsn: self.next_lsn,
-                        kinds: vec![CHANGESET_CREATED.to_owned()],
+                        kinds: vec![
+                            CHANGESET_CREATED.to_owned(),
+                            WORKSPACE_OPENED.to_owned(),
+                            WORKSPACE_CLOSED.to_owned(),
+                        ],
                         limit: 0,
                         wait_ms: wait,
                     },
@@ -515,6 +546,15 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
             let mut next = page.next_lsn.max(self.next_lsn);
             let mut failed = None;
             for entry in &page.entries {
+                if let Some((name, line)) = parse_workspace_entry(entry) {
+                    match line {
+                        Some(line) => self.remember_line(name, line),
+                        None => {
+                            self.lines.remove(&name);
+                        }
+                    }
+                    continue;
+                }
                 let Some(p) = parse_entry(entry) else {
                     continue;
                 };
@@ -549,13 +589,15 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
         Ok(queued)
     }
 
-    /// The line `workspace` tracks, asked once and remembered; `None` when
-    /// it is gone (closed, or its lease lapsed and it was collected).
+    /// The line `workspace` tracks: from its `WorkspaceOpened` entry, else
+    /// asked of the server. `None` when the server doesn't know it (closed,
+    /// or lapsed and collected); that answer is not remembered, so a
+    /// workspace reopened under the name is asked about again.
     async fn workspace_line(&mut self, workspace: &str) -> Result<Option<String>, ApiError> {
         if let Some(line) = self.lines.get(workspace) {
-            return Ok(line.clone());
+            return Ok(Some(line.clone()));
         }
-        let line = match self
+        match self
             .api
             .get_workspace(
                 &self.cx,
@@ -566,15 +608,20 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
             )
             .await
         {
-            Ok(view) => Some(view.line),
-            Err(ApiError::NotFound { .. }) => None,
-            Err(e) => return Err(e),
-        };
-        if self.lines.len() >= LINE_CACHE {
+            Ok(view) => {
+                self.remember_line(workspace.to_owned(), view.line.clone());
+                Ok(Some(view.line))
+            }
+            Err(ApiError::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn remember_line(&mut self, workspace: String, line: String) {
+        if self.lines.len() >= LINE_CACHE && !self.lines.contains_key(&workspace) {
             self.lines.clear();
         }
-        self.lines.insert(workspace.to_owned(), line.clone());
-        Ok(line)
+        self.lines.insert(workspace, line);
     }
 
     /// Checks the oldest waiting draft; `None` when nothing waits. A draft
@@ -1157,6 +1204,37 @@ mod tests {
                 "RefMoved",
                 format!("{{\"id\":\"{d}\",\"state\":\"draft\",\"workspace\":\"w\"}}")
             )),
+            None
+        );
+    }
+
+    #[test]
+    fn workspace_entries_name_the_line_or_the_close() {
+        let entry = |kind: &str, body: &str| JournalEntry {
+            lsn: 1,
+            kind: kind.to_owned(),
+            body: body.to_owned(),
+        };
+        assert_eq!(
+            parse_workspace_entry(&entry(
+                WORKSPACE_OPENED,
+                r#"{"name":"w","owner":"o","line":"trial-1","base":"c00"}"#
+            )),
+            Some(("w".to_owned(), Some("trial-1".to_owned())))
+        );
+        assert_eq!(
+            parse_workspace_entry(&entry(
+                WORKSPACE_CLOSED,
+                r#"{"name":"w","reason":"lease-expired","abandoned":2}"#
+            )),
+            Some(("w".to_owned(), None))
+        );
+        assert_eq!(
+            parse_workspace_entry(&entry(WORKSPACE_OPENED, r#"{"name":"w"}"#)),
+            None
+        );
+        assert_eq!(
+            parse_workspace_entry(&entry(CHANGESET_CREATED, r#"{"name":"w"}"#)),
             None
         );
     }

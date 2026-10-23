@@ -543,20 +543,18 @@ async fn a_draft_that_is_no_longer_a_draft_is_skipped() {
     }
     assert!(attestations(&engine).await.is_empty());
 
-    // A draft whose workspace is already gone when it is read is not queued.
-    draft(&engine, root, "v", &[("src.txt", "two\n")]).await;
-    engine
-        .close_workspace(
-            &admin(),
-            WorkspaceRef {
-                repo: REPO.to_owned(),
-                name: "v".to_owned(),
-            },
-            false,
-        )
-        .await
-        .expect("close");
-    assert_eq!(a.poll(0).await.expect("poll"), 0);
+    // A draft whose workspace closed before it was read is queued (the
+    // journal names its line) and skipped when its turn comes.
+    let second = draft(&engine, root, "v", &[("src.txt", "two\n")]).await;
+    close(&engine, "v").await;
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    match a.run_next().await.expect("run") {
+        Some(Report::Skipped { draft, state }) => {
+            assert_eq!(draft, second);
+            assert_eq!(state, "abandoned");
+        }
+        other => panic!("expected a skip, got {other:?}"),
+    }
 }
 
 /// `(check, passed)` of each attestation, in order.
@@ -726,4 +724,81 @@ async fn keep_going_runs_every_check_after_a_failure() {
     assert_eq!(id, bad);
     assert_eq!(results[0].outcome, Outcome::Failed(Some(1)));
     assert_eq!(results[1].outcome, Outcome::Passed);
+}
+
+/// The journal position of `id`'s `ChangesetCreated` entry.
+async fn created_lsn(engine: &Eng, id: ChangesetId) -> u64 {
+    let page = engine
+        .watch(
+            &admin(),
+            Watch {
+                repo: REPO.to_owned(),
+                from_lsn: 1,
+                kinds: vec!["ChangesetCreated".to_owned()],
+                limit: 0,
+                wait_ms: 0,
+            },
+        )
+        .await
+        .expect("watch");
+    page.entries
+        .iter()
+        .find(|e| e.body.contains(&id.to_string()))
+        .expect("created entry")
+        .lsn
+}
+
+/// Closes workspace `name`, abandoning its drafts.
+async fn close(engine: &Eng, name: &str) {
+    engine
+        .close_workspace(
+            &admin(),
+            WorkspaceRef {
+                repo: REPO.to_owned(),
+                name: name.to_owned(),
+            },
+            false,
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_workspace_closed_and_reopened_on_the_line_is_checked() {
+    let (engine, root) = repo().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    // `w` comes and goes before the attester starts, and the attester's
+    // saved position is past `w`'s WorkspaceOpened: it asks the server
+    // about `w`, which no longer knows it.
+    let first = draft(&engine, root, "w", &[("src.txt", "first\n")]).await;
+    close(&engine, "w").await;
+    let created = created_lsn(&engine, first).await;
+    std::fs::create_dir_all(dir.path().join("state")).expect("state dir");
+    std::fs::write(dir.path().join("state/lsn"), format!("{created}\n")).expect("state");
+    let (_server, mut a, _) = attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    assert_eq!(a.poll(0).await.expect("poll"), 0, "not found: not queued");
+    // Reopened under the same name on the trial line, its new draft is
+    // checked: "not found" was not remembered.
+    let second = draft(&engine, root, "w", &[("src.txt", "second\n")]).await;
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    let (id, results) = checked(a.run_next().await.expect("run"));
+    assert_eq!(id, second);
+    assert!(results.iter().all(|r| r.outcome.passed()), "{results:?}");
+    assert!(a.run_next().await.expect("nothing left").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_workspace_reopened_on_another_line_is_not_checked() {
+    let (engine, root) = repo().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_server, mut a, _) = attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    let first = draft(&engine, root, "w", &[("src.txt", "first\n")]).await;
+    assert_eq!(a.poll(0).await.expect("poll"), 1);
+    let (id, _) = checked(a.run_next().await.expect("run"));
+    assert_eq!(id, first);
+    // The same name, now on main: its line is read from the journal, not
+    // from what was remembered for the closed workspace.
+    close(&engine, "w").await;
+    draft_on(&engine, root, "w", "main", &[("src.txt", "main\n")]).await;
+    assert_eq!(a.poll(0).await.expect("poll"), 0);
 }

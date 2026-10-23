@@ -92,8 +92,11 @@ What it does:
 
 - It reads the journal of `rusttorrent` (`Watch`, long-poll) for
   `ChangesetCreated` entries of drafts held by a workspace that tracks
-  `trial-1` (it asks `GetWorkspace` once per workspace). Drafts on `main`
-  or any other line are ignored. It keeps the
+  `trial-1`. It reads a workspace's line from its `WorkspaceOpened` entry,
+  in journal order, and forgets it at `WorkspaceClosed`, so a name closed
+  and reopened is read correctly. For a workspace opened before its read
+  position it asks `GetWorkspace`. It never remembers a "not found". Drafts
+  on `main` or any other line are ignored. It keeps the
   newest draft per workspace, since a land needs the stack's head
   attested. The queue holds at most 16 drafts. When it is full the attester
   stops reading, and the journal holds the rest.
