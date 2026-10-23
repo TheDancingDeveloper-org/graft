@@ -384,6 +384,10 @@ fn ref_types_round_trip() {
             },
         ),
     );
+    check::<CreateLine, pb::CreateLineRequest, _>(
+        "CreateLine",
+        (text(), text(), cid()).prop_map(|(repo, name, from)| CreateLine { repo, name, from }),
+    );
 }
 
 #[test]
