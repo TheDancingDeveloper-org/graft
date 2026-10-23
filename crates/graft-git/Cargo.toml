@@ -12,6 +12,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+futures-util.workspace = true
 gix.workspace = true
 graft-model.workspace = true
 graft-proto.workspace = true

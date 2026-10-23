@@ -1949,6 +1949,7 @@ dependencies = [
 name = "graft-git"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
  "gix",
  "graft-model",
  "graft-proto",

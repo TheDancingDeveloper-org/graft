@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use futures_util::StreamExt;
 use graft_model::{
     ApplyOptions, Author, AuthorKind, BlobId, Change, Changeset, ChangesetId, CheckOptions,
     EntryKind, Metadata, ObjectId, ObjectKind, ObjectSource, RepoPath, SourceError, Timestamp,
@@ -46,8 +47,11 @@ use crate::{BadPath, GitError, GitSha, Unrepresentable};
 /// as a rebased copy, would map to one changeset.
 pub const SHA_KEY: &str = "mirror.git-commit";
 
-/// Blobs per `PutObjects` call.
-const PUT_BLOBS_MAX: usize = 256;
+/// Blobs per `PutObjects` call: small enough that a queue spreads over
+/// several calls in flight.
+const PUT_BLOBS_PER_CALL: usize = 32;
+/// `PutObjects` calls in flight at once.
+const PUTS_IN_FLIGHT: usize = 8;
 /// Bytes of blobs held before they are uploaded.
 const PUT_BYTES_MAX: usize = 16 * 1024 * 1024;
 /// Ids per `HasObjects` call.
@@ -657,6 +661,7 @@ where
             };
             missing.extend(self.api.has_objects(self.cx, req).await?);
         }
+        let mut batches = Vec::new();
         let mut batch = Vec::new();
         let mut bytes = 0;
         for (id, payload) in queue {
@@ -665,25 +670,32 @@ where
             }
             bytes += payload.len();
             batch.push(Frame::encode(ObjectKind::Blob, &payload));
-            if batch.len() >= PUT_BLOBS_MAX || bytes >= PUT_BYTES_MAX {
-                self.put_blobs(std::mem::take(&mut batch)).await?;
+            if batch.len() >= PUT_BLOBS_PER_CALL || bytes >= PUT_BYTES_MAX {
+                batches.push(std::mem::take(&mut batch));
                 bytes = 0;
             }
         }
         if !batch.is_empty() {
-            self.put_blobs(batch).await?;
+            batches.push(batch);
         }
-        Ok(())
-    }
-
-    async fn put_blobs(&mut self, blobs: Vec<Frame>) -> Result<(), GitError> {
-        let n = blobs.len() as u64;
-        let req = PutObjects {
-            repo: self.config.repo.clone(),
-            blobs,
-        };
-        self.api.put_objects(self.cx, req).await?;
-        self.report.blobs += n;
+        // The server stores (and syncs) a call's blobs one by one; calls in
+        // flight together overlap those waits.
+        let (api, cx, repo) = (self.api, self.cx, &self.config.repo);
+        let mut puts = futures_util::stream::iter(batches.into_iter().map(|blobs| {
+            let n = blobs.len() as u64;
+            let req = PutObjects {
+                repo: repo.clone(),
+                blobs,
+            };
+            async move { api.put_objects(cx, req).await.map(|_| n) }
+        }))
+        .buffer_unordered(PUTS_IN_FLIGHT);
+        let mut stored = 0;
+        while let Some(n) = puts.next().await {
+            stored += n?;
+        }
+        drop(puts);
+        self.report.blobs += stored;
         Ok(())
     }
 
