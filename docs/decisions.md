@@ -36,7 +36,8 @@ Already decided by the operator (2026-10-22):
   becomes the phase-2 setting for `main`, not the default. See
   [D22](#d22-phase-1-is-a-git-alternative).
 - **D23** (operator, 2026-10-23): line fork points. A new line writes one
-  fork row and reads below it fall through to the parent line. No migration.
+  fork row and reads below it fall through to the parent line. No data
+  migration (the schema bumps to version 5).
   See [D23](#d23-line-fork-points).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
@@ -533,7 +534,8 @@ The options it replaces:
 ## D23. Line fork points
 
 **Decided (operator, 2026-10-23): creating a line writes one fork row instead
-of copying its parent's line index. No migration.**
+of copying its parent's line index. No data migration; the schema bumps to
+version 5.**
 
 - Creating a line on existing history indexes only the unlanded stretch it
   lands. It writes one `line_forks(repo, line, parent, pos)` row (SQLite
@@ -547,7 +549,7 @@ of copying its parent's line index. No migration.**
 - Consequence: the line index can no longer be rebuilt from refs and history
   alone. Which line a line forked from, and at what position, is stored only
   in `line_forks`.
-- No migration, rollback guard or backfill: graft has no users. Existing
+- No data migration, rollback guard or backfill: graft has no users. Existing
   databases open at version 5 with their rows intact.
 - Rejected: shared-prefix segments (rewrites every row's key shape), and
   chunking the full copy (keeps the O(history) cost and breaks one

@@ -1324,19 +1324,17 @@ at once. That is how the mirror avoids split-brain.
   commits and moves graft `main` to match by admin CAS. Lag is a metric with
   an alert.
 - **Write path (phase 2), the PR bridge (removed under D21/D22; GitHub
-  delivery is the batch PR, D21. Kept here as history):** `graft land` on a git-primary line
-  does not move graft `main`. The server hands the stack to the mirror, which
-  exports it as commits on the current GitHub tip and pushes branch
-  `graft/<workspace>/<short-id>`. It opens a PR with the work item and
+  delivery is the batch PR, D21. Kept here as history):** `graft land` on a
+  git-primary line does not move graft `main`. The server hands the stack to
+  the mirror, which exports it as commits on the current GitHub tip and pushes
+  branch `graft/<workspace>/<short-id>`. It opens a PR with the work item and
   session in the body and enqueues it in the GitHub merge queue. The CLI
   returns `Queued { pr_url }` (exit 0 with `--no-wait`), or waits on the
-  journal for the PR's outcome. When the merge queue lands it, the commit comes
-  back through follow. The trailer `Graft-Changeset` links it to the draft,
-  which becomes `landed` (mapped to the squashed or rebased commit GitHub
-  made). A PR that fails CI or is closed comes back as `Rejected`, with the
-  check URL.
-- What this buys: during the pilot, review, CI, and the merge queue do not
-  change at all. graft only changes how agents read and write.
+  journal for the PR's outcome. When the merge queue lands it, the commit
+  comes back through follow. The trailer `Graft-Changeset` links it to the
+  draft, which becomes `landed` (mapped to the squashed or rebased commit
+  GitHub made). A PR that fails CI or is closed comes back as `Rejected`, with
+  the check URL.
 
 **Mode B: `graft-primary` (phase 3 onward).** graft `main` is authoritative.
 
