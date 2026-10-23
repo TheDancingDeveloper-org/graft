@@ -175,3 +175,84 @@ def scale_md(r: dict) -> list[str]:
 
 def _mib(v, div) -> str:
     return "" if v is None else f"{v / div:.1f}"
+
+
+def live_md(la: dict) -> list[str]:
+    """The "Live awareness" section: policy x overlap level (WI-2311)."""
+    out = ["## Live awareness", ""]
+    if "error" in la:
+        return out + ["```", la["error"], "```", ""]
+    out += [
+        f"Deterministic mode: seed {la['seed']}, {la['writers']} writers x {la['steps']} steps, one client call per tick "
+        f"(no races), interleaving round-robin with a seeded jitter. Counts are gated (two runs must match, and graft must "
+        f"match the `git merge-file` oracle); timings are reported only. Result: **{'pass' if la['ok'] else 'FAIL'}**.",
+        "",
+        "| Overlap | System | Policy | conflicts at land | caught early | conflict lines resolved | rework (regions rewritten) "
+        "| land attempts | land refusals (named fewer paths) | probe calls | probe p50 / p95 (ms) | wall (s) | same counts twice | oracle | final tree |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
+    ]
+    for lvl in la["levels"]:
+        for side in ("graft", "git"):
+            for policy, x in lvl[side].items():
+                if "skipped" in x:
+                    out.append(f"| {lvl['overlap']} | {side} | {policy} | skipped: {x['skipped']} | | | | | | | | | | | |")
+                    continue
+                c = x["counts"]
+                pl = x["probe_latency"]
+                oracle = ""
+                if side == "graft":
+                    oracle = _yes(x["oracle_events_match"] and x["oracle_counts_match"] and x["oracle_tree_equals_expected"])
+                refusals = f"{x['land_refusals']} ({x['land_refusals_incomplete']})" if side == "graft" else ""
+                ok = (
+                    x["land_refusals_sound"]
+                    and x["final_tree_equals_expected"]
+                    and x["no_lost_or_duplicated_lands"]
+                    and x["line_never_moved_backwards"]
+                )
+                out.append(
+                    f"| {lvl['overlap']} | {side} | {policy} | {c['conflicts_at_land']} | {c['conflicts_caught_early']} "
+                    f"| {c['conflict_lines_resolved']} | {c['rework_regions_rewritten']} | {c['land_attempts']} | {refusals} | {c['probe_calls']} "
+                    f"| {_ms(pl)} / {_ms(pl, 'p95_ms')} | {x['wall_s']} | {_yes(x['deterministic'])} | {oracle} | {_yes(ok)} |"
+                )
+    out += [
+        "",
+        "| Overlap | Script | Steps own / region / hot | graft final tree = git | draft overlap (oracle: ticks, pairs) |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for lvl in la["levels"]:
+        k = lvl["kinds"]
+        ov = next((x["oracle_draft_overlap"] for x in lvl["graft"].values() if "oracle_draft_overlap" in x), {})
+        out.append(
+            f"| {lvl['overlap']} | `{lvl['script_sha256'][:12]}` | {k['own']} / {k['region']} / {k['hot']} | {_yes(lvl['graft_equals_git'])} "
+            f"| {ov.get('ticks_with_overlap', '')} of {ov.get('ticks', '')}, {ov.get('overlap_pairs', '')} |"
+        )
+    racing = [(lvl["overlap"], p, x["racing"]) for lvl in la["levels"] for p, x in lvl["graft"].items() if "racing" in x]
+    if racing:
+        out += [
+            "",
+            "Racing variant (real threads, correctness only):",
+            "",
+            "| Overlap | Policy | final tree | lands | too late (conflicts at land) | wall (s) |",
+            "| --- | --- | --- | --- | ---: | ---: |",
+        ]
+        for o, p, r in racing:
+            out.append(
+                f"| {o} | {p} | {_yes(r['final_tree_equals_expected'])} | {_yes(r['no_lost_or_duplicated_lands'])} | {r['too_late']} | {r['wall_s']} |"
+            )
+    m = la["mcp"]
+    out += [
+        "",
+        "### MCP conflict scenario",
+        "",
+        f"Two writers change one key of `{m['path']}`; the second land conflicts, is resolved by rule and lands, once over `/mcp` and once "
+        f"through the CLI. Resolution over MCP: {m['resolution']}. Calls: {', '.join(m['mcp']['calls'])}.",
+        "",
+        "| Path | conflict reported | landed | file = expected |",
+        "| --- | --- | --- | --- |",
+        f"| CLI | {', '.join(m['cli']['conflicts']) or 'none'} | {_yes(m['cli']['landed'])} | {_yes(m['cli']['file_equals_expected'])} |",
+        f"| MCP | {', '.join(m['mcp']['conflicts']) or 'none'} | {_yes(m['mcp']['landed'])} | {_yes(m['mcp']['file_equals_expected'])} |",
+        "",
+        f"MCP result equals the CLI result: {_yes(m['mcp_equals_cli'])}.",
+        "",
+    ]
+    return out
