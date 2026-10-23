@@ -269,6 +269,79 @@ async fn mcp_takes_the_bearer_token_and_the_engine_scopes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_non_main_line_is_attested() {
+    // WI-2288: `[[lines]]` gives `trial-1` the attested policy.
+    let site = Site::new(
+        "server-line-policy",
+        "[[lines]]\nname = \"trial-1\"\npolicy = \"attested\"\nchecks = [\"ci/fmt\", \"ci/test\"]\n",
+    );
+    let admin = site.mint(&["repo:r:admin"]);
+    let lander = site.mint(&["repo:r:write", "repo:r:land:trial-1"]);
+    let server = site.start();
+
+    let mut c = server.clients(Some(&admin)).await;
+    c.create_repo("r").await.expect("create");
+    let files = BTreeMap::from([("README.md".to_owned(), b"hello\n".to_vec())]);
+    let root = c
+        .commit("r", None, &BTreeMap::new(), &files, 0)
+        .await
+        .expect("root");
+    c.set_line("r", "trial-1", root.id).await.expect("line");
+
+    let land = Session::open(server.addr, &lander);
+    let (failed, opened) = land.call(
+        "graft_workspace",
+        json!({"repo": "r", "action": "open", "line": "trial-1"}),
+    );
+    assert!(!failed, "{opened}");
+    let ws = opened["workspace"]["name"].as_str().unwrap().to_owned();
+    let (failed, committed) = land.call(
+        "graft_commit",
+        json!({
+            "repo": "r", "workspace": ws, "message": "change",
+            "files": [{"path": "README.md", "content": "changed\n"}],
+        }),
+    );
+    assert!(!failed, "{committed}");
+
+    // Unattested: refused by the line's policy, naming the first check.
+    let (failed, refused) = land.call("graft_land", json!({"repo": "r", "workspace": ws}));
+    assert!(failed);
+    assert_eq!(refused["kind"], "rejected");
+    assert_eq!(refused["policy"], "attested");
+    assert!(
+        refused["detail"].as_str().unwrap().contains("ci/fmt"),
+        "{refused}"
+    );
+
+    // Attested on the configured checks: the land succeeds.
+    let draft: graft_model::ChangesetId = committed["id"].as_str().unwrap().parse().unwrap();
+    let ci = site.mint_kind(
+        &format!("ci:github:o/r#{draft}"),
+        "ci",
+        &["repo:r:read", "repo:r:attest"],
+        3600,
+    );
+    let mut by_ci = server.clients(Some(&ci)).await;
+    for check in ["ci/fmt", "ci/test"] {
+        by_ci
+            .repo
+            .attest(pb::AttestRequest::from(Attest {
+                repo: "r".into(),
+                changeset: draft,
+                check: check.into(),
+                passed: true,
+                url: "https://ci.example/run/1".into(),
+            }))
+            .await
+            .expect("attest");
+    }
+    let (failed, landed) = land.call("graft_land", json!({"repo": "r", "workspace": ws}));
+    assert!(!failed, "{landed}");
+    assert_eq!(landed["outcome"], "landed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_refuses_an_oversized_body_from_an_authenticated_caller() {
     let site = Site::new("server-mcp-cap", "");
     let writer = site.mint(&["repo:r:write"]);

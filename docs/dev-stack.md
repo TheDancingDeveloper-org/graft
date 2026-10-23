@@ -223,6 +223,30 @@ Every runtime service has `restart: on-failure:3`. `docker inspect` shows
 | `graft-dev_graft-dev-client-work` | client working copies (`/work`) |
 | `graft-dev_graft-dev-prometheus`, `graft-dev_graft-dev-grafana` | obs data |
 
+## Line land policy
+
+`server.toml` takes an optional `[[lines]]` array and a `[default_line]`
+table (WI-2288). Without them the engine defaults stand: `main` is decision D6
+(attested on `ci/build` and `ci/test`, post-land with auto-revert) and every
+other line lands directly.
+
+| Key | Meaning |
+| --- | --- |
+| `name` | line name (`[[lines]]` only; required, unique) |
+| `policy` | `direct` (default), `attested` or `queued` |
+| `checks` | required checks; needed for `attested` and `queued`, refused for `direct` |
+| `attest_merged` | re-attest line-merged results; `attested` only |
+| `authority` | `graft-primary` (default) or `git-primary` |
+| `path_rules` | `{ prefix, checks, human_review }`: extra requirements under a path |
+| `post_land` | `{ checks, auto_revert }`: post-land testing |
+
+An entry replaces the default for its name, so a `[[lines]]` entry for `main`
+replaces D6; `main` keeps D6 unless listed. `[default_line]` takes the same
+keys (no `name`) and applies to every line no entry names. Unknown keys and
+invalid combinations stop the server at start-up. The config is global: every
+repository gets the same lines. Per-repository configs can come later. A
+commented `trial-1` example is in `deploy/server.toml`.
+
 ## Open items
 
 These need decisions from the crates that own the behaviour:
