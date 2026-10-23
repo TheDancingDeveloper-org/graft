@@ -31,11 +31,11 @@ and clone speed, history integrity.
 ### Phase 1 backlog
 
 The Vogt review WI-2297 holds this list; Vogt is the source of truth for its
-state. Delivered on 2026-10-23 (#82 to #110), all done:
+state. Delivered on 2026-10-23 (#82 to #111), all done:
 
 - WI-2296 `graft land` line-merges by default (#83, #84).
 - WI-2298 every line defaults to `direct` (#85).
-- WI-2299, WI-2295 D22 docs (#82, #89); WI-2321 D23 docs (#109).
+- WI-2299, WI-2295 D22 docs (#82, #89); WI-2321 D23 docs (#109); WI-2323 group-commit note (#111).
 - WI-2294 bench harness (#81); WI-2311 live-awareness mode (#100);
   WI-2305 correctness smoke in the merge queue (#94).
 - WI-2300 `graft mcp` over stdio (#87).
@@ -57,7 +57,7 @@ What remains:
 | Item | What |
 | --- | --- |
 | WI-2310 | draft overlap (design note #95 merged; implementation open) |
-| WI-2323 | group-commit chained import inserts (note #111 in merge queue; implementation open) |
+| WI-2323 | group-commit chained import inserts (note #111 merged; implementation open) |
 | WI-2304 | bench at 10k and 100k on the graft-dev VM |
 | WI-2314 | CI OOM flake: quarantined (#91), root cause open |
 | WI-2307 | graft-dev alerts patch (blocked on the operator; backups #97 done) |

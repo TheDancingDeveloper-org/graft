@@ -1,6 +1,6 @@
 # graft status: what's delivered (baseline, 2026-10-23, end of day)
 
-- **As of:** `main` at `904d800` after #110 (the 2026-10-23 phase-1 run, #82 to #110; #111 in merge queue),
+- **As of:** `main` at `c5393e9` after #111 (the 2026-10-23 phase-1 run, #82 to #111),
   under operator decision
   [D22](decisions.md#d22-phase-1-is-a-git-alternative).
 - **Review:** Vogt WI-2297. Its children are the backlog below.
@@ -42,7 +42,7 @@ rustTorrent #214).
 | GC | dry-run report; the sweep in the server (`admin gc`, scheduler, metrics), off by default | G2.9 (#37), G3.2 (#66), WI-2274 (#103) |
 | Dev server | graft-dev VM, compose stack in `deploy/`; pre-flight config check, health gate and rollback; scheduled backups and restore runbook | WI-2251 (#50, #55), WI-2291 (#96), WI-2307 (#97) |
 | Measurement | pilot harness and crash suite (Rust); the bench against git (`bench/`), its live-awareness mode, and a scale-10 correctness smoke in the merge queue | G1.16 (#26), WI-2294 (#81), WI-2311 (#100), WI-2305 (#94) |
-| Docs | D22 follow-through; D23 (fork-point index, bridge removal); group-commit note (in merge queue) | WI-2295 (#89), WI-2321 (#109), WI-2323 (#111) |
+| Docs | D22 follow-through; D23 (fork-point index, bridge removal); group-commit note | WI-2295 (#89), WI-2321 (#109), WI-2323 (#111) |
 
 ## Built but switched off (phase 2, D22)
 
@@ -99,7 +99,7 @@ Vogt is the source of truth.
 | Item | What |
 | --- | --- |
 | WI-2310 | draft overlap: who else has in-flight drafts on these paths (design note #95 merged; the rest open) |
-| WI-2323 | group-commit chained import inserts in graft-store-sqlite (note #111 in merge queue; implementation open) |
+| WI-2323 | group-commit chained import inserts in graft-store-sqlite (note merged in #111; implementation open) |
 | WI-2304 | bench at 10k and 100k on the graft-dev VM |
 | WI-2314 | CI `test` job OOM flake: quarantined (#91), root cause open |
 
