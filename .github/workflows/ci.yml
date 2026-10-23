@@ -101,6 +101,9 @@ jobs:
           # Exact pin: an older nextest on a self-hosted runner rejects
           # --no-tests. install-action replaces a binary of another version.
           tool: cargo-nextest@0.9.148
+      # Some self-hosted runners carry an older cargo-nextest in ~/.cargo/bin,
+      # which shadows the pinned one install-action puts in /usr/local/bin.
+      - run: echo /usr/local/bin >> "$GITHUB_PATH"
       - run: cargo nextest --version
       - run: cargo nextest run --workspace --all-features --no-tests=pass
       - run: cargo test --workspace --all-features --doc
