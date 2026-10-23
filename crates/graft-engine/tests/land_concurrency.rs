@@ -18,13 +18,13 @@ use graft_store_sqlite::SqliteMetaStore;
 
 const RACERS: usize = 8;
 
-fn land_req(head: ChangesetId) -> Land {
+fn land_req(head: ChangesetId, merge: MergeMode) -> Land {
     Land {
         repo: "r".to_owned(),
         head,
         line: "trunk".to_owned(),
         squash: false,
-        merge: MergeMode::File,
+        merge,
         deadline_ms: None,
     }
 }
@@ -35,6 +35,16 @@ fn race(
     r: &Repo<'_, SqliteMetaStore>,
     heads: &[ChangesetId],
 ) -> Vec<ApiResult<Landed>> {
+    race_with(f, r, heads, MergeMode::File)
+}
+
+/// [`race`] with a merge mode.
+fn race_with(
+    f: &Fixture<SqliteMetaStore>,
+    r: &Repo<'_, SqliteMetaStore>,
+    heads: &[ChangesetId],
+    merge: MergeMode,
+) -> Vec<ApiResult<Landed>> {
     let barrier = Barrier::new(heads.len());
     thread::scope(|s| {
         let handles: Vec<_> = heads
@@ -43,7 +53,7 @@ fn race(
                 let (barrier, cx) = (&barrier, r.cx.clone());
                 s.spawn(move || {
                     barrier.wait();
-                    block_on(f.engine.land(&cx, land_req(head)))
+                    block_on(f.engine.land(&cx, land_req(head, merge)))
                 })
             })
             .collect();
@@ -124,9 +134,15 @@ fn disjoint_racers_all_land() {
 }
 
 /// Concurrent lands on the same lines of one file: exactly one lands, and
-/// every other gets a file-level `Conflict` (none is left `Contended`).
+/// every other gets a `Conflict` (none is left `Contended`), whether the
+/// rebase merges by file or by line.
 #[test]
 fn same_lines_racers_conflict_but_one() {
+    same_lines(MergeMode::File);
+    same_lines(MergeMode::Line);
+}
+
+fn same_lines(merge: MergeMode) {
     let f = sqlite_with(EngineConfig::default());
     let (r, root) = setup(&f);
     let heads: Vec<ChangesetId> = (0..RACERS)
@@ -135,7 +151,7 @@ fn same_lines_racers_conflict_but_one() {
             r.commit(vec![root], &[("a", data.as_bytes())], &[]).id
         })
         .collect();
-    let results = race(&f, &r, &heads);
+    let results = race_with(&f, &r, &heads, merge);
 
     let winners: Vec<ChangesetId> = results
         .iter()
@@ -162,6 +178,51 @@ fn same_lines_racers_conflict_but_one() {
     assert_eq!((line.target, line.version), (winner, 2));
 }
 
+/// G3.7: concurrent lands on different lines of one file all land with
+/// `merge = line` (D16), and the line ends with every edit: each loser's
+/// retry merges onto the winner's tip.
+#[test]
+fn different_lines_racers_all_land_by_line_merge() {
+    let f = sqlite_with(EngineConfig::default());
+    let (r, root) = setup(&f);
+    // Every racer edits its own line; two unchanged lines separate them.
+    let lines: Vec<String> = (0..3 * RACERS).map(|i| format!("line {i}\n")).collect();
+    let base = lines.concat();
+    let shared = r.commit(vec![root], &[("shared", base.as_bytes())], &[]).id;
+    block_on(r.e().land(&r.cx, land_req(shared, MergeMode::File))).expect("shared");
+    let edited = |i: usize| {
+        let mut mine = lines.clone();
+        mine[3 * i + 1] = format!("racer {i} was here\n");
+        mine.concat()
+    };
+    let heads: Vec<ChangesetId> = (0..RACERS)
+        .map(|i| {
+            r.commit(vec![shared], &[("shared", edited(i).as_bytes())], &[])
+                .id
+        })
+        .collect();
+    let results = race_with(&f, &r, &heads, MergeMode::Line);
+
+    let mut merged_any = false;
+    for result in &results {
+        match result {
+            Ok(Landed::Landed { merged_paths, .. }) => {
+                merged_any |= !merged_paths.is_empty();
+            }
+            other => panic!("every racer lands, got {other:?}"),
+        }
+    }
+    assert!(merged_any, "all but the first land merge");
+    let line = tip(&r);
+    assert_eq!(line.version, 2 + RACERS as u64);
+    let mut want = lines.clone();
+    for i in 0..RACERS {
+        want[3 * i + 1] = format!("racer {i} was here\n");
+    }
+    let files = r.fetch(r.changeset(line.target).changeset.root);
+    assert_eq!(files["shared"], want.concat().into_bytes());
+}
+
 /// Racing retries of one land agree: every caller gets the same `Landed`,
 /// and the line moved once.
 #[test]
@@ -171,7 +232,7 @@ fn racing_retries_of_one_land_agree() {
     // The line moves first, so every retry rebases onto the same tip.
     let first = r.commit(vec![root], &[("b", b"b\n")], &[]).id;
     let head = r.commit(vec![root], &[("c", b"c\n")], &[]).id;
-    block_on(r.e().land(&r.cx, land_req(first))).expect("first");
+    block_on(r.e().land(&r.cx, land_req(first, MergeMode::File))).expect("first");
     let results = race(&f, &r, &[head; 4]);
     for result in &results {
         assert_eq!(result, &results[0]);

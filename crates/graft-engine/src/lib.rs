@@ -5,6 +5,10 @@
 //! G2.7 (rebase and sync), G3.1 (land and policies), G3.7 (revert, stacks,
 //! line merge).
 //!
+//! G3.7 adds `Revert` (`revert.rs`), the `Stack` operations (`stack.rs`),
+//! line merge in `Rebase`, `Sync` and `Land` (decision D16, recorded in
+//! [`MERGED_PATHS`]), and the `attested` policy's `attest_merged`.
+//!
 //! G3.11 adds the GC protection records of design §8.6 (`protect.rs`):
 //! parent pins and expiries written with every record change, claims on
 //! doomed objects before a write commits, and [`Engine::protect_repo`], the
@@ -52,7 +56,9 @@ mod protect;
 mod read;
 mod rebase;
 mod refs;
+mod revert;
 mod source;
+mod stack;
 mod workspace;
 mod write;
 
@@ -62,8 +68,9 @@ pub use land::{
 };
 pub use policy::{LandHooks, LineConfig};
 pub use protect::{CLAIM_HOLDER, ProtectReport};
-pub use rebase::REBASED_FROM;
+pub use rebase::{MERGED_PATHS, REBASED_FROM};
 pub use refs::MAX_REF_NAME;
+pub use revert::REVERTS;
 pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
 pub use write::MAX_REPO_NAME;
 
@@ -307,8 +314,8 @@ where
     async fn rebase(&self, cx: &CallContext, req: Rebase) -> ApiResult<ChangesetId> {
         self.do_rebase(cx, req).await
     }
-    async fn revert(&self, _cx: &CallContext, _req: Revert) -> ApiResult<ChangesetId> {
-        todo!("G3.7")
+    async fn revert(&self, cx: &CallContext, req: Revert) -> ApiResult<ChangesetId> {
+        self.do_revert(cx, req).await
     }
     async fn land(&self, cx: &CallContext, req: Land) -> ApiResult<Landed> {
         self.do_land(cx, req).await
@@ -365,11 +372,11 @@ where
     }
     async fn stack(
         &self,
-        _cx: &CallContext,
-        _req: WorkspaceRef,
-        _op: StackOp,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        op: StackOp,
     ) -> ApiResult<WorkspaceView> {
-        todo!("G3.7")
+        self.do_stack(cx, req, op).await
     }
     async fn close_workspace(
         &self,

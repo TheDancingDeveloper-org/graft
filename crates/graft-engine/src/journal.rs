@@ -64,7 +64,7 @@ pub const ATTESTED: &str = "Attested";
 pub const REVERT_REQUESTED: &str = "RevertRequested";
 
 /// A JSON string literal.
-fn json_str(out: &mut String, s: &str) {
+pub(crate) fn json_str(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
         match c {

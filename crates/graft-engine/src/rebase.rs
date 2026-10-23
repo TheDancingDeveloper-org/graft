@@ -8,14 +8,27 @@
 //! | --- | --- | --- |
 //! | equal | — | apply `c[p]` |
 //! | differ | equal | drop: the change is already there |
-//! | differ | differ | conflict |
+//! | differ | differ, all three text files, `merge = line` | line merge |
+//! | differ | differ, otherwise | conflict |
 //!
 //! An entry is its kind and id, so a mode or symlink change is a change, and
 //! a directory compares by tree id. A file/directory clash (one side turns
 //! `a` into a directory) is a conflict: either the entries at `a` differ, or
 //! applying the kept changes to the target breaks validity rule 7, which is
-//! reported as a conflict at that path. `merge = line` is answered at file
-//! level until line merge lands (G3.7, decision D16).
+//! reported as a conflict at that path.
+//!
+//! With `merge = line` (decision D16), a path both sides changed is merged
+//! three ways (`graft_model::merge3`) when the base, ours and theirs are all
+//! regular or executable files under 1 MiB of text. A clean merge puts the
+//! merged blob, taking the executable bit from the side that changed it; a
+//! merge whose result is already on the target is dropped. Anything else is a
+//! conflict at file level. A rebased changeset records the paths its own
+//! rebase merged, in it or in any draft below it in the same stack, in
+//! [`MERGED_PATHS`], a JSON array of path strings, so the
+//! `attested` policy and reviewers can tell a merged result from its draft.
+//! Merged blobs stay in memory until the changeset that introduces them is
+//! stored, and go in with it, like `CreateChangeset`'s inline blobs. `Sync`
+//! always merges by line; `Rebase` and `Land` take the request's mode.
 //!
 //! A stack rebases bottom-up. The whole stack is planned in memory first,
 //! reading only the directories on each changed path, so any conflict fails
@@ -29,26 +42,47 @@
 //! adopts them, so a crash part-way leaves only collectable orphans.
 //!
 //! Cost: O(changes × depth) tree reads per draft, plus one changeset read
-//! per draft. It never depends on the distance between base and target.
+//! per draft, plus the size of any line-merged files. It never depends on
+//! the distance between base and target.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap};
 
+use graft_model::merge::{MAX_TEXT_BYTES, Merge3, merge3};
 use graft_model::{
-    ApplyError, ApplyOptions, Change, Changeset, ChangesetId, ObjectId, RepoPath, Rule, TreeEntry,
-    TreeId, apply_changes_with, diff_trees,
+    ApplyError, ApplyOptions, Change, Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind,
+    RepoPath, Rule, TreeEntry, TreeId, apply_changes_with, diff_trees,
 };
 use graft_proto::error::ConflictPath;
-use graft_proto::types::{Rebase, Synced, WorkspaceRef};
-use graft_proto::{ApiError, CallContext};
+use graft_proto::types::{MergeMode, Rebase, Synced, WorkspaceRef};
+use graft_proto::{ApiError, CallContext, Frame};
 use graft_store::{MetaStore, ObjectStore, RecordState, RepoId, TxnOutcome, Write};
 
 use crate::access::{Need, require, require_changes};
+use crate::objects::Upload;
 use crate::source::{Trees, model_root};
 use crate::workspace::{CAS_RETRIES, check_name, contended, guarded, held_by, holder, transition};
 use crate::{Engine, errors, journal};
 
 /// The metadata key naming the draft a rebased changeset came from.
 pub const REBASED_FROM: &str = "graft.rebased-from";
+
+/// The metadata key listing the paths a rebase resolved by line merge
+/// (decision D16): a JSON array of path strings, sorted by path bytes.
+pub const MERGED_PATHS: &str = "graft.merged-paths";
+
+/// The [`MERGED_PATHS`] value for `paths` (sorted, each once).
+pub(crate) fn encode_paths<'a>(paths: impl IntoIterator<Item = &'a RepoPath>) -> String {
+    let mut out = String::from("[");
+    for (i, path) in paths.into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        journal::json_str(&mut out, path.as_str());
+    }
+    out.push(']');
+    out
+}
 
 /// What became of one draft.
 pub(crate) struct Step {
@@ -69,14 +103,46 @@ pub(crate) struct Plan {
     /// disappeared.
     pub(crate) head: ChangesetId,
     /// Its snapshot root.
-    head_root: TreeId,
+    pub(crate) head_root: TreeId,
+    /// The payloads of the blobs line merge made, by id. Each is stored
+    /// with the first new changeset that puts it.
+    pub(crate) blobs: HashMap<ObjectId, Vec<u8>>,
+    /// Every path resolved by line merge, sorted, each once.
+    pub(crate) merged: Vec<RepoPath>,
+}
+
+impl Plan {
+    /// The merged blobs `cs` puts, as uploads to store with it.
+    pub(crate) fn uploads(&self, cs: &Changeset) -> Vec<Upload> {
+        let mut out: Vec<Upload> = Vec::new();
+        for change in &cs.changes {
+            if let Change::Put { id, .. } = change
+                && let Some(payload) = self.blobs.get(id)
+                && !out.iter().any(|u| u.id == *id)
+            {
+                out.push(Upload {
+                    id: *id,
+                    bytes: Frame::encode(ObjectKind::Blob, payload).to_bytes(),
+                });
+            }
+        }
+        out
+    }
+}
+
+/// A text input of a line merge: a pending merged blob or a stored one.
+type Text<'a> = Cow<'a, [u8]>;
+
+/// Whether an entry kind can be merged by line.
+fn mergeable(kind: EntryKind) -> bool {
+    matches!(kind, EntryKind::File | EntryKind::Exec)
 }
 
 /// A changeset entry as the rebase compares it. Changes are file-level, so
 /// a directory counts as no entry: a draft that deletes file `a` matches a
 /// target that turned `a` into a directory. A real clash is found when the
 /// kept changes are applied.
-fn key(e: &Option<TreeEntry>) -> Option<(graft_model::EntryKind, ObjectId)> {
+pub(crate) fn key(e: &Option<TreeEntry>) -> Option<(graft_model::EntryKind, ObjectId)> {
     e.as_ref()
         .filter(|e| e.kind != graft_model::EntryKind::Tree)
         .map(|e| (e.kind, e.id))
@@ -104,6 +170,73 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         trees.lookup(root, path).await.map_err(errors::source)
     }
 
+    /// The text of blob `id` for a line merge: a merged blob of this plan,
+    /// or the stored blob. `None` when it is too large to merge by line,
+    /// which the frame header tells without decoding it.
+    async fn merge_input<'p>(
+        &self,
+        repo: RepoId,
+        id: ObjectId,
+        pending: &'p HashMap<ObjectId, Vec<u8>>,
+    ) -> Result<Option<Text<'p>>, ApiError> {
+        if let Some(payload) = pending.get(&id) {
+            return Ok(Some(Cow::Borrowed(payload)));
+        }
+        let Some(bytes) = self.objects.get(repo, id).await.map_err(errors::store)? else {
+            return Err(ApiError::MissingObjects { ids: vec![id] });
+        };
+        let frame = Frame::from_bytes(&bytes)
+            .ok()
+            .filter(|f| f.kind == ObjectKind::Blob)
+            .ok_or(ApiError::CorruptObject { id })?;
+        if frame.uncompressed_len >= MAX_TEXT_BYTES as u64 {
+            return Ok(None);
+        }
+        let payload = frame
+            .decode_verified(id)
+            .map_err(|_| ApiError::CorruptObject { id })?;
+        Ok(Some(Cow::Owned(payload)))
+    }
+
+    /// The line merge of a path both sides changed (decision D16): the
+    /// merged entry and its payload, or `None` when it conflicts. All three
+    /// entries must be regular or executable files of text; the result
+    /// takes the kind from the side that changed it.
+    async fn line_merge(
+        &self,
+        repo: RepoId,
+        base: Option<(EntryKind, ObjectId)>,
+        ours: Option<(EntryKind, ObjectId)>,
+        theirs: Option<(EntryKind, ObjectId)>,
+        pending: &HashMap<ObjectId, Vec<u8>>,
+    ) -> Result<Option<(EntryKind, ObjectId, Vec<u8>)>, ApiError> {
+        let (Some(b), Some(o), Some(t)) = (base, ours, theirs) else {
+            return Ok(None);
+        };
+        if !(mergeable(b.0) && mergeable(o.0) && mergeable(t.0)) {
+            return Ok(None);
+        }
+        // Two kinds only: when theirs changed the kind, ours either kept
+        // the base's or made the same change.
+        let kind = if b.0 == t.0 { o.0 } else { t.0 };
+        let Some(base) = self.merge_input(repo, b.1, pending).await? else {
+            return Ok(None);
+        };
+        let Some(ours) = self.merge_input(repo, o.1, pending).await? else {
+            return Ok(None);
+        };
+        let Some(theirs) = self.merge_input(repo, t.1, pending).await? else {
+            return Ok(None);
+        };
+        match merge3(&base, &ours, &theirs) {
+            Merge3::Clean(merged) => {
+                let id = ObjectId::hash(ObjectKind::Blob, &merged);
+                Ok(Some((kind, id, merged)))
+            }
+            Merge3::Conflicts(_) | Merge3::NotText | Merge3::TooComplex => Ok(None),
+        }
+    }
+
     /// Plans the rebase of `stack` (bottom first; each draft's first parent
     /// is the one below it) onto `onto`. Reads only; fails with `Conflict`
     /// at the first draft that conflicts.
@@ -112,9 +245,24 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         repo: RepoId,
         stack: &[(ChangesetId, Changeset)],
         onto: ChangesetId,
+        mode: MergeMode,
+    ) -> Result<Plan, ApiError> {
+        let onto_root = self.root_of(repo, onto).await?;
+        self.plan_onto(repo, stack, onto, onto_root, mode).await
+    }
+
+    /// [`Engine::plan`] onto a changeset whose root is `onto_root`, which
+    /// need not be stored yet (a squashed draft). Each draft's own first
+    /// parent must be stored or in `stack`.
+    pub(crate) async fn plan_onto(
+        &self,
+        repo: RepoId,
+        stack: &[(ChangesetId, Changeset)],
+        onto: ChangesetId,
+        onto_root: TreeId,
+        mode: MergeMode,
     ) -> Result<Plan, ApiError> {
         let trees = Trees::new(&*self.objects, repo);
-        let onto_root = self.root_of(repo, onto).await?;
         let apply = ApplyOptions {
             case_clash: self.config.portable_paths,
         };
@@ -123,7 +271,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             new: Vec::new(),
             head: onto,
             head_root: onto_root,
+            blobs: HashMap::new(),
+            merged: Vec::new(),
         };
+        let mut merged_all: BTreeSet<RepoPath> = BTreeSet::new();
         // The roots of the drafts below, so a stacked draft's base costs no
         // read.
         let mut roots: HashMap<ChangesetId, TreeId> = HashMap::new();
@@ -150,6 +301,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 
             let mut kept = Vec::with_capacity(c.changes.len());
             let mut conflicts = Vec::new();
+            let mut merged = Vec::new();
             for change in &c.changes {
                 let path = change.path();
                 let b = self.entry(&trees, base_root, path).await?;
@@ -157,7 +309,23 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 let (b, o, ours) = (key(&b), key(&o), change_key(change));
                 if b == o {
                     kept.push(change.clone());
-                } else if ours != o {
+                } else if ours == o {
+                    // The change is already there: drop it.
+                } else if let Some((kind, id, payload)) = match mode {
+                    MergeMode::Line => self.line_merge(repo, b, ours, o, &plan.blobs).await?,
+                    MergeMode::File => None,
+                } {
+                    // A merge whose result is already there is dropped.
+                    if Some((kind, id)) != o {
+                        kept.push(Change::Put {
+                            path: path.clone(),
+                            kind,
+                            id,
+                        });
+                        plan.blobs.entry(id).or_insert(payload);
+                    }
+                    merged.push(path.clone());
+                } else {
                     conflicts.push(ConflictPath {
                         path: path.to_string(),
                         base: b.map(|(_, id)| id),
@@ -165,11 +333,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         theirs: o.map(|(_, id)| id),
                     });
                 }
-                // Otherwise the change is already there: drop it.
             }
             if !conflicts.is_empty() {
                 return Err(conflict(conflicts, onto));
             }
+            merged_all.extend(merged.iter().cloned());
             if kept.is_empty() {
                 plan.steps.push(Step {
                     from: *id,
@@ -209,6 +377,15 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             parents.extend(c.parents.iter().skip(1).copied());
             let mut metadata = c.metadata.clone();
             metadata.insert(REBASED_FROM.to_owned(), id.to_string());
+            // The paths this rebase merged, in this draft or any below it in
+            // the stack: the content under a draft above a merge was never
+            // tested either. Not an earlier rebase's: a later file-level
+            // rebase of a merged result inherits its attestations.
+            if merged_all.is_empty() {
+                metadata.remove(MERGED_PATHS);
+            } else {
+                metadata.insert(MERGED_PATHS.to_owned(), encode_paths(&merged_all));
+            }
             let cs = Changeset {
                 parents,
                 root,
@@ -227,14 +404,16 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             plan.head_root = root;
             plan.new.push(cs);
         }
+        plan.merged = merged_all.into_iter().collect();
         Ok(plan)
     }
 
     /// Stores a plan's new changesets, bottom first, each abandoned until a
     /// workspace adopts it. A changeset already stored (a retry) is kept.
-    async fn store_plan(&self, repo: RepoId, plan: &Plan) -> Result<(), ApiError> {
+    pub(crate) async fn store_plan(&self, repo: RepoId, plan: &Plan) -> Result<(), ApiError> {
         for cs in &plan.new {
-            self.insert_unheld(repo, cs.clone()).await?;
+            self.insert_unheld(repo, cs.clone(), plan.uploads(cs))
+                .await?;
         }
         Ok(())
     }
@@ -287,7 +466,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         for (_, cs) in &stack {
             require_changes(cx, &req.repo, &cs.changes)?;
         }
-        let plan = self.plan(repo, &stack, req.onto).await?;
+        let plan = self.plan(repo, &stack, req.onto, req.merge).await?;
         self.store_plan(repo, &plan).await?;
         Ok(plan.head)
     }
@@ -360,7 +539,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 records.insert(id, record);
                 drafts.push((id, cs));
             }
-            let plan = self.plan(repo, &drafts, target).await?;
+            // Decision D16: a sync merges by line.
+            let plan = self.plan(repo, &drafts, target, MergeMode::Line).await?;
 
             self.store_plan(repo, &plan).await?;
 
