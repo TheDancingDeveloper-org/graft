@@ -5,14 +5,21 @@
 //! (`c<hex>`). The bodies are a durable format:
 //!
 //! - `ChangesetCreated`: `{"id":"c…","state":"draft","workspace":"w"}` for a
-//!   draft created in a workspace, `{"id":"c…","state":"abandoned"}` for one
-//!   created without (nothing holds it)
+//!   draft created in a workspace, `{"id":"c…","state":"draft","holder":"land:…"}`
+//!   for a land candidate held by its land-attempt lease,
+//!   `{"id":"c…","state":"abandoned"}` for one created without (nothing
+//!   holds it)
 //! - `RefMoved`: `{"name":"main","old":"c…"|null,"new":"c…","version":2,"actor":"…"}`
 //! - `WorkspaceOpened`: `{"name":"w","owner":"…","line":"main","base":"c…"}`
 //! - `WorkspaceRenewed`: `{"name":"w","lease_until_ms":123}`
 //! - `WorkspaceHeadMoved`: `{"name":"w","old":"c…"|null,"new":"c…"|null}`
 //! - `WorkspaceClosed`: `{"name":"w","reason":"closed"|"lease-expired","abandoned":2}`
 //! - `WorkspaceSynced`: `{"name":"w","old_base":"c…","new_base":"c…","old_head":"c…"|null,"new_head":"c…"|null}`
+//! - `LandAttempt`: `{"draft":"c…","line":"main","outcome":"landed","landed":"c…"}`
+//!   in the land's CAS transaction, or `{"draft":"c…","line":"main","outcome":"conflict","onto":"c…"}`
+//! - `Attested`: `{"changeset":"c…","check":"ci/test","passed":true,"url":"…","actor":"…"}`
+//! - `RevertRequested`: `{"line":"main","changeset":"c…","check":"ci/test","url":"…"}`,
+//!   with the failing `Attested` entry of a post-land check (decision D6)
 
 use std::fmt::Write as _;
 
@@ -46,6 +53,15 @@ pub const WORKSPACE_CLOSED: &str = "WorkspaceClosed";
 /// Kind of the entry written when `Sync` moves a workspace's base (and
 /// rebases its stack).
 pub const WORKSPACE_SYNCED: &str = "WorkspaceSynced";
+
+/// Kind of the entry written for a land's outcome.
+pub const LAND_ATTEMPT: &str = "LandAttempt";
+
+/// Kind of the entry written with each attestation.
+pub const ATTESTED: &str = "Attested";
+
+/// Kind of the entry that asks for a landed changeset to be reverted.
+pub const REVERT_REQUESTED: &str = "RevertRequested";
 
 /// A JSON string literal.
 fn json_str(out: &mut String, s: &str) {
@@ -95,6 +111,74 @@ pub(crate) fn changeset_created(id: ChangesetId, workspace: Option<&str>) -> Wri
     }
     body.push('}');
     entry(CHANGESET_CREATED, body)
+}
+
+/// The `ChangesetCreated` entry for a land candidate, a draft held by its
+/// land-attempt lease `holder`.
+pub(crate) fn candidate_created(id: ChangesetId, holder: &str) -> Write {
+    let mut body = format!("{{\"id\":\"{id}\",\"state\":\"draft\",\"holder\":");
+    json_str(&mut body, holder);
+    body.push('}');
+    entry(CHANGESET_CREATED, body)
+}
+
+/// What a land attempt came to, as `LandAttempt` records it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LandOutcome {
+    /// The line moved to this changeset.
+    Landed(ChangesetId),
+    /// The stack conflicts with this tip.
+    Conflict(ChangesetId),
+}
+
+/// The `LandAttempt` entry.
+pub(crate) fn land_attempt(draft: ChangesetId, line: &str, outcome: LandOutcome) -> Write {
+    let mut body = format!("{{\"draft\":\"{draft}\",\"line\":");
+    json_str(&mut body, line);
+    match outcome {
+        LandOutcome::Landed(id) => {
+            let _ = write!(body, ",\"outcome\":\"landed\",\"landed\":\"{id}\"}}");
+        }
+        LandOutcome::Conflict(id) => {
+            let _ = write!(body, ",\"outcome\":\"conflict\",\"onto\":\"{id}\"}}");
+        }
+    }
+    entry(LAND_ATTEMPT, body)
+}
+
+/// The `Attested` entry.
+pub(crate) fn attested(
+    changeset: ChangesetId,
+    check: &str,
+    passed: bool,
+    url: &str,
+    actor: &str,
+) -> Write {
+    let mut body = format!("{{\"changeset\":\"{changeset}\",\"check\":");
+    json_str(&mut body, check);
+    let _ = write!(body, ",\"passed\":{passed},\"url\":");
+    json_str(&mut body, url);
+    body.push_str(",\"actor\":");
+    json_str(&mut body, actor);
+    body.push('}');
+    entry(ATTESTED, body)
+}
+
+/// The `RevertRequested` entry.
+pub(crate) fn revert_requested(
+    line: &str,
+    changeset: ChangesetId,
+    check: &str,
+    url: &str,
+) -> Write {
+    let mut body = String::from("{\"line\":");
+    json_str(&mut body, line);
+    let _ = write!(body, ",\"changeset\":\"{changeset}\",\"check\":");
+    json_str(&mut body, check);
+    body.push_str(",\"url\":");
+    json_str(&mut body, url);
+    body.push('}');
+    entry(REVERT_REQUESTED, body)
 }
 
 /// The `WorkspaceOpened` entry.
@@ -269,6 +353,34 @@ mod tests {
             text(workspace_synced("w", id, id, Some(id), None)),
             format!(
                 "{{\"name\":\"w\",\"old_base\":\"{id}\",\"new_base\":\"{id}\",\"old_head\":\"{id}\",\"new_head\":null}}"
+            )
+        );
+        assert_eq!(
+            text(candidate_created(id, "land:9:ab")),
+            format!("{{\"id\":\"{id}\",\"state\":\"draft\",\"holder\":\"land:9:ab\"}}")
+        );
+        assert_eq!(
+            text(land_attempt(id, "main", LandOutcome::Landed(id))),
+            format!(
+                "{{\"draft\":\"{id}\",\"line\":\"main\",\"outcome\":\"landed\",\"landed\":\"{id}\"}}"
+            )
+        );
+        assert_eq!(
+            text(land_attempt(id, "main", LandOutcome::Conflict(id))),
+            format!(
+                "{{\"draft\":\"{id}\",\"line\":\"main\",\"outcome\":\"conflict\",\"onto\":\"{id}\"}}"
+            )
+        );
+        assert_eq!(
+            text(attested(id, "ci/test", false, "https://ci/1", "ci-bot")),
+            format!(
+                "{{\"changeset\":\"{id}\",\"check\":\"ci/test\",\"passed\":false,\"url\":\"https://ci/1\",\"actor\":\"ci-bot\"}}"
+            )
+        );
+        assert_eq!(
+            text(revert_requested("main", id, "ci/test", "u")),
+            format!(
+                "{{\"line\":\"main\",\"changeset\":\"{id}\",\"check\":\"ci/test\",\"url\":\"u\"}}"
             )
         );
     }
