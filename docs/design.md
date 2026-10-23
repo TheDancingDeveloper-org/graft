@@ -698,6 +698,7 @@ tested by `kill -9` during load, from the first phase.**
 | `Sync` | `name, onto?` → new `base`, rebased `head`, the list of changed paths, or `Conflict` |
 | `Stack` | `name, op: reorder \| squash \| split \| drop` → new head |
 | `CloseWorkspace` | `name, keep_drafts?` → its drafts become abandoned unless kept |
+| `OverlappingDrafts` | `line, paths, include_own?, limit, page?` → `(path, workspace)` hits in index order, plus owner, session, work item, draft age and lease end per workspace. Needs `repo:<r>:drafts`; live leased workspaces only; never contents or head ids ([D24](decisions.md#d24-draft-overlap-visibility)) |
 
 **Admin API:** `CreateRepo`, `ImportChangesets` (bulk, preserves parents and
 allows roots), `Gc { dry_run }`, `Fsck`, `Obliterate { blob, reason }`,
@@ -1373,6 +1374,9 @@ compact format) and carry: `sub`, principal `kind`, `session` (Vogt `ses_…`),
 - `repo:<name>:read`
 - `repo:<name>:write[:<path-prefix>]`
 - `repo:<name>:land:<line>`
+- `repo:<name>:attest` (post attestations only)
+- `repo:<name>:drafts` (the draft-overlap query; granted only by `admin`, see
+  [D24](decisions.md#d24-draft-overlap-visibility))
 - `repo:<name>:admin`
 - `objects:read`
 

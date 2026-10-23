@@ -3,8 +3,8 @@
 Status: design note for WI-2310. This note doesn't change
 [design.md](../design.md) or [decisions.md](../decisions.md). Two operator
 decisions are already made (2026-10-23): results are gated by a new scope,
-and they carry paths, ids and draft age, never contents. Accepting this note
-needs a decisions.md entry (proposed D23, below) in its own PR.
+and they carry paths, ids and draft age, never contents. Accepted as
+[D24](../decisions.md#d24-draft-overlap-visibility).
 
 ## 1. Use case
 
@@ -33,7 +33,7 @@ perm  := "read" | "write" | "land" | "attest" | "admin" | "drafts"
 
 (`attest` is on `main` already: `Scope::Attest` in
 `crates/graft-auth/src/scope.rs`. §12.1 of design.md doesn't list it yet;
-the D23 docs PR can fix that in passing.)
+D24's docs PR adds it.)
 
 `drafts` takes no argument; `repo:<r>:drafts:<anything>` is `Malformed`.
 
@@ -136,9 +136,8 @@ triggered; if review finds a vector that does cover workspaces, it would be,
 and this field would wait for that decision. The same goes for the token's
 `work_item` claim, which is read, not changed.
 
-New tables only; existing workspaces are back-filled once at upgrade by
-walking each live workspace's stack (bounded by live workspaces × stack
-depth). No durable encoding changes, so no golden vector moves.
+The draft-paths tables are new. There is no data to migrate (D24: no users
+yet).
 
 ## 4. API
 
@@ -286,14 +285,13 @@ follow-up step once the bench shows the query alone helps.
 | Step | Crates | Contents |
 | --- | --- | --- |
 | **a. Interface PR** | `graft-auth`, `graft-proto`, `graft-store` | `Scope::Drafts` with parse, display and `grants` (+ tests); `OverlappingDrafts`/`DraftOverlap` types and the `Api` method stubbed; MetaStore port methods `draft_paths_replace`, `draft_paths_delete`, `overlapping_drafts` and `WorkspaceRecord.work_item`, with stubbed bodies |
-| **b. Store and engine** | `graft-store` (memory + conformance), `graft-store-sqlite`, `graft-engine`, `graft-gc` | Tables and back-fill migration; row maintenance in commit, amend, stack, sync, land and close; GC and `Fsck` handling; the query with the lease filter; conformance tests for the four acceptance cases (overlap seen, disjoint not, closed and expired drop out, no contents) |
+| **b. Store and engine** | `graft-store` (memory + conformance), `graft-store-sqlite`, `graft-engine`, `graft-gc` | Tables and schema migration (no back-fill); row maintenance in commit, amend, stack, sync, land and close; GC and `Fsck` handling; the query with the lease filter; conformance tests for the four acceptance cases (overlap seen, disjoint not, closed and expired drop out, no contents) |
 | **c. Surfaces** | `graft-server`, `graft-cli`, `graft-mcp` | gRPC and JSON facade routes with the scope check; `graft status --upstream --drafts`; `graft_draft_overlap` MCP tool; an end-to-end test in `graft-server/tests` |
 | **d. (optional) Watch** | `graft-store`, `graft-engine`, `graft-server` | `DraftPathsChanged` journal entry and its scope-gated delivery |
 
 Steps b and c can overlap once a lands (c programs against the memory store).
 The bench check (WI-2311, live-awareness mode) runs after c.
 
-**Decision needed:** a decisions.md entry (proposed **D23: draft-overlap
-visibility**) recording the `repo:<r>:drafts` scope, its non-composition with
+**Decision needed:** a decisions.md entry (**D24: draft-overlap visibility**) recording the `repo:<r>:drafts` scope, its non-composition with
 `read`, the default of no grant, and the no-contents rule; plus a §7.2 and
 §12.1 update in design.md. Both go in their own docs PR before step a lands.

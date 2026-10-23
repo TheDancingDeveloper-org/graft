@@ -35,6 +35,9 @@ Already decided by the operator (2026-10-22):
   runs and auto-revert) move to phase 2: the code stays, switched off. D6
   becomes the phase-2 setting for `main`, not the default. See
   [D22](#d22-phase-1-is-a-git-alternative).
+- **D24** (operator, 2026-10-23): draft overlap is gated by a new scope,
+  `repo:<r>:drafts`, granted only by `admin`. See
+  [D24](#d24-draft-overlap-visibility).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -64,6 +67,7 @@ Already decided by the operator (2026-10-22):
 | D20 | Pilot period | **Decided:** none; G1.18 dropped, phase 2 not gated (replaces D18's gate) | — |
 | D21 | Batch PR export | **Decided:** agents land on a graft integration line; each batch goes to GitHub as one squashed PR the operator merges | — |
 | D22 | What phase 1 is | **Decided:** graft as a git alternative; lines `direct` by default; CI checks are phase 2, switched off | — |
+| D24 | Draft overlap visibility | **Decided:** a `repo:<r>:drafts` scope, granted only by `admin`; paths and principals, never contents | — |
 
 ---
 
@@ -524,3 +528,31 @@ The options it replaces:
   properties phase 1 needs to prove.
 - Keeping D6 as the default on `main`. Then a server with no config would
   gate lands on checks that nothing posts.
+
+## D24. Draft overlap visibility
+
+**Decided (operator, 2026-10-23): "who else has an open draft on these
+paths" is answered only to holders of a new scope, `repo:<r>:drafts`.**
+The design is [notes/draft-overlap.md](notes/draft-overlap.md) (WI-2310).
+
+- **Scope.** `repo:<r>:drafts` takes no argument. Only `admin` grants it.
+  `read`, `write` and `land` don't, and `drafts` doesn't grant `read`.
+  No token gets it by default; `MintToken` adds it when asked.
+- **What is visible.** Paths, workspaces, owners, Vogt sessions, work
+  items, draft age and lease end. Never file contents, head or changeset
+  ids, messages, diffs or tokens.
+- **Lifetime.** Only live, leased workspaces count. Closed workspaces drop
+  out when they close; expired ones are filtered at read time until GC
+  removes their rows.
+- **Paging.** `OverlappingDrafts` pages `(path, workspace)` hits in index
+  order with an opaque cursor. Each page scans at most 4 × `limit` index
+  rows, so its cost is O(limit) however broad the prefix. The empty or root
+  prefix is rejected. A page can be short or empty and still carry a token.
+- **Index.** The draft-paths index is updated in the same transaction as
+  the write that changes a workspace's stack (rule 3).
+- **Migration.** None for data: there are no users yet. The new tables and
+  the nullable `workspaces.work_item` column come from a schema migration;
+  no golden vector moves.
+
+Rejected: gating by `read` (every reader would see every agent's
+activity), and scanning workspaces at query time (breaks rule 2).
