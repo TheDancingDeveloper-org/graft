@@ -31,6 +31,10 @@ scope := "repo:" name ":" perm [ ":" arg ] | "objects:read"
 perm  := "read" | "write" | "land" | "attest" | "admin" | "drafts"
 ```
 
+(`attest` is on `main` already: `Scope::Attest` in
+`crates/graft-auth/src/scope.rs`. §12.1 of design.md doesn't list it yet;
+the D23 docs PR can fix that in passing.)
+
 `drafts` takes no argument; `repo:<r>:drafts:<anything>` is `Malformed`.
 
 **Composition** (in `Scope::grants`):
@@ -101,8 +105,10 @@ same walk `Sync` already does.
 ### Lifetime
 
 - **Lease lapse:** a lapse writes nothing at the moment it happens, so the
-  query filters `lease_until_ms > now` on the joined workspace record. Expired
-  workspaces drop out immediately, with no sweeper on the read path. Server
+  query filters `lease_until_ms > now` on the joined workspace record at read
+  time. Expired workspaces drop out immediately, with no sweeper on the read
+  path; their rows still cost scan budget until GC deletes them, which is why
+  a page may come back short (§4). Server
   time is used only as a filter, never in an id (rule 5).
 - **Superseded drafts:** they have no holder, so they never appear; the
   replace step above removes their paths in the same transaction as the
@@ -117,6 +123,19 @@ same walk `Sync` already does.
 
 ### Migration
 
+**`WorkspaceRecord.work_item` is a stored-record change.** Checked against
+`main`: workspaces are stored as plain SQL columns
+(`crates/graft-store-sqlite/src/migrations.rs`, table `workspaces`) and as a
+struct in the memory store. No golden vector covers them (the golden vectors
+in `graft-model`, `graft-proto/src/frame.rs` and `graft-auth/src/token.rs`
+pin ids, trees, changesets, frames and tokens only). So the change is a
+nullable column added by a new numbered schema migration
+(`ALTER TABLE workspaces ADD COLUMN work_item TEXT`), with old rows reading as
+`None`. No durable encoding moves, so rule 1's operator decision is not
+triggered; if review finds a vector that does cover workspaces, it would be,
+and this field would wait for that decision. The same goes for the token's
+`work_item` claim, which is read, not changed.
+
 New tables only; existing workspaces are back-filled once at upgrade by
 walking each live workspace's stack (bounded by live workspaces × stack
 depth). No durable encoding changes, so no golden vector moves.
@@ -126,31 +145,62 @@ depth). No durable encoding changes, so no golden vector moves.
 ```text
 OverlappingDrafts {
   repo, line,
-  paths: [RepoPath],        // 1..=256 paths or directory prefixes
+  paths: [RepoPath],        // 1..=64 paths or directory prefixes, each non-empty
   include_own: bool = false,
-  limit: u32 (≤ 200), page_token?
+  limit: u32 (1..=200),     // hits per page
+  page_token?               // opaque cursor: (input index, path, workspace)
 } → {
-  overlaps: [DraftOverlap {
+  hits: [ { path, workspace } ],          // in index order
+  workspaces: [ DraftWorkspace {          // one per workspace named in `hits`
     workspace, owner, session?, work_item?,
-    paths: [RepoPath],       // the intersection, capped at 64 per entry
-    paths_truncated: bool,
     draft_age_ms,            // now - head.received_at
     lease_until_ms,
-  }],
-  next_page_token?
+  } ],
+  next_page_token?           // absent when every input prefix is exhausted
 }
 ```
 
-- **Scope:** `repo:<r>:drafts` (or `admin`). Without it, `PermissionDenied`.
+- **Scope:** `repo:<r>:drafts` (or `admin`). Without it,
+  `ApiError::PermissionDenied { scope: "repo:<r>:drafts", path: None }`.
 - **Excludes the caller's own workspaces** (owner = token `sub`) unless
   `include_own` is set.
-- **Bounded** (rule 7): at most 256 input paths, 200 workspaces per page, 64
-  paths per workspace with a truncation flag. Paging is by
-  `(workspace name)` after the token, so the order is stable across pages.
-- **Cost:** one range scan per input path or prefix on `draft_paths`, then a
-  point read per matching workspace. O(input paths + matching rows), never
-  O(workspaces) or O(history).
-- **Errors:** typed `ApiError`; no contents, no tokens.
+- **Paging follows the index order.** The response is a page of
+  `(path, workspace)` hits, not a page of workspaces. The input prefixes are
+  sorted and de-duplicated; the cursor is `(input index, path, workspace)`,
+  the last row examined. The next page resumes the range scan on
+  `(repo, line, path, workspace) > (path, workspace)` within that input
+  prefix, then moves to the next prefix. Nothing is gathered and re-sorted,
+  so a broad prefix costs no more per page than a narrow one. Clients that
+  want one entry per workspace group `hits` themselves; the CLI and MCP tool
+  do.
+- **No whole-repository prefix.** The empty path `""` and the root are
+  rejected with `ApiError::InvalidPath { path, reason: "prefix-required" }`.
+  A caller can still page through a broad top-level directory, but only one
+  bounded page at a time.
+- **Expired-but-not-collected rows** (lease lapsed, GC not yet run) are
+  filtered at read time by joining the workspace record and dropping rows
+  with `lease_until_ms <= now`, as are the caller's own rows. Filtered rows
+  still count toward the page's scan budget, so **a page may be short, even
+  empty, with a `next_page_token`**. Clients keep paging until the token is
+  absent.
+- **Cost per page** (rules 2 and 7): at most `S = 4 × limit` index rows
+  scanned (`S ≤ 800`), plus one workspace-record point read per distinct
+  workspace among them (memoised per page, ≤ `S`), plus one changeset-record
+  read per distinct head for draft age. So O(limit) per page, independent of
+  the number of workspaces, drafts, prefixes' total breadth or history.
+  Response size is bounded by `limit` hits plus at most `limit`
+  workspace entries.
+- **Errors** (all `graft_proto::ApiError`, none carrying contents or
+  tokens):
+  - `PermissionDenied` — no `drafts` scope;
+  - `InvalidPath` — a malformed path, or the empty/root prefix;
+  - `LimitExceeded { limit: "paths", max: 64 }` — too many input paths;
+    `LimitExceeded { limit: "limit", max: 200 }` — page size too large;
+  - `InvalidChange { rule: "bad-page-token" }`-style rejection is avoided:
+    a token that fails to decode, or was issued for different inputs, is
+    `InvalidPath { path: "", reason: "bad-page-token" }`. (If a dedicated
+    variant is preferred, it is an additive `ApiError` change in step a.)
+  - `NotFound` for an unknown repository or line, as other reads do.
 
 **Optional Watch event.** A journal entry `DraftPathsChanged { workspace,
 line, added: [path], removed: [path] }` (paths capped as above, with a
