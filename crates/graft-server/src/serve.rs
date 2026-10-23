@@ -367,6 +367,8 @@ pub(crate) fn record_sweep(m: &graft_telemetry::Metrics, result: &ApiResult<Swee
             "ok"
         }
         Err(ApiError::Unavailable { .. }) => "busy",
+        // The plan failed `--verify`: nothing swept, and worth its own alert.
+        Err(ApiError::Rejected { detail, .. }) if detail.starts_with("verify found") => "mismatch",
         Err(ApiError::Rejected { .. }) => "refused",
         Err(_) => "failed",
     };
@@ -466,6 +468,17 @@ mod tests {
                 detail: "deletion is off for this repository".into(),
             }),
         );
+        record_sweep(
+            &m,
+            &Err(ApiError::Rejected {
+                policy: "gc".into(),
+                detail: graft_gc::GcError::Mismatch {
+                    changesets: Vec::new(),
+                    objects: Vec::new(),
+                }
+                .to_string(),
+            }),
+        );
         let text = graft_telemetry::encode(&registry);
         for line in [
             "graft_gc_collected_total 2",
@@ -475,6 +488,7 @@ mod tests {
             r#"graft_gc_sweeps_total{outcome="ok"} 1"#,
             r#"graft_gc_sweeps_total{outcome="busy"} 1"#,
             r#"graft_gc_sweeps_total{outcome="refused"} 1"#,
+            r#"graft_gc_sweeps_total{outcome="mismatch"} 1"#,
         ] {
             assert!(text.contains(line), "{line} in\n{text}");
         }

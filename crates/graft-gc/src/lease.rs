@@ -35,12 +35,20 @@ impl Default for SweepLeases {
 }
 
 impl SweepLeases {
-    /// No leases held, owned by this process: its pid, and a counter so
-    /// that two lease sets of one process are distinct owners too.
+    /// No leases held, owned by this process: the host name, a random
+    /// nonce drawn once per process, the pid, and a counter so that two
+    /// lease sets of one process are distinct owners too. The pid alone is
+    /// not unique: two containers sharing one store are both pid 1. This is
+    /// a lease owner, never a durable id, so randomness is fine here.
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        Self::with_owner(format!("pid{}-{n}", std::process::id()))
+        Self::with_owner(format!(
+            "{}-{:016x}-pid{}-{n}",
+            host_name(),
+            process_nonce(),
+            std::process::id()
+        ))
     }
 
     /// No leases held, owned by `owner` (tests, and a host-qualified name).
@@ -98,6 +106,32 @@ impl SweepLeases {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<RepoId>> {
         self.held.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// The host name, or `unknown-host` when it cannot be read.
+fn host_name() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|h| h.trim().to_owned())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "unknown-host".to_owned())
+}
+
+/// A random 64-bit nonce, drawn once per process: the standard library's
+/// per-process random hash keys, mixed with the start time.
+fn process_nonce() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *NONCE.get_or_init(|| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        h.write_u128(t);
+        h.write_u32(std::process::id());
+        h.finish()
+    })
 }
 
 /// A held lease. [`SweepLease::release`] gives the store lease back;
@@ -218,6 +252,35 @@ mod tests {
             assert!(!a.is_held(repo));
             let by_b = b.try_acquire(&meta, repo, 60, 100).await.unwrap();
             assert!(by_b.is_some(), "released");
+        });
+    }
+
+    #[test]
+    fn owners_are_distinct_and_carry_a_nonce() {
+        let (a, b) = (SweepLeases::new(), SweepLeases::new());
+        assert_ne!(a.owner(), b.owner());
+        assert!(a.owner().contains(&format!("{:016x}", process_nonce())));
+        assert!(!a.owner().starts_with("pid"), "{}", a.owner());
+    }
+
+    #[test]
+    fn a_live_lease_of_another_owner_is_not_retaken() {
+        block(async {
+            let meta = MemoryStore::new();
+            let repo = meta.create_repo("r").await.expect("repo");
+            // Two processes, as two containers that are both pid 1 would be.
+            let a = SweepLeases::new();
+            let b = SweepLeases::new();
+            let _held = a.try_acquire(&meta, repo, 0, 100).await.unwrap().unwrap();
+            for now in [0, 1, 50, 99] {
+                assert!(
+                    b.try_acquire(&meta, repo, now, 100)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "retaken at {now}"
+                );
+            }
         });
     }
 

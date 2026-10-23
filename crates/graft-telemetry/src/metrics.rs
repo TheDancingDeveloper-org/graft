@@ -195,7 +195,7 @@ pub const SPECS: &[MetricSpec] = &[
         GC_SWEEPS_TOTAL,
         Counter,
         &["outcome"],
-        "GC sweep passes by outcome (ok, busy, refused, failed).",
+        "GC sweep passes by outcome (ok, busy, refused, mismatch, failed).",
     ),
     spec(
         GC_COLLECTED_TOTAL,
