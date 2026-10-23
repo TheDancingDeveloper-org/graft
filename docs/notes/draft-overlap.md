@@ -1,10 +1,9 @@
 # Draft overlap: who else is editing these paths
 
-Status: design note for WI-2310. This note doesn't change
-[design.md](../design.md) or [decisions.md](../decisions.md). Two operator
-decisions are already made (2026-10-23): results are gated by a new scope,
-and they carry paths, ids and draft age, never contents. Accepted as
-[D24](../decisions.md#d24-draft-overlap-visibility).
+Status: design note for WI-2310, accepted by the operator (2026-10-23) as
+[D24](../decisions.md#d24-draft-overlap-visibility). Results are gated by a
+new scope and carry paths, ids and draft age, never contents. The design.md
+changes (§7.2, §12.1) went in with D24.
 
 ## 1. Use case
 
@@ -292,6 +291,7 @@ follow-up step once the bench shows the query alone helps.
 Steps b and c can overlap once a lands (c programs against the memory store).
 The bench check (WI-2311, live-awareness mode) runs after c.
 
-**Decision needed:** a decisions.md entry (**D24: draft-overlap visibility**) recording the `repo:<r>:drafts` scope, its non-composition with
-`read`, the default of no grant, and the no-contents rule; plus a §7.2 and
-§12.1 update in design.md. Both go in their own docs PR before step a lands.
+**Accepted** as [D24](../decisions.md#d24-draft-overlap-visibility)
+(draft-overlap visibility): the `repo:<r>:drafts` scope, its non-composition
+with `read`, the default of no grant and the no-contents rule, with the
+§7.2 and §12.1 updates in design.md.

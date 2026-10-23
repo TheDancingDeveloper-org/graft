@@ -71,6 +71,7 @@ Already decided by the operator (2026-10-22):
 | D20 | Pilot period | **Decided:** none; G1.18 dropped, phase 2 not gated (replaces D18's gate) | — |
 | D21 | Batch PR export | **Decided:** agents land on a graft integration line; each batch goes to GitHub as one squashed PR the operator merges | — |
 | D22 | What phase 1 is | **Decided:** graft as a git alternative; lines `direct` by default; CI checks are phase 2, switched off | — |
+| D23 | Line fork points | **Decided:** a new line writes one fork row instead of copying its parent's line index; no data migration | — |
 | D24 | Draft overlap visibility | **Decided:** a `repo:<r>:drafts` scope, granted only by `admin`; paths and principals, never contents | — |
 
 ---
