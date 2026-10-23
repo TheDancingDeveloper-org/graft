@@ -88,8 +88,11 @@ pub(crate) fn open_stores(
     let observer = telemetry.map(|t| Arc::new(StoreTelemetry(t)) as Arc<dyn StoreObserver>);
     let meta = SqliteMetaStore::open_observed(SqliteConfig::new(&config.meta_db), observer)
         .map_err(|e| format!("open {}: {e:?}", config.meta_db.display()))?;
+    // Every reader verifies the frames it decodes (the engine, the index,
+    // fsck), so the store does not decode and hash each one first.
     let objects = FsObjectStore::open(&config.objects_dir, FsMode::Authoritative)
-        .map_err(|e| format!("open {}: {e:?}", config.objects_dir.display()))?;
+        .map_err(|e| format!("open {}: {e:?}", config.objects_dir.display()))?
+        .verify_reads(false);
     Ok((meta, objects))
 }
 

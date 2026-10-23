@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use common::{Site, SynthSpec, generate};
 use graft_model::{ChangesetId, EntryKind, ObjectId, ObjectKind, Tree, TreeId};
-use graft_proto::pb;
 use graft_proto::types::{Changesets, ImportChangesets, RefKind, UpdateRef};
+use graft_proto::{ApiError, pb};
 
 const REPO: &str = "synth";
 
@@ -281,4 +281,73 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
             std::fs::copy(e.path(), dest).expect("copy");
         }
     }
+}
+
+/// The server's object store does not verify reads (every reader does), so
+/// a damaged blob on disk is still refused by the readers that serve it:
+/// GetObjects and a diff with patches both answer `CorruptObject`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_damaged_blob_is_refused_by_the_readers() {
+    use graft_proto::types::{Diff, Page, PatchOptions};
+
+    let site = Site::new("server-damaged", "");
+    let token = site.mint(&["repo:r:admin"]);
+    let server = site.start();
+    let mut c = server.clients(Some(&token)).await;
+    c.create_repo("r").await.expect("create");
+    let snapshots: Vec<BTreeMap<String, Vec<u8>>> = [b"one\n".as_slice(), b"two\n"]
+        .iter()
+        .map(|text| BTreeMap::from([("f".to_owned(), text.to_vec())]))
+        .collect();
+    let created = c.import("r", &snapshots).await;
+
+    // Flip the last byte of the old blob, as fsck's test does.
+    let id = ObjectId::hash(ObjectKind::Blob, b"one\n");
+    let hex = id.to_hex();
+    let path = site
+        .objects_dir()
+        .join("1/objects")
+        .join(&hex[..2])
+        .join(&hex[2..]);
+    let mut bytes = std::fs::read(&path).expect("read object");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    std::fs::write(&path, bytes).expect("write object");
+
+    let get = c
+        .objects
+        .get_objects(pb::GetObjectsRequest {
+            repo: "r".into(),
+            ids: vec![id.0.to_vec()],
+        })
+        .await;
+    let err = match get {
+        Err(status) => common::api(status),
+        Ok(stream) => common::api(
+            stream
+                .into_inner()
+                .message()
+                .await
+                .expect_err("the page is refused"),
+        ),
+    };
+    assert_eq!(err, ApiError::CorruptObject { id });
+
+    let diff = c
+        .repo
+        .diff(pb::DiffRequest::from(Diff {
+            repo: "r".into(),
+            from: created[0].id,
+            to: created[1].id,
+            paths: vec![],
+            patch: Some(PatchOptions {
+                context: 3,
+                max_bytes_per_file: 0,
+            }),
+            page: Page::default(),
+        }))
+        .await
+        .expect_err("the patch input is refused");
+    assert_eq!(common::api(diff), ApiError::CorruptObject { id });
+    assert!(server.stop().success());
 }

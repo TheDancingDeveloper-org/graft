@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use graft_model::{ObjectId, ObjectKind};
-use graft_proto::frame::{Codec, Frame, HEADER_LEN};
+use graft_proto::frame::{Codec, Frame, HEADER_LEN, MAX_FRAME_PAYLOAD};
 use graft_store::{ObjectStore, RepoId, StoreError, StoreStats};
 use graft_store_fs::{FsMode, FsObjectStore};
 use graft_testkit::crash::{TempDir, block_on};
@@ -160,6 +160,25 @@ fn unverified_reads_return_the_bytes_as_stored() {
         block_on(store.get(REPO, id)).expect("get"),
         Some(b"torn".to_vec())
     );
+}
+
+/// A file larger than any valid frame is refused unread, verified or not.
+#[test]
+fn oversized_files_are_corrupt_with_or_without_verification() {
+    for verify in [true, false] {
+        let dir = TempDir::new("fs-oversized");
+        let store = open(dir.path(), FsMode::Authoritative).verify_reads(verify);
+        let (id, frame) = blob(1, 100);
+        block_on(store.put(REPO, id, frame)).expect("put");
+        // Sparse: the length is past the cap without writing the bytes.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(store.object_path(REPO, id))
+            .expect("open object")
+            .set_len(HEADER_LEN as u64 + MAX_FRAME_PAYLOAD + 1)
+            .expect("grow");
+        assert_corrupt(&store, id, &format!("oversized, verify_reads({verify})"));
+    }
 }
 
 #[test]
