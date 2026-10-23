@@ -1,7 +1,7 @@
 //! `graft-mirror`: the only service that speaks git (`docs/design.md` §11).
 //!
-//! Work item G1.14 (import, follow); G2.6 (PR bridge), G3.3 (export) and
-//! G3.9 (authority switch) come later.
+//! Work items G1.14 (import, follow), G2.6 (PR bridge) and G3.3 (export);
+//! G3.9 (authority switch) comes later.
 //!
 //! - [`import`]: a one-shot lossless import of a local git repository, then
 //!   the line and tag refs set by compare-and-swap.
@@ -9,8 +9,17 @@
 //!   into a local bare mirror, import the new commits, and move each graft
 //!   line by admin CAS. A non-fast-forward upstream stops that line and raises
 //!   `graft_mirror_divergence`; graft is left unchanged.
+//! - [`export`]: graft-primary mode B. Tail the journal, export each line
+//!   move, push to GitHub with a lease, and record progress. A refused lease
+//!   stops the line and raises `graft_mirror_divergence`; nothing is forced.
+//! - [`reconcile`]: an operator resolves a stopped line, landing the stray
+//!   commits through graft or replacing them on a lease.
+//! - [`pulls`]: GitHub PRs imported as drafts in `github-pr/<n>` workspaces,
+//!   landed through graft once approved.
+//! - [`land`]: the hand-off to graft's `Land`, and holding imported stacks as
+//!   drafts.
 //! - [`db`]: the mirror DB (SQLite), implementing `graft-git`'s `MirrorMap`
-//!   and holding follow's per-line state.
+//!   and holding follow's, the bridge's and export's per-line state.
 //! - [`git`]: the git CLI for `ls-remote`, `fetch` and ancestry.
 //! - [`server`]: the graft API over gRPC, including the admin service.
 //!
@@ -31,10 +40,14 @@ pub mod bridge;
 pub mod config;
 pub mod credentials;
 pub mod db;
+pub mod export;
 pub mod follow;
 pub mod git;
 pub mod github;
 pub mod import;
+pub mod land;
+pub mod pulls;
+pub mod reconcile;
 pub mod server;
 
 pub use db::MirrorDb;

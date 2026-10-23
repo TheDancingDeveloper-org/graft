@@ -16,6 +16,7 @@ use graft_git::{GitError, GitSha};
 use graft_model::{BlobId, ChangesetId, ObjectId, RepoPath};
 
 use crate::bridge::{BridgeState, PullRecord};
+use crate::pulls::{ImportState, PrImport};
 use rusqlite::{Connection, OptionalExtension, params};
 
 const SCHEMA: &str = "
@@ -58,6 +59,24 @@ CREATE TABLE IF NOT EXISTS bridge (
     landed BLOB,
     attempts INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS exports (
+    line TEXT PRIMARY KEY,
+    lsn INTEGER NOT NULL,
+    changeset BLOB,
+    sha BLOB,
+    version INTEGER NOT NULL,
+    diverged INTEGER NOT NULL,
+    stray BLOB
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pr_imports (
+    number INTEGER PRIMARY KEY,
+    head_sha BLOB NOT NULL,
+    workspace TEXT NOT NULL,
+    head BLOB NOT NULL,
+    state TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    landed BLOB
+);
 ";
 
 /// Follow's record of one line.
@@ -70,6 +89,25 @@ pub struct LineState {
     /// The upstream commit that is not a fast-forward of the graft line,
     /// while the line is stopped.
     pub diverged: Option<GitSha>,
+}
+
+/// Export's record of one graft-primary line (`docs/design.md` §11.3,
+/// mode B): how far it has read the journal and what upstream holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExportState {
+    /// The next journal LSN to read.
+    pub lsn: u64,
+    /// The changeset upstream's branch was last pushed to.
+    pub changeset: Option<ChangesetId>,
+    /// Its git sha: the lease for the next push (`None`: no branch yet).
+    pub sha: Option<GitSha>,
+    /// The ref version of the last line move exported. Moves at or below it
+    /// are already on upstream.
+    pub version: u64,
+    /// Whether the line is stopped on a refused lease.
+    pub diverged: bool,
+    /// What upstream held when the lease was refused (`None`: no branch).
+    pub stray: Option<GitSha>,
 }
 
 /// The mirror DB. One per mirrored graft repository.
@@ -273,6 +311,159 @@ impl MirrorDb {
                     rec.merge_sha.map(|s| s.0.to_vec()),
                     rec.landed.map(|c| c.0.0.to_vec()),
                     rec.attempts,
+                ],
+            )
+            .map(drop)
+            .map_err(db_err)
+    }
+
+    /// Export's record of `line`, if export has started it.
+    pub fn export_state(&self, line: &str) -> Result<Option<ExportState>, GitError> {
+        type Row = (
+            i64,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            i64,
+            bool,
+            Option<Vec<u8>>,
+        );
+        let row: Option<Row> = self
+            .conn()
+            .query_row(
+                "SELECT lsn, changeset, sha, version, diverged, stray FROM exports
+                 WHERE line = ?1",
+                params![line],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db_err)?;
+        let Some((lsn, changeset, sha, version, diverged, stray)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(ExportState {
+            lsn: lsn as u64,
+            changeset: changeset.map(|b| id_col(b).map(ChangesetId)).transpose()?,
+            sha: sha_col(sha)?,
+            version: version as u64,
+            diverged,
+            stray: sha_col(stray)?,
+        }))
+    }
+
+    /// Replaces export's record of `line`, in one statement: the cursor and
+    /// the lease always move together.
+    pub fn set_export_state(&self, line: &str, state: &ExportState) -> Result<(), GitError> {
+        self.conn()
+            .execute(
+                "INSERT INTO exports (line, lsn, changeset, sha, version, diverged, stray)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (line) DO UPDATE SET lsn = ?2, changeset = ?3, sha = ?4,
+                     version = ?5, diverged = ?6, stray = ?7",
+                params![
+                    line,
+                    state.lsn as i64,
+                    state.changeset.map(|c| c.0.0.to_vec()),
+                    state.sha.map(|s| s.0.to_vec()),
+                    state.version as i64,
+                    state.diverged,
+                    state.stray.map(|s| s.0.to_vec()),
+                ],
+            )
+            .map(drop)
+            .map_err(db_err)
+    }
+
+    /// The import record of GitHub PR `number`, if there is one.
+    pub fn pr_import(&self, number: u64) -> Result<Option<PrImport>, GitError> {
+        let mut found = self.pr_imports_where("WHERE number = ?1", Some(number))?;
+        Ok(found.pop())
+    }
+
+    /// The PR imports that are not final, by PR number.
+    pub fn open_pr_imports(&self) -> Result<Vec<PrImport>, GitError> {
+        self.pr_imports_where("WHERE state IN ('held', 'landed')", None)
+    }
+
+    fn pr_imports_where(
+        &self,
+        filter: &str,
+        number: Option<u64>,
+    ) -> Result<Vec<PrImport>, GitError> {
+        type Row = (
+            i64,
+            Vec<u8>,
+            String,
+            Vec<u8>,
+            String,
+            String,
+            Option<Vec<u8>>,
+        );
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT number, head_sha, workspace, head, state, detail, landed
+                 FROM pr_imports {filter} ORDER BY number"
+            ))
+            .map_err(db_err)?;
+        let map = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Row> {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        };
+        let rows = match number {
+            Some(n) => stmt.query_map(params![n as i64], map),
+            None => stmt.query_map([], map),
+        }
+        .map_err(db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (number, head_sha, workspace, head, state, detail, landed) = row.map_err(db_err)?;
+            let state = ImportState::parse(&state)
+                .ok_or_else(|| GitError::Map("mirror db: malformed PR import state".to_owned()))?;
+            out.push(PrImport {
+                number: number as u64,
+                head_sha: sha_col(Some(head_sha))?.expect("present"),
+                workspace,
+                head: id_col(head).map(ChangesetId)?,
+                state,
+                detail,
+                landed: landed.map(|b| id_col(b).map(ChangesetId)).transpose()?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Writes the import record of a PR, replacing any earlier one.
+    pub fn put_pr_import(&self, rec: &PrImport) -> Result<(), GitError> {
+        self.conn()
+            .execute(
+                "INSERT INTO pr_imports (number, head_sha, workspace, head, state, detail, landed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (number) DO UPDATE SET head_sha = ?2, workspace = ?3, head = ?4,
+                     state = ?5, detail = ?6, landed = ?7",
+                params![
+                    rec.number as i64,
+                    &rec.head_sha.0[..],
+                    rec.workspace,
+                    &rec.head.0.0[..],
+                    rec.state.as_str(),
+                    rec.detail,
+                    rec.landed.map(|c| c.0.0.to_vec()),
                 ],
             )
             .map(drop)

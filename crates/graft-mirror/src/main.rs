@@ -10,9 +10,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use graft_git::import::ImportConfig;
-use graft_mirror::config::{FileConfig, parse_shas};
+use graft_mirror::config::{AuthChoice, FileConfig, GithubFile, parse_shas};
+use graft_mirror::credentials::{CredentialProvider, GithubApp, NoCredentials, StaticToken};
+use graft_mirror::export::{Export, export_all};
 use graft_mirror::follow::Follower;
+use graft_mirror::github::{HttpForge, RetryPolicy};
 use graft_mirror::import::import_repo;
+use graft_mirror::land::NativeLand;
+use graft_mirror::pulls::PrImporter;
+use graft_mirror::reconcile::{Resolution, reconcile};
 use graft_mirror::server::Server;
 use graft_mirror::{Mirror, MirrorDb, MirrorError};
 use graft_proto::{CallContext, Principal, PrincipalKind};
@@ -26,8 +32,10 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
   bridge --config <file>                git-primary: land drafts as GitHub PRs
   export --config <file>                graft-primary: export lines to GitHub
   export --to <bare-repo> --repo <name> full export (exit path, drill)
+         --db <file> [--server <url>] [--token-file <file>]
   verify --repo <name> [--last N]       re-export and compare shas
-  reconcile --repo <name> --line <l>    resolve a divergence by hand
+  reconcile --config <file> --line <l> (--land | --discard)
+                                        resolve an export divergence by hand
   authority <status|freeze|verify|flip|unfreeze> --line <l>
 
   The server URL defaults to GRAFT_ENDPOINT; the token comes from
@@ -41,7 +49,9 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("import") => run(cmd_import(&args[1..])),
         Some("follow") => run(cmd_follow(&args[1..])),
-        Some("bridge" | "export" | "verify" | "reconcile" | "authority") => {
+        Some("export") => run(cmd_export(&args[1..])),
+        Some("reconcile") => run(cmd_reconcile(&args[1..])),
+        Some("bridge" | "verify" | "authority") => {
             eprintln!("graft-mirror: not implemented yet (see docs/plan.md)");
             ExitCode::from(2)
         }
@@ -217,6 +227,292 @@ async fn cmd_follow(args: &[String]) -> Result<(), CmdError> {
     follower.run(shutdown()).await;
     tracing::info!("mirror follow stopped");
     Ok(())
+}
+
+/// The default GitHub API root.
+const GITHUB_API: &str = "https://api.github.com";
+
+fn system_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+/// Runs `with` with the credential `[github]` chose, or none.
+async fn with_credentials<T>(
+    github: Option<&GithubFile>,
+    with: impl AsyncCredentialFn<T>,
+) -> Result<T, CmdError> {
+    let Some(gh) = github else {
+        return with.call(&NoCredentials).await;
+    };
+    let api = gh.api.as_deref().unwrap_or(GITHUB_API);
+    match gh.auth()? {
+        AuthChoice::TokenFile(path) => with.call(&StaticToken::load(&path)?).await,
+        AuthChoice::App {
+            app_id,
+            installation_id,
+            private_key_file,
+        } => {
+            let app = GithubApp::load(api, app_id, installation_id, &private_key_file, system_ms)?;
+            with.call(&app).await
+        }
+    }
+}
+
+/// A command body generic over the credential type.
+trait AsyncCredentialFn<T> {
+    async fn call<C: CredentialProvider>(self, credentials: &C) -> Result<T, CmdError>;
+}
+
+async fn cmd_export(args: &[String]) -> Result<(), CmdError> {
+    match args.first().map(String::as_str) {
+        Some("--config") => {}
+        Some("--to") => return cmd_export_to(args).await,
+        _ => {
+            return Err(CmdError::Usage(
+                "export takes --config <file> or --to <bare-repo>".into(),
+            ));
+        }
+    }
+    let path = match args {
+        [_, path] => PathBuf::from(path),
+        _ => return Err(CmdError::Usage("export takes --config <file>".into())),
+    };
+    let file = FileConfig::load(&path)?;
+    let telemetry = graft_telemetry::init(&TelemetryConfig {
+        service: "graft-mirror".to_owned(),
+        json_logs: file.json_logs,
+        metrics_addr: file.metrics_addr.clone(),
+        otlp_endpoint: None,
+    })
+    .map_err(|e| MirrorError::Config(e.to_string()))?;
+    let telemetry = std::sync::Arc::new(telemetry);
+    if let Some(addr) = &file.metrics_addr {
+        serve_metrics(addr, telemetry.clone()).await?;
+    }
+    let api = Server::connect(&file.server, token(file.token_file.as_deref())?).await?;
+    let db = MirrorDb::open(&file.db).map_err(MirrorError::from)?;
+    with_credentials(
+        file.github.as_ref(),
+        RunExport {
+            file: &file,
+            api: &api,
+            db: &db,
+            telemetry: &telemetry,
+        },
+    )
+    .await
+}
+
+struct RunExport<'a> {
+    file: &'a FileConfig,
+    api: &'a Server,
+    db: &'a MirrorDb,
+    telemetry: &'a Telemetry,
+}
+
+impl AsyncCredentialFn<()> for RunExport<'_> {
+    async fn call<C: CredentialProvider>(self, credentials: &C) -> Result<(), CmdError> {
+        let file = self.file;
+        let mirror = Mirror::new(&file.mirror_dir, &file.upstream);
+        let config = file.export();
+        tracing::info!(
+            repo = %config.repo, lines = config.lines.len(),
+            interval_secs = config.interval.as_secs(), "mirror export starting"
+        );
+        let mut export = Export::new(
+            self.api,
+            mirror_cx(&file.repo),
+            self.db,
+            mirror.clone(),
+            credentials,
+            config.clone(),
+        )?
+        .with_metrics(self.telemetry.metrics().clone());
+        let pulls = file.export.as_ref().is_some_and(|e| e.import_pulls);
+        let (Some(gh), true) = (file.github.as_ref(), pulls) else {
+            export.run(shutdown()).await;
+            tracing::info!("mirror export stopped");
+            return Ok(());
+        };
+        let forge = HttpForge::new(
+            gh.api.as_deref().unwrap_or(GITHUB_API),
+            &gh.owner,
+            &gh.repo,
+            credentials,
+            RetryPolicy::default(),
+        )?;
+        let lander = NativeLand::new(self.api);
+        let mut importers: Vec<_> = config
+            .lines
+            .iter()
+            .map(|l| {
+                PrImporter::new(
+                    self.api,
+                    mirror_cx(&file.repo),
+                    self.db,
+                    mirror.clone(),
+                    &forge,
+                    &lander,
+                    file.repo.clone(),
+                    l.clone(),
+                )
+            })
+            .collect();
+        let mut tick = tokio::time::interval(export.interval());
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut stop = std::pin::pin!(shutdown());
+        loop {
+            tokio::select! {
+                () = &mut stop => break,
+                _ = tick.tick() => {}
+            }
+            if let Err(e) = export.poll_once().await {
+                tracing::warn!(error = %e, "mirror export poll failed");
+            }
+            for importer in &mut importers {
+                if let Err(e) = importer.poll_once().await {
+                    tracing::warn!(error = %e, "mirror PR import poll failed");
+                }
+            }
+        }
+        tracing::info!("mirror export stopped");
+        Ok(())
+    }
+}
+
+async fn cmd_export_to(args: &[String]) -> Result<(), CmdError> {
+    let mut dest = None;
+    let mut repo = None;
+    let mut server = std::env::var("GRAFT_ENDPOINT").ok();
+    let mut db = None;
+    let mut token_file = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |flag: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| CmdError::Usage(format!("{flag} needs a value")))
+        };
+        match a.as_str() {
+            "--to" => dest = Some(PathBuf::from(value("--to")?)),
+            "--repo" => repo = Some(value("--repo")?),
+            "--server" => server = Some(value("--server")?),
+            "--db" => db = Some(PathBuf::from(value("--db")?)),
+            "--token-file" => token_file = Some(PathBuf::from(value("--token-file")?)),
+            s => return Err(CmdError::Usage(format!("unexpected argument {s}"))),
+        }
+    }
+    let dest = dest.ok_or_else(|| CmdError::Usage("export needs --to <bare-repo>".into()))?;
+    let repo = repo.ok_or_else(|| CmdError::Usage("export --to needs --repo".into()))?;
+    let db = db.ok_or_else(|| {
+        CmdError::Usage("export --to needs --db (the mirror DB keeps the exact commits)".into())
+    })?;
+    let server = server
+        .ok_or_else(|| CmdError::Usage("no server: pass --server or GRAFT_ENDPOINT".into()))?;
+    let api = Server::connect(&server, token(token_file.as_deref())?).await?;
+    let db = MirrorDb::open(&db).map_err(MirrorError::from)?;
+    let report = export_all(&api, &mirror_cx(&repo), &db, &repo, &dest).await?;
+    println!(
+        "exported {} commits ({} blobs) into {}",
+        report.commits,
+        report.blobs,
+        dest.display()
+    );
+    for (name, sha) in &report.refs {
+        println!("{name} -> {sha}");
+    }
+    Ok(())
+}
+
+async fn cmd_reconcile(args: &[String]) -> Result<(), CmdError> {
+    let mut config = None;
+    let mut line = None;
+    let mut resolution = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |flag: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| CmdError::Usage(format!("{flag} needs a value")))
+        };
+        match a.as_str() {
+            "--config" => config = Some(PathBuf::from(value("--config")?)),
+            "--line" => line = Some(value("--line")?),
+            "--land" | "--discard" if resolution.is_some() => {
+                return Err(CmdError::Usage("choose one of --land and --discard".into()));
+            }
+            "--land" => resolution = Some(Resolution::Land),
+            "--discard" => resolution = Some(Resolution::Discard),
+            s => return Err(CmdError::Usage(format!("unexpected argument {s}"))),
+        }
+    }
+    let config = config.ok_or_else(|| CmdError::Usage("reconcile needs --config".into()))?;
+    let line = line.ok_or_else(|| CmdError::Usage("reconcile needs --line".into()))?;
+    let resolution = resolution.ok_or_else(|| {
+        CmdError::Usage("reconcile needs --land or --discard (there is no default)".into())
+    })?;
+    let file = FileConfig::load(&config)?;
+    let line = file
+        .lines()
+        .into_iter()
+        .find(|l| l.line == line)
+        .ok_or_else(|| CmdError::Usage(format!("line {line} is not in the config")))?;
+    let api = Server::connect(&file.server, token(file.token_file.as_deref())?).await?;
+    let db = MirrorDb::open(&file.db).map_err(MirrorError::from)?;
+    with_credentials(
+        file.github.as_ref(),
+        RunReconcile {
+            file: &file,
+            api: &api,
+            db: &db,
+            line,
+            resolution,
+        },
+    )
+    .await
+}
+
+struct RunReconcile<'a> {
+    file: &'a FileConfig,
+    api: &'a Server,
+    db: &'a MirrorDb,
+    line: graft_mirror::follow::FollowLine,
+    resolution: Resolution,
+}
+
+impl AsyncCredentialFn<()> for RunReconcile<'_> {
+    async fn call<C: CredentialProvider>(self, credentials: &C) -> Result<(), CmdError> {
+        let mirror = Mirror::new(&self.file.mirror_dir, &self.file.upstream);
+        let lander = NativeLand::new(self.api);
+        let out = reconcile(
+            self.api,
+            &mirror_cx(&self.file.repo),
+            self.db,
+            &mirror,
+            &lander,
+            credentials,
+            &self.file.repo,
+            &self.line,
+            self.resolution,
+        )
+        .await?;
+        if out.already_resolved {
+            println!("upstream is back where export left it; export resumes");
+            return Ok(());
+        }
+        if let Some(kept) = &out.kept_as {
+            println!("stray commits kept in the mirror as {kept}");
+        }
+        match (self.resolution, out.landed) {
+            (Resolution::Land, Some(id)) => {
+                println!("landed through graft as {id}; export resumes")
+            }
+            _ => println!("stray commits replaced by graft's history; export resumes"),
+        }
+        Ok(())
+    }
 }
 
 async fn serve_metrics(
