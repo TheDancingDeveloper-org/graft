@@ -1,0 +1,52 @@
+# Prometheus alert rules for the graft-dev stack (WI-2307). The estate
+# Prometheus on Node B evaluates these: copy this file to
+# personal/grafanaloki/prometheus/rules/graft-dev.yml in the ops repo, and add
+# the scrape jobs in deploy/monitoring/prometheus-scrape.yml. Alerts go to
+# Alertmanager's default Telegram route.
+groups:
+  - name: graft-dev
+    rules:
+      # /readyz through the blackbox exporter: 200 only when the server can
+      # serve (stores open, not draining).
+      - alert: GraftDevServerDown
+        expr: probe_success{job="blackbox-services", service="graft-dev-server"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "graft-dev: graft-server /readyz has failed for 5m"
+          runbook: docs/runbooks/graft-dev-backup-restore.md (graft repo)
+
+      - alert: GraftDevMetricsDown
+        expr: up{job="graft-dev"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "graft-dev: {{ $labels.service }} metrics unreachable for 10m"
+
+      # The server's own view of its volumes. Writes are refused below 5%
+      # free (min_free_fraction); warn well before.
+      - alert: GraftDevDiskLow
+        expr: graft_disk_free_bytes{job="graft-dev"} / graft_disk_total_bytes{job="graft-dev"} < 0.15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "graft-dev: {{ $labels.volume }} volume below 15% free"
+      - alert: GraftDevDiskCritical
+        expr: graft_disk_free_bytes{job="graft-dev"} / graft_disk_total_bytes{job="graft-dev"} < 0.08
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "graft-dev: {{ $labels.volume }} volume below 8% free; writes stop at 5%"
+
+      # graft_mirror_lag_seconds: how long the line has been behind upstream.
+      - alert: GraftDevMirrorLag
+        expr: max by (line) (graft_mirror_lag_seconds{job="graft-dev"}) > 1800
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "graft-dev: mirror line {{ $labels.line }} is {{ $value | humanizeDuration }} behind GitHub"
