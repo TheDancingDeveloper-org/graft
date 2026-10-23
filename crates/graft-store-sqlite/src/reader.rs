@@ -9,12 +9,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    ChangesetRecord, Lsn, RecordState, RefRecord, RepoId, StoreError, StoreResult, WorkspaceRecord,
-    page_limit,
+    ChangesetRecord, DoomMark, Lsn, Protection, RecordState, RefRecord, RepoId, StoreError,
+    StoreResult, TimedRow, WorkspaceRecord, page_limit,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::codec::{changeset_id, int, ref_kind, sql_err, state, state_code, uint};
+use crate::codec::{changeset_id, int, object_id, ref_kind, sql_err, state, state_code, uint};
 
 /// A queued read: runs against a reader's connection and answers itself.
 pub(crate) type ReadJob = Box<dyn FnOnce(&Connection) + Send>;
@@ -493,4 +493,226 @@ pub(crate) fn list_all_workspaces(
         .map_err(sql_err)?;
     rows.map(|r| r.map_err(sql_err).and_then(workspace_record))
         .collect()
+}
+
+/// A record's protection, without the repository check (the writer uses it
+/// too).
+pub(crate) fn read_protection(
+    conn: &Connection,
+    repo: i64,
+    id: ChangesetId,
+) -> StoreResult<Option<Protection>> {
+    let raw: Option<(i64, Option<i64>)> = conn
+        .prepare_cached("SELECT pins, expires_at FROM changesets WHERE repo = ?1 AND id = ?2")
+        .and_then(|mut s| {
+            s.query_row(params![repo, &id.0.0[..]], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()
+        })
+        .map_err(sql_err)?;
+    raw.map(|(pins, expires_at_ms)| {
+        Ok(Protection {
+            pins: u32::try_from(pins).map_err(|_| StoreError::Corrupt(format!("pins {pins}")))?,
+            expires_at_ms,
+        })
+    })
+    .transpose()
+}
+
+/// An object's doomed mark, without the repository check.
+pub(crate) fn doom_mark(
+    conn: &Connection,
+    repo: i64,
+    object: ObjectId,
+) -> StoreResult<Option<DoomMark>> {
+    conn.prepare_cached("SELECT since, deleting FROM doomed WHERE repo = ?1 AND object = ?2")
+        .and_then(|mut s| {
+            s.query_row(params![repo, &object.0[..]], |r| {
+                Ok(DoomMark {
+                    since_ms: r.get(0)?,
+                    deleting: r.get(1)?,
+                })
+            })
+            .optional()
+        })
+        .map_err(sql_err)
+}
+
+pub(crate) fn protection(
+    conn: &Connection,
+    repo: RepoId,
+    id: ChangesetId,
+) -> StoreResult<Option<Protection>> {
+    check_repo(conn, repo)?;
+    read_protection(conn, repo.0.into(), id)
+}
+
+pub(crate) fn expired_records(
+    conn: &Connection,
+    repo: RepoId,
+    now_ms: i64,
+    after: Option<(i64, ChangesetId)>,
+    limit: u32,
+) -> StoreResult<Vec<(i64, ChangesetId)>> {
+    check_repo(conn, repo)?;
+    // With no cursor, start below every row: (i64::MIN, empty id).
+    let (at, id) = after.map_or((i64::MIN, Vec::new()), |(at, id)| (at, id.0.0.to_vec()));
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT expires_at, id FROM changesets
+             WHERE repo = ?1 AND pins = 0 AND expires_at IS NOT NULL
+               AND expires_at <= ?2 AND (expires_at, id) > (?3, ?4)
+             ORDER BY expires_at, id LIMIT ?5",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, now_ms, at, id, limit], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(sql_err)?;
+    rows.map(|r| {
+        let (at, id) = r.map_err(sql_err)?;
+        Ok((at, changeset_id(&id)?))
+    })
+    .collect()
+}
+
+pub(crate) fn held_objects(
+    conn: &Connection,
+    repo: RepoId,
+    holder: &str,
+    after: Option<ObjectId>,
+    limit: u32,
+) -> StoreResult<Vec<ObjectId>> {
+    check_repo(conn, repo)?;
+    let after = after.map_or(Vec::new(), |o| o.0.to_vec());
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT object FROM holders
+             WHERE repo = ?1 AND holder = ?2 AND object > ?3
+             ORDER BY object LIMIT ?4",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, holder, after, limit], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
+        .map_err(sql_err)?;
+    rows.map(|r| object_id(&r.map_err(sql_err)?)).collect()
+}
+
+pub(crate) fn expired_rows(
+    conn: &Connection,
+    repo: RepoId,
+    now_ms: i64,
+    after: Option<TimedRow>,
+    limit: u32,
+) -> StoreResult<Vec<TimedRow>> {
+    check_repo(conn, repo)?;
+    let (at, object, holder) = after.map_or((i64::MIN, Vec::new(), String::new()), |row| {
+        (row.expires_at_ms, row.object.0.to_vec(), row.holder)
+    });
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT expires, object, holder FROM holders
+             WHERE repo = ?1 AND expires IS NOT NULL AND expires <= ?2
+               AND (expires, object, holder) > (?3, ?4, ?5)
+             ORDER BY expires, object, holder LIMIT ?6",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, now_ms, at, object, holder, limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(sql_err)?;
+    rows.map(|r| {
+        let (expires_at_ms, object, holder) = r.map_err(sql_err)?;
+        Ok(TimedRow {
+            expires_at_ms,
+            object: object_id(&object)?,
+            holder,
+        })
+    })
+    .collect()
+}
+
+pub(crate) fn doom_marks(
+    conn: &Connection,
+    repo: RepoId,
+    ids: &[ObjectId],
+) -> StoreResult<Vec<(ObjectId, DoomMark)>> {
+    check_repo(conn, repo)?;
+    let mut out = Vec::new();
+    for id in ids {
+        if let Some(mark) = doom_mark(conn, repo.0.into(), *id)? {
+            out.push((*id, mark));
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn old_doomed(
+    conn: &Connection,
+    repo: RepoId,
+    until_ms: i64,
+    after: Option<(i64, ObjectId)>,
+    limit: u32,
+) -> StoreResult<Vec<(ObjectId, DoomMark)>> {
+    check_repo(conn, repo)?;
+    let (at, object) = after.map_or((i64::MIN, Vec::new()), |(at, o)| (at, o.0.to_vec()));
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT object, since, deleting FROM doomed
+             WHERE repo = ?1 AND since <= ?2 AND (since, object) > (?3, ?4)
+             ORDER BY since, object LIMIT ?5",
+        )
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, until_ms, at, object, limit], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get(1)?, r.get(2)?))
+        })
+        .map_err(sql_err)?;
+    rows.map(|r| {
+        let (object, since_ms, deleting) = r.map_err(sql_err)?;
+        Ok((object_id(&object)?, DoomMark { since_ms, deleting }))
+    })
+    .collect()
+}
+
+pub(crate) fn lapsed_workspaces(
+    conn: &Connection,
+    repo: RepoId,
+    before_ms: i64,
+    after: Option<(i64, String)>,
+    limit: u32,
+) -> StoreResult<Vec<WorkspaceRecord>> {
+    check_repo(conn, repo)?;
+    let (at, name) = after.unwrap_or((i64::MIN, String::new()));
+    let limit = page_limit(limit) as i64;
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT {WORKSPACE_COLUMNS} FROM workspaces
+             WHERE repo = ?1 AND lease_until < ?2 AND (lease_until, name) > (?3, ?4)
+             ORDER BY lease_until, name LIMIT ?5"
+        ))
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![repo.0, before_ms, at, name, limit], raw_workspace)
+        .map_err(sql_err)?;
+    rows.map(|r| r.map_err(sql_err).and_then(workspace_record))
+        .collect()
+}
+
+pub(crate) fn gc_protection(conn: &Connection, repo: RepoId) -> StoreResult<bool> {
+    check_repo(conn, repo)?;
+    conn.prepare_cached("SELECT gc_protection FROM repos WHERE id = ?1")
+        .and_then(|mut s| s.query_row([repo.0], |r| r.get(0)))
+        .map_err(sql_err)
 }

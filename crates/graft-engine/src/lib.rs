@@ -5,6 +5,11 @@
 //! G2.7 (rebase and sync), G3.1 (land and policies), G3.7 (revert, stacks,
 //! line merge).
 //!
+//! G3.11 adds the GC protection records of design §8.6 (`protect.rs`):
+//! parent pins and expiries written with every record change, claims on
+//! doomed objects before a write commits, and [`Engine::protect_repo`], the
+//! backfill for repositories written before them.
+//!
 //! G3.1 adds `Land` and `Attest` with the `direct`, `attested` and
 //! `queued` policies and path rules ([`policy`]); the land loop is in
 //! `land.rs`.
@@ -43,6 +48,7 @@ pub mod journal;
 mod land;
 mod objects;
 pub mod policy;
+mod protect;
 mod read;
 mod rebase;
 mod refs;
@@ -55,6 +61,7 @@ pub use land::{
     ATTESTATION, LAND_RESULT, MAX_ATTEST_URL, MAX_CHECK_NAME, REBASED_HOPS, Sleeper, ThreadSleeper,
 };
 pub use policy::{LandHooks, LineConfig};
+pub use protect::{CLAIM_HOLDER, ProtectReport};
 pub use rebase::REBASED_FROM;
 pub use refs::MAX_REF_NAME;
 pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
@@ -99,6 +106,12 @@ pub struct EngineConfig {
     pub max_put_bytes: u64,
     /// How long an upload holds its objects before a changeset must, ms.
     pub upload_lease_ms: u64,
+    /// How long an abandoned or superseded changeset is kept before it may
+    /// be collected, ms (design §8.6).
+    pub draft_retention_ms: u64,
+    /// How long a write's claim on a doomed object holds it, ms: longer
+    /// than any request deadline, shorter than the GC grace period.
+    pub claim_ms: u64,
     /// Page size when a request asks for 0.
     pub default_page: u32,
     /// Largest page of any list (at most the stores' `MAX_PAGE`).
@@ -142,6 +155,8 @@ impl Default for EngineConfig {
             max_get_bytes: 64 << 20,
             max_put_bytes: 128 << 20,
             upload_lease_ms: 24 * 3600 * 1000,
+            draft_retention_ms: 7 * 24 * 3600 * 1000,
+            claim_ms: 10 * 60 * 1000,
             default_page: 100,
             max_page: MAX_PAGE,
             max_import: 1000,

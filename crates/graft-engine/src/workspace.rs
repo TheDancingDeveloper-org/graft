@@ -105,13 +105,17 @@ pub(crate) fn head_conflict(ws: &WorkspaceRecord) -> ApiError {
     }
 }
 
-/// Appends a record transition guarded by a CAS on its current state.
+/// Appends a record transition guarded by a CAS on its current state, with
+/// the record's new expiry (design §8.6): `None` for a draft a workspace
+/// holds, the end time plus the retention window for a draft that stops
+/// being one.
 pub(crate) fn transition(
     id: ChangesetId,
     mut record: ChangesetRecord,
     state: RecordState,
     holder: Option<String>,
     superseded_by: Option<ChangesetId>,
+    expires_at_ms: Option<i64>,
     txn: &mut MetaTxn,
 ) {
     txn.preconditions.push(Precondition::RecordStateIs {
@@ -122,6 +126,7 @@ pub(crate) fn transition(
     record.holder = holder;
     record.superseded_by = superseded_by;
     txn.writes.push(Write::SetRecord { id, record });
+    txn.writes.push(Write::SetExpiry { id, expires_at_ms });
 }
 
 /// A transaction whose first precondition is that `ws` is unchanged.
@@ -299,10 +304,20 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     ) -> Result<bool, ApiError> {
         let mut txn = guarded(ws);
         let stack = self.stack(repo, ws.base, ws.head, &mut txn.writes).await?;
+        // A lapsed lease ended at `lease_until`; a close ends it now.
+        let expires = self.retained_until(ws.lease_until_ms.min(self.clock.now().ms));
         let mut abandoned = 0;
         for (id, record) in stack {
             if held_by(&record, &ws.name) {
-                transition(id, record, RecordState::Abandoned, None, None, &mut txn);
+                transition(
+                    id,
+                    record,
+                    RecordState::Abandoned,
+                    None,
+                    None,
+                    expires,
+                    &mut txn,
+                );
                 abandoned += 1;
             }
         }
@@ -517,6 +532,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                             RecordState::Draft,
                             Some(holder(&ws.name)),
                             None,
+                            None,
                             &mut txn,
                         );
                         continue;
@@ -529,6 +545,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 return Err(errors::invalid(None, rule));
             }
             let successor = req.new.filter(|n| !old_ids.contains(n));
+            let expires = self.retained_until(self.clock.now().ms);
             for (id, record) in old {
                 if new_ids.contains(&id) || !held_by(&record, &ws.name) {
                     continue;
@@ -537,7 +554,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     Some(_) => RecordState::Superseded,
                     None => RecordState::Abandoned,
                 };
-                transition(id, record, state, None, successor, &mut txn);
+                transition(id, record, state, None, successor, expires, &mut txn);
             }
 
             let mut next = ws.clone();

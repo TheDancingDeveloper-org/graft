@@ -386,6 +386,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             // draft that disappeared is superseded by the successor below
             // it, or by the target itself.
             let mut below = target;
+            let expires = self.retained_until(self.clock.now().ms);
             for step in &plan.steps {
                 let record = records.remove(&step.from).ok_or_else(contended)?;
                 match step.to {
@@ -412,6 +413,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                                 RecordState::Draft,
                                 Some(holder(&ws.name)),
                                 None,
+                                None,
                                 &mut txn,
                             );
                         }
@@ -422,6 +424,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                                 RecordState::Superseded,
                                 None,
                                 Some(to),
+                                expires,
                                 &mut txn,
                             );
                         }
@@ -434,6 +437,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                                 RecordState::Superseded,
                                 None,
                                 Some(below),
+                                expires,
                                 &mut txn,
                             );
                         }

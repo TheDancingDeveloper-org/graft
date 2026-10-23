@@ -6,6 +6,8 @@
 //! the move indexes every changeset it adds to the line (positions and path
 //! rows) and marks it landed, in that one transaction.
 
+use std::collections::HashSet;
+
 use graft_index::kinds::Skips;
 use graft_model::{Changeset, ChangesetId};
 use graft_proto::types::{ListRefs, RefKind, RefView, ResolveRef, UpdateRef};
@@ -16,6 +18,7 @@ use graft_store::{
 };
 
 use crate::access::{Need, require};
+use crate::protect::distinct_parents;
 use crate::workspace::{CAS_RETRIES, contended};
 use crate::{Engine, errors, journal};
 
@@ -268,6 +271,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 .await
                 .map_err(errors::store)?,
         );
+        // Landing zeroes a record's own pins (the store does), and releases
+        // the pins it holds on parents off the line: every pin comes from a
+        // non-landed child (design §8.6). First parents are on the line, so
+        // a linear chain releases nothing.
+        let ids: HashSet<ChangesetId> = chain.iter().map(|(cs, _)| cs.id()).collect();
+        let mut released = Vec::new();
         for (cs, mut record) in chain {
             if record.state != RecordState::Landed {
                 guards.push(Precondition::RecordStateIs {
@@ -281,8 +290,15 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     id: cs.id(),
                     record,
                 });
+                let first = cs.first_parent();
+                released.extend(
+                    distinct_parents(&cs)
+                        .into_iter()
+                        .filter(|p| Some(*p) != first && !ids.contains(p)),
+                );
             }
         }
+        writes.extend(released.into_iter().map(Write::Unpin));
         Ok(writes)
     }
 

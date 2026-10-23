@@ -15,8 +15,8 @@ use graft_proto::types::*;
 use graft_proto::{ApiError, CallContext, RepoApi, WorkspaceApi};
 use graft_store::memory::MemoryStore;
 use graft_store::{
-    ChangesetRecord, Lsn, MetaStore, MetaTxn, RecordState, RefRecord, RepoId, StoreError,
-    StoreResult, TxnOutcome, WorkspaceRecord, Write,
+    ChangesetRecord, DoomMark, Lsn, MetaStore, MetaTxn, Protection, RecordState, RefRecord, RepoId,
+    StoreError, StoreResult, TimedRow, TxnOutcome, WorkspaceRecord, Write,
 };
 
 /// A repository with `main` at a landed root holding `files`.
@@ -803,6 +803,74 @@ impl<M: MetaStore> MetaStore for Hooked<M> {
     ) -> StoreResult<Vec<(Lsn, String, Vec<u8>)>> {
         self.read();
         self.inner.journal(repo, from, limit).await
+    }
+    async fn protection(&self, repo: RepoId, id: ChangesetId) -> StoreResult<Option<Protection>> {
+        self.read();
+        self.inner.protection(repo, id).await
+    }
+    async fn expired_records(
+        &self,
+        repo: RepoId,
+        now_ms: i64,
+        after: Option<(i64, ChangesetId)>,
+        limit: u32,
+    ) -> StoreResult<Vec<(i64, ChangesetId)>> {
+        self.read();
+        self.inner.expired_records(repo, now_ms, after, limit).await
+    }
+    async fn held_objects(
+        &self,
+        repo: RepoId,
+        holder: &str,
+        after: Option<ObjectId>,
+        limit: u32,
+    ) -> StoreResult<Vec<ObjectId>> {
+        self.read();
+        self.inner.held_objects(repo, holder, after, limit).await
+    }
+    async fn expired_rows(
+        &self,
+        repo: RepoId,
+        now_ms: i64,
+        after: Option<TimedRow>,
+        limit: u32,
+    ) -> StoreResult<Vec<TimedRow>> {
+        self.read();
+        self.inner.expired_rows(repo, now_ms, after, limit).await
+    }
+    async fn doom_marks(
+        &self,
+        repo: RepoId,
+        ids: &[ObjectId],
+    ) -> StoreResult<Vec<(ObjectId, DoomMark)>> {
+        self.read();
+        self.inner.doom_marks(repo, ids).await
+    }
+    async fn old_doomed(
+        &self,
+        repo: RepoId,
+        until_ms: i64,
+        after: Option<(i64, ObjectId)>,
+        limit: u32,
+    ) -> StoreResult<Vec<(ObjectId, DoomMark)>> {
+        self.read();
+        self.inner.old_doomed(repo, until_ms, after, limit).await
+    }
+    async fn lapsed_workspaces(
+        &self,
+        repo: RepoId,
+        before_ms: i64,
+        after: Option<(i64, String)>,
+        limit: u32,
+    ) -> StoreResult<Vec<WorkspaceRecord>> {
+        self.read();
+        self.inner
+            .lapsed_workspaces(repo, before_ms, after, limit)
+            .await
+    }
+    async fn gc_protection(&self, repo: RepoId) -> StoreResult<bool> {
+        self.read();
+        self.inner.gc_protection(repo).await
     }
 }
 

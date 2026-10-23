@@ -12,13 +12,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
-use graft_store::{MetaTxn, Precondition, RepoId, StoreError, StoreResult, TxnOutcome, Write};
+use graft_model::{ChangesetId, ObjectId};
+use graft_store::{
+    MetaTxn, Precondition, RecordState, RepoId, StoreError, StoreResult, TxnOutcome, Write,
+};
 use rusqlite::{Connection, DropBehavior, OptionalExtension, TransactionBehavior, params};
 
 use crate::WriterQueue;
 use crate::codec::{int, ref_kind_code, sql_err, state_code, uint};
 use crate::oneshot;
-use crate::reader::{check_repo, read_ref, workspace};
+use crate::reader::{changeset, check_repo, doom_mark, read_protection, read_ref, workspace};
 
 /// The most jobs grouped under one commit.
 pub(crate) const MAX_BATCH: usize = 256;
@@ -125,7 +128,8 @@ fn create_repo(conn: &Connection, name: &str) -> StoreResult<RepoId> {
     if taken {
         return Err(StoreError::Exists);
     }
-    conn.prepare_cached("INSERT INTO repos (name) VALUES (?1)")
+    // A new repository has protection records from its first write.
+    conn.prepare_cached("INSERT INTO repos (name, gc_protection) VALUES (?1, 1)")
         .and_then(|mut s| s.execute([name]))
         .map_err(sql_err)?;
     let id = conn.last_insert_rowid();
@@ -173,7 +177,166 @@ fn holds(conn: &Connection, repo_id: RepoId, pre: &Precondition) -> StoreResult<
                 .map_err(sql_err)?;
             Ok(!present)
         }
+        Precondition::RecordLive(id) => {
+            let state = record_state(conn, repo, *id)?;
+            Ok(state.is_some_and(|s| s != state_code(RecordState::Collected)))
+        }
+        Precondition::RecordIs {
+            id,
+            record,
+            protection,
+        } => Ok(
+            changeset(conn, repo_id, *id)?.is_some_and(|(_, r)| r == *record)
+                && read_protection(conn, repo, *id)? == Some(*protection),
+        ),
+        Precondition::ObjectDoomed(object) => {
+            Ok(doom_mark(conn, repo, *object)?.is_some_and(|m| !m.deleting))
+        }
+        Precondition::ObjectUnheld(object) => Ok(!is_held(conn, repo, *object)?),
     }
+}
+
+/// A record's state code, or `None` when it is not stored.
+fn record_state(conn: &Connection, repo: i64, id: ChangesetId) -> StoreResult<Option<i64>> {
+    conn.prepare_cached("SELECT state FROM changesets WHERE repo = ?1 AND id = ?2")
+        .and_then(|mut s| {
+            s.query_row(params![repo, &id.0.0[..]], |r| r.get(0))
+                .optional()
+        })
+        .map_err(sql_err)
+}
+
+fn is_held(conn: &Connection, repo: i64, object: ObjectId) -> StoreResult<bool> {
+    conn.prepare_cached("SELECT 1 FROM holders WHERE repo = ?1 AND object = ?2 LIMIT 1")
+        .and_then(|mut s| s.exists(params![repo, &object.0[..]]))
+        .map_err(sql_err)
+}
+
+/// Whether a record in state `code` keeps protection: landed and collected
+/// records have none.
+fn protectable(code: i64) -> bool {
+    code != state_code(RecordState::Landed) && code != state_code(RecordState::Collected)
+}
+
+fn invalid(what: String) -> StoreError {
+    StoreError::Invalid(what)
+}
+
+/// Adds a holder row (with an expiry, for a timed one) and revives the
+/// object: a held object is not doomed, unless it is being deleted.
+fn add_row(
+    conn: &Connection,
+    repo: i64,
+    object: ObjectId,
+    holder: &str,
+    expires: Option<i64>,
+) -> StoreResult<()> {
+    conn.prepare_cached(
+        "INSERT OR IGNORE INTO holders (repo, object, holder, expires) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .and_then(|mut s| s.execute(params![repo, &object.0[..], holder, expires]))
+    .map_err(sql_err)?;
+    conn.prepare_cached("DELETE FROM doomed WHERE repo = ?1 AND object = ?2 AND deleting = 0")
+        .and_then(|mut s| s.execute(params![repo, &object.0[..]]))
+        .map_err(sql_err)?;
+    Ok(())
+}
+
+/// Applies one protection or object-mark write.
+fn protect(conn: &Connection, repo: i64, write: Write) -> StoreResult<()> {
+    match write {
+        Write::SetExpiry { id, expires_at_ms } => match record_state(conn, repo, id)? {
+            None => return Err(invalid(format!("no changeset {id} to expire"))),
+            Some(code) if !protectable(code) && expires_at_ms.is_some() => {
+                return Err(invalid(format!("changeset {id} has landed: no expiry")));
+            }
+            Some(_) => {
+                conn.prepare_cached(
+                    "UPDATE changesets SET expires_at = ?3 WHERE repo = ?1 AND id = ?2",
+                )
+                .and_then(|mut s| s.execute(params![repo, &id.0.0[..], expires_at_ms]))
+                .map_err(sql_err)?;
+            }
+        },
+        Write::Pin(id) | Write::Unpin(id) => {
+            let pin = matches!(write, Write::Pin(_));
+            let code = record_state(conn, repo, id)?
+                .filter(|c| *c != state_code(RecordState::Collected))
+                .ok_or_else(|| invalid(format!("no live changeset {id} to pin")))?;
+            if code == state_code(RecordState::Landed) {
+                return Ok(());
+            }
+            let pins = read_protection(conn, repo, id)?.map_or(0, |p| p.pins);
+            let next = if pin {
+                pins.checked_add(1)
+                    .ok_or_else(|| invalid(format!("changeset {id} has {pins} pins")))?
+            } else {
+                pins.saturating_sub(1)
+            };
+            set_pins(conn, repo, id, next)?;
+        }
+        Write::SetPins { id, pins } => match record_state(conn, repo, id)? {
+            None => return Err(invalid(format!("no changeset {id} to pin"))),
+            Some(code) if !protectable(code) && pins > 0 => {
+                return Err(invalid(format!("changeset {id} has landed: no pins")));
+            }
+            Some(_) => set_pins(conn, repo, id, pins)?,
+        },
+        Write::AddHolderUntil {
+            object,
+            holder,
+            expires_at_ms,
+        } => add_row(conn, repo, object, &holder, Some(expires_at_ms))?,
+        Write::Doom { object, since_ms } => {
+            if is_held(conn, repo, object)? {
+                return Err(invalid(format!("object {} is held", object.to_hex())));
+            }
+            if doom_mark(conn, repo, object)?.is_some_and(|m| m.deleting) {
+                return Err(invalid(format!(
+                    "object {} is being deleted",
+                    object.to_hex()
+                )));
+            }
+            conn.prepare_cached(
+                "INSERT OR IGNORE INTO doomed (repo, object, since, deleting)
+                 VALUES (?1, ?2, ?3, 0)",
+            )
+            .and_then(|mut s| s.execute(params![repo, &object.0[..], since_ms]))
+            .map_err(sql_err)?;
+        }
+        Write::MarkDeleting(object) => {
+            let changed = conn
+                .prepare_cached("UPDATE doomed SET deleting = 1 WHERE repo = ?1 AND object = ?2")
+                .and_then(|mut s| s.execute(params![repo, &object.0[..]]))
+                .map_err(sql_err)?;
+            if changed == 0 {
+                return Err(invalid(format!("object {} is not doomed", object.to_hex())));
+            }
+        }
+        Write::Undoom(object) => {
+            conn.prepare_cached("DELETE FROM doomed WHERE repo = ?1 AND object = ?2")
+                .and_then(|mut s| s.execute(params![repo, &object.0[..]]))
+                .map_err(sql_err)?;
+        }
+        Write::SetGcProtection(on) => {
+            conn.prepare_cached("UPDATE repos SET gc_protection = ?2 WHERE id = ?1")
+                .and_then(|mut s| s.execute(params![repo, on]))
+                .map_err(sql_err)?;
+        }
+        other => {
+            return Err(StoreError::Backend(format!(
+                "not a protection write: {other:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn set_pins(conn: &Connection, repo: i64, id: ChangesetId, pins: u32) -> StoreResult<()> {
+    conn.prepare_cached("UPDATE changesets SET pins = ?3 WHERE repo = ?1 AND id = ?2")
+        .and_then(|mut s| s.execute(params![repo, &id.0.0[..], pins]))
+        .map_err(sql_err)?;
+    Ok(())
 }
 
 /// One logical write. Runs inside its own savepoint, so an error or a failed
@@ -214,12 +377,14 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 let lsn = int(record.lsn)?;
                 conn.prepare_cached(
                     "INSERT INTO changesets
-                         (repo, id, content, lsn, received_at, state, holder, superseded_by)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         (repo, id, content, lsn, received_at, state, holder, superseded_by,
+                          pins, expires_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL)
                      ON CONFLICT (repo, id) DO UPDATE SET
                          content = excluded.content, lsn = excluded.lsn,
                          received_at = excluded.received_at, state = excluded.state,
-                         holder = excluded.holder, superseded_by = excluded.superseded_by",
+                         holder = excluded.holder, superseded_by = excluded.superseded_by,
+                         pins = 0, expires_at = NULL",
                 )
                 .and_then(|mut s| {
                     s.execute(params![
@@ -243,7 +408,9 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 let changed = conn
                     .prepare_cached(
                         "UPDATE changesets SET lsn = ?3, received_at = ?4, state = ?5,
-                             holder = ?6, superseded_by = ?7
+                             holder = ?6, superseded_by = ?7,
+                             pins = CASE WHEN ?5 IN (?8, ?9) THEN 0 ELSE pins END,
+                             expires_at = CASE WHEN ?5 IN (?8, ?9) THEN NULL ELSE expires_at END
                          WHERE repo = ?1 AND id = ?2",
                     )
                     .and_then(|mut s| {
@@ -255,6 +422,8 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                             state_code(record.state),
                             record.holder,
                             record.superseded_by.map(|c| c.0.0.to_vec()),
+                            state_code(RecordState::Landed),
+                            state_code(RecordState::Collected),
                         ])
                     })
                     .map_err(sql_err)?;
@@ -375,13 +544,7 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 })
                 .map_err(sql_err)?;
             }
-            Write::AddHolder { object, holder } => {
-                conn.prepare_cached(
-                    "INSERT OR IGNORE INTO holders (repo, object, holder) VALUES (?1, ?2, ?3)",
-                )
-                .and_then(|mut s| s.execute(params![repo, &object.0[..], holder]))
-                .map_err(sql_err)?;
-            }
+            Write::AddHolder { object, holder } => add_row(conn, repo, object, &holder, None)?,
             Write::RemoveHolder { object, holder } => {
                 conn.prepare_cached(
                     "DELETE FROM holders WHERE repo = ?1 AND object = ?2 AND holder = ?3",
@@ -401,6 +564,15 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 .and_then(|mut s| s.execute(params![repo, &draft.0.0[..], line, &landed.0.0[..]]))
                 .map_err(sql_err)?;
             }
+            write @ (Write::AddHolderUntil { .. }
+            | Write::SetExpiry { .. }
+            | Write::Pin(_)
+            | Write::Unpin(_)
+            | Write::SetPins { .. }
+            | Write::Doom { .. }
+            | Write::MarkDeleting(_)
+            | Write::Undoom(_)
+            | Write::SetGcProtection(_)) => protect(conn, repo, write)?,
             Write::Journal { kind, body } => {
                 let lsn = int(next_lsn)?;
                 conn.prepare_cached(

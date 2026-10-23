@@ -83,6 +83,44 @@ pub struct WorkspaceRecord {
     pub lease_until_ms: i64,
 }
 
+/// The GC protection kept beside a changeset's record (design §8.6). It is
+/// read and written apart from [`ChangesetRecord`]: [`Write::Pin`],
+/// [`Write::Unpin`], [`Write::SetPins`] and [`Write::SetExpiry`] change it,
+/// and a record written as landed or collected always has the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Protection {
+    /// On a non-landed record, the number of non-collected changesets that
+    /// name it as a parent. A record with pins is never collected. Always 0
+    /// on a landed record.
+    pub pins: u32,
+    /// When the record may be collected, ms: set when it stops being a
+    /// draft, or when a land-attempt candidate is written. `None` for drafts
+    /// held by a workspace and for landed records.
+    pub expires_at_ms: Option<i64>,
+}
+
+/// The mark on an object that no row holds (design §8.6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DoomMark {
+    /// When it was doomed, ms.
+    pub since_ms: i64,
+    /// A sweep is deleting its frame. A write that needs the object must
+    /// wait for the delete to finish (or report it missing); it cannot claim
+    /// it.
+    pub deleting: bool,
+}
+
+/// A holder row with an expiry: an upload lease or a write's claim.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TimedRow {
+    /// When the row lapses, ms.
+    pub expires_at_ms: i64,
+    /// Object.
+    pub object: ObjectId,
+    /// Holder.
+    pub holder: String,
+}
+
 /// A condition a transaction checks before writing. The first failing
 /// precondition aborts the transaction, and nothing is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,13 +160,33 @@ pub enum Precondition {
         /// Expected state.
         state: RecordState,
     },
+    /// The changeset is stored and not collected. A new child checks this
+    /// on each parent it pins, so it cannot race the parent's collection.
+    RecordLive(ChangesetId),
+    /// The changeset is stored with exactly this record and protection. The
+    /// compare in a collection: any transition, adoption or new pin since
+    /// the read fails it.
+    RecordIs {
+        /// Changeset.
+        id: ChangesetId,
+        /// Expected record.
+        record: ChangesetRecord,
+        /// Expected protection.
+        protection: Protection,
+    },
+    /// The object is doomed and not being deleted. A claim and a delete
+    /// mark both check it, so at most one of them wins.
+    ObjectDoomed(ObjectId),
+    /// No row holds the object.
+    ObjectUnheld(ObjectId),
 }
 
 /// One write inside a transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Write {
     /// Insert content and its record. Stores set `record.lsn` to the LSN of
-    /// the transaction's first `Journal` write, when there is one.
+    /// the transaction's first `Journal` write, when there is one. The new
+    /// record has no pins and no expiry.
     PutChangeset {
         /// Id.
         id: ChangesetId,
@@ -138,7 +196,8 @@ pub enum Write {
         record: ChangesetRecord,
     },
     /// Update a changeset's record (`record.lsn` is handled as for
-    /// `PutChangeset`).
+    /// `PutChangeset`). Its protection is kept, except that a record set to
+    /// landed or collected gets no pins and no expiry (design §8.6).
     SetRecord {
         /// Id.
         id: ChangesetId,
@@ -186,7 +245,9 @@ pub enum Write {
         changeset: ChangesetId,
     },
     /// Adds an object holder row. A holder is a set member, so adding the
-    /// same `(object, holder)` twice counts once.
+    /// same `(object, holder)` twice counts once. A held object is not
+    /// doomed: adding a row clears the object's doomed mark, unless it is
+    /// being deleted (design §8.6, revival).
     AddHolder {
         /// Object.
         object: ObjectId,
@@ -200,6 +261,61 @@ pub enum Write {
         /// Holder.
         holder: String,
     },
+    /// Adds a holder row that lapses at `expires_at_ms`: an upload lease or
+    /// a claim. Otherwise as [`Write::AddHolder`]; the first add of a row
+    /// decides its expiry.
+    AddHolderUntil {
+        /// Object.
+        object: ObjectId,
+        /// Holder.
+        holder: String,
+        /// Expiry, ms.
+        expires_at_ms: i64,
+    },
+    /// Sets a changeset's expiry. The changeset must be stored, and a
+    /// landed or collected one takes only `None`; anything else is
+    /// `StoreError::Invalid`.
+    SetExpiry {
+        /// Changeset.
+        id: ChangesetId,
+        /// Expiry, ms.
+        expires_at_ms: Option<i64>,
+    },
+    /// Adds one pin to a parent, unless it has landed, when nothing changes:
+    /// the store decides by the state inside the transaction. A parent that
+    /// is absent or collected is `StoreError::Invalid`.
+    Pin(ChangesetId),
+    /// Takes one pin off a parent, unless it has landed, when nothing
+    /// changes. A parent with no pins keeps 0: its pins were never written
+    /// (a repository the backfill has not reached). A parent that is absent
+    /// or collected is `StoreError::Invalid`.
+    Unpin(ChangesetId),
+    /// Sets a changeset's pins outright (the backfill and `fsck`). The
+    /// changeset must be stored, and a landed one takes only 0.
+    SetPins {
+        /// Changeset.
+        id: ChangesetId,
+        /// Pins.
+        pins: u32,
+    },
+    /// Marks an object doomed since `since_ms`. An object already doomed
+    /// keeps its first time. An object with a row, or being deleted, is
+    /// `StoreError::Invalid`.
+    Doom {
+        /// Object.
+        object: ObjectId,
+        /// Time, ms.
+        since_ms: i64,
+    },
+    /// Marks a doomed object as being deleted. An object that is not doomed
+    /// is `StoreError::Invalid`.
+    MarkDeleting(ObjectId),
+    /// Removes an object's doomed mark, `deleting` or not (after its frame
+    /// is deleted). Removing an absent mark is a no-op.
+    Undoom(ObjectId),
+    /// Sets the repository's `gc_protection` marker: its records carry
+    /// complete protection, so a sweep may run on it.
+    SetGcProtection(bool),
     /// Records a land. The first record for `(draft, line)` is kept, so a
     /// retried land returns the same result.
     PutLand {
@@ -388,6 +504,85 @@ pub trait MetaStore: Send + Sync {
     ) -> impl Future<Output = StoreResult<Vec<String>>> + Send {
         async { Err(unsupported("holder_rows")) }
     }
+    /// A changeset's protection, or `None` when it is not stored. A store
+    /// without protection records answers `StoreError::Backend`.
+    fn protection(
+        &self,
+        _repo: RepoId,
+        _id: ChangesetId,
+    ) -> impl Future<Output = StoreResult<Option<Protection>>> + Send {
+        async { Err(unsupported("protection")) }
+    }
+    /// The records a collection may take now: no pins and `expires_at_ms`
+    /// at or before `now_ms`, in `(expires_at_ms, id)` order after `after`,
+    /// up to `limit`. One index range over exactly those records.
+    fn expired_records(
+        &self,
+        _repo: RepoId,
+        _now_ms: i64,
+        _after: Option<(i64, ChangesetId)>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(i64, ChangesetId)>>> + Send {
+        async { Err(unsupported("expired_records")) }
+    }
+    /// The objects `holder` holds rows for, in id order after `after`, up
+    /// to `limit` (the holder index).
+    fn held_objects(
+        &self,
+        _repo: RepoId,
+        _holder: &str,
+        _after: Option<ObjectId>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<ObjectId>>> + Send {
+        async { Err(unsupported("held_objects")) }
+    }
+    /// Holder rows with an expiry at or before `now_ms`, in
+    /// `(expires_at_ms, object, holder)` order after `after`, up to `limit`.
+    fn expired_rows(
+        &self,
+        _repo: RepoId,
+        _now_ms: i64,
+        _after: Option<TimedRow>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<TimedRow>>> + Send {
+        async { Err(unsupported("expired_rows")) }
+    }
+    /// The doomed marks of those of `ids` that have one, in the order of
+    /// `ids`. One key read per id: the caller bounds `ids`.
+    fn doom_marks(
+        &self,
+        _repo: RepoId,
+        _ids: &[ObjectId],
+    ) -> impl Future<Output = StoreResult<Vec<(ObjectId, DoomMark)>>> + Send {
+        async { Err(unsupported("doom_marks")) }
+    }
+    /// Objects doomed at or before `until_ms`, in `(since_ms, object)` order
+    /// after `after`, up to `limit`.
+    fn old_doomed(
+        &self,
+        _repo: RepoId,
+        _until_ms: i64,
+        _after: Option<(i64, ObjectId)>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(ObjectId, DoomMark)>>> + Send {
+        async { Err(unsupported("old_doomed")) }
+    }
+    /// Workspaces whose lease ends before `before_ms`, in
+    /// `(lease_until_ms, name)` order after `after`, up to `limit`.
+    fn lapsed_workspaces(
+        &self,
+        _repo: RepoId,
+        _before_ms: i64,
+        _after: Option<(i64, String)>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        async { Err(unsupported("lapsed_workspaces")) }
+    }
+    /// Whether the repository has the `gc_protection` marker. A repository
+    /// created by a store with protection records has it from the start.
+    fn gc_protection(&self, _repo: RepoId) -> impl Future<Output = StoreResult<bool>> + Send {
+        async { Err(unsupported("gc_protection")) }
+    }
 }
 
 /// The error a store answers for an optional index it does not have yet.
@@ -544,5 +739,67 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
         (**self).list_all_workspaces(repo, after, limit)
+    }
+    fn protection(
+        &self,
+        repo: RepoId,
+        id: ChangesetId,
+    ) -> impl Future<Output = StoreResult<Option<Protection>>> + Send {
+        (**self).protection(repo, id)
+    }
+    fn expired_records(
+        &self,
+        repo: RepoId,
+        now_ms: i64,
+        after: Option<(i64, ChangesetId)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(i64, ChangesetId)>>> + Send {
+        (**self).expired_records(repo, now_ms, after, limit)
+    }
+    fn held_objects(
+        &self,
+        repo: RepoId,
+        holder: &str,
+        after: Option<ObjectId>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<ObjectId>>> + Send {
+        (**self).held_objects(repo, holder, after, limit)
+    }
+    fn expired_rows(
+        &self,
+        repo: RepoId,
+        now_ms: i64,
+        after: Option<TimedRow>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<TimedRow>>> + Send {
+        (**self).expired_rows(repo, now_ms, after, limit)
+    }
+    fn doom_marks(
+        &self,
+        repo: RepoId,
+        ids: &[ObjectId],
+    ) -> impl Future<Output = StoreResult<Vec<(ObjectId, DoomMark)>>> + Send {
+        (**self).doom_marks(repo, ids)
+    }
+    fn old_doomed(
+        &self,
+        repo: RepoId,
+        until_ms: i64,
+        after: Option<(i64, ObjectId)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(ObjectId, DoomMark)>>> + Send {
+        (**self).old_doomed(repo, until_ms, after, limit)
+    }
+    fn lapsed_workspaces(
+        &self,
+        repo: RepoId,
+        before_ms: i64,
+        after: Option<(i64, String)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<WorkspaceRecord>>> + Send {
+        (**self).lapsed_workspaces(repo, before_ms, after, limit)
+    }
+    fn gc_protection(&self, repo: RepoId) -> impl Future<Output = StoreResult<bool>> + Send {
+        (**self).gc_protection(repo)
     }
 }

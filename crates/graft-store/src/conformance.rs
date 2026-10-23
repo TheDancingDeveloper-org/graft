@@ -8,8 +8,8 @@
 use graft_model::{ChangesetId, ObjectId};
 
 use crate::meta::{
-    ChangesetRecord, MetaStore, MetaTxn, Precondition, RecordState, RefKind, RefRecord, TxnOutcome,
-    WorkspaceRecord, Write,
+    ChangesetRecord, DoomMark, MetaStore, MetaTxn, Precondition, Protection, RecordState, RefKind,
+    RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
 };
 use crate::object::ObjectStore;
 use crate::{MAX_PAGE, RepoId, StoreError};
@@ -50,6 +50,15 @@ where
     case!(pagination_is_bounded);
     case!(index_reads_page_in_order);
     case!(all_workspaces_page_in_name_order);
+    case!(pins_follow_the_parent_state);
+    case!(protection_writes_are_checked_and_atomic);
+    case!(expiry_is_indexed_for_collection);
+    case!(record_preconditions_compare_protection);
+    case!(rows_read_by_holder_and_by_expiry);
+    case!(doomed_marks_claims_and_deletes);
+    case!(old_doomed_page_in_time_order);
+    case!(lapsed_workspaces_page_in_lease_order);
+    case!(gc_protection_marker);
 }
 
 fn cs(n: u8) -> ChangesetId {
@@ -1352,4 +1361,628 @@ async fn all_workspaces_page_in_name_order<O: ObjectStore, M: MetaStore>(_object
             .expect("page")
             .is_empty()
     );
+}
+
+/// Commits `writes` with no preconditions and asserts that they applied.
+async fn apply<M: MetaStore>(meta: &M, repo: RepoId, writes: Vec<Write>) {
+    let outcome = run_txn(meta, repo, txn(vec![], writes)).await;
+    assert!(matches!(outcome, TxnOutcome::Committed(_)), "{outcome:?}");
+}
+
+/// Asserts that `writes` (after a journal entry) are refused as `Invalid`
+/// and leave nothing behind.
+async fn refused<M: MetaStore>(meta: &M, repo: RepoId, writes: Vec<Write>, why: &str) {
+    let before = lsns_of(meta, repo).await;
+    let mut all = vec![journal("Before")];
+    all.extend(writes);
+    let got = meta.commit(repo, txn(vec![], all)).await;
+    assert!(matches!(got, Err(StoreError::Invalid(_))), "{why}: {got:?}");
+    assert_eq!(lsns_of(meta, repo).await, before, "{why}: nothing written");
+}
+
+async fn protection_of<M: MetaStore>(meta: &M, repo: RepoId, id: ChangesetId) -> Protection {
+    meta.protection(repo, id)
+        .await
+        .expect("protection")
+        .expect("stored")
+}
+
+fn put_record(n: u8, state: RecordState) -> Write {
+    Write::PutChangeset {
+        id: cs(n),
+        content: vec![n],
+        record: record(state),
+    }
+}
+
+fn protection(pins: u32, expires_at_ms: Option<i64>) -> Protection {
+    Protection {
+        pins,
+        expires_at_ms,
+    }
+}
+
+async fn pins_follow_the_parent_state<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "pins").await;
+    assert_eq!(meta.protection(repo, cs(1)).await.expect("read"), None);
+    apply(
+        meta,
+        repo,
+        vec![
+            put_record(1, RecordState::Draft),
+            put_record(2, RecordState::Landed),
+            put_record(3, RecordState::Abandoned),
+            Write::Pin(cs(1)),
+            Write::Pin(cs(1)),
+            Write::Pin(cs(2)),
+            Write::Pin(cs(3)),
+        ],
+    )
+    .await;
+    assert_eq!(protection_of(meta, repo, cs(1)).await, protection(2, None));
+    assert_eq!(
+        protection_of(meta, repo, cs(2)).await,
+        protection(0, None),
+        "a landed parent takes no pin"
+    );
+    assert_eq!(protection_of(meta, repo, cs(3)).await, protection(1, None));
+
+    apply(meta, repo, vec![Write::Unpin(cs(1)), Write::Unpin(cs(2))]).await;
+    assert_eq!(protection_of(meta, repo, cs(1)).await.pins, 1);
+    assert_eq!(protection_of(meta, repo, cs(2)).await.pins, 0);
+
+    // Landing zeroes the pins and clears the expiry; other transitions keep
+    // them.
+    apply(
+        meta,
+        repo,
+        vec![
+            Write::SetExpiry {
+                id: cs(3),
+                expires_at_ms: Some(50),
+            },
+            Write::SetRecord {
+                id: cs(3),
+                record: record(RecordState::Superseded),
+            },
+        ],
+    )
+    .await;
+    assert_eq!(
+        protection_of(meta, repo, cs(3)).await,
+        protection(1, Some(50))
+    );
+    apply(
+        meta,
+        repo,
+        vec![Write::SetRecord {
+            id: cs(3),
+            record: record(RecordState::Landed),
+        }],
+    )
+    .await;
+    assert_eq!(
+        protection_of(meta, repo, cs(3)).await,
+        Protection::default()
+    );
+
+    // A fresh record has none, and SetPins sets them outright.
+    apply(
+        meta,
+        repo,
+        vec![
+            put_record(4, RecordState::Draft),
+            Write::SetPins { id: cs(4), pins: 7 },
+            Write::Pin(cs(4)),
+        ],
+    )
+    .await;
+    assert_eq!(protection_of(meta, repo, cs(4)).await.pins, 8);
+
+    // Pins written in the transaction that stores the parent count.
+    apply(
+        meta,
+        repo,
+        vec![put_record(5, RecordState::Draft), Write::Pin(cs(5))],
+    )
+    .await;
+    assert_eq!(protection_of(meta, repo, cs(5)).await.pins, 1);
+}
+
+async fn protection_writes_are_checked_and_atomic<O: ObjectStore, M: MetaStore>(
+    _objects: &O,
+    meta: &M,
+) {
+    let repo = new_repo(meta, "protection-checks").await;
+    apply(
+        meta,
+        repo,
+        vec![
+            put_record(1, RecordState::Draft),
+            put_record(2, RecordState::Landed),
+            put_record(3, RecordState::Collected),
+            Write::Pin(cs(1)),
+        ],
+    )
+    .await;
+    refused(meta, repo, vec![Write::Pin(cs(9))], "pin an absent record").await;
+    refused(
+        meta,
+        repo,
+        vec![Write::Pin(cs(3))],
+        "pin a collected record",
+    )
+    .await;
+    refused(
+        meta,
+        repo,
+        vec![Write::Unpin(cs(9))],
+        "unpin an absent record",
+    )
+    .await;
+    refused(
+        meta,
+        repo,
+        vec![Write::Unpin(cs(3))],
+        "unpin a collected record",
+    )
+    .await;
+    refused(
+        meta,
+        repo,
+        vec![Write::Unpin(cs(1)), Write::Pin(cs(9))],
+        "a refused write after an unpin",
+    )
+    .await;
+    assert_eq!(
+        protection_of(meta, repo, cs(1)).await.pins,
+        1,
+        "the refused transaction's unpin is not kept"
+    );
+    apply(meta, repo, vec![Write::Unpin(cs(1)), Write::Unpin(cs(1))]).await;
+    assert_eq!(
+        protection_of(meta, repo, cs(1)).await.pins,
+        0,
+        "pins never written stay at 0"
+    );
+    refused(
+        meta,
+        repo,
+        vec![Write::SetExpiry {
+            id: cs(9),
+            expires_at_ms: Some(1),
+        }],
+        "expire an absent record",
+    )
+    .await;
+    refused(
+        meta,
+        repo,
+        vec![Write::SetExpiry {
+            id: cs(2),
+            expires_at_ms: Some(1),
+        }],
+        "expire a landed record",
+    )
+    .await;
+    refused(
+        meta,
+        repo,
+        vec![Write::SetPins { id: cs(2), pins: 1 }],
+        "pin a landed record outright",
+    )
+    .await;
+    refused(
+        meta,
+        repo,
+        vec![Write::SetPins { id: cs(9), pins: 0 }],
+        "set the pins of an absent record",
+    )
+    .await;
+    // Clearing what a landed record does not have is allowed.
+    apply(
+        meta,
+        repo,
+        vec![
+            Write::SetExpiry {
+                id: cs(2),
+                expires_at_ms: None,
+            },
+            Write::SetPins { id: cs(2), pins: 0 },
+        ],
+    )
+    .await;
+}
+
+async fn expiry_is_indexed_for_collection<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "expiry").await;
+    let other = new_repo(meta, "expiry-other").await;
+    let mut writes = Vec::new();
+    for (n, at) in [(1, 30), (2, 10), (3, 20), (4, 20), (5, 99), (6, 10)] {
+        writes.push(put_record(n, RecordState::Abandoned));
+        writes.push(Write::SetExpiry {
+            id: cs(n),
+            expires_at_ms: Some(at),
+        });
+    }
+    // 6 is pinned by 7, a draft with no expiry.
+    writes.push(put_record(7, RecordState::Draft));
+    writes.push(Write::Pin(cs(6)));
+    apply(meta, repo, writes).await;
+    apply(
+        meta,
+        other,
+        vec![
+            put_record(8, RecordState::Abandoned),
+            Write::SetExpiry {
+                id: cs(8),
+                expires_at_ms: Some(0),
+            },
+        ],
+    )
+    .await;
+
+    let all = meta
+        .expired_records(repo, 30, None, 100)
+        .await
+        .expect("expired");
+    assert_eq!(
+        all,
+        [(10, cs(2)), (20, cs(3)), (20, cs(4)), (30, cs(1))],
+        "expires_at <= now, unpinned, in (expiry, id) order, this repository only"
+    );
+    let first = meta.expired_records(repo, 30, None, 2).await.expect("page");
+    assert_eq!(first, [(10, cs(2)), (20, cs(3))]);
+    let second = meta
+        .expired_records(repo, 30, first.last().copied(), 2)
+        .await
+        .expect("page");
+    assert_eq!(second, [(20, cs(4)), (30, cs(1))]);
+
+    // Unpinning, clearing and landing move records in and out.
+    apply(
+        meta,
+        repo,
+        vec![
+            Write::Unpin(cs(6)),
+            Write::SetExpiry {
+                id: cs(3),
+                expires_at_ms: None,
+            },
+            Write::SetRecord {
+                id: cs(4),
+                record: record(RecordState::Landed),
+            },
+        ],
+    )
+    .await;
+    let now = meta
+        .expired_records(repo, 30, None, 100)
+        .await
+        .expect("expired");
+    assert_eq!(now, [(10, cs(2)), (10, cs(6)), (30, cs(1))]);
+}
+
+async fn record_preconditions_compare_protection<O: ObjectStore, M: MetaStore>(
+    _objects: &O,
+    meta: &M,
+) {
+    let repo = new_repo(meta, "record-is").await;
+    apply(
+        meta,
+        repo,
+        vec![
+            put_record(1, RecordState::Abandoned),
+            put_record(2, RecordState::Landed),
+            put_record(3, RecordState::Collected),
+            Write::SetExpiry {
+                id: cs(1),
+                expires_at_ms: Some(5),
+            },
+        ],
+    )
+    .await;
+    let check = |pre: Precondition| {
+        let t = txn(vec![pre], vec![journal("Checked")]);
+        async move {
+            matches!(
+                meta.commit(repo, t).await.expect("commit"),
+                TxnOutcome::Committed(_)
+            )
+        }
+    };
+    assert!(check(Precondition::RecordLive(cs(1))).await);
+    assert!(check(Precondition::RecordLive(cs(2))).await);
+    assert!(!check(Precondition::RecordLive(cs(3))).await, "collected");
+    assert!(!check(Precondition::RecordLive(cs(9))).await, "absent");
+
+    let is = |n: u8, state: RecordState, p: Protection| Precondition::RecordIs {
+        id: cs(n),
+        record: record(state),
+        protection: p,
+    };
+    // The precondition's own journal entries do not touch record 1 (its
+    // record keeps lsn 0), so it can be checked repeatedly.
+    assert!(check(is(1, RecordState::Abandoned, protection(0, Some(5)))).await);
+    assert!(!check(is(1, RecordState::Abandoned, protection(0, Some(6)))).await);
+    assert!(!check(is(1, RecordState::Abandoned, protection(1, Some(5)))).await);
+    assert!(!check(is(1, RecordState::Superseded, protection(0, Some(5)))).await);
+    assert!(!check(is(9, RecordState::Abandoned, Protection::default())).await);
+    apply(
+        meta,
+        repo,
+        vec![put_record(4, RecordState::Draft), Write::Pin(cs(1))],
+    )
+    .await;
+    assert!(
+        !check(is(1, RecordState::Abandoned, protection(0, Some(5)))).await,
+        "a new pin fails the compare"
+    );
+    assert!(check(is(1, RecordState::Abandoned, protection(1, Some(5)))).await);
+}
+
+async fn rows_read_by_holder_and_by_expiry<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "rows").await;
+    let other = new_repo(meta, "rows-other").await;
+    let add = |object: ObjectId, holder: &str| Write::AddHolder {
+        object,
+        holder: holder.to_owned(),
+    };
+    let until = |object: ObjectId, holder: &str, at: i64| Write::AddHolderUntil {
+        object,
+        holder: holder.to_owned(),
+        expires_at_ms: at,
+    };
+    apply(
+        meta,
+        repo,
+        vec![
+            add(oid(3), "c1"),
+            add(oid(1), "c1"),
+            add(oid(2), "c2"),
+            add(oid(2), "c1"),
+            until(oid(4), "upload:40:u", 40),
+            until(oid(1), "claim:20:r", 20),
+            until(oid(5), "upload:20:u", 20),
+            // The first add of a row decides its expiry.
+            until(oid(4), "upload:40:u", 10),
+        ],
+    )
+    .await;
+    apply(meta, other, vec![add(oid(1), "c1"), until(oid(1), "x", 0)]).await;
+
+    let held = meta
+        .held_objects(repo, "c1", None, 100)
+        .await
+        .expect("held");
+    assert_eq!(held, [oid(1), oid(2), oid(3)]);
+    let page = meta
+        .held_objects(repo, "c1", Some(oid(1)), 1)
+        .await
+        .expect("page");
+    assert_eq!(page, [oid(2)]);
+    assert!(
+        meta.held_objects(repo, "nobody", None, 100)
+            .await
+            .expect("held")
+            .is_empty()
+    );
+    assert_eq!(
+        meta.holders(repo, oid(1)).await.expect("count"),
+        2,
+        "a timed row is a row"
+    );
+
+    let row = |at: i64, object: ObjectId, holder: &str| TimedRow {
+        expires_at_ms: at,
+        object,
+        holder: holder.to_owned(),
+    };
+    let expired = meta.expired_rows(repo, 40, None, 100).await.expect("rows");
+    assert_eq!(
+        expired,
+        [
+            row(20, oid(1), "claim:20:r"),
+            row(20, oid(5), "upload:20:u"),
+            row(40, oid(4), "upload:40:u"),
+        ]
+    );
+    let first = meta.expired_rows(repo, 39, None, 1).await.expect("page");
+    assert_eq!(first, [row(20, oid(1), "claim:20:r")]);
+    let second = meta
+        .expired_rows(repo, 39, first.last().cloned(), 5)
+        .await
+        .expect("page");
+    assert_eq!(second, [row(20, oid(5), "upload:20:u")]);
+
+    apply(
+        meta,
+        repo,
+        vec![Write::RemoveHolder {
+            object: oid(1),
+            holder: "claim:20:r".to_owned(),
+        }],
+    )
+    .await;
+    assert_eq!(
+        meta.expired_rows(repo, 40, None, 100)
+            .await
+            .expect("rows")
+            .len(),
+        2
+    );
+    // A removed timed row added again without an expiry has none.
+    apply(meta, repo, vec![add(oid(1), "claim:20:r")]).await;
+    assert_eq!(
+        meta.expired_rows(repo, 40, None, 100)
+            .await
+            .expect("rows")
+            .len(),
+        2
+    );
+}
+
+async fn doomed_marks_claims_and_deletes<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "doomed").await;
+    let (a, b, c) = (oid(1), oid(2), oid(3));
+    let doom = |object: ObjectId, since_ms: i64| Write::Doom { object, since_ms };
+    let row = |object: ObjectId, holder: &str| Write::AddHolder {
+        object,
+        holder: holder.to_owned(),
+    };
+    let mark = |since_ms: i64, deleting: bool| DoomMark { since_ms, deleting };
+    let marks =
+        |ids: Vec<ObjectId>| async move { meta.doom_marks(repo, &ids).await.expect("marks") };
+    let holds = |pre: Vec<Precondition>| {
+        let t = txn(pre, vec![journal("Checked")]);
+        async move {
+            matches!(
+                meta.commit(repo, t).await.expect("commit"),
+                TxnOutcome::Committed(_)
+            )
+        }
+    };
+
+    apply(meta, repo, vec![doom(a, 10), doom(b, 20), row(c, "h")]).await;
+    assert_eq!(
+        marks(vec![c, b, a]).await,
+        [(b, mark(20, false)), (a, mark(10, false))],
+        "marks in the order asked, unmarked ids left out"
+    );
+    refused(meta, repo, vec![doom(c, 5)], "doom a held object").await;
+    refused(
+        meta,
+        repo,
+        vec![Write::MarkDeleting(c)],
+        "mark an undoomed object deleting",
+    )
+    .await;
+    // Doomed again: the first time stays.
+    apply(meta, repo, vec![doom(a, 99)]).await;
+    assert_eq!(marks(vec![a]).await, [(a, mark(10, false))]);
+    // A row removed and the object doomed in one transaction.
+    apply(
+        meta,
+        repo,
+        vec![
+            Write::RemoveHolder {
+                object: c,
+                holder: "h".to_owned(),
+            },
+            doom(c, 30),
+        ],
+    )
+    .await;
+    assert_eq!(marks(vec![c]).await, [(c, mark(30, false))]);
+
+    assert!(
+        holds(vec![
+            Precondition::ObjectDoomed(a),
+            Precondition::ObjectUnheld(a)
+        ])
+        .await
+    );
+    assert!(!holds(vec![Precondition::ObjectDoomed(oid(9))]).await);
+    assert!(holds(vec![Precondition::ObjectUnheld(oid(9))]).await);
+
+    // A claim: the doomed mark goes and a row holds the object.
+    apply(
+        meta,
+        repo,
+        vec![Write::AddHolderUntil {
+            object: a,
+            holder: "claim:50:r".to_owned(),
+            expires_at_ms: 50,
+        }],
+    )
+    .await;
+    assert!(marks(vec![a]).await.is_empty(), "a row revives the object");
+    assert!(!holds(vec![Precondition::ObjectUnheld(a)]).await);
+    assert!(!holds(vec![Precondition::ObjectDoomed(a)]).await);
+
+    // A delete: deleting, then the mark goes after the frame.
+    apply(meta, repo, vec![Write::MarkDeleting(b)]).await;
+    assert_eq!(marks(vec![b]).await, [(b, mark(20, true))]);
+    assert!(
+        !holds(vec![Precondition::ObjectDoomed(b)]).await,
+        "a claim cannot take an object being deleted"
+    );
+    refused(meta, repo, vec![doom(b, 1)], "doom an object being deleted").await;
+    apply(meta, repo, vec![Write::Undoom(b), Write::Undoom(oid(9))]).await;
+    assert!(marks(vec![b]).await.is_empty());
+
+    // A row on an object being deleted leaves the mark: the writer should
+    // have waited for the delete.
+    apply(meta, repo, vec![Write::MarkDeleting(c), row(c, "late")]).await;
+    assert_eq!(marks(vec![c]).await, [(c, mark(30, true))]);
+}
+
+async fn old_doomed_page_in_time_order<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "old-doomed").await;
+    let other = new_repo(meta, "old-doomed-other").await;
+    let mut writes = Vec::new();
+    for (n, since_ms) in [(5, 10), (1, 30), (3, 10), (2, 20), (4, 50)] {
+        writes.push(Write::Doom {
+            object: oid(n),
+            since_ms,
+        });
+    }
+    apply(meta, repo, writes).await;
+    apply(
+        meta,
+        other,
+        vec![Write::Doom {
+            object: oid(7),
+            since_ms: 0,
+        }],
+    )
+    .await;
+    let ids =
+        |rows: Vec<(ObjectId, DoomMark)>| rows.into_iter().map(|(o, _)| o).collect::<Vec<_>>();
+    let all = meta.old_doomed(repo, 30, None, 100).await.expect("doomed");
+    assert_eq!(ids(all), [oid(3), oid(5), oid(2), oid(1)]);
+    let first = meta.old_doomed(repo, 30, None, 2).await.expect("page");
+    let last = first.last().map(|(o, m)| (m.since_ms, *o));
+    assert_eq!(ids(first), [oid(3), oid(5)]);
+    let second = meta.old_doomed(repo, 30, last, 2).await.expect("page");
+    assert_eq!(ids(second), [oid(2), oid(1)]);
+}
+
+async fn lapsed_workspaces_page_in_lease_order<O: ObjectStore, M: MetaStore>(
+    _objects: &O,
+    meta: &M,
+) {
+    let repo = new_repo(meta, "lapsed").await;
+    let mut writes = Vec::new();
+    for (name, lease) in [("d", 10), ("a", 30), ("c", 10), ("b", 20), ("e", 40)] {
+        writes.push(Write::PutWorkspace(ws(name, None, lease)));
+    }
+    apply(meta, repo, writes).await;
+    let first = meta
+        .lapsed_workspaces(repo, 40, None, 2)
+        .await
+        .expect("lapsed");
+    assert_eq!(names(first.clone()), ["c", "d"]);
+    let last = first.last().map(|w| (w.lease_until_ms, w.name.clone()));
+    let second = meta
+        .lapsed_workspaces(repo, 40, last, 5)
+        .await
+        .expect("lapsed");
+    assert_eq!(
+        names(second),
+        ["b", "a"],
+        "leases end before, not at, the time"
+    );
+}
+
+async fn gc_protection_marker<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "marker").await;
+    assert!(
+        meta.gc_protection(repo).await.expect("marker"),
+        "a new repository is protected from its first write"
+    );
+    apply(meta, repo, vec![Write::SetGcProtection(false)]).await;
+    assert!(!meta.gc_protection(repo).await.expect("marker"));
+    apply(meta, repo, vec![Write::SetGcProtection(true)]).await;
+    assert!(meta.gc_protection(repo).await.expect("marker"));
 }
