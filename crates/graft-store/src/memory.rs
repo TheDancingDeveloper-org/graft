@@ -24,6 +24,10 @@ struct Repo {
     changesets: BTreeMap<ChangesetId, (Vec<u8>, ChangesetRecord)>,
     refs: BTreeMap<String, RefRecord>,
     workspaces: BTreeMap<String, WorkspaceRecord>,
+    /// Draft path index: (line, path, workspace).
+    draft_paths: BTreeSet<(String, RepoPath, String)>,
+    /// Reverse draft path index: workspace → (line, path).
+    workspace_paths: BTreeMap<String, BTreeSet<(String, RepoPath)>>,
     derived: BTreeMap<(String, u32, Vec<u8>), Vec<u8>>,
     line_pos: BTreeMap<(String, ChangesetId), u64>,
     line_paths: BTreeMap<(String, RepoPath), BTreeSet<(u64, ChangesetId)>>,
@@ -443,7 +447,21 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
             }
             Write::DeleteWorkspace(name) => {
                 repo.workspaces.remove(&name);
+                clear_draft_paths(repo, &name);
             }
+            Write::SetDraftPaths {
+                workspace,
+                line,
+                paths,
+            } => {
+                clear_draft_paths(repo, &workspace);
+                add_draft_paths(repo, &workspace, &line, paths);
+            }
+            Write::AddDraftPaths {
+                workspace,
+                line,
+                paths,
+            } => add_draft_paths(repo, &workspace, &line, paths),
             Write::PutDerived {
                 kind,
                 version,
@@ -500,6 +518,24 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
 }
 
 /// Clears a doomed mark that is not `deleting`: the object is held again.
+fn clear_draft_paths(repo: &mut Repo, workspace: &str) {
+    for (line, path) in repo.workspace_paths.remove(workspace).unwrap_or_default() {
+        repo.draft_paths.remove(&(line, path, workspace.to_owned()));
+    }
+}
+
+fn add_draft_paths(repo: &mut Repo, workspace: &str, line: &str, paths: Vec<RepoPath>) {
+    let rows = repo
+        .workspace_paths
+        .entry(workspace.to_owned())
+        .or_default();
+    for path in paths {
+        repo.draft_paths
+            .insert((line.to_owned(), path.clone(), workspace.to_owned()));
+        rows.insert((line.to_owned(), path));
+    }
+}
+
 fn revive(repo: &mut Repo, object: ObjectId) {
     if repo.doomed.get(&object).is_some_and(|m| !m.deleting) {
         repo.doomed.remove(&object);
@@ -905,6 +941,57 @@ impl MetaStore for MemoryStore {
                 .take(page_limit(limit))
                 .map(|(_, holder)| holder.clone())
                 .collect())
+        }))
+    }
+
+    fn scan_draft_paths(
+        &self,
+        repo: RepoId,
+        line: &str,
+        prefix: &RepoPath,
+        after: Option<(RepoPath, String)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(RepoPath, String)>>> + Send {
+        ready(self.with(|st| {
+            use std::ops::Bound;
+            let start = match after {
+                Some((path, ws)) => Bound::Excluded((line.to_owned(), path, ws)),
+                None => Bound::Included((line.to_owned(), prefix.clone(), String::new())),
+            };
+            // Beneath `prefix` sorts before `prefix0` ('0' follows '/').
+            let end = format!("{prefix}0");
+            Ok(st
+                .repo(repo)?
+                .draft_paths
+                .range((start, Bound::Unbounded))
+                .take_while(|(l, p, _)| l == line && p.as_str() < end.as_str())
+                .filter(|(_, p, _)| p.starts_with(prefix))
+                .take(page_limit(limit))
+                .map(|(_, p, w)| (p.clone(), w.clone()))
+                .collect())
+        }))
+    }
+
+    fn workspace_draft_paths(
+        &self,
+        repo: RepoId,
+        workspace: &str,
+        after: Option<RepoPath>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<RepoPath>>> + Send {
+        ready(self.with(|st| {
+            let mut paths: Vec<RepoPath> = st
+                .repo(repo)?
+                .workspace_paths
+                .get(workspace)
+                .into_iter()
+                .flatten()
+                .map(|(_, p)| p.clone())
+                .filter(|p| after.as_ref().is_none_or(|a| p > a))
+                .collect();
+            paths.sort();
+            paths.truncate(page_limit(limit));
+            Ok(paths)
         }))
     }
 

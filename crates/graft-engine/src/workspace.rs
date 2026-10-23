@@ -374,6 +374,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             base,
             head: None,
             lease_until_ms: self.lease_until(req.lease_ms),
+            // Set from `cx.principal.work_item` once the SQLite store keeps
+            // the column (WI-2310 step b); a store that drops it would fail
+            // every later whole-record CAS.
+            work_item: None,
         };
 
         for _ in 0..CAS_RETRIES {

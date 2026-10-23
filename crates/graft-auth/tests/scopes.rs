@@ -49,6 +49,7 @@ fn text_forms_round_trip() {
         "repo:graft:land:main",
         "repo:graft:land:release/1.0",
         "repo:graft:attest",
+        "repo:graft:drafts",
         "repo:graft:admin",
         "objects:read",
     ] {
@@ -94,6 +95,7 @@ fn malformed_scopes() {
         "repo:graft:read:extra",
         "repo:graft:admin:extra",
         "repo:graft:attest:main",
+        "repo:graft:drafts:src",
         "repo:graft:land",
         "repo:graft:land:",
         "repo:graft:delete",
@@ -210,4 +212,32 @@ fn write_path_prefix() {
     // An unrestricted write grants any path.
     let any = principal(&["repo:graft:write"]);
     assert_eq!(authorize(&any, &write(), Some(&path("README.md"))), Ok(()));
+}
+
+#[test]
+fn drafts_is_granted_only_by_itself_and_admin() {
+    let drafts = |repo: &str| Scope::Drafts { repo: repo.into() };
+    // read, write and land do not reveal other agents' drafts.
+    let p = principal(&[
+        "repo:graft:read",
+        "repo:graft:write",
+        "repo:graft:land:main",
+    ]);
+    assert_eq!(
+        authorize(&p, &drafts("graft"), None),
+        Err(AuthError::Denied {
+            scope: "repo:graft:drafts".into(),
+            path: None,
+        })
+    );
+    // drafts grants nothing else.
+    let d = principal(&["repo:graft:drafts"]);
+    assert_eq!(authorize(&d, &drafts("graft"), None), Ok(()));
+    assert!(authorize(&d, &drafts("other"), None).is_err());
+    assert!(authorize(&d, &read("graft"), None).is_err());
+    assert!(authorize(&d, &write(), None).is_err());
+    // admin grants it on its repository only.
+    let admin = principal(&["repo:graft:admin"]);
+    assert_eq!(authorize(&admin, &drafts("graft"), None), Ok(()));
+    assert!(authorize(&admin, &drafts("other"), None).is_err());
 }

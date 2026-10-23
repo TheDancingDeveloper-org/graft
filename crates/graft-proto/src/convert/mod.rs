@@ -1719,6 +1719,92 @@ impl TryFrom<pb::GetConflictsRequest> for GetConflicts {
     }
 }
 
+// ---- draft overlap (WI-2310) ----------------------------------------------
+
+impl From<OverlappingDrafts> for pb::OverlappingDraftsRequest {
+    fn from(r: OverlappingDrafts) -> Self {
+        pb::OverlappingDraftsRequest {
+            repo: r.repo,
+            line: r.line,
+            paths: r.paths.into_iter().map(|p| p.as_str().to_owned()).collect(),
+            include_own: r.include_own,
+            page: Some(r.page.into()),
+        }
+    }
+}
+
+impl TryFrom<pb::OverlappingDraftsRequest> for OverlappingDrafts {
+    type Error = WireError;
+    fn try_from(r: pb::OverlappingDraftsRequest) -> R<Self> {
+        Ok(OverlappingDrafts {
+            repo: r.repo,
+            line: r.line,
+            paths: paths(r.paths, "paths")?,
+            include_own: r.include_own,
+            page: page_from(r.page),
+        })
+    }
+}
+
+impl From<DraftOverlap> for pb::DraftOverlap {
+    fn from(r: DraftOverlap) -> Self {
+        pb::DraftOverlap {
+            hits: r
+                .hits
+                .into_iter()
+                .map(|h| pb::DraftHit {
+                    path: h.path.as_str().to_owned(),
+                    workspace: h.workspace,
+                })
+                .collect(),
+            workspaces: r
+                .workspaces
+                .into_iter()
+                .map(|w| pb::DraftWorkspace {
+                    workspace: w.workspace,
+                    owner: w.owner,
+                    session: w.session,
+                    work_item: w.work_item,
+                    draft_age_ms: w.draft_age_ms,
+                    lease_until_ms: w.lease_until_ms,
+                })
+                .collect(),
+            next: r.next,
+        }
+    }
+}
+
+impl TryFrom<pb::DraftOverlap> for DraftOverlap {
+    type Error = WireError;
+    fn try_from(r: pb::DraftOverlap) -> R<Self> {
+        Ok(DraftOverlap {
+            hits: r
+                .hits
+                .into_iter()
+                .map(|h| {
+                    Ok(DraftHit {
+                        path: path(h.path, "hits.path")?,
+                        workspace: h.workspace,
+                    })
+                })
+                .collect::<R<_>>()?,
+            workspaces: r
+                .workspaces
+                .into_iter()
+                .map(|w| DraftWorkspace {
+                    workspace: w.workspace,
+                    owner: w.owner,
+                    session: w.session,
+                    work_item: w.work_item,
+                    draft_age_ms: w.draft_age_ms,
+                    lease_until_ms: w.lease_until_ms,
+                })
+                .collect(),
+            next: r.next,
+        })
+    }
+}
+
 fn conflict_reason(r: Option<ConflictReason>) -> i32 {
     (match r {
         None => pb::ConflictReason::Unspecified,

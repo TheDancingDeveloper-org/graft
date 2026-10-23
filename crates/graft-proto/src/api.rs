@@ -215,6 +215,17 @@ pub trait WorkspaceApi: Send + Sync {
         cx: &CallContext,
         req: Resolve,
     ) -> impl Future<Output = ApiResult<Resolved>> + Send;
+    /// Which other live workspaces have open drafts on these paths. See
+    /// [`OverlappingDrafts`] for the contract. Implementations without the
+    /// draft path index keep the default, which answers `Unavailable`.
+    fn overlapping_drafts(
+        &self,
+        cx: &CallContext,
+        req: OverlappingDrafts,
+    ) -> impl Future<Output = ApiResult<DraftOverlap>> + Send {
+        let _ = (cx, req);
+        async { Err(crate::ApiError::Unavailable { retry_after_ms: 0 }) }
+    }
 }
 
 /// Admin operations.

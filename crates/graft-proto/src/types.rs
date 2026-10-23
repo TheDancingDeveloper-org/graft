@@ -747,6 +747,68 @@ pub struct Conflicts {
     pub next: Option<String>,
 }
 
+/// The most input paths an `OverlappingDrafts` request may name.
+pub const MAX_OVERLAP_PATHS: usize = 64;
+
+/// The largest `OverlappingDrafts` page, in hits.
+pub const MAX_OVERLAP_PAGE: u32 = 200;
+
+/// `OverlappingDrafts` request: which other live workspaces on `line` have
+/// open drafts changing paths under `paths` (`docs/notes/draft-overlap.md`
+/// §4). Needs the `repo:<r>:drafts` scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OverlappingDrafts {
+    /// Repository.
+    pub repo: String,
+    /// Line.
+    pub line: String,
+    /// Paths or directory prefixes, 1..=[`MAX_OVERLAP_PATHS`]. The root is
+    /// not a path, so a whole-repository query cannot be expressed.
+    pub paths: Vec<RepoPath>,
+    /// Include the caller's own workspaces.
+    pub include_own: bool,
+    /// Page over hits (limit 1..=[`MAX_OVERLAP_PAGE`]), in index order.
+    pub page: Page,
+}
+
+/// One `(path, workspace)` row of an overlap page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftHit {
+    /// A path the workspace's stack changes.
+    pub path: RepoPath,
+    /// The workspace.
+    pub workspace: String,
+}
+
+/// A workspace named by a [`DraftHit`]. Never its head id or contents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftWorkspace {
+    /// Workspace.
+    pub workspace: String,
+    /// Owner subject.
+    pub owner: String,
+    /// Vogt session, if any.
+    pub session: Option<String>,
+    /// Vogt work item, if any.
+    pub work_item: Option<String>,
+    /// How long ago its head draft was written, ms.
+    pub draft_age_ms: u64,
+    /// Lease expiry, ms since the epoch.
+    pub lease_until_ms: i64,
+}
+
+/// `OverlappingDrafts` response. A page may be short, even empty, with a
+/// `next` token: keep paging until `next` is absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DraftOverlap {
+    /// Hits in index order: by input prefix, then `(path, workspace)`.
+    pub hits: Vec<DraftHit>,
+    /// One entry per workspace named in `hits`.
+    pub workspaces: Vec<DraftWorkspace>,
+    /// Resume token for the next page.
+    pub next: Option<String>,
+}
+
 /// A caller-supplied resolution for one conflicting path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]

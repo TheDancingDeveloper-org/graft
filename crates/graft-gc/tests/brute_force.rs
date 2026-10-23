@@ -216,6 +216,7 @@ fn populate(h: &History) -> (MemoryStore, graft_store::RepoId) {
             base: cs(0),
             head: None,
             lease_until_ms: *lease,
+            work_item: None,
         }));
     }
     for (o, exp) in h.uploads.iter().enumerate() {
