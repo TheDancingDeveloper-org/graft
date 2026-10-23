@@ -1,6 +1,6 @@
 //! `graft-mirror`: the only service that speaks git (`docs/design.md` §11).
 //!
-//! Work items G1.14 (import, follow), G2.6 (PR bridge), G3.3 (export),
+//! Work items G1.14 (import, follow), G3.3 (export),
 //! G3.9 (authority switch), WI-2284 (batch PRs, decision D21).
 //!
 //! The bearer token comes from `GRAFT_TOKEN` or a token file, never from the
@@ -817,7 +817,7 @@ impl RunAuthority<'_> {
                     match s.to {
                         graft_mirror::authority::Authority::GitPrimary => "follow (not export)",
                         graft_mirror::authority::Authority::GraftPrimary => {
-                            "export (not follow or bridge)"
+                            "export (not follow)"
                         }
                     }
                 );
@@ -870,7 +870,6 @@ fn print_status(line: &str, s: &Status) {
     if s.export.as_ref().is_some_and(|e| e.diverged) {
         println!("  export:    stopped on a divergence (reconcile)");
     }
-    println!("  open bridge requests: {}", s.open_pulls);
 }
 
 async fn serve_metrics(

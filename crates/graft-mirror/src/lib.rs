@@ -1,6 +1,6 @@
 //! `graft-mirror`: the only service that speaks git (`docs/design.md` §11).
 //!
-//! Work items G1.14 (import, follow), G2.6 (PR bridge), G3.3 (export),
+//! Work items G1.14 (import, follow), G3.3 (export),
 //! G3.9 (authority switch) and WI-2284 (batch PRs, D21).
 //!
 //! - [`import`]: a one-shot lossless import of a local git repository, then
@@ -24,7 +24,7 @@
 //! - [`land`]: the hand-off to graft's `Land`, and holding imported stacks as
 //!   drafts.
 //! - [`db`]: the mirror DB (SQLite), implementing `graft-git`'s `MirrorMap`
-//!   and holding follow's, the bridge's and export's per-line state.
+//!   and holding follow's, export's and batch's per-line state.
 //! - [`git`]: the git CLI for `ls-remote`, `fetch` and ancestry.
 //! - [`server`]: the graft API over gRPC, including the admin service.
 //!
@@ -46,7 +46,6 @@ use crate::github::ForgeError;
 
 pub mod authority;
 pub mod batch;
-pub mod bridge;
 pub mod config;
 pub mod credentials;
 pub mod db;
@@ -59,6 +58,7 @@ pub mod land;
 pub mod pulls;
 pub mod reconcile;
 pub mod server;
+pub mod text;
 
 pub use db::MirrorDb;
 pub use git::{GitCliError, Mirror};

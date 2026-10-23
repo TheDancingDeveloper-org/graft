@@ -6,7 +6,7 @@
 //!
 //! Each poll, at most [`MAX_PULLS`] open PRs into the line's branch are read:
 //!
-//! 1. A PR whose head branch is `graft/…` is the PR bridge's own and is
+//! 1. A PR whose head branch is `graft/…` is graft's own and is
 //!    skipped.
 //! 2. A new PR, or one whose head moved, is fetched (`refs/pull/<n>/head`)
 //!    into the local mirror and imported with `graft-git`. Its stack must
@@ -34,12 +34,12 @@ use graft_proto::types::{Pair, WorkspaceRef};
 use graft_proto::{ApiError, CallContext};
 
 use crate::MirrorError;
-use crate::bridge::clean_text;
 use crate::db::MirrorDb;
 use crate::follow::FollowLine;
 use crate::git::Mirror;
 use crate::github::{OpenPull, PullSource};
 use crate::land::{Lander, hold, stack_base};
+use crate::text::clean_text;
 
 /// Open PRs read per poll.
 pub const MAX_PULLS: u32 = 100;

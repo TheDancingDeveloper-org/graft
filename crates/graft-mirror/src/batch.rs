@@ -55,17 +55,17 @@ use graft_proto::types::{
 use graft_proto::{ApiError, CallContext};
 use serde::Deserialize;
 
-use crate::bridge::clean_text;
 use crate::credentials::SecretToken;
 use crate::db::MirrorDb;
 use crate::export::default_committer;
 use crate::follow::{FollowConfig, FollowLine, Follower, LineOutcome};
 use crate::git::{Mirror, PushOutcome};
 use crate::github::{Forge, Pull};
+use crate::text::clean_text;
 use crate::{MirrorError, current_ref, move_ref};
 
 /// The authority batch mode claims for an integration line: nothing else
-/// (export, follow, the bridge) writes it from the mirror.
+/// (export, follow) writes it from the mirror.
 pub const BATCH: &str = "batch";
 
 /// The metadata key on a sync changeset, naming the base tip it absorbed.

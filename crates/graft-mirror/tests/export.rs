@@ -627,7 +627,7 @@ impl World {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn export_claims_the_line_and_refuses_one_another_authority_holds() {
     let w = World::new(true).await;
-    w.db.claim_authority("main", graft_mirror::bridge::GIT_PRIMARY)
+    w.db.claim_authority("main", graft_mirror::authority::GIT_PRIMARY)
         .unwrap();
     let refused = Export::new(
         &w.api,

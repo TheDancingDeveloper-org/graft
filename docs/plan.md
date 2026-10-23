@@ -21,7 +21,8 @@ phases are now set by D22:
 | 5 | **Later:** regional tier, virtual checkouts, chunked blobs, code search, publish decision | — |
 
 Not planned (D21, D22): cutting rustTorrent `main` over to graft-primary
-(G3.10), and the per-land PR bridge CLI (G2.6's `bridge` subcommand).
+(G3.10), and the per-land PR bridge (G2.6; its code was removed in
+WI-2302 and WI-2320).
 
 Phase 1 is measured as source control against git with the `bench/` harness
 (WI-2294): land latency and contention, merge and conflict correctness, sync
@@ -484,7 +485,8 @@ harness reports on. They don't gate phase 2.
 ## Phase 2: write through GitHub
 
 > **Delivered** (G2.1 to G2.9). The per-land PR bridge (G2.6) was
-> superseded by the batch PR (D21); its CLI stub is being removed (WI-2302).
+> superseded by the batch PR (D21); its CLI stub (WI-2302) and module
+> (WI-2320) are removed.
 
 **Goal:** agents commit drafts in graft and land them through GitHub. `graft
 land` exports the stack as a PR into the existing merge queue, and the merged
@@ -563,7 +565,7 @@ CI and the merge queue do not change.
   supersedes the old head. The parity test is updated.
 - Test: `assert_cmd` against the testkit server; snapshot tests.
 
-**G2.6 Mirror: PR bridge.**
+**G2.6 Mirror: PR bridge.** (Superseded by D21; removed in WI-2320.)
 - Crates: `graft-mirror`
 - Needs: G2.2, G1.14
 - Deliver: a land request on a git-primary line becomes an exported branch
