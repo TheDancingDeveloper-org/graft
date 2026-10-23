@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS authority (
     line TEXT PRIMARY KEY,
     claim TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS switches (
+    line TEXT PRIMARY KEY,
+    from_claim TEXT NOT NULL,
+    to_claim TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    changeset BLOB,
+    sha BLOB
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS bridge (
     head BLOB PRIMARY KEY,
     line TEXT NOT NULL,
@@ -108,6 +116,21 @@ pub struct ExportState {
     pub diverged: bool,
     /// What upstream held when the lease was refused (`None`: no branch).
     pub stray: Option<GitSha>,
+}
+
+/// An authority switch in progress on one line (`docs/design.md` §11.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SwitchRecord {
+    /// The claim that held the line when the switch began.
+    pub from: String,
+    /// The claim the switch hands the line to.
+    pub to: String,
+    /// `frozen`, `verified` or `flipped`.
+    pub stage: String,
+    /// The graft tip `verify` checked, once verified.
+    pub changeset: Option<ChangesetId>,
+    /// The upstream commit `verify` checked, once verified.
+    pub sha: Option<GitSha>,
 }
 
 /// The mirror DB. One per mirrored graft repository.
@@ -210,6 +233,127 @@ impl MirrorDb {
             |r| r.get::<_, String>(0),
         )
         .map_err(db_err)
+    }
+
+    /// The claim that holds `line`, if any. Reads only; never claims.
+    pub fn authority(&self, line: &str) -> Result<Option<String>, GitError> {
+        self.conn()
+            .query_row(
+                "SELECT claim FROM authority WHERE line = ?1",
+                params![line],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    /// The switch in progress on `line`, if any.
+    pub fn switch(&self, line: &str) -> Result<Option<SwitchRecord>, GitError> {
+        type Row = (String, String, String, Option<Vec<u8>>, Option<Vec<u8>>);
+        let row: Option<Row> = self
+            .conn()
+            .query_row(
+                "SELECT from_claim, to_claim, stage, changeset, sha FROM switches
+                 WHERE line = ?1",
+                params![line],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .map_err(db_err)?;
+        let Some((from, to, stage, changeset, sha)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(SwitchRecord {
+            from,
+            to,
+            stage,
+            changeset: changeset.map(|b| id_col(b).map(ChangesetId)).transpose()?,
+            sha: sha_col(sha)?,
+        }))
+    }
+
+    /// Writes the switch record of `line`, replacing any earlier one.
+    pub fn put_switch(&self, line: &str, rec: &SwitchRecord) -> Result<(), GitError> {
+        self.conn()
+            .execute(
+                "INSERT INTO switches (line, from_claim, to_claim, stage, changeset, sha)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (line) DO UPDATE SET from_claim = ?2, to_claim = ?3, stage = ?4,
+                     changeset = ?5, sha = ?6",
+                params![
+                    line,
+                    rec.from,
+                    rec.to,
+                    rec.stage,
+                    rec.changeset.map(|c| c.0.0.to_vec()),
+                    rec.sha.map(|s| s.0.to_vec()),
+                ],
+            )
+            .map(drop)
+            .map_err(db_err)
+    }
+
+    /// Ends the switch on `line`: its record goes.
+    pub fn end_switch(&self, line: &str) -> Result<(), GitError> {
+        self.conn()
+            .execute("DELETE FROM switches WHERE line = ?1", params![line])
+            .map(drop)
+            .map_err(db_err)
+    }
+
+    /// Hands `line` from claim `from` to claim `to`, in one transaction:
+    /// the claim moves by compare-and-swap (`false`, and nothing changes,
+    /// when `from` no longer holds it), export's record is dropped so the
+    /// next export starts afresh from the line and upstream, follow's record
+    /// restarts at `upstream`, and the switch is marked `flipped`.
+    pub fn flip_authority(
+        &self,
+        line: &str,
+        from: &str,
+        to: &str,
+        upstream: GitSha,
+    ) -> Result<bool, GitError> {
+        let mut conn = self.conn();
+        let txn = conn.transaction().map_err(db_err)?;
+        let moved = txn
+            .execute(
+                "UPDATE authority SET claim = ?3 WHERE line = ?1 AND claim = ?2",
+                params![line, from, to],
+            )
+            .map_err(db_err)?;
+        if moved != 1 {
+            return Ok(false);
+        }
+        txn.execute("DELETE FROM exports WHERE line = ?1", params![line])
+            .map_err(db_err)?;
+        txn.execute(
+            "INSERT INTO lines (line, upstream, behind_since_ms, diverged)
+             VALUES (?1, ?2, NULL, NULL)
+             ON CONFLICT (line) DO UPDATE SET upstream = ?2, behind_since_ms = NULL,
+                 diverged = NULL",
+            params![line, upstream.0.to_vec()],
+        )
+        .map_err(db_err)?;
+        txn.execute(
+            "UPDATE switches SET stage = 'flipped' WHERE line = ?1",
+            params![line],
+        )
+        .map_err(db_err)?;
+        txn.commit().map_err(db_err)?;
+        Ok(true)
+    }
+
+    /// The bridge records not yet final on `line`.
+    pub fn open_pulls_on(&self, line: &str) -> Result<usize, GitError> {
+        self.conn()
+            .query_row(
+                "SELECT count(*) FROM bridge
+                 WHERE line = ?1 AND state NOT IN ('landed', 'rejected')",
+                params![line],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .map_err(db_err)
     }
 
     /// The bridge record for the stack headed by `head`, if there is one.
