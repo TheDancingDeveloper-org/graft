@@ -50,7 +50,7 @@ docker exec graft-dev-server graft-server admin token mint \
 sudo chown 10001:10001 "$work/token"
 sudo chmod 0600 "$work/token"
 
-sudo docker run --rm --user 10001:10001 --network graft-dev_graft-dev \
+sudo docker run --rm --user 10001:10001 --network graft-dev \
   --entrypoint sh -v "$work:/w" "$image" -c '
     set -eu
     repo=$1; line=$2; upstream=$3

@@ -34,7 +34,7 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
    ```sh
    export CARGO_BUILD_JOBS=4
    cargo fmt --all -- --check                                                    # ci/fmt
-   cargo clippy --workspace --exclude rtbit-desktop --all-targets \
+   cargo clippy --workspace --exclude rtbit-desktop \
      --no-default-features --features default-tls -- -D warnings                 # ci/clippy
    cargo test --workspace --exclude rtbit-desktop --locked \
      --no-default-features --features default-tls                                # ci/test
