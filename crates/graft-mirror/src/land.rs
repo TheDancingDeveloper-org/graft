@@ -57,7 +57,7 @@ impl<A: RepoApi> Lander for NativeLand<'_, A> {
         };
         match self.api.land(cx, req).await? {
             Landed::Landed { landed, .. } => Ok(landed),
-            // A graft-primary line never hands back to the PR bridge; if it
+            // A graft-primary line never hands back to GitHub; if it
             // did, the line's authority is not what the mirror believes.
             _ => Err(ApiError::Rejected {
                 policy: "line-authority".to_owned(),

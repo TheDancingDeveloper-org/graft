@@ -1,6 +1,6 @@
-//! The GitHub calls the PR bridge makes (`docs/design.md` §11.3): find, open
+//! The GitHub calls the mirror makes (`docs/design.md` §11.3): find, open
 //! and read pull requests, enqueue one in the merge queue, and read the check
-//! runs on a head commit. The bridge talks to them through [`Forge`], so tests
+//! runs on a head commit. The mirror talks to them through [`Forge`], so tests
 //! can stand in a fake.
 //!
 //! Every call is bounded: a rate limit or a 5xx answer is retried a fixed
@@ -18,8 +18,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::MirrorError;
-use crate::bridge::clean_text;
 use crate::credentials::{CredentialProvider, SecretToken};
+use crate::text::clean_text;
 
 /// How many characters of a GitHub message are kept.
 const MESSAGE_CHARS: usize = 200;
@@ -68,7 +68,7 @@ impl fmt::Display for ForgeError {
 
 impl std::error::Error for ForgeError {}
 
-/// A pull request as the bridge reads it.
+/// A pull request as the mirror reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pull {
     /// The PR number.
@@ -111,7 +111,7 @@ pub struct CheckRun {
     pub url: String,
 }
 
-/// The calls the PR bridge needs from GitHub.
+/// The calls the mirror needs from GitHub.
 pub trait Forge: Send + Sync {
     /// The PR whose head is `branch`, open or not, if there is one.
     fn find_pull(

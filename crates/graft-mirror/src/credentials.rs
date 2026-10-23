@@ -1,4 +1,4 @@
-//! How the PR bridge authenticates to GitHub (decision D8, operator's call).
+//! How the mirror authenticates to GitHub (decision D8, operator's call).
 //!
 //! The choice is made in config and has no default: either a static token
 //! read from a file, or a GitHub App (its id, an installation id and a
@@ -60,7 +60,7 @@ impl fmt::Debug for SecretToken {
     }
 }
 
-/// Where the bridge's GitHub credential comes from.
+/// Where the mirror's GitHub credential comes from.
 pub trait CredentialProvider: Send + Sync {
     /// A token that is valid now, minted or read as the provider needs.
     fn token(&self) -> impl std::future::Future<Output = Result<SecretToken, ForgeError>> + Send;

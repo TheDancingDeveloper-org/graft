@@ -62,8 +62,9 @@ pub struct FileConfig {
     pub allow_lossy: Vec<String>,
     /// The followed branches.
     pub lines: Vec<LineConfig>,
-    /// The PR bridge's GitHub repository and credential. Optional: without
-    /// it the mirror follows and imports but does not bridge.
+    /// The GitHub repository and credential for batch PRs, PR import and the
+    /// authority switch. Optional: without it the mirror follows and imports
+    /// only.
     #[serde(default)]
     pub github: Option<GithubFile>,
     /// Graft-primary export settings (`graft-mirror export --config`).
@@ -85,7 +86,7 @@ pub struct ExportFile {
     pub import_pulls: bool,
 }
 
-/// The PR bridge's GitHub repository and how it authenticates.
+/// The mirror's GitHub repository and how it authenticates.
 ///
 /// ```toml
 /// [github]
