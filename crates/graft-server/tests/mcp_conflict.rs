@@ -447,3 +447,88 @@ async fn mcp_only_agent_resolves_a_binary_conflict_by_id_only() {
     assert_lineage(&o, "blob.bin");
     assert_clean(&o, &["ff0002", "ff0003"]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revert_into_a_workspace_is_for_its_owner_only() {
+    let site = Site::new(
+        "server-mcp-revert-owner",
+        "[[lines]]\nname = \"main\"\npolicy = \"direct\"\n",
+    );
+    let admin = site.mint(&["repo:r:admin"]);
+    let scopes = ["repo:r:write", "repo:r:land:main"];
+    let token_a = site.mint_as("agent-a", &scopes, 3600);
+    let token_b = site.mint_as("agent-b", &scopes, 3600);
+    let server = site.start();
+
+    let mut c = server.clients(Some(&admin)).await;
+    c.create_repo("r").await.expect("create");
+    let files = BTreeMap::from([("f.txt".to_owned(), BASE.as_bytes().to_vec())]);
+    let root = c
+        .commit("r", None, &BTreeMap::new(), &files, 0)
+        .await
+        .expect("root");
+    let files = BTreeMap::from([("f.txt".to_owned(), THEIRS.as_bytes().to_vec())]);
+    let tip = c
+        .commit("r", Some(root.id), &BTreeMap::new(), &files, 1)
+        .await
+        .expect("tip");
+    c.set_line("r", "main", tip.id).await.expect("main");
+    let tip = tip.id.to_string();
+
+    let a = Agent::open(server.addr, &token_a);
+    let b = Agent::open(server.addr, &token_b);
+    a.ok(
+        "graft_workspace",
+        json!({"repo": "r", "action": "open", "name": "wa", "line": "main"}),
+    );
+    let draft = a.commit("wa", json!({"path": "g.txt", "content": "g\n"}));
+
+    // B may not add a draft to A's workspace, by default `onto` or not.
+    for args in [
+        json!({"repo": "r", "changeset": tip, "workspace": "wa"}),
+        json!({"repo": "r", "changeset": tip, "workspace": "wa", "onto": tip}),
+    ] {
+        let e = b.err("graft_revert", args);
+        assert_eq!(e["kind"], "permission_denied", "{e}");
+    }
+    // Nor over gRPC.
+    let mut cb = server.clients(Some(&token_b)).await;
+    let tip_id = graft_model::ChangesetId::parse(&tip).unwrap();
+    let e = cb
+        .repo
+        .revert(graft_proto::pb::RevertRequest {
+            repo: "r".into(),
+            changeset: tip_id.0.0.to_vec(),
+            onto: tip_id.0.0.to_vec(),
+            workspace: Some("wa".into()),
+        })
+        .await
+        .expect_err("foreign revert");
+    assert!(
+        matches!(
+            common::api(e),
+            graft_proto::ApiError::PermissionDenied { .. }
+        ),
+        "gRPC refuses too"
+    );
+    let ws = a.ok(
+        "graft_workspace",
+        json!({"repo": "r", "action": "get", "name": "wa"}),
+    );
+    assert_eq!(
+        ws["workspace"]["head"],
+        draft.as_str(),
+        "A's stack is untouched"
+    );
+
+    // The owner may revert onto a changeset that is not the workspace head.
+    let reverted = a.ok(
+        "graft_revert",
+        json!({"repo": "r", "changeset": tip, "workspace": "wa", "onto": draft}),
+    );
+    assert_eq!(reverted["onto"], draft.as_str(), "{reverted}");
+    assert_eq!(
+        a.read(reverted["id"].as_str().unwrap(), "f.txt"),
+        ("utf8".into(), BASE.into())
+    );
+}

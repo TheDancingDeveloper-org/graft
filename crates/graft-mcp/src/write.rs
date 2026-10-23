@@ -737,7 +737,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
 
     #[tool(
         name = "graft_conflicts",
-        description = "What a workspace's stack conflicts on against its line tip (or `onto`): per path the base, ours and theirs ids and kinds, and diff3 markers when all sides are text (clipped to 16 KiB; read larger sides with graft_read by id). Paged by path. Resolve with graft_resolve.",
+        description = "What a workspace's stack conflicts on against its line tip (or `onto`): per path the base, ours and theirs ids and kinds, and diff3 markers when all sides are text (clipped to 16 KiB; read larger sides with graft_read by id). A binary path gives ids only, with `markers: null` and `reason: \"binary\"`. Paged by path. Resolve with graft_resolve.",
         annotations(
             title = "Conflicts",
             read_only_hint = true,
@@ -977,6 +977,7 @@ fn resolutions(files: &[FileChange]) -> Result<Vec<PathResolution>, ToolError> {
                     let content = file.content.as_deref().unwrap_or_default();
                     let data = match file.encoding.unwrap_or_default() {
                         Encoding::Utf8 => content.as_bytes().to_vec(),
+                        // `stage` above refused bad hex, so this decodes.
                         Encoding::Hex => unhex(content).unwrap_or_default(),
                     };
                     Resolution::Put {

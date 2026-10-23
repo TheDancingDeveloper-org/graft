@@ -184,9 +184,18 @@ impl RepoApi for McpApi {
             .await)
     }
     async fn revert(&self, cx: &CallContext, req: Revert) -> ApiResult<ChangesetId> {
-        via!(self, "Revert", req.repo, cx, true, |e, c| e
-            .revert(&c, req)
-            .await)
+        // As on gRPC: a revert into a workspace adds a draft to it, so only
+        // its owner (or a repository admin) may.
+        via!(self, "Revert", req.repo, cx, true, |e, c| {
+            if let Some(name) = &req.workspace {
+                let ws = WorkspaceRef {
+                    repo: req.repo.clone(),
+                    name: name.clone(),
+                };
+                own_workspace(&e, &c, &ws).await?;
+            }
+            e.revert(&c, req).await
+        })
     }
     async fn land(&self, cx: &CallContext, req: Land) -> ApiResult<Landed> {
         via!(self, "Land", req.repo, cx, true, |e, c| e
