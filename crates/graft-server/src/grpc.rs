@@ -1123,9 +1123,14 @@ impl pb::ci_service_server::CiService for Services {
             tracing::info!(op = OP, reason = "no CI issuer is configured", "refused");
             return Err(refuse(ApiError::Unauthenticated));
         };
-        let jwt = request.into_inner().ci_token;
+        let req = request.into_inner();
         let token = ci
-            .exchange(&self.app.signing, jwt.trim(), self.app.now_s())
+            .exchange(
+                &self.app.signing,
+                req.ci_token.trim(),
+                req.changeset.as_deref(),
+                self.app.now_s(),
+            )
             .await
             .map_err(|e| {
                 tracing::info!(op = OP, reason = %e, "refused");

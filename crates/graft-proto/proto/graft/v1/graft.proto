@@ -512,9 +512,12 @@ message Token {
 
 // A CI job's identity token (a GitHub Actions OIDC token or a Woodpecker job
 // token, a JWT) to exchange for a short graft token (docs/design.md §12.1).
-// Its generated `Debug` is replaced by one that redacts it.
+// Its generated `Debug` is replaced by one that redacts it. A binding that
+// can attest only mints a token pinned to `changeset`, and only when the CI
+// job ran on the commit exported for it.
 message ExchangeCiTokenRequest {
   string ci_token = 1;
+  optional string changeset = 2;
 }
 
 // ---- errors (docs/design.md §7.10) ----------------------------------------

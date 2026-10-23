@@ -800,6 +800,7 @@ fn token_debug_is_redacted() {
 fn ci_token_debug_is_redacted() {
     let r = pb::ExchangeCiTokenRequest {
         ci_token: "eyJ.secret.jwt".into(),
+        changeset: None,
     };
     assert!(!format!("{r:?}").contains("secret"));
 }
