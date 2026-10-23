@@ -20,6 +20,37 @@
         },
         "message": {
           "type": "string"
+        },
+        "onto": {
+          "description": "Conflicts: the tip the stack conflicts with.",
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$"
+        },
+        "conflicts": {
+          "description": "Conflicts: the paths, and how a sync wrote each (null when nothing was written).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "mode"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "mode": {
+                "enum": [
+                  "markers",
+                  "sidecar",
+                  "merged",
+                  "skipped",
+                  null
+                ]
+              }
+            }
+          }
         }
       }
     }

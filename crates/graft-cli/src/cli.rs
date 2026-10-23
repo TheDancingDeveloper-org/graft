@@ -66,12 +66,16 @@ pub(crate) enum Command {
     Commit(CommitArgs),
     /// Show, list, open, renew or close workspaces
     Workspace(WorkspaceArgs),
-    /// List the drafts between the base and the head
+    /// List, squash, reorder, split or drop the drafts between the base and the head
     Stack(StackArgs),
-    /// Move the base to the line tip (fast-forward with no stack; the server rebases a stack)
+    /// Move the base to the line tip (the server rebases a stack; conflicts are written into the files)
     Sync,
     /// Land the stack on the line, or hand it to the PR bridge
     Land(LandArgs),
+    /// Add a draft that inverts a changeset
+    Revert(RevertArgs),
+    /// Record a check result for a changeset (for CI)
+    Attest(AttestArgs),
     /// Call a read operation of the API, with JSON in and out
     Api(ApiArgs),
     /// Print versions
@@ -295,6 +299,30 @@ pub(crate) struct StackArgs {
 pub(crate) enum StackAction {
     /// List the drafts, oldest first
     List,
+    /// Squash adjacent drafts into one (default: the whole stack)
+    Squash {
+        /// The drafts, by id or unique id prefix
+        drafts: Vec<String>,
+    },
+    /// Put the drafts in a new order, oldest first
+    Reorder {
+        /// Every draft, by id or unique id prefix, oldest first
+        #[arg(required = true)]
+        drafts: Vec<String>,
+    },
+    /// Split a draft into one draft per part; paths no part names stay in a last draft
+    Split {
+        /// The draft, by id or unique id prefix
+        draft: String,
+        /// The paths (or directories) of one part, comma-separated (repeatable)
+        #[arg(long = "part", value_name = "PATHS", required = true)]
+        parts: Vec<String>,
+    },
+    /// Drop a draft from the stack
+    Drop {
+        /// The draft, by id or unique id prefix
+        draft: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -305,6 +333,34 @@ pub(crate) struct LandArgs {
     /// Land the stack as one changeset
     #[arg(long)]
     pub(crate) squash: bool,
+    /// On a conflict, sync to the tip and write the conflicts into the files (still exits 3)
+    #[arg(long)]
+    pub(crate) sync: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RevertArgs {
+    /// The changeset to invert: an id or a ref
+    pub(crate) rev: String,
+}
+
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("result").required(true).args(["pass", "fail"])))]
+pub(crate) struct AttestArgs {
+    /// The changeset checked: an id or a ref
+    pub(crate) rev: String,
+    /// The check's name, for example `ci/test`
+    #[arg(long, value_name = "NAME")]
+    pub(crate) check: String,
+    /// The check passed
+    #[arg(long)]
+    pub(crate) pass: bool,
+    /// The check failed
+    #[arg(long)]
+    pub(crate) fail: bool,
+    /// A link to the run
+    #[arg(long, value_name = "URL", default_value = "")]
+    pub(crate) url: String,
 }
 
 #[derive(Debug, Args)]

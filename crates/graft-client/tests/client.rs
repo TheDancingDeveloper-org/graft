@@ -357,6 +357,7 @@ async fn an_interrupted_fetch_resumes_asking_only_for_missing_ids() {
         base: tip,
         head: None,
         lsn: 0,
+        moving: None,
     };
     let mut wc = WorkingCopy::init(dest.path(), config(), state, sparse.clone()).unwrap();
     let cache = wc.open_cache(DEFAULT_CACHE_BYTES).unwrap();
@@ -423,6 +424,7 @@ async fn checkout_refetches_blobs_torn_in_the_cache_once() {
         base: tip,
         head: None,
         lsn: 0,
+        moving: None,
     };
     let mut wc = WorkingCopy::init(dest.path(), config(), state, sparse.clone()).unwrap();
     let cache = wc.open_cache(DEFAULT_CACHE_BYTES).unwrap();

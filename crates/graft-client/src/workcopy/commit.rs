@@ -162,6 +162,16 @@ impl WorkingCopy {
         opts: &CommitOptions,
     ) -> Result<Committed> {
         let workspace = self.workspace_name()?;
+        if self.state.moving.is_some() {
+            return Err(Error::Unfinished);
+        }
+        // After a conflicting sync, this commit is the stack on the tip:
+        // every conflict must be resolved, and the message defaults to the
+        // stack head's.
+        let conflicts = self.load_conflicts()?;
+        if let Some(c) = &conflicts {
+            self.check_resolved(c)?;
+        }
         let statuses = self.status()?;
         let limits = &opts.limits;
         // The working copy's own changes against the snapshot it holds:
@@ -207,10 +217,11 @@ impl WorkingCopy {
             if wc.is_empty() {
                 return Err(Error::NothingToCommit);
             }
-            let message = opts
-                .message
-                .clone()
-                .ok_or_else(|| Error::State("a commit needs a message".to_owned()))?;
+            let message = match (&opts.message, &conflicts) {
+                (Some(m), _) => m.clone(),
+                (None, Some(c)) => self.message_of(api, cx, c.head).await?,
+                (None, None) => return Err(Error::State("a commit needs a message".to_owned())),
+            };
             let changes = wc
                 .iter()
                 .map(|(path, snap)| match snap {
@@ -671,7 +682,38 @@ impl WorkingCopy {
         self.save_index()?;
         self.state.head = Some(id);
         self.save_state()?;
+        // A commit after a conflicting sync resolves it.
+        self.drop_conflicts()?;
         self.drop_pending()
+    }
+
+    /// The message of changeset `id`.
+    async fn message_of<A: RepoApi>(
+        &self,
+        api: &A,
+        cx: &CallContext,
+        id: ChangesetId,
+    ) -> Result<String> {
+        let got = api
+            .get_changesets(
+                cx,
+                GetChangesets {
+                    repo: self.config.repo.clone(),
+                    ids: vec![id],
+                },
+            )
+            .await?;
+        got.found
+            .into_iter()
+            .map(|v| v.changeset)
+            .find(|c| c.id() == id)
+            .map(|c| c.message)
+            .ok_or_else(|| {
+                ApiError::NotFound {
+                    what: format!("changeset {id}"),
+                }
+                .into()
+            })
     }
 
     fn pending_path(&self) -> std::path::PathBuf {
