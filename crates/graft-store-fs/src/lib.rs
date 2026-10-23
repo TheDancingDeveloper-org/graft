@@ -133,6 +133,8 @@ impl FsObjectStore {
     /// With verification on, a frame that does not decode to its id is
     /// [`StoreError::Corrupt`]. Turn it off only where the caller verifies,
     /// or where frames are opaque test bytes (the conformance suite).
+    /// Either way, a file larger than any valid frame is
+    /// [`StoreError::Corrupt`] and is never read into memory.
     pub fn verify_reads(mut self, on: bool) -> Self {
         self.verify_reads = on;
         self
@@ -274,7 +276,9 @@ impl FsObjectStore {
     fn read(&self, path: &Path) -> Result<Vec<u8>, ReadFail> {
         let mut file = File::open(path).map_err(ReadFail::from)?;
         let len = file.metadata().map_err(ReadFail::from)?.len();
-        if self.verify_reads && len > MAX_FRAME_FILE {
+        // Checked with or without verification: no valid frame is larger,
+        // and reading one must not cost unbounded memory.
+        if len > MAX_FRAME_FILE {
             return Err(ReadFail::TooLarge(len));
         }
         let mut bytes = Vec::with_capacity(len as usize);
