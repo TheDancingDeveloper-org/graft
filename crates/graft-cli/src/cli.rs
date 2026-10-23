@@ -82,6 +82,15 @@ pub(crate) enum Command {
     Api(ApiArgs),
     /// Print versions
     Version,
+    /// Run the MCP server over stdio, for agents
+    ///
+    /// Serves graft's MCP tools against the remote API, at the endpoint the
+    /// other commands use. Inside a working copy it adds the working-copy
+    /// tools: graft_status, graft_commit with from_working_copy, and
+    /// graft_land and graft_sync that move the working copy. Standard output
+    /// is the MCP channel; messages go to standard error. The token comes
+    /// only from --token-file or GRAFT_TOKEN.
+    Mcp,
     /// Run the LSP server over stdio (owned by G3.6)
     Lsp {
         /// Arguments passed to the LSP server

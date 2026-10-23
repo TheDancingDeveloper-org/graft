@@ -8,6 +8,8 @@ use graft_proto::ApiError;
 use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 
+use crate::workcopy::WorkingCopyError;
+
 /// Every tool result, serialized as a whole, is at most this many bytes.
 pub const MAX_RESULT_BYTES: usize = 64 * 1024;
 
@@ -48,6 +50,23 @@ pub(crate) enum ToolError {
     },
     /// Not even a single item fits under [`MAX_RESULT_BYTES`].
     TooLarge,
+    /// The working copy could not do it.
+    Local {
+        /// Its kind.
+        kind: &'static str,
+        /// What happened.
+        message: String,
+    },
+}
+
+impl From<WorkingCopyError> for ToolError {
+    fn from(e: WorkingCopyError) -> Self {
+        match e {
+            WorkingCopyError::Api(e) => ToolError::Api(e),
+            WorkingCopyError::Invalid(message) => ToolError::Invalid(message),
+            WorkingCopyError::Local { kind, message } => ToolError::Local { kind, message },
+        }
+    }
 }
 
 impl ToolError {
@@ -67,6 +86,10 @@ impl ToolError {
             ToolError::TooLarge => {
                 json!({"kind": "result_too_large", "max_bytes": MAX_RESULT_BYTES})
             }
+            ToolError::Local { kind, message } => json!({
+                "kind": kind,
+                "message": clip(&message, MESSAGE_MAX_BYTES).0,
+            }),
         };
         CallToolResult::structured_error(value)
     }
