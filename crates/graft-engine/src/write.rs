@@ -10,7 +10,8 @@
 //! With `workspace`, the new changeset is a draft held by that workspace,
 //! and the same transaction moves the workspace head from `parents[0]` to
 //! it by CAS: a draft never exists without its holder. Without one, nothing
-//! holds it and it is created abandoned (a line move still lands it).
+//! holds it and it is created abandoned (a line move still lands it). A land
+//! candidate is a draft held by its land-attempt lease instead.
 
 use std::collections::HashSet;
 
