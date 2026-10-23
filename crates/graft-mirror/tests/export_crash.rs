@@ -246,7 +246,6 @@ fn verify(dir: &Path, acked_pushes: &[String], complete: bool) {
 }
 
 #[test]
-#[ignore = "flaky under CI load, WI-2262"]
 fn kill_9_at_any_point_resumes_with_no_duplicate_and_no_gap() {
     if let Some(c) = crash::child() {
         runtime().block_on(child(&c.dir));

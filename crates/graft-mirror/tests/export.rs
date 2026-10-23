@@ -231,7 +231,6 @@ async fn each_land_is_exported_on_a_lease() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "flaky under CI load, WI-2262"]
 async fn a_thousand_random_lands_export_in_order_with_deterministic_shas() {
     async fn run(seed: u64) -> (Vec<String>, Vec<String>) {
         set_clock(1_700_000_000_000);
