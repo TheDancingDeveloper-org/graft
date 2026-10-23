@@ -24,6 +24,7 @@ use tracing::Instrument as _;
 use crate::admission::Admission;
 use crate::ci::CiExchange;
 use crate::denylist::Denylist;
+use crate::exports::Exports;
 use crate::watch::Watches;
 
 /// The engine over the production stores.
@@ -152,6 +153,8 @@ pub(crate) struct App {
     pub(crate) watches: Watches,
     pub(crate) put_budget: PutBudget,
     pub(crate) denylist: Arc<Denylist>,
+    /// The commits graft-mirror exported, which pinned CI exchanges check.
+    pub(crate) exports: Arc<Exports>,
     /// The CI token exchange, when the config trusts an issuer.
     pub(crate) ci: Option<Arc<CiExchange>>,
     ready: AtomicBool,
@@ -170,6 +173,7 @@ impl App {
         watches: Watches,
         put_budget: PutBudget,
         denylist: Denylist,
+        exports: Arc<Exports>,
     ) -> Self {
         Self {
             engine,
@@ -181,6 +185,7 @@ impl App {
             watches,
             put_budget,
             denylist: Arc::new(denylist),
+            exports,
             ci: None,
             ready: AtomicBool::new(false),
             next_request: AtomicU64::new(1),

@@ -3,10 +3,12 @@
 //! `gen.py` with throwaway keys), served over loopback HTTP so the
 //! fetch-and-refresh path runs too.
 //!
-//! A recorded GitHub Actions token is exchanged for a graft token; that
-//! token attests both of `main`'s required checks (decision D6) on a draft,
-//! after which an `attested` land succeeds. A token for another repository
-//! is refused, at the exchange or at the attest.
+//! A recorded GitHub Actions token is exchanged for a graft token, once the
+//! mirror has recorded (`MirrorService.RecordExports`) that the job's commit
+//! is the draft's export; that token attests both of `main`'s required
+//! checks (decision D6) on the draft, after which an `attested` land
+//! succeeds. There is no commit map file. A token for another repository is
+//! refused, at the exchange or at the attest.
 
 mod common;
 
@@ -80,14 +82,12 @@ const SHA: &str = "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c";
 /// The `[ci]` section: `o/app` bound to graft repo `r` (attest, so pinned),
 /// `o/other` to `other`, `o/reader` to `r` for reads only. The recorded
 /// tokens were issued in 2025 and expire in 2096, so the lifetime limit is
-/// raised for them; nothing else is relaxed. `commit_map` is the static
-/// changeset-to-commit map file.
-fn ci_config(keys: &str, commit_map: &std::path::Path) -> String {
+/// raised for them; nothing else is relaxed.
+fn ci_config(keys: &str) -> String {
     format!(
         r#"
 [ci]
 max_token_ttl_s = 600
-commit_map_file = "{}"
 
 [[ci.issuers]]
 provider = "github"
@@ -121,8 +121,7 @@ repo_id = "104"
 graft_repo = "r"
 workflows = ["{WORKFLOW}"]
 scopes = ["repo:r:read"]
-"#,
-        commit_map.display()
+"#
     )
 }
 
@@ -130,6 +129,40 @@ type CiClient = pb::ci_service_client::CiServiceClient<InterceptedService<Channe
 
 async fn ci_client(server: &Server, auth: Auth) -> CiClient {
     pb::ci_service_client::CiServiceClient::with_interceptor(server.channel().await, auth)
+}
+
+/// Records, as the mirror does, that `commit` is the export of `changeset`
+/// in `r`.
+async fn record_export(
+    server: &Server,
+    token: &str,
+    changeset: ChangesetId,
+    commit: &str,
+) -> Result<(), ApiError> {
+    record_export_raw(server, token, changeset, commit)
+        .await
+        .map_err(api)
+}
+
+async fn record_export_raw(
+    server: &Server,
+    token: &str,
+    changeset: ChangesetId,
+    commit: &str,
+) -> Result<(), tonic::Status> {
+    pb::mirror_service_client::MirrorServiceClient::with_interceptor(
+        server.channel().await,
+        Auth::new(Some(token)),
+    )
+    .record_exports(pb::RecordExportsRequest {
+        repo: "r".into(),
+        exports: vec![pb::ExportedCommit {
+            changeset: changeset.0.0.to_vec(),
+            commit: commit.into(),
+        }],
+    })
+    .await
+    .map(|_| ())
 }
 
 async fn exchange(server: &Server, jwt: &str) -> Result<String, ApiError> {
@@ -213,11 +246,9 @@ async fn land(server: &Server, token: &str, head: ChangesetId) -> Result<Landed,
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_exchanged_ci_token_attests_and_the_attested_land_succeeds() {
     let jwks = JwksServer::start(include_str!("fixtures/ci/jwks.json"));
-    let maps = graft_testkit::crash::TempDir::new("server-ci-e2e-map");
-    let commit_map = maps.path().join("commits");
     let site = Site::new(
         "server-ci-e2e",
-        &ci_config(&format!("jwks_url = \"{}\"", jwks.url), &commit_map),
+        &ci_config(&format!("jwks_url = \"{}\"", jwks.url)),
     );
     let server = site.start();
     assert!(
@@ -242,7 +273,7 @@ async fn an_exchanged_ci_token_attests_and_the_attested_land_succeeds() {
 
     // A binding that can attest mints only pinned tokens, and only once the
     // job's commit is known to be the draft's export: refused (fail closed)
-    // until the map says so.
+    // until the mirror records it.
     assert!(matches!(
         exchange(&server, &token("ok")).await,
         Err(ApiError::PermissionDenied { .. })
@@ -251,7 +282,31 @@ async fn an_exchanged_ci_token_attests_and_the_attested_land_succeeds() {
         pinned("ok").await,
         Err(ApiError::PermissionDenied { .. })
     ));
-    std::fs::write(&commit_map, format!("{draft} {SHA}\n")).expect("write commit map");
+
+    // Only an admin of `r` records exports, only of changesets `r` stores,
+    // and only commit ids that are hex.
+    let reader = site.mint(&["repo:r:read", "repo:r:write"]);
+    assert!(matches!(
+        record_export(&server, &reader, draft, SHA).await,
+        Err(ApiError::PermissionDenied { .. })
+    ));
+    let mirror = site.mint(&["repo:r:admin"]);
+    let unknown = ChangesetId(graft_model::ObjectId([9; 32]));
+    assert!(matches!(
+        record_export(&server, &mirror, unknown, SHA).await,
+        Err(ApiError::NotFound { .. })
+    ));
+    let bad = record_export_raw(&server, &mirror, draft, "not-a-sha")
+        .await
+        .expect_err("not hex");
+    assert_eq!(bad.code(), tonic::Code::InvalidArgument);
+    assert!(matches!(
+        pinned("ok").await,
+        Err(ApiError::PermissionDenied { .. })
+    ));
+    record_export(&server, &mirror, draft, SHA)
+        .await
+        .expect("record the export");
     let ci = pinned("ok").await.expect("exchange");
     assert!(ci.starts_with("v4.public."), "a graft token");
     // A job on another commit cannot attest this draft.
@@ -265,15 +320,14 @@ async fn an_exchanged_ci_token_attests_and_the_attested_land_succeeds() {
         .expect("read token");
 
     // A token for another repository: refused at the exchange when the CI
-    // repository is not bound, and at the attest when it is bound to
-    // another graft repository.
+    // repository is not bound, and also when it is bound to another graft
+    // repository, since the export was recorded in `r` only.
     assert!(matches!(
         pinned("unbound").await,
         Err(ApiError::PermissionDenied { .. })
     ));
-    let other = pinned("other_repo").await.expect("bound to other");
     assert!(matches!(
-        attest(&server, &other, draft, "ci/build").await,
+        pinned("other_repo").await,
         Err(ApiError::PermissionDenied { .. })
     ));
     // A workflow the binding does not pin, and the wrong audience.
@@ -307,10 +361,7 @@ async fn an_unknown_key_refetches_the_key_set_once_a_minute() {
     let jwks = JwksServer::start(include_str!("fixtures/ci/jwks.json"));
     let site = Site::new(
         "server-ci-rotate",
-        &ci_config(
-            &format!("jwks_url = \"{}\"", jwks.url),
-            std::path::Path::new("/nonexistent"),
-        ),
+        &ci_config(&format!("jwks_url = \"{}\"", jwks.url)),
     );
     let server = site.start();
     let start_hits = jwks.hits.load(Ordering::SeqCst);
@@ -347,10 +398,7 @@ async fn the_exchange_binds_the_protocol_and_is_off_without_an_issuer() {
     std::fs::write(&path, include_str!("fixtures/ci/jwks.json")).expect("write jwks");
     let site = Site::new(
         "server-ci-file",
-        &ci_config(
-            &format!("jwks_file = \"{}\"", path.display()),
-            &dir.path().join("no-map"),
-        ),
+        &ci_config(&format!("jwks_file = \"{}\"", path.display())),
     );
     let server = site.start();
 

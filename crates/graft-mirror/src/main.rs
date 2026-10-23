@@ -346,7 +346,8 @@ impl AsyncCredentialFn<()> for RunExport<'_> {
             credentials,
             config.clone(),
         )?
-        .with_metrics(self.telemetry.metrics().clone());
+        .with_metrics(self.telemetry.metrics().clone())
+        .with_export_log(self.api);
         let pulls = file.export.as_ref().is_some_and(|e| e.import_pulls);
         let (Some(gh), true) = (file.github.as_ref(), pulls) else {
             export.run(shutdown()).await;
