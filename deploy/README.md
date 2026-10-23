@@ -56,10 +56,15 @@ deploy/up.sh
 ```
 
 On a fresh VM this bootstraps everything: the signing key, the server, the
-repository `rusttorrent`, the mirror token and the mirror. It then checks
+repositories `rusttorrent` and `graft-dev`, the mirror token and the mirror. It then checks
 `/healthz` and `GET /v1/repos/rusttorrent/refs` (authenticated with the mirror
 token, which goes to curl on stdin and is never printed), waiting up to
 `GRAFT_REFS_WAIT` seconds (default 600) for the first import.
+
+The mirror maps git branch `main` to the graft line `main`, so the refs answer
+lists `{"kind":"line","name":"main",...}` (graft names, not `refs/heads/main`).
+`/etc/graft` keeps its own mode (0750 root:runner on the VM); `up.sh` only
+writes files inside it. The runner user needs the docker group, not sudo.
 
 To run compose yourself, pass the image file:
 
@@ -84,6 +89,19 @@ contents into the VM's volumes of the same names and copy that key to
 it, `up.sh` creates a new key, and tokens minted on Node B stop working.
 
 ## Mint another token
+
+A human token into a root-only file on the VM, never printed (this is how
+`/etc/graft/sprooty.token` was made):
+
+```sh
+docker compose --env-file deploy/image.env -f deploy/compose.yml exec -T graft-server \
+  graft-server admin token mint --subject sprooty --kind human \
+  --scope repo:graft-dev:read --scope repo:graft-dev:write \
+  --scope repo:rusttorrent:read --ttl 2592000 \
+  | sudo sh -c 'umask 077; cat > /etc/graft/.t && [ -s /etc/graft/.t ] && mv /etc/graft/.t /etc/graft/sprooty.token'
+```
+
+Or straight into Infisical:
 
 ```sh
 docker compose --env-file deploy/image.env -f deploy/compose.yml exec -T graft-server \
