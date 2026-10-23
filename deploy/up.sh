@@ -8,8 +8,8 @@
 #      written by a throwaway root container from the pinned image, mode 0600,
 #      owned by uid 10001. Neither is ever printed.
 #   2. Pull the pinned image and `compose up -d --wait`.
-#   3. Create the repository `rusttorrent` (a retry of an existing repo is a
-#      success), mint the mirror token if absent or due for renewal.
+#   3. Create the repositories `rusttorrent` and `graft-dev` (a retry of an
+#      existing repo is a success), mint the mirror token if absent or due for renewal.
 #   4. Health-check /healthz, then the /v1 facade: the refs of `rusttorrent`.
 #
 # Needs: docker with compose v2, curl, and membership of the docker group.
@@ -37,6 +37,8 @@ set -a
 set +a
 
 repo=rusttorrent
+# Every repository the stack serves; creating one that exists is a no-op.
+repos=(rusttorrent graft-dev)
 ttl=2592000
 renew_days=${GRAFT_TOKEN_RENEW_DAYS:-20}
 refs_wait=${GRAFT_REFS_WAIT:-600}
@@ -62,7 +64,6 @@ as_root() {
 store_secret() {
   as_root "set -e
     umask 077
-    chmod 0755 /s
     cat > /s/.$1.tmp
     if [ ! -s /s/.$1.tmp ]; then rm -f /s/.$1.tmp; echo 'empty value refused' >&2; exit 1; fi
     chown 10001:10001 /s/.$1.tmp
@@ -86,7 +87,9 @@ export GRAFT_CONFIG_HASH
 log "starting graft-server"
 compose up -d --wait graft-server
 
-compose exec -T graft-server graft-server admin repo create "$repo" >&2
+for name in "${repos[@]}"; do
+  compose exec -T graft-server graft-server admin repo create "$name" >&2
+done
 
 token="$secrets/mirror-token"
 mint=0
