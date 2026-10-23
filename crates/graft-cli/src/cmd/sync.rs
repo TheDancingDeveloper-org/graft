@@ -30,7 +30,7 @@ pub(crate) fn run(g: &Global) -> Result<(), Failure> {
             ws,
             DEFAULT_LEASE_MS,
             HEARTBEAT_EVERY,
-            s.wc.sync(
+            s.wc.sync_writing_conflicts(
                 &s.conn.remote,
                 &cache,
                 &s.cx,

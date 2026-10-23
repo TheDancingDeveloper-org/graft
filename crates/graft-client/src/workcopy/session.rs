@@ -497,12 +497,10 @@ impl WorkingCopy {
 
     /// Moves the working copy and its workspace to the line tip. With no
     /// stack this is a fast-forward of the files that changed. With a stack
-    /// the server rebases it (`Sync`). When the stack conflicts with the
-    /// tip, the working copy moves to the tip with the stack's changes on
-    /// top as uncommitted edits, and the conflicting files carry markers or
-    /// a sidecar ([`Error::Conflicted`]); the stack becomes one draft when
-    /// they are committed. An unfinished move is finished first.
-    /// [`WorkingCopy::begin`] must have run first.
+    /// the server rebases it (`Sync`); when the stack conflicts with the
+    /// tip, nothing changes and the error is the server's `Conflict`. An
+    /// unfinished move is finished first. [`WorkingCopy::begin`] must have
+    /// run first.
     pub async fn sync<A: ObjectApi + RepoApi + WorkspaceApi, S: ObjectStore>(
         &mut self,
         api: &A,
@@ -510,6 +508,38 @@ impl WorkingCopy {
         cx: &CallContext,
         lease_ms: u64,
         opts: &FetchOptions,
+    ) -> Result<SyncOutcome> {
+        self.sync_inner(api, cache, cx, lease_ms, opts, false).await
+    }
+
+    /// [`WorkingCopy::sync`], except that a conflicting stack does not stop
+    /// it (`docs/design.md` §8.2): the working copy moves to the tip with
+    /// the stack's changes on top as uncommitted edits, and the conflicting
+    /// files carry markers or a sidecar ([`Error::Conflicted`]); the stack
+    /// becomes one draft when they are committed.
+    pub async fn sync_writing_conflicts<A, S>(
+        &mut self,
+        api: &A,
+        cache: &S,
+        cx: &CallContext,
+        lease_ms: u64,
+        opts: &FetchOptions,
+    ) -> Result<SyncOutcome>
+    where
+        A: ObjectApi + RepoApi + WorkspaceApi,
+        S: ObjectStore,
+    {
+        self.sync_inner(api, cache, cx, lease_ms, opts, true).await
+    }
+
+    async fn sync_inner<A: ObjectApi + RepoApi + WorkspaceApi, S: ObjectStore>(
+        &mut self,
+        api: &A,
+        cache: &S,
+        cx: &CallContext,
+        lease_ms: u64,
+        opts: &FetchOptions,
+        write_conflicts: bool,
     ) -> Result<SyncOutcome> {
         let from = self.state.base;
         let mut finished = UpdateStats::default();
@@ -560,6 +590,10 @@ impl WorkingCopy {
                     self.complete_move(api, cache, cx, to, None, None, lease_ms, opts)
                         .await?
                         .update
+                }
+                Err(e @ ApiError::Conflict { .. }) if !write_conflicts => {
+                    self.settle()?;
+                    return Err(e.into());
                 }
                 Err(ApiError::Conflict { onto, .. }) => {
                     self.settle()?;
@@ -667,7 +701,8 @@ impl WorkingCopy {
                     // Writes the conflicts (`Conflicted`), or, when the line
                     // moved on again and the stack now rebases cleanly,
                     // lands the rebased stack.
-                    self.sync(api, cache, cx, opts.lease_ms, fetch).await?;
+                    self.sync_writing_conflicts(api, cache, cx, opts.lease_ms, fetch)
+                        .await?;
                     synced = true;
                     req.head = self.state.head.ok_or(Error::NoDraft)?;
                     continue;

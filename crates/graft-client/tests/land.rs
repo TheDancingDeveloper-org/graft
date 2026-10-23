@@ -155,7 +155,7 @@ impl Env {
     async fn sync(&self, wc: &mut WorkingCopy) -> Result<(), Error> {
         wc.begin(&*self.repo, &self.cx(), DEFAULT_LEASE_MS).await?;
         let cache = wc.open_cache(DEFAULT_CACHE_BYTES)?;
-        wc.sync(
+        wc.sync_writing_conflicts(
             &*self.repo,
             &cache,
             &self.cx(),
@@ -410,8 +410,31 @@ async fn after_a_conflict_sync_writes_markers_and_an_edit_commit_and_land_succee
         "fn a() { 1 }\nfn b() {}\nfn c() {}\n"
     );
 
-    // Sync: the working copy moves to the tip, with the stack on top and
-    // the conflict marked.
+    // A plain sync keeps the conflict typed and changes nothing.
+    wc.begin(&*env.repo, &env.cx(), DEFAULT_LEASE_MS)
+        .await
+        .unwrap();
+    let cache = wc.open_cache(DEFAULT_CACHE_BYTES).unwrap();
+    let err = wc
+        .sync(
+            &*env.repo,
+            &cache,
+            &env.cx(),
+            DEFAULT_LEASE_MS,
+            &FetchOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    drop(cache);
+    assert!(
+        matches!(&err, Error::Api(ApiError::Conflict { onto, .. }) if *onto == tip),
+        "{err:?}"
+    );
+    assert_eq!((wc.state().head, wc.state().moving), (Some(head), None));
+    assert!(!wc.has_conflicts());
+
+    // Writing the conflicts: the working copy moves to the tip, with the
+    // stack on top and the conflict marked.
     let Err(Error::Conflicted(c)) = env.sync(&mut wc).await else {
         panic!("expected conflicts");
     };
