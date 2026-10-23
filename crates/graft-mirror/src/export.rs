@@ -53,7 +53,7 @@ use crate::credentials::CredentialProvider;
 use crate::db::{ExportState, MirrorDb};
 use crate::follow::{FollowLine, POLL_INTERVAL};
 use crate::git::{Mirror, PushOutcome};
-use crate::{MirrorError, tag_ref};
+use crate::{ExportLog, MirrorError, tag_ref};
 
 /// The authority export claims for the lines it writes to GitHub.
 pub const GRAFT_PRIMARY: &str = "graft-primary";
@@ -176,6 +176,7 @@ pub struct Export<'a, A, C> {
     metrics: Option<Metrics>,
     clock: fn() -> i64,
     calls: u64,
+    exports: Option<&'a dyn ExportLog>,
 }
 
 impl<'a, A, C> Export<'a, A, C>
@@ -213,6 +214,7 @@ where
             metrics: None,
             clock: system_ms,
             calls: 0,
+            exports: None,
         })
     }
 
@@ -225,6 +227,13 @@ where
     /// Reads time from `clock` (milliseconds since the epoch).
     pub fn with_clock(mut self, clock: fn() -> i64) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Records each exported line tip's commit in `log`, before the push, so
+    /// the post-land CI run the push starts can attest it.
+    pub fn with_export_log(mut self, log: &'a dyn ExportLog) -> Self {
+        self.exports = Some(log);
         self
     }
 
@@ -414,6 +423,11 @@ where
     ) -> Result<Option<ExportOutcome>, MirrorError> {
         let sha = self.export(target).await?;
         if state.sha != Some(sha) {
+            if let Some(log) = self.exports {
+                let cx = self.call("record-export");
+                log.record_exports(&cx, &self.config.repo, &[(target, sha)])
+                    .await?;
+            }
             let token = self.token().await?;
             let bearer = token.as_ref().map(|t| t.expose());
             let outcome = self

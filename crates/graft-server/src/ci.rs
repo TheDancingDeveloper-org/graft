@@ -21,14 +21,14 @@
 //! graft_repo = "myrepo"
 //! refs = ["refs/heads/graft/", "refs/heads/main"]
 //! workflows = ["org/graft-ci/.github/workflows/graft-pre-land.yml@refs/heads/main"]
-//! scopes = ["repo:myrepo:read", "repo:myrepo:write:.ci"]
+//! scopes = ["repo:myrepo:read", "repo:myrepo:attest"]
 //! ```
 //!
-//! A binding with `write` can attest, so its tokens are pinned to one
+//! A binding with `attest` can attest, so its tokens are pinned to one
 //! changeset (`graft_auth::oidc::Exchange::exchange_pinned`), and only when
-//! the job's commit is the one exported for that changeset. Where that
-//! answer comes from is [`CommitMap`]; with no source, pinned exchanges are
-//! refused.
+//! the job's commit is one graft-mirror recorded as exported for that
+//! changeset in the binding's graft repository ([`crate::exports`]). With no
+//! such record, or any doubt reading it, the pinned exchange is refused.
 //!
 //! The verification itself is `graft_auth::oidc`. This module owns what the
 //! server adds: reading the rules, and fetching keys. A key set comes from a
@@ -38,12 +38,17 @@
 //! fetch a minute, not one per call).
 
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use graft_auth::oidc::{Binding, Exchange, Issuer, Jwks, MAX_JWKS_LEN, OidcError, Provider};
+use graft_auth::oidc::{
+    Binding, CiIdentity, Exchange, Issuer, Jwks, MAX_JWKS_LEN, OidcError, Provider,
+};
 use graft_auth::{SigningKey, Token};
+use graft_model::ChangesetId;
 use serde::Deserialize;
+
+use crate::exports::Exports;
 
 /// Longest life of an exchanged token: the `graft_auth::oidc` default and
 /// cap.
@@ -71,10 +76,6 @@ pub(crate) struct CiConfig {
     pub(crate) issuers: Vec<IssuerConfig>,
     /// Which CI repository maps to which graft repository.
     pub(crate) bindings: Vec<BindingConfig>,
-    /// A static map of changeset ids to the commits exported for them, one
-    /// `<changeset> <commit>` pair per line, for tests and rehearsals. Without
-    /// it no commit is known, and every pinned exchange is refused.
-    pub(crate) commit_map_file: Option<PathBuf>,
 }
 
 impl Default for CiConfig {
@@ -83,7 +84,6 @@ impl Default for CiConfig {
             max_token_ttl_s: MAX_CI_TOKEN_TTL_S,
             issuers: Vec::new(),
             bindings: Vec::new(),
-            commit_map_file: None,
         }
     }
 }
@@ -167,17 +167,20 @@ pub(crate) struct BindingConfig {
     /// matched like `refs`. Required for GitHub; empty elsewhere means any.
     #[serde(default)]
     pub(crate) workflows: Vec<String>,
-    /// The scopes an exchanged token carries: `read` and `write` on
+    /// The scopes an exchanged token carries: `read` and `attest` on
     /// `graft_repo` only.
     pub(crate) scopes: Vec<String>,
 }
 
 impl BindingConfig {
-    fn grants_write(&self) -> bool {
+    /// Whether tokens under this binding can attest (the `attest` scope, or
+    /// a `write` scope, which is refused below anyway). Such a binding must
+    /// name its refs, pin its workflow, and never be a Woodpecker pipeline.
+    fn can_attest(&self) -> bool {
         self.scopes.iter().any(|s| {
             matches!(
                 graft_auth::Scope::parse(s),
-                Ok(graft_auth::Scope::Write { .. })
+                Ok(graft_auth::Scope::Attest { .. } | graft_auth::Scope::Write { .. })
             )
         })
     }
@@ -192,7 +195,7 @@ impl BindingConfig {
         )
         .map_err(|_| {
             format!(
-                "ci binding {}: scopes must be read or write on {} (never land or admin), and at least one",
+                "ci binding {}: scopes must be read or attest on {} (never write, land or admin), and at least one",
                 self.ci_repo, self.graft_repo
             )
         })?;
@@ -266,7 +269,7 @@ impl CiConfig {
             // A binding that can attest must name its refs, and a Woodpecker
             // pipeline (the branch's own file) cannot be trusted to attest:
             // `exchange_pinned` refuses both, so refuse them at start-up.
-            if b.grants_write() {
+            if b.can_attest() {
                 if b.refs.is_empty() {
                     return Err(format!(
                         "ci binding {}: a binding with write must name `refs`",
@@ -326,19 +329,30 @@ struct Source {
 }
 
 /// The exchange the server runs: rules, keys, and where to refresh them.
-#[derive(Debug)]
 pub(crate) struct CiExchange {
     exchange: RwLock<Exchange>,
     sources: Vec<Source>,
     http: reqwest::Client,
-    commits: CommitMap,
+    /// Each binding's CI system, CI repository and graft repository.
+    repos: Vec<(Provider, String, String)>,
+    exports: Arc<Exports>,
+}
+
+impl std::fmt::Debug for CiExchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CiExchange")
+            .field("sources", &self.sources)
+            .field("repos", &self.repos)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CiExchange {
-    /// Builds the exchange from a checked config. `None` when no issuer is
-    /// configured. Key files are read here; key URLs are fetched by
-    /// [`CiExchange::refresh_all`] and the refresh tasks.
-    pub(crate) fn load(config: &CiConfig) -> Result<Option<Self>, String> {
+    /// Builds the exchange from a checked config, checking pins against
+    /// `exports`. `None` when no issuer is configured. Key files are read
+    /// here; key URLs are fetched by [`CiExchange::refresh_all`] and the
+    /// refresh tasks.
+    pub(crate) fn load(config: &CiConfig, exports: Arc<Exports>) -> Result<Option<Self>, String> {
         if config.issuers.is_empty() {
             return Ok(None);
         }
@@ -368,8 +382,10 @@ impl CiExchange {
             issuer.max_lifetime_s = i.max_lifetime_s;
             exchange = exchange.trust(issuer);
         }
+        let mut repos = Vec::new();
         for b in &config.bindings {
             exchange = exchange.bind(b.binding()?);
+            repos.push((b.provider.into(), b.ci_repo.clone(), b.graft_repo.clone()));
         }
         let http = reqwest::Client::builder()
             .timeout(FETCH_TIMEOUT)
@@ -380,7 +396,8 @@ impl CiExchange {
             exchange: RwLock::new(exchange),
             sources,
             http,
-            commits: CommitMap::new(config.commit_map_file.clone()),
+            repos,
+            exports,
         }))
     }
 
@@ -395,31 +412,72 @@ impl CiExchange {
         changeset: Option<&str>,
         now_s: i64,
     ) -> Result<Token, OidcError> {
-        match self.run(key, jwt, changeset, now_s) {
+        match self.run(key, jwt, changeset, now_s).await {
             Err(OidcError::UnknownKey) if self.refresh_on_demand().await => {
-                self.run(key, jwt, changeset, now_s)
+                self.run(key, jwt, changeset, now_s).await
             }
             result => result,
         }
     }
 
-    fn run(
+    async fn run(
         &self,
         key: &SigningKey,
         jwt: &str,
         changeset: Option<&str>,
         now_s: i64,
     ) -> Result<Token, OidcError> {
-        let exchange = self
-            .exchange
+        let Some(cs) = changeset else {
+            return self.read().exchange(key, jwt, now_s);
+        };
+        let exported = self.exported_commit(jwt, cs, now_s).await;
+        self.read().exchange_pinned(key, jwt, now_s, cs, |commit| {
+            exported.as_deref() == Some(commit)
+        })
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Exchange> {
+        self.exchange
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match changeset {
-            None => exchange.exchange(key, jwt, now_s),
-            Some(cs) => exchange.exchange_pinned(key, jwt, now_s, cs, |commit| {
-                self.commits.is_export_of(cs, commit)
-            }),
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The job's commit (the verified token's `sha` claim), when graft-mirror
+    /// recorded it as an export of `changeset` in the graft repository the
+    /// job's binding names. `None` on any doubt: a token that does not
+    /// verify (the exchange then refuses it for that reason), no binding, a
+    /// changeset id that does not parse, no record, or a database error.
+    async fn exported_commit(&self, jwt: &str, changeset: &str, now_s: i64) -> Option<String> {
+        let id = self.read().verify(jwt, now_s).ok()?;
+        let sha = id.sha.clone()?;
+        let repo = self.graft_repo(&id)?.to_owned();
+        let changeset = ChangesetId::parse(changeset).ok()?;
+        let exports = self.exports.clone();
+        let check = sha.clone();
+        let found =
+            tokio::task::spawn_blocking(move || exports.is_export_of(&repo, changeset, &check))
+                .await;
+        match found {
+            Ok(Ok(true)) => Some(sha),
+            Ok(Ok(false)) => None,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "exported commits unreadable; refusing the pin");
+                None
+            }
+            Err(_) => None,
         }
+    }
+
+    /// The graft repository of the binding for `id`'s CI repository. The
+    /// config allows one binding per CI repository (`CiConfig::check`), so
+    /// this is the binding `exchange_pinned` selects, if it selects any.
+    fn graft_repo(&self, id: &CiIdentity) -> Option<&str> {
+        self.repos
+            .iter()
+            .find(|(provider, ci_repo, _)| {
+                *provider == id.provider && ci_repo.eq_ignore_ascii_case(&id.repo)
+            })
+            .map(|(_, _, graft_repo)| graft_repo.as_str())
     }
 
     /// Refetches every URL key set not fetched on demand in the last
@@ -486,76 +544,6 @@ impl CiExchange {
             });
         }
         while tasks.join_next().await.is_some() {}
-    }
-}
-
-/// Which commit was exported for which changeset: the check
-/// `exchange_pinned` needs, that the job ran on the commit belonging to the
-/// changeset it attests. The ids are opaque text here.
-///
-/// The only source today is the config's static `commit_map_file`, reread
-/// when it changes. The mirror's own map is not reachable from the server
-/// yet; until it is, a server without the file refuses every pinned
-/// exchange (fails closed).
-#[derive(Debug)]
-struct CommitMap {
-    file: Option<PathBuf>,
-    loaded: Mutex<
-        Option<(
-            std::time::SystemTime,
-            std::collections::HashMap<String, String>,
-        )>,
-    >,
-}
-
-/// Largest commit map file read.
-const MAX_COMMIT_MAP: u64 = 16 << 20;
-
-impl CommitMap {
-    fn new(file: Option<PathBuf>) -> Self {
-        Self {
-            file,
-            loaded: Mutex::new(None),
-        }
-    }
-
-    /// Whether `commit` is the commit exported for `changeset`.
-    fn is_export_of(&self, changeset: &str, commit: &str) -> bool {
-        let Some(path) = &self.file else {
-            return false;
-        };
-        let Ok(meta) = std::fs::metadata(path) else {
-            tracing::warn!(path = %path.display(), "ci commit map unreadable");
-            return false;
-        };
-        let Ok(modified) = meta.modified() else {
-            return false;
-        };
-        let mut loaded = self
-            .loaded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if loaded.as_ref().is_none_or(|(at, _)| *at != modified) {
-            if meta.len() > MAX_COMMIT_MAP {
-                tracing::warn!(path = %path.display(), "ci commit map too large");
-                return false;
-            }
-            let Ok(text) = std::fs::read_to_string(path) else {
-                return false;
-            };
-            let map = text
-                .lines()
-                .filter_map(|l| {
-                    let mut it = l.split_whitespace();
-                    Some((it.next()?.to_owned(), it.next()?.to_owned()))
-                })
-                .collect();
-            *loaded = Some((modified, map));
-        }
-        loaded
-            .as_ref()
-            .and_then(|(_, map)| map.get(changeset))
-            .is_some_and(|c| c.eq_ignore_ascii_case(commit))
     }
 }
 
@@ -629,7 +617,7 @@ repo_id = "1"
 graft_repo = "r"
 refs = ["refs/heads/graft/"]
 workflows = ["o/ci/.github/workflows/graft-pre-land.yml@refs/heads/main"]
-scopes = ["repo:r:read", "repo:r:write:.ci"]
+scopes = ["repo:r:read", "repo:r:attest"]
 "#;
 
     #[test]
@@ -639,9 +627,18 @@ scopes = ["repo:r:read", "repo:r:write:.ci"]
         assert_eq!(c.issuers[0].leeway_s, 60);
         assert_eq!(c.issuers[0].max_lifetime_s, 3600);
         assert_eq!(c.issuers[0].jwks_refresh_s, 3600);
-        let ex = CiExchange::load(&c).expect("loads").expect("on");
+        let dir = graft_testkit::crash::TempDir::new("ci-load");
+        let exports = Arc::new(Exports::open(&dir.path().join("meta.db")).expect("exports"));
+        let ex = CiExchange::load(&c, exports.clone())
+            .expect("loads")
+            .expect("on");
         assert_eq!(ex.sources.len(), 1);
-        assert!(CiExchange::load(&CiConfig::default()).unwrap().is_none());
+        assert_eq!(ex.repos.len(), 1);
+        assert!(
+            CiExchange::load(&CiConfig::default(), exports)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -653,7 +650,7 @@ scopes = ["repo:r:read", "repo:r:write:.ci"]
             r#"["repo:other:read"]"#,
             "[]",
         ] {
-            let b = BINDING.replace(r#"["repo:r:read", "repo:r:write:.ci"]"#, scopes);
+            let b = BINDING.replace(r#"["repo:r:read", "repo:r:attest"]"#, scopes);
             assert!(parse(&format!("{ISSUER}{b}")).is_err(), "{scopes}");
         }
         // A binding with no issuer of its provider, or bound twice, or a
@@ -680,7 +677,7 @@ scopes = ["repo:r:read", "repo:r:write:.ci"]
             "",
         );
         assert!(parse(&format!("{wp_issuer}{wp_write}")).is_err());
-        let wp_read = wp_write.replace(", \"repo:r:write:.ci\"", "");
+        let wp_read = wp_write.replace(", \"repo:r:attest\"", "");
         assert!(parse(&format!("{wp_issuer}{wp_read}")).is_ok());
         // Keys: exactly one source, and TLS off loopback.
         let both = ISSUER.replace("jwks_url", "jwks_file = \"/x\"\njwks_url");
@@ -702,23 +699,88 @@ scopes = ["repo:r:read", "repo:r:write:.ci"]
         assert!(parse("max_token_ttl_s = 901").is_err());
         assert!(parse("max_token_ttl_s = 0").is_err());
         assert!(parse(&format!("{ISSUER}typo = 1")).is_err());
+        // The static commit map is gone: the mirror records exports.
+        assert!(parse("commit_map_file = \"/x\"").is_err());
         assert!(parse(&ISSUER.replace("\"github\"", "\"gitlab\"")).is_err());
     }
 
-    #[test]
-    fn the_commit_map_fails_closed_and_follows_its_file() {
-        assert!(!CommitMap::new(None).is_export_of("c1", "abc"));
-        let dir = graft_testkit::crash::TempDir::new("ci-commit-map");
-        let path = dir.path().join("map");
-        let map = CommitMap::new(Some(path.clone()));
-        assert!(
-            !map.is_export_of("c1", "abc"),
-            "a missing file knows nothing"
+    /// The fixture tokens' commit (`tests/fixtures/ci/gen.py`).
+    const SHA: &str = "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c";
+
+    fn fixture_token(name: &str) -> String {
+        let all: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(include_str!("../tests/fixtures/ci/tokens.json")).expect("tokens");
+        all[name].clone()
+    }
+
+    #[tokio::test]
+    async fn a_pin_needs_the_commit_the_mirror_recorded_for_its_repository() {
+        let jwks = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ci/jwks.json");
+        let c = parse(&format!(
+            r#"
+[[issuers]]
+provider = "github"
+issuer = "https://token.actions.githubusercontent.com"
+audience = "https://graft.e2e.test"
+jwks_file = "{jwks}"
+max_lifetime_s = 3000000000
+
+[[bindings]]
+provider = "github"
+ci_repo = "o/app"
+repo_id = "101"
+graft_repo = "r"
+refs = ["refs/heads/graft/"]
+workflows = ["o/graft-ci/.github/workflows/graft-pre-land.yml@refs/heads/main"]
+scopes = ["repo:r:read", "repo:r:attest"]
+"#
+        ))
+        .expect("parses");
+        let dir = graft_testkit::crash::TempDir::new("ci-pin");
+        let exports = Arc::new(Exports::open(&dir.path().join("meta.db")).expect("exports"));
+        let ex = CiExchange::load(&c, exports.clone())
+            .expect("loads")
+            .expect("on");
+        let key = SigningKey::from_seed(&[7; 32]);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs() as i64;
+        let draft = ChangesetId(graft_model::ObjectId([3; 32]));
+        let elsewhere = ChangesetId(graft_model::ObjectId([4; 32]));
+        let (ok, other_commit) = (fixture_token("ok"), fixture_token("other_commit"));
+        let (ex, key) = (&ex, &key);
+        let pin = |jwt: &str, cs: &str| {
+            let (jwt, cs) = (jwt.to_owned(), cs.to_owned());
+            async move { ex.exchange(key, &jwt, Some(&cs), now).await }
+        };
+        let cs = draft.to_string();
+
+        // Nothing recorded: refused.
+        assert_eq!(pin(&ok, &cs).await.err(), Some(OidcError::CommitMismatch));
+        // Recorded in `r`: the job on that commit gets a token; a job on
+        // another commit does not.
+        exports
+            .record("r", &[(draft, SHA.to_owned())], now)
+            .expect("record");
+        pin(&ok, &cs).await.expect("the recorded commit");
+        assert_eq!(
+            pin(&other_commit, &cs).await.err(),
+            Some(OidcError::CommitMismatch)
         );
-        std::fs::write(&path, "c1 ABC\n\nmalformed\n").unwrap();
-        assert!(map.is_export_of("c1", "abc"));
-        assert!(!map.is_export_of("c1", "abd"));
-        assert!(!map.is_export_of("c2", "abc"));
+        // A record in another graft repository vouches for nothing in `r`.
+        exports
+            .record("other", &[(elsewhere, SHA.to_owned())], now)
+            .expect("record");
+        assert_eq!(
+            pin(&ok, &elsewhere.to_string()).await.err(),
+            Some(OidcError::CommitMismatch)
+        );
+        // A pin that is not a changeset id is never matched.
+        assert_eq!(
+            pin(&ok, "c123").await.err(),
+            Some(OidcError::CommitMismatch)
+        );
     }
 
     #[test]

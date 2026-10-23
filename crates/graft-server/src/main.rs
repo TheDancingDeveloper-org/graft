@@ -13,6 +13,7 @@ mod backup;
 mod ci;
 mod config;
 mod denylist;
+mod exports;
 mod fsck;
 mod grpc;
 mod http;

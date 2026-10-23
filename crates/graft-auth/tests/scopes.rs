@@ -30,6 +30,10 @@ fn write() -> Scope {
     }
 }
 
+fn attest(repo: &str) -> Scope {
+    Scope::Attest { repo: repo.into() }
+}
+
 fn land(line: &str) -> Scope {
     Scope::Land {
         repo: "graft".into(),
@@ -44,6 +48,7 @@ fn text_forms_round_trip() {
         "repo:graft:write",
         "repo:graft:land:main",
         "repo:graft:land:release/1.0",
+        "repo:graft:attest",
         "repo:graft:admin",
         "objects:read",
     ] {
@@ -88,6 +93,7 @@ fn malformed_scopes() {
         "repo:graft:",
         "repo:graft:read:extra",
         "repo:graft:admin:extra",
+        "repo:graft:attest:main",
         "repo:graft:land",
         "repo:graft:land:",
         "repo:graft:delete",
@@ -140,6 +146,36 @@ fn implied_scopes() {
     let node = principal(&["objects:read"]);
     assert_eq!(authorize(&node, &Scope::ObjectsRead, None), Ok(()));
     assert!(authorize(&node, &read("graft"), None).is_err());
+}
+
+#[test]
+fn attest_grants_only_attest() {
+    // An attest-only token (what a CI binding mints) cannot read, write or
+    // land, and nothing but admin implies attest.
+    let ci = principal(&["repo:graft:attest"]);
+    assert_eq!(authorize(&ci, &attest("graft"), None), Ok(()));
+    assert!(authorize(&ci, &attest("other"), None).is_err());
+    assert!(authorize(&ci, &read("graft"), None).is_err());
+    assert!(authorize(&ci, &write(), None).is_err());
+    assert!(authorize(&ci, &write(), Some(&path("a"))).is_err());
+    assert!(authorize(&ci, &land("main"), None).is_err());
+    assert!(authorize(&ci, &Scope::ObjectsRead, None).is_err());
+
+    let writer = principal(&[
+        "repo:graft:write",
+        "repo:graft:land:main",
+        "repo:graft:read",
+    ]);
+    assert_eq!(
+        authorize(&writer, &attest("graft"), None),
+        Err(AuthError::Denied {
+            scope: "repo:graft:attest".into(),
+            path: None,
+        })
+    );
+    let admin = principal(&["repo:graft:admin"]);
+    assert_eq!(authorize(&admin, &attest("graft"), None), Ok(()));
+    assert!(authorize(&admin, &attest("other"), None).is_err());
 }
 
 #[test]

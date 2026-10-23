@@ -65,6 +65,7 @@ then the `jti` denylist. It needs no store lookup; the server backs
 | `repo:<name>:read` | reads on the repository |
 | `repo:<name>:write[:<prefix>]` | writes, to `<prefix>` and below when given; implies read |
 | `repo:<name>:land:<line>` | landing on that line; implies read |
+| `repo:<name>:attest` | posting attestations (`Attest`) only; implies nothing, and only `admin` implies it |
 | `repo:<name>:admin` | everything on the repository |
 | `objects:read` | content-addressed object reads (node daemon); only itself |
 
@@ -89,14 +90,15 @@ at), the named `kid`, the signature, `iss`, `aud`, `exp` (no leeway),
 `nbf`/`iat` (60 s leeway), the lifetime, then the `Binding` for the token's
 repository, ref and workflow. A valid token for a repository with no binding
 is `PermissionDenied`; an invalid one is `Unauthenticated`. The minted token
-carries exactly the binding's `read`/`write` scopes and expires at the
+carries exactly the binding's `read`/`attest` scopes and expires at the
 earlier of 15 minutes and the CI token's own `exp`. See `ci/README.md` for the
 workflow side and the trust model.
 
-A binding with a `write` scope can attest, so it is exchanged only through
+A binding holds `read` and `attest` only (`write`, `land` and `admin` are
+refused). A binding with `attest` is exchanged only through
 `Exchange::exchange_pinned`: the caller names the changeset and supplies a
 check that the token's `sha` claim is the commit exported for it, and the
 minted subject is `ci:<provider>:<repo>#<changeset>` (`oidc::pinned_changeset`).
-The server must refuse an `Attest` from a `ci` principal pinned to another
-changeset. Write bindings must name refs and (GitHub) pin the reusable
+The engine refuses an `Attest` from a `ci` principal not pinned to that
+changeset. Attest bindings must name refs and (GitHub) pin the reusable
 workflow; Woodpecker bindings are read-only.

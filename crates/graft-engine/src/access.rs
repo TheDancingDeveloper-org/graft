@@ -2,9 +2,11 @@
 //!
 //! Scopes arrive in the caller's [`Principal`] as text:
 //! `repo:<name>:read`, `repo:<name>:write[:<path-prefix>]`,
-//! `repo:<name>:land:<line>`, `repo:<name>:admin` and `objects:read`.
-//! `admin` grants everything on its repository; `write` and `land` grant
-//! `read`; `land:<line>` grants landing on that line only. This is the engine's minimal reading of the text form until
+//! `repo:<name>:land:<line>`, `repo:<name>:attest`, `repo:<name>:admin` and
+//! `objects:read`. `admin` grants everything on its repository; `write` and
+//! `land` grant `read`; `land:<line>` grants landing on that line only;
+//! `attest` grants `Attest` and nothing else, and only it and `admin` grant
+//! `Attest`. This is the engine's minimal reading of the text form until
 //! `graft_auth::authorize` (G1.9) replaces it.
 
 use graft_model::{Change, RepoPath};
@@ -24,6 +26,8 @@ pub(crate) enum Need<'a> {
     Workspace,
     /// Land on a line (`land:<line>`).
     Land(&'a str),
+    /// Post an attestation (`attest`).
+    Attest,
     /// Administer the repository.
     Admin,
 }
@@ -43,6 +47,7 @@ pub(crate) fn require(cx: &CallContext, repo: &str, need: Need<'_>) -> Result<()
                 path: None,
             });
         }
+        Need::Attest => ("attest", None),
         Need::Admin => ("admin", None),
     };
     Err(ApiError::PermissionDenied {
@@ -90,6 +95,7 @@ fn grants(scope: &str, repo: &str, need: Need<'_>) -> bool {
         (Some("read" | "land" | "write"), Need::Objects | Need::Read) => true,
         (Some("write"), Need::Workspace) => true,
         (Some("land"), Need::Land(line)) => arg == Some(line),
+        (Some("attest"), Need::Attest) => arg.is_none(),
         (Some("write"), Need::Write(path)) => match (arg, path) {
             (None, _) => true,
             // A prefix-restricted write scope covers only paths beneath it.
@@ -152,6 +158,31 @@ mod tests {
         assert!(!grants("objects:read", "r", Need::Read));
         assert!(grants("repo:r:land:main", "r", Need::Read));
         assert!(!grants("repo:r:land:main", "r", Need::Admin));
+    }
+
+    #[test]
+    fn attest_is_its_own_scope() {
+        assert!(grants("repo:r:attest", "r", Need::Attest));
+        assert!(grants("repo:r:admin", "r", Need::Attest));
+        // Write no longer implies attest (WI-2272), nor does land or read.
+        assert!(!grants("repo:r:write", "r", Need::Attest));
+        assert!(!grants("repo:r:write:.ci", "r", Need::Attest));
+        assert!(!grants("repo:r:land:main", "r", Need::Attest));
+        assert!(!grants("repo:r:read", "r", Need::Attest));
+        assert!(!grants("repo:s:attest", "r", Need::Attest));
+        assert!(!grants("repo:r:attest:x", "r", Need::Attest));
+        // And attest grants nothing else.
+        for need in [
+            Need::Objects,
+            Need::Read,
+            Need::Write(None),
+            Need::Write(Some(&path("a"))),
+            Need::Workspace,
+            Need::Land("main"),
+            Need::Admin,
+        ] {
+            assert!(!grants("repo:r:attest", "r", need), "{need:?}");
+        }
     }
 
     #[test]
