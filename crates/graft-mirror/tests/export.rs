@@ -252,14 +252,18 @@ async fn a_thousand_random_lands_export_in_order_with_deterministic_shas() {
                 stack.push(files.into_iter().collect());
             }
             land(&w.api, &stack, n + 2).await;
-            if rng.below(4) == 0
-                && let ExportOutcome::Pushed { to, .. } = w.poll().await
-            {
-                pushed.push(to.to_hex());
+            if rng.below(4) == 0 {
+                match w.poll().await {
+                    ExportOutcome::Pushed { to, .. } => pushed.push(to.to_hex()),
+                    ExportOutcome::UpToDate => {}
+                    other => panic!("export stopped after land {n}: {other:?}"),
+                }
             }
         }
-        if let ExportOutcome::Pushed { to, .. } = w.poll().await {
-            pushed.push(to.to_hex());
+        match w.poll().await {
+            ExportOutcome::Pushed { to, .. } => pushed.push(to.to_hex()),
+            ExportOutcome::UpToDate => {}
+            other => panic!("export stopped at the end: {other:?}"),
         }
         assert_eq!(w.poll().await, ExportOutcome::UpToDate);
         w.assert_mirrored().await;
