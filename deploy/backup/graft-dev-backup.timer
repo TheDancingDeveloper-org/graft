@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up graft-dev every 6 hours (WI-2307)
+
+[Timer]
+OnCalendar=*-*-* 00/6:17:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

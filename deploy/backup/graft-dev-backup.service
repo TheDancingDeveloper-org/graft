@@ -1,0 +1,12 @@
+[Unit]
+Description=graft-dev metadata and object backup (WI-2307)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Optional: GRAFT_BACKUP_DIR, GRAFT_BACKUP_KEEP, GRAFT_BACKUP_REMOTE
+EnvironmentFile=-/etc/graft/backup.env
+ExecStart=@DEPLOY@/backup/graft-dev-backup.sh
+Nice=10
+IOSchedulingClass=idle
