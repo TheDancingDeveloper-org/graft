@@ -54,9 +54,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             self.changeset(repo, until).await?;
         }
         let limit = self.page_size(req.page.limit);
-        let ids = self
+        let page = self
             .index
-            .log(
+            .log_changesets(
                 repo,
                 LogQuery {
                     from,
@@ -68,15 +68,13 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             )
             .await
             .map_err(|e| index_error(e, || format!("changeset {from}")))?;
-        let mut changesets = Vec::with_capacity(ids.len());
-        let mut next = None;
-        for (i, id) in ids.iter().enumerate() {
-            let (cs, _) = self.changeset(repo, *id).await?;
-            if i + 1 == ids.len() && ids.len() == limit as usize {
-                next = cs.first_parent().map(|p| p.to_string());
+        let next = match page.last() {
+            Some((_, cs)) if page.len() == limit as usize => {
+                cs.first_parent().map(|p| p.to_string())
             }
-            changesets.push(summary(*id, &cs));
-        }
+            _ => None,
+        };
+        let changesets = page.iter().map(|(id, cs)| summary(*id, cs)).collect();
         Ok(History { changesets, next })
     }
 

@@ -103,5 +103,24 @@ jobs:
       - run: |
           curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/cargo-nextest" nextest --version
-      - run: '"$RUNNER_TEMP/cargo-nextest" nextest run --workspace --all-features --no-tests=pass'
+      # Quarantine (WI-2314, docs/known-flakes.md): rustc, cargo or the
+      # linker is sometimes OOM-killed on a shared runner. Retry once only
+      # when the log matches .github/scripts/oom-flake-signature.sh; any
+      # other failure fails at once. Runs on pull_request and merge_group
+      # alike. Remove with the host fix.
+      - name: nextest
+        shell: bash
+        run: |
+          set +e
+          nextest() {
+            "$RUNNER_TEMP/cargo-nextest" nextest run --workspace --all-features --no-tests=pass 2>&1 \
+              | tee "$RUNNER_TEMP/nextest.log"
+            return "${PIPESTATUS[0]}"
+          }
+          nextest; status=$?
+          if [ "$status" -ne 0 ] && .github/scripts/oom-flake-signature.sh "$RUNNER_TEMP/nextest.log"; then
+            echo "::warning::known OOM flake (WI-2314): rustc killed with no diagnostic; retrying once"
+            nextest; status=$?
+          fi
+          exit "$status"
       - run: cargo test --workspace --all-features --doc

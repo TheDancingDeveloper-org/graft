@@ -1,0 +1,5 @@
+   Compiling graft-cli v0.1.0
+error[E0425]: cannot find value `x` in this scope
+ --> crates/graft-cli/src/main.rs:3:5
+error: could not compile `graft-cli` (bin "graft") due to 1 previous error
+error: command `cargo '--color=always' test --no-run --message-format json-render-diagnostics --workspace --all-features` exited with code 101

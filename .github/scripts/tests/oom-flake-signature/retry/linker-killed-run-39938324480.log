@@ -1,0 +1,37 @@
+[1m[91merror[0m: could not compile `graft-proto` (lib test)
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name graft_proto --edition=2024 crates/graft-proto/src/lib.rs --error-format ...` (exit status: 2)
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1m[91merror[0m[1m: linking with `cc` failed: exit status: 1[0m
+  [1m[94m|[0m
+  [1m[94m= [0m[1mnote[0m:  "cc" "-m64" "/runner-work/_work/graft/graft/target/debug/deps/rustcliqvqu/symbols.o" "<2 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libtest-*,libgetopts-*,librustc_std_workspace_std-*}.rlib" "/runner-wo ...
+  [1m[94m= [0m[1mnote[0m: some arguments are omitted. use `--verbose` to show all linker arguments
+  [1m[94m= [0m[1mnote[0m: collect2: fatal error: ld terminated with signal 9 [Killed]
+          compilation terminated.
+[1m[91merror[0m: could not compile `graft-mirror` (test "configs") due to 1 previous error
+[1m[91merror[0m[1m: linking with `cc` failed: exit status: 1[0m
+  [1m[94m|[0m
+  [1m[94m= [0m[1mnote[0m:  "cc" "-m64" "/runner-work/_work/graft/graft/target/debug/deps/rustcajPLjW/symbols.o" "<2 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "/runner-work/_work/graft/graft/target/debug/deps/{libgraft_node-1af961612ffe1093,libtoml-d37fd06128f7ae97,libtoml_writer-4 ...
+  [1m[94m= [0m[1mnote[0m: some arguments are omitted. use `--verbose` to show all linker arguments
+  [1m[94m= [0m[1mnote[0m: collect2: fatal error: ld terminated with signal 9 [Killed]
+          compilation terminated.
+[1m[91merror[0m: could not compile `graft-node` (bin "graft-node") due to 1 previous error
+[1m[91merror[0m: could not compile `graft-testkit` (lib test)
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name graft_testkit --edition=2024 crates/graft-testkit/src/lib.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m: could not compile `graft-mirror` (test "export")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name export --edition=2024 crates/graft-mirror/tests/export.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m[1m: linking with `cc` failed: exit status: 1[0m
+  [1m[94m|[0m
+  [1m[94m= [0m[1mnote[0m:  "cc" "-m64" "/runner-work/_work/graft/graft/target/debug/deps/rustcs4JDyq/symbols.o" "<2 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "/runner-work/_work/graft/graft/target/debug/deps/{libtempfile-1929e9cbf91bb1a8,libgetrandom-a99458ed53f5514f,librand_core- ...
+  [1m[94m= [0m[1mnote[0m: some arguments are omitted. use `--verbose` to show all linker arguments
+  [1m[94m= [0m[1mnote[0m: collect2: fatal error: ld terminated with signal 9 [Killed]
+          compilation terminated.
+[1m[91merror[0m: could not compile `graft-mirror` (test "pulls")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name pulls --edition=2024 crates/graft-mirror/tests/pulls.rs --error-format ...` (exit status: 2)
+[1m[91merror[0m: could not compile `graft-mirror` (bin "graft-mirror")
+Caused by:
+  process didn't exit successfully: `sccache /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name graft_mirror --edition=2024 crates/graft-mirror/src/main.rs --error-format ...` (exit status: 2)
+[31;1merror[0m: command `[1mcargo '--color=always' test --no-run --message-format json-render-diagnostics --workspace --all-features[0m` exited
