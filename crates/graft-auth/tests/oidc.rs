@@ -544,10 +544,23 @@ fn the_commit_check_sees_only_a_verified_sha_and_runs_last() {
 #[test]
 fn a_pin_must_be_a_plain_id() {
     let key = server_key();
-    for bad in ["", "c#x", "c x", "c/../x", &"c".repeat(65)] {
+    for bad in ["", "c#x", "c x", "c/../x", &"c".repeat(66)] {
         let r = exchange().exchange_pinned(&key, &tok("gh_ok"), NOW, bad, |_| true);
         assert_eq!(r.unwrap_err(), OidcError::Malformed, "{bad:?}");
     }
+}
+
+#[test]
+fn a_real_changeset_id_pins() {
+    // A changeset id as graft prints it: a kind letter and 64 hex digits.
+    let real = graft_model::ChangesetId(graft_model::ObjectId([0x5a; 32])).to_string();
+    assert_eq!(real.len(), 65);
+    let key = server_key();
+    let t = exchange()
+        .exchange_pinned(&key, &tok("gh_ok"), NOW, &real, |sha| sha == SHA)
+        .expect("a real id pins");
+    let c = verify_graft(&key, &t, NOW);
+    assert_eq!(pinned_changeset(&c.principal.subject), Some(real.as_str()));
 }
 
 #[test]
