@@ -1,6 +1,6 @@
 [package]
 name = "graft-mirror"
-description = "git and GitHub mirror for graft: import, follow, PR bridge, export, authority switch."
+description = "git and GitHub mirror for graft: import, follow, export, batch PRs, PR import, authority switch."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

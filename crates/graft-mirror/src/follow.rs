@@ -196,8 +196,8 @@ where
         for l in &self.config.lines {
             let holder = self
                 .db
-                .claim_authority(&l.line, crate::bridge::GIT_PRIMARY)?;
-            if holder != crate::bridge::GIT_PRIMARY {
+                .claim_authority(&l.line, crate::authority::GIT_PRIMARY)?;
+            if holder != crate::authority::GIT_PRIMARY {
                 return Err(MirrorError::Config(format!(
                     "line {} is claimed by {holder}; follow cannot also write it",
                     l.line

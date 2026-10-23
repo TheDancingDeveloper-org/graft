@@ -44,7 +44,6 @@ use graft_proto::api::{ObjectApi, RepoApi};
 use graft_proto::types::GetChangesets;
 use serde_json::{Value, json};
 
-use crate::bridge::GIT_PRIMARY;
 use crate::credentials::CredentialProvider;
 use crate::db::{ExportState, LineState, MirrorDb, SwitchRecord};
 use crate::export::GRAFT_PRIMARY;
@@ -58,6 +57,10 @@ pub const DEFAULT_LAST: usize = 100;
 
 /// The most changesets one `verify` re-exports, so the check stays bounded.
 pub const MAX_LAST: usize = 10_000;
+
+/// The authority claim for a git-primary line: GitHub accepts writes and
+/// follow imports them.
+pub const GIT_PRIMARY: &str = "git-primary";
 
 /// Which side accepts writes to a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -455,8 +458,6 @@ pub struct Status {
     pub follow: LineState,
     /// Export's record of the line, if export has started it.
     pub export: Option<ExportState>,
-    /// PR bridge requests on the line that are not final.
-    pub open_pulls: usize,
 }
 
 impl Status {
@@ -583,7 +584,6 @@ where
             tip_sha,
             follow: self.db.line(&self.line.line)?,
             export: self.db.export_state(&self.line.line)?,
-            open_pulls: self.db.open_pulls_on(&self.line.line)?,
         })
     }
 
@@ -660,12 +660,6 @@ where
                 if let Some(d) = self.db.line(&self.line.line)?.diverged {
                     return Err(refused(format!(
                         "follow is stopped on upstream commit {d}; resolve it first"
-                    )));
-                }
-                let open = self.db.open_pulls_on(&self.line.line)?;
-                if open > 0 {
-                    return Err(refused(format!(
-                        "{open} PR bridge request(s) on the line are not final; drain them first"
                     )));
                 }
             }

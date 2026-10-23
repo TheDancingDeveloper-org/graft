@@ -22,7 +22,6 @@ use graft_git::map::MirrorMap;
 use graft_mirror::authority::{
     Authority, Gate, GateState, HookGate, RulesetGate, Stage, Switcher, Unfrozen, ruleset_name,
 };
-use graft_mirror::bridge::{BridgeState, PullRecord};
 use graft_mirror::credentials::{NoCredentials, SecretToken, StaticToken};
 use graft_mirror::export::{Export, ExportConfig, ExportOutcome};
 use graft_mirror::follow::{FollowConfig, FollowLine, Follower, LineOutcome};
@@ -469,38 +468,6 @@ async fn verify_refuses_a_stopped_line() {
     state.diverged = Some(GitSha([7; 20]));
     w.db.set_line("main", &state).unwrap();
     assert!(switch_err(w.switcher().verify(10).await).contains("follow is stopped"));
-}
-
-#[tokio::test]
-async fn verify_refuses_while_a_bridge_request_is_open() {
-    let mut w = World::new().await;
-    assert!(w.push());
-    w.follow().await.unwrap();
-    let tip = w.tip().await;
-    let mut rec = PullRecord {
-        head: tip,
-        line: "main".to_owned(),
-        workspace: "ws".to_owned(),
-        branch: "graft/ws/x".to_owned(),
-        requested_ms: 1,
-        covered: vec![tip],
-        export_sha: None,
-        pr_number: Some(1),
-        pr_url: None,
-        node_id: None,
-        enqueued: true,
-        state: BridgeState::Open,
-        detail: String::new(),
-        merge_sha: None,
-        landed: None,
-        attempts: 0,
-    };
-    w.db.put_pull(&rec).unwrap();
-    assert_eq!(w.switcher().status().await.unwrap().open_pulls, 1);
-    assert!(switch_err(w.switcher().verify(10).await).contains("PR bridge"));
-    rec.state = BridgeState::Rejected;
-    w.db.put_pull(&rec).unwrap();
-    w.switcher().verify(10).await.unwrap();
 }
 
 #[tokio::test]

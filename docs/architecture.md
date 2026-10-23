@@ -52,7 +52,7 @@ flowchart TB
     server["graft-server<br/>gRPC + /v1 JSON facade,<br/>MCP endpoint, admin CLI"]
     node["graft-node<br/>local edge cache and forwarder"]
     client["graft-client<br/>sync, sparse working copy,<br/>land, conflict files"]
-    mirror["graft-mirror<br/>follow, export, PR bridge,<br/>reconcile, authority"]
+    mirror["graft-mirror<br/>follow, export, batch PR,<br/>PR import, reconcile, authority"]
     mcp["graft-mcp<br/>MCP tools for agents"]
     lsp["graft-lsp<br/>editor integration"]
     cli["graft-cli<br/>the graft command"]
@@ -127,7 +127,7 @@ flowchart LR
   subgraph Mirror["graft-mirror"]
     follow["follow (import)"]
     export["export (push with lease)"]
-    bridge["PR bridge / PR import"]
+    bridge["batch PR / PR import"]
   end
 
   subgraph CI["CI (outside graft; phase 2, off by default)"]
@@ -387,7 +387,7 @@ change anything.
 flowchart TB
   subgraph A["Mode A: git-primary (GitHub is the truth)"]
     a_gh["GitHub main"] -- "follow" --> a_gr["graft main (read-only copy)"]
-    a_ag["agent: graft land"] -- "PR bridge: pushes graft/* branch,<br/>opens a GitHub PR, queues it" --> a_gh
+    a_ag["agent: graft land"] -- "batch PR: graft lands on an integration line,<br/>its net change goes up as one PR" --> a_gh
     a_hu["human: normal GitHub PRs,<br/>merge button, Actions"] --> a_gh
   end
 
