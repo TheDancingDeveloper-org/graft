@@ -29,8 +29,10 @@
 //! in-process engine.
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 
-use graft_git::GitError;
+use graft_git::{GitError, GitSha};
 use graft_model::ChangesetId;
 use graft_proto::api::RepoApi;
 use graft_proto::types::{RefKind, ResolveRef, UpdateRef};
@@ -113,6 +115,21 @@ impl From<ApiError> for MirrorError {
     fn from(e: ApiError) -> Self {
         MirrorError::Api(e)
     }
+}
+
+/// Where the mirror records which commit it exported for a changeset, so
+/// the server can check that a CI job attesting a changeset ran on that
+/// changeset's commit (`MirrorService.RecordExports`). Recorded after the
+/// commit is written and before it is pushed, so a CI run started by the
+/// push always finds it. [`server::Server`] is the real one.
+pub trait ExportLog: Send + Sync {
+    /// Records each `(changeset, commit)` exported from `repo`.
+    fn record_exports<'s>(
+        &'s self,
+        cx: &'s CallContext,
+        repo: &'s str,
+        exports: &'s [(ChangesetId, GitSha)],
+    ) -> Pin<Box<dyn Future<Output = Result<(), ApiError>> + Send + 's>>;
 }
 
 /// The graft ref for a git tag (`refs/tags/<name>`).

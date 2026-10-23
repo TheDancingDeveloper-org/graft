@@ -520,6 +520,22 @@ message ExchangeCiTokenRequest {
   optional string changeset = 2;
 }
 
+// The commit graft-mirror exported for a changeset: `commit` is the export's
+// id as the CI system reports it (a git commit sha, in hex). Recorded so a CI
+// job that ran on that commit may attest to the changeset.
+message ExportedCommit {
+  bytes changeset = 1;
+  string commit = 2;
+}
+
+// Records exports of changesets in `repo` (admin scope). Every changeset
+// must be stored in `repo`. At most 256 per call; recording one twice is
+// fine.
+message RecordExportsRequest {
+  string repo = 1;
+  repeated ExportedCommit exports = 2;
+}
+
 // ---- errors (docs/design.md §7.10) ----------------------------------------
 
 // Carried in the `details` of a gRPC status, so errors round-trip losslessly.
@@ -625,4 +641,9 @@ service AdminService {
 // credential. Served by graft-server only.
 service CiService {
   rpc ExchangeCiToken(ExchangeCiTokenRequest) returns (Token);
+}
+
+// Called by graft-mirror with an admin token. Served by graft-server only.
+service MirrorService {
+  rpc RecordExports(RecordExportsRequest) returns (Empty);
 }

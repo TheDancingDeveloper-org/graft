@@ -19,9 +19,10 @@ use graft_mirror::db::ExportState;
 use graft_mirror::export::{Export, ExportConfig, ExportOutcome, GRAFT_PRIMARY, export_all};
 use graft_mirror::follow::FollowLine;
 use graft_mirror::reconcile::{Reconciled, Resolution, reconcile, stray_ref};
-use graft_mirror::{Mirror, MirrorDb, MirrorError, current_ref};
+use graft_mirror::{ExportLog, Mirror, MirrorDb, MirrorError, current_ref};
 use graft_model::ChangesetId;
 use graft_proto::api::AdminApi;
+use graft_proto::{ApiError, CallContext};
 use graft_store::memory::MemoryStore;
 use graft_telemetry::Metrics;
 use graft_testkit::clock::FakeClock;
@@ -228,6 +229,70 @@ async fn each_land_is_exported_on_a_lease() {
     let text = git(&w.github, &["log", "-1", "--format=%cn <%ce>%n%B", "main"]);
     assert!(text.starts_with("graft <graft@graft.invalid>"), "{text}");
     assert!(text.contains(&format!("Graft-Changeset: {}", w.tip().await)));
+}
+
+/// The server's record of exported commits, in memory. While `refuse` is
+/// set it answers `Unavailable`, as a server that cannot be reached.
+#[derive(Default)]
+struct Log {
+    got: std::sync::Mutex<Vec<(String, ChangesetId, GitSha)>>,
+    refuse: std::sync::atomic::AtomicBool,
+}
+
+impl ExportLog for Log {
+    fn record_exports<'s>(
+        &'s self,
+        _cx: &'s CallContext,
+        repo: &'s str,
+        exports: &'s [(ChangesetId, GitSha)],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send + 's>>
+    {
+        Box::pin(async move {
+            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ApiError::Unavailable { retry_after_ms: 1 });
+            }
+            let mut got = self.got.lock().unwrap();
+            got.extend(exports.iter().map(|(c, s)| (repo.to_owned(), *c, *s)));
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_pushed_tip_is_recorded_with_the_server_first() {
+    let mut w = World::new(true).await;
+    let log = Log::default();
+    async fn poll(w: &World, log: &Log) -> ExportOutcome {
+        advance(1000);
+        let mut export = w.export().with_export_log(log);
+        export.poll_once().await.unwrap().pop().unwrap().1
+    }
+    assert!(matches!(poll(&w, &log).await, ExportOutcome::Pushed { .. }));
+    let first = w.tip().await;
+    let before = w.github_main();
+    // A server that cannot record: nothing is pushed, and the next poll
+    // retries the move.
+    let a = w.land_one().await;
+    log.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(poll(&w, &log).await, ExportOutcome::Failed(_)));
+    assert_eq!(w.github_main(), before);
+    log.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+    let b = w.land_one().await;
+    assert!(matches!(
+        poll(&w, &log).await,
+        ExportOutcome::Pushed { moves: 2, .. }
+    ));
+    assert_eq!(poll(&w, &log).await, ExportOutcome::UpToDate);
+    // One record per push, for the tip pushed, naming the commit upstream
+    // holds.
+    let got = log.got.lock().unwrap().clone();
+    let want: Vec<(String, ChangesetId, GitSha)> = [first, b]
+        .into_iter()
+        .map(|c| (REPO.to_owned(), c, w.db.sha_of(c).unwrap().unwrap()))
+        .collect();
+    assert_eq!(got, want);
+    assert_ne!(a, b);
+    assert_eq!(w.github_main(), Some(w.sha_of(b)));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

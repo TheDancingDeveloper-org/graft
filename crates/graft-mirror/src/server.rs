@@ -5,24 +5,27 @@
 //! request id, the bearer token (marked sensitive) and a deadline, as
 //! `Remote`'s do.
 //! Once `Remote` implements `AdminApi`, this module reduces to that.
+//! It also speaks the server-only `MirrorService` ([`ExportLog`]).
 
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use graft_client::remote::{DEFAULT_TIMEOUT, MAX_MESSAGE_BYTES, REQUEST_ID_HEADER};
 use graft_client::{Endpoint, Remote};
+use graft_git::GitSha;
 use graft_model::{ChangesetId, ObjectId};
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::error::ApiResult;
 use graft_proto::pb;
 use graft_proto::pb::admin_service_client::AdminServiceClient;
+use graft_proto::pb::mirror_service_client::MirrorServiceClient;
 use graft_proto::types::*;
 use graft_proto::{ApiError, CallContext, PROTOCOL_VERSION, VERSION_HEADER};
 use tonic::codec::CompressionEncoding;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
-use crate::MirrorError;
+use crate::{ExportLog, MirrorError};
 
 /// The wait suggested when the transport fails without a hint.
 const TRANSPORT_RETRY_MS: u64 = 1000;
@@ -110,6 +113,12 @@ impl Server {
             .max_encoding_message_size(MAX_MESSAGE_BYTES)
     }
 
+    fn mirror(&self) -> MirrorServiceClient<Channel> {
+        MirrorServiceClient::new(self.admin.clone())
+            .send_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Gzip)
+    }
+
     fn request<T>(&self, cx: &CallContext, msg: T) -> ApiResult<tonic::Request<T>> {
         let mut req = tonic::Request::new(msg);
         let md = req.metadata_mut();
@@ -180,6 +189,41 @@ impl AdminApi for Server {
         Err(ApiError::PermissionDenied {
             scope: "mint".to_owned(),
             path: None,
+        })
+    }
+}
+
+/// The most exports one `RecordExports` call carries (the server's cap).
+const RECORD_BATCH: usize = 256;
+
+impl ExportLog for Server {
+    fn record_exports<'s>(
+        &'s self,
+        cx: &'s CallContext,
+        repo: &'s str,
+        exports: &'s [(ChangesetId, GitSha)],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApiResult<()>> + Send + 's>> {
+        Box::pin(async move {
+            for chunk in exports.chunks(RECORD_BATCH) {
+                let req = self.request(
+                    cx,
+                    pb::RecordExportsRequest {
+                        repo: repo.to_owned(),
+                        exports: chunk
+                            .iter()
+                            .map(|(id, sha)| pb::ExportedCommit {
+                                changeset: id.0.0.to_vec(),
+                                commit: sha.to_hex(),
+                            })
+                            .collect(),
+                    },
+                )?;
+                self.mirror()
+                    .record_exports(req)
+                    .await
+                    .map_err(status_error)?;
+            }
+            Ok(())
         })
     }
 }

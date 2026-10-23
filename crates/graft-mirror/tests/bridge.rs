@@ -21,7 +21,7 @@ use graft_mirror::bridge::{Bridge, BridgeConfig, BridgeState};
 use graft_mirror::credentials::{SecretToken, StaticToken};
 use graft_mirror::follow::{FollowConfig, FollowLine, Follower, LineOutcome, POLL_INTERVAL};
 use graft_mirror::github::{ForgeError, HttpForge, RetryPolicy};
-use graft_mirror::{Mirror, MirrorDb, MirrorError, current_ref};
+use graft_mirror::{ExportLog, Mirror, MirrorDb, MirrorError, current_ref};
 use graft_model::{
     Author, AuthorKind, Change, ChangesetId, EntryKind, Metadata, ObjectId, ObjectKind, RepoPath,
     Timestamp,
@@ -655,6 +655,68 @@ async fn land_pr_merge_follow_landed() {
         "the line holds the squashed commit"
     );
     assert_eq!(db.sha_of(landed).unwrap(), Some(merge));
+}
+
+/// The server's record of exported commits, in memory. While `refuse` is
+/// set it answers `Unavailable`, as a server that cannot be reached.
+#[derive(Default)]
+struct Log {
+    got: Mutex<Vec<(String, ChangesetId, GitSha)>>,
+    refuse: std::sync::atomic::AtomicBool,
+}
+
+impl ExportLog for Log {
+    fn record_exports<'s>(
+        &'s self,
+        _cx: &'s CallContext,
+        repo: &'s str,
+        exports: &'s [(ChangesetId, GitSha)],
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), graft_proto::ApiError>> + Send + 's>,
+    > {
+        Box::pin(async move {
+            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(graft_proto::ApiError::Unavailable { retry_after_ms: 1 });
+            }
+            let mut got = self.got.lock().unwrap();
+            got.extend(exports.iter().map(|(c, s)| (repo.to_owned(), *c, *s)));
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_pushed_head_is_recorded_with_the_server_first() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let gh = FakeGitHub::start(&w.upstream).await;
+    let forge = gh.forge();
+    let tip = base(&w, &db).await;
+    let head = draft(&w.api, tip, "feature.txt", b"feature\n", "Add feature").await;
+    let branch = format!("graft/ws1/{}", short(head));
+    let log = Log::default();
+
+    // A server that cannot record: the branch is not pushed, and the
+    // request waits to be advanced again.
+    log.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut bridge = w.bridge(&db, &forge).with_export_log(&log);
+    assert!(bridge.submit("ws1", head).await.is_err());
+    assert_eq!(branch_sha(&w.upstream, &branch), "0".repeat(40));
+    assert_eq!(
+        bridge.request(head).unwrap().unwrap().state,
+        BridgeState::Requested
+    );
+
+    log.refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+    let rec = bridge.submit("ws1", head).await.unwrap();
+    assert_eq!(rec.state, BridgeState::Open, "detail: {}", rec.detail);
+    let sha = rec.export_sha.unwrap();
+    assert_eq!(branch_sha(&w.upstream, &branch), sha.to_hex());
+    assert_eq!(
+        *log.got.lock().unwrap(),
+        vec![(REPO.to_owned(), head, sha)],
+        "the stack head's commit, as pushed"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
