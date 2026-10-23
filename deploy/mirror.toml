@@ -1,0 +1,19 @@
+# graft-mirror follow configuration for the graft-dev VM (deploy/, WI-2251).
+# Follows rustTorrent's main branch into the graft repository `rusttorrent`.
+# Parsed by graft_mirror::config::FileConfig. Nothing here is secret: the
+# token comes from /run/secrets/graft-mirror-token, mounted read-only from the
+# host file /etc/graft/mirror-token that up.sh mints.
+# No [github] section, so the mirror follows and imports but does not bridge.
+server = "http://graft-server:7878"
+repo = "rusttorrent"
+upstream = "https://github.com/TheDancingDeveloper-org/rustTorrent.git"
+mirror_dir = "/var/lib/graft/mirror/rusttorrent.git"
+db = "/var/lib/graft/mirror/rusttorrent.sqlite"
+token_file = "/run/secrets/graft-mirror-token"
+poll_interval_secs = 15
+metrics_addr = "0.0.0.0:9465"
+json_logs = true
+
+[[lines]]
+branch = "main"
+line = "main"
