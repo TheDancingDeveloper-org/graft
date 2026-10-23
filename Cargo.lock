@@ -1865,7 +1865,6 @@ dependencies = [
  "insta",
  "jsonschema",
  "predicates",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",

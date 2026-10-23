@@ -5,6 +5,7 @@
   "type": "object",
   "required": [
     "provider",
+    "changeset",
     "token_file"
   ],
   "additionalProperties": false,
@@ -13,6 +14,18 @@
       "enum": [
         "github",
         "woodpecker"
+      ]
+    },
+    "changeset": {
+      "description": "The changeset the token is pinned to, or null.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$"
+        }
       ]
     },
     "token_file": {

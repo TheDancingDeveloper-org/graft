@@ -24,6 +24,9 @@ EXP = 4_000_000_000  # 2096
 ISS = "https://token.actions.githubusercontent.com"
 AUD = "https://graft.e2e.test"
 WORKFLOW = "o/graft-ci/.github/workflows/graft-pre-land.yml@refs/heads/main"
+# The commit the job ran on (GitHub's `sha` claim). The test maps the
+# draft it attests to this commit.
+SHA = "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c"
 
 
 def b64(raw: bytes) -> str:
@@ -47,7 +50,7 @@ def claims(repo, repo_id, **over):
         "iss": ISS, "aud": AUD,
         "sub": f"repo:{repo}:ref:refs/heads/graft/e2e",
         "repository": repo, "repository_id": repo_id,
-        "ref": "refs/heads/graft/e2e", "job_workflow_ref": WORKFLOW,
+        "ref": "refs/heads/graft/e2e", "sha": SHA, "job_workflow_ref": WORKFLOW,
         "iat": IAT, "nbf": IAT, "exp": EXP,
     }
     c.update(over)
@@ -58,8 +61,11 @@ def main():
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     rotated = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     t = {
-        # o/app is bound to graft repo `r`; o/other to graft repo `other`.
+        # o/app is bound to graft repo `r`; o/other to graft repo `other`;
+        # o/reader may only read `r`.
         "ok": jwt(key, "e2e-1", claims("o/app", "101")),
+        "other_commit": jwt(key, "e2e-1", claims("o/app", "101", sha="9" * 40)),
+        "reader": jwt(key, "e2e-1", claims("o/reader", "104")),
         "other_repo": jwt(key, "e2e-1", claims("o/other", "102")),
         "unbound": jwt(key, "e2e-1", claims("o/stranger", "103")),
         "own_workflow": jwt(key, "e2e-1", claims(

@@ -174,9 +174,12 @@ pub(crate) struct BindingConfig {
 
 impl BindingConfig {
     fn grants_write(&self) -> bool {
-        self.scopes
-            .iter()
-            .any(|s| matches!(graft_auth::Scope::parse(s), Ok(graft_auth::Scope::Write { .. })))
+        self.scopes.iter().any(|s| {
+            matches!(
+                graft_auth::Scope::parse(s),
+                Ok(graft_auth::Scope::Write { .. })
+            )
+        })
     }
 
     fn binding(&self) -> Result<Binding, String> {
@@ -232,7 +235,10 @@ impl CiConfig {
                 }
             }
             if i.jwks_refresh_s == 0 {
-                return Err(format!("ci issuer {}: jwks_refresh_s must be positive", i.issuer));
+                return Err(format!(
+                    "ci issuer {}: jwks_refresh_s must be positive",
+                    i.issuer
+                ));
             }
             if !(0..=MAX_LEEWAY_S).contains(&i.leeway_s) {
                 return Err(format!(
@@ -241,7 +247,10 @@ impl CiConfig {
                 ));
             }
             if i.max_lifetime_s <= 0 {
-                return Err(format!("ci issuer {}: max_lifetime_s must be positive", i.issuer));
+                return Err(format!(
+                    "ci issuer {}: max_lifetime_s must be positive",
+                    i.issuer
+                ));
             }
         }
         for (n, b) in self.bindings.iter().enumerate() {
@@ -491,7 +500,12 @@ impl CiExchange {
 #[derive(Debug)]
 struct CommitMap {
     file: Option<PathBuf>,
-    loaded: Mutex<Option<(std::time::SystemTime, std::collections::HashMap<String, String>)>>,
+    loaded: Mutex<
+        Option<(
+            std::time::SystemTime,
+            std::collections::HashMap<String, String>,
+        )>,
+    >,
 }
 
 /// Largest commit map file read.
@@ -650,14 +664,21 @@ scopes = ["repo:r:read", "repo:r:write:.ci"]
             "",
         );
         assert!(parse(&format!("{ISSUER}{unpinned}")).is_err());
-        assert!(parse(&format!("{ISSUER}{BINDING}{}", BINDING.replace("o/r", "O/R"))).is_err());
+        assert!(
+            parse(&format!(
+                "{ISSUER}{BINDING}{}",
+                BINDING.replace("o/r", "O/R")
+            ))
+            .is_err()
+        );
         // Write needs refs; Woodpecker may only read.
         let any_ref = BINDING.replace("refs = [\"refs/heads/graft/\"]\n", "");
         assert!(parse(&format!("{ISSUER}{any_ref}")).is_err());
         let wp_issuer = ISSUER.replace("\"github\"", "\"woodpecker\"");
-        let wp_write = BINDING
-            .replace("\"github\"", "\"woodpecker\"")
-            .replace("workflows = [\"o/ci/.github/workflows/graft-pre-land.yml@refs/heads/main\"]\n", "");
+        let wp_write = BINDING.replace("\"github\"", "\"woodpecker\"").replace(
+            "workflows = [\"o/ci/.github/workflows/graft-pre-land.yml@refs/heads/main\"]\n",
+            "",
+        );
         assert!(parse(&format!("{wp_issuer}{wp_write}")).is_err());
         let wp_read = wp_write.replace(", \"repo:r:write:.ci\"", "");
         assert!(parse(&format!("{wp_issuer}{wp_read}")).is_ok());
@@ -669,7 +690,13 @@ scopes = ["repo:r:read", "repo:r:write:.ci"]
             "",
         );
         assert!(parse(&neither).is_err());
-        assert!(parse(&ISSUER.replace("https://token.actions.githubusercontent.com/.well", "http://ci.example/.well")).is_err());
+        assert!(
+            parse(&ISSUER.replace(
+                "https://token.actions.githubusercontent.com/.well",
+                "http://ci.example/.well"
+            ))
+            .is_err()
+        );
         assert!(parse(&format!("{ISSUER}leeway_s = 301")).is_err());
         assert!(parse(&format!("{ISSUER}max_lifetime_s = 0")).is_err());
         assert!(parse("max_token_ttl_s = 901").is_err());
@@ -684,7 +711,10 @@ scopes = ["repo:r:read", "repo:r:write:.ci"]
         let dir = graft_testkit::crash::TempDir::new("ci-commit-map");
         let path = dir.path().join("map");
         let map = CommitMap::new(Some(path.clone()));
-        assert!(!map.is_export_of("c1", "abc"), "a missing file knows nothing");
+        assert!(
+            !map.is_export_of("c1", "abc"),
+            "a missing file knows nothing"
+        );
         std::fs::write(&path, "c1 ABC\n\nmalformed\n").unwrap();
         assert!(map.is_export_of("c1", "abc"));
         assert!(!map.is_export_of("c1", "abd"));

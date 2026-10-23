@@ -74,14 +74,20 @@ impl JwksServer {
     }
 }
 
-/// The `[ci]` section: `o/app` bound to graft repo `r`, `o/other` to
-/// `other`. The recorded tokens were issued in 2025 and expire in 2096, so
-/// the lifetime limit is raised for them; nothing else is relaxed.
-fn ci_config(keys: &str) -> String {
+/// The commit the recorded tokens say their job ran on (`gen.py`).
+const SHA: &str = "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c";
+
+/// The `[ci]` section: `o/app` bound to graft repo `r` (write, so pinned),
+/// `o/other` to `other`, `o/reader` to `r` for reads only. The recorded
+/// tokens were issued in 2025 and expire in 2096, so the lifetime limit is
+/// raised for them; nothing else is relaxed. `commit_map` is the static
+/// changeset-to-commit map file.
+fn ci_config(keys: &str, commit_map: &std::path::Path) -> String {
     format!(
         r#"
 [ci]
 max_token_ttl_s = 600
+commit_map_file = "{}"
 
 [[ci.issuers]]
 provider = "github"
@@ -107,7 +113,16 @@ graft_repo = "other"
 refs = ["refs/heads/graft/"]
 workflows = ["{WORKFLOW}"]
 scopes = ["repo:other:read", "repo:other:write:.ci"]
-"#
+
+[[ci.bindings]]
+provider = "github"
+ci_repo = "o/reader"
+repo_id = "104"
+graft_repo = "r"
+workflows = ["{WORKFLOW}"]
+scopes = ["repo:r:read"]
+"#,
+        commit_map.display()
     )
 }
 
@@ -118,10 +133,19 @@ async fn ci_client(server: &Server, auth: Auth) -> CiClient {
 }
 
 async fn exchange(server: &Server, jwt: &str) -> Result<String, ApiError> {
+    exchange_pinned(server, jwt, None).await
+}
+
+async fn exchange_pinned(
+    server: &Server,
+    jwt: &str,
+    pin: Option<ChangesetId>,
+) -> Result<String, ApiError> {
     ci_client(server, Auth::new(None))
         .await
         .exchange_ci_token(pb::ExchangeCiTokenRequest {
             ci_token: jwt.to_owned(),
+            changeset: pin.map(|c| c.to_string()),
         })
         .await
         .map(|r| r.into_inner().token)
@@ -145,7 +169,12 @@ async fn repo_with_draft(site: &Site, server: &Server) -> ChangesetId {
         .id
 }
 
-async fn attest(server: &Server, token: &str, changeset: ChangesetId, check: &str) -> Result<(), ApiError> {
+async fn attest(
+    server: &Server,
+    token: &str,
+    changeset: ChangesetId,
+    check: &str,
+) -> Result<(), ApiError> {
     server
         .clients(Some(token))
         .await
@@ -184,44 +213,76 @@ async fn land(server: &Server, token: &str, head: ChangesetId) -> Result<Landed,
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_exchanged_ci_token_attests_and_the_attested_land_succeeds() {
     let jwks = JwksServer::start(include_str!("fixtures/ci/jwks.json"));
+    let maps = graft_testkit::crash::TempDir::new("server-ci-e2e-map");
+    let commit_map = maps.path().join("commits");
     let site = Site::new(
         "server-ci-e2e",
-        &ci_config(&format!("jwks_url = \"{}\"", jwks.url)),
+        &ci_config(&format!("jwks_url = \"{}\"", jwks.url), &commit_map),
     );
     let server = site.start();
-    assert!(jwks.hits.load(Ordering::SeqCst) >= 1, "keys fetched at start-up");
+    assert!(
+        jwks.hits.load(Ordering::SeqCst) >= 1,
+        "keys fetched at start-up"
+    );
     let draft = repo_with_draft(&site, &server).await;
     let lander = site.mint(&["repo:r:write", "repo:r:land:main"]);
+    let pinned = |name: &'static str| {
+        let server = &server;
+        async move { exchange_pinned(server, &token(name), Some(draft)).await }
+    };
 
     // Before CI attests, D6 refuses the land.
     assert!(
-        matches!(land(&server, &lander, draft).await, Err(ApiError::Rejected { .. })),
+        matches!(
+            land(&server, &lander, draft).await,
+            Err(ApiError::Rejected { .. })
+        ),
         "an unattested land is rejected"
     );
 
-    // The exchange: a recorded GitHub token for o/app.
-    let ci = exchange(&server, &token("ok")).await.expect("exchange");
+    // A binding that can attest mints only pinned tokens, and only once the
+    // job's commit is known to be the draft's export: refused (fail closed)
+    // until the map says so.
+    assert!(matches!(
+        exchange(&server, &token("ok")).await,
+        Err(ApiError::PermissionDenied { .. })
+    ));
+    assert!(matches!(
+        pinned("ok").await,
+        Err(ApiError::PermissionDenied { .. })
+    ));
+    std::fs::write(&commit_map, format!("{draft} {SHA}\n")).expect("write commit map");
+    let ci = pinned("ok").await.expect("exchange");
     assert!(ci.starts_with("v4.public."), "a graft token");
+    // A job on another commit cannot attest this draft.
+    assert!(matches!(
+        pinned("other_commit").await,
+        Err(ApiError::PermissionDenied { .. })
+    ));
+    // A read-only binding needs no pin.
+    exchange(&server, &token("reader"))
+        .await
+        .expect("read token");
 
     // A token for another repository: refused at the exchange when the CI
     // repository is not bound, and at the attest when it is bound to
     // another graft repository.
     assert!(matches!(
-        exchange(&server, &token("unbound")).await,
+        pinned("unbound").await,
         Err(ApiError::PermissionDenied { .. })
     ));
-    let other = exchange(&server, &token("other_repo")).await.expect("bound to other");
+    let other = pinned("other_repo").await.expect("bound to other");
     assert!(matches!(
         attest(&server, &other, draft, "ci/build").await,
         Err(ApiError::PermissionDenied { .. })
     ));
     // A workflow the binding does not pin, and the wrong audience.
     assert!(matches!(
-        exchange(&server, &token("own_workflow")).await,
+        pinned("own_workflow").await,
         Err(ApiError::PermissionDenied { .. })
     ));
     assert!(matches!(
-        exchange(&server, &token("wrong_aud")).await,
+        pinned("wrong_aud").await,
         Err(ApiError::Unauthenticated)
     ));
 
@@ -246,15 +307,22 @@ async fn an_unknown_key_refetches_the_key_set_once_a_minute() {
     let jwks = JwksServer::start(include_str!("fixtures/ci/jwks.json"));
     let site = Site::new(
         "server-ci-rotate",
-        &ci_config(&format!("jwks_url = \"{}\"", jwks.url)),
+        &ci_config(
+            &format!("jwks_url = \"{}\"", jwks.url),
+            std::path::Path::new("/nonexistent"),
+        ),
     );
     let server = site.start();
     let start_hits = jwks.hits.load(Ordering::SeqCst);
 
     // The issuer rotates: a token signed by the new key makes the server
-    // refetch, and then it is accepted.
+    // refetch, and then it verifies: what refuses it now is only the
+    // missing pin (`PermissionDenied`), not the key (`Unauthenticated`).
     jwks.serve(include_str!("fixtures/ci/jwks-rotated.json"));
-    exchange(&server, &token("rotated")).await.expect("after refetch");
+    assert!(matches!(
+        exchange(&server, &token("rotated")).await,
+        Err(ApiError::PermissionDenied { .. })
+    ));
     assert_eq!(jwks.hits.load(Ordering::SeqCst), start_hits + 1);
 
     // Unknown key ids within the minute cost no further fetch.
@@ -279,22 +347,29 @@ async fn the_exchange_binds_the_protocol_and_is_off_without_an_issuer() {
     std::fs::write(&path, include_str!("fixtures/ci/jwks.json")).expect("write jwks");
     let site = Site::new(
         "server-ci-file",
-        &ci_config(&format!("jwks_file = \"{}\"", path.display())),
+        &ci_config(
+            &format!("jwks_file = \"{}\"", path.display()),
+            &dir.path().join("no-map"),
+        ),
     );
     let server = site.start();
 
     // Keys from a file work the same.
-    exchange(&server, &token("ok")).await.expect("exchange");
+    exchange(&server, &token("reader")).await.expect("exchange");
 
     // No protocol header: refused before the token is looked at.
     let refused = ci_client(&server, Auth::new(None).without_version())
         .await
         .exchange_ci_token(pb::ExchangeCiTokenRequest {
-            ci_token: token("ok"),
+            ci_token: token("reader"),
+            changeset: None,
         })
         .await
         .expect_err("no version");
-    assert!(matches!(api(refused), ApiError::IncompatibleProtocol { .. }));
+    assert!(matches!(
+        api(refused),
+        ApiError::IncompatibleProtocol { .. }
+    ));
 
     // A bearer token is not a CI token.
     let graft = site.mint(&["repo:r:read"]);
@@ -307,19 +382,23 @@ async fn the_exchange_binds_the_protocol_and_is_off_without_an_issuer() {
     let answer = ci_client(&server, Auth::new(None))
         .await
         .exchange_ci_token(pb::ExchangeCiTokenRequest {
-            ci_token: token("ok"),
+            ci_token: token("reader"),
+            changeset: None,
         })
         .await
         .expect("exchange");
     assert_eq!(
-        answer.metadata().get(VERSION_HEADER).and_then(|v| v.to_str().ok()),
+        answer
+            .metadata()
+            .get(VERSION_HEADER)
+            .and_then(|v| v.to_str().ok()),
         Some(PROTOCOL_VERSION.to_string().as_str())
     );
 
     // With no `[ci]` section the exchange is off.
     let plain = Site::new("server-ci-off", "").start();
     assert!(matches!(
-        exchange(&plain, &token("ok")).await,
+        exchange(&plain, &token("reader")).await,
         Err(ApiError::Unauthenticated)
     ));
 }

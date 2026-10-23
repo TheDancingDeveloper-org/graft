@@ -373,16 +373,16 @@ pub(crate) struct CiArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CiAction {
-    /// Exchange the CI job's identity token (from the environment) for a short graft token, written to --out
+    /// Exchange the CI job's identity token (on standard input) for a short graft token, written to --out
     Exchange(CiExchangeArgs),
 }
 
 /// The CI system a job runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum CiProvider {
-    /// GitHub Actions: an OIDC token from ACTIONS_ID_TOKEN_REQUEST_URL
+    /// GitHub Actions OIDC
     Github,
-    /// Woodpecker: the job token in GRAFT_CI_ID_TOKEN
+    /// A Woodpecker job token
     Woodpecker,
 }
 
@@ -401,9 +401,9 @@ pub(crate) struct CiExchangeArgs {
     /// The CI system
     #[arg(long, value_enum)]
     pub(crate) provider: CiProvider,
-    /// The audience to ask GitHub for: the one the graft server's issuer rule names
-    #[arg(long, value_name = "AUDIENCE")]
-    pub(crate) audience: Option<String>,
+    /// Pin the token to the changeset the job attests (a binding that can attest requires it)
+    #[arg(long, value_name = "ID")]
+    pub(crate) changeset: Option<String>,
     /// File to write the graft token to (mode 0600; replaced whole). The token is never printed.
     #[arg(long, value_name = "PATH")]
     pub(crate) out: PathBuf,

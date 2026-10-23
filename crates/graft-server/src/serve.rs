@@ -144,20 +144,22 @@ async fn run(config: ServerConfig) -> Result<(), String> {
         ci.refresh_all().await;
         tokio::spawn(ci.clone().refresh_forever());
     }
-    let app = Arc::new(App::new(
-        engine,
-        signing,
-        admission,
-        telemetry,
-        config.max_token_ttl_s,
-        Watches::new(config.watch_limits()),
-        PutBudget::new(config.max_put_call_bytes, config.put_buffer_bytes).with_waits(
-            std::time::Duration::from_millis(config.put_wait_ms),
-            std::time::Duration::from_millis(config.put_idle_ms),
-        ),
-        denylist,
-    )
-    .with_ci(ci));
+    let app = Arc::new(
+        App::new(
+            engine,
+            signing,
+            admission,
+            telemetry,
+            config.max_token_ttl_s,
+            Watches::new(config.watch_limits()),
+            PutBudget::new(config.max_put_call_bytes, config.put_buffer_bytes).with_waits(
+                std::time::Duration::from_millis(config.put_wait_ms),
+                std::time::Duration::from_millis(config.put_idle_ms),
+            ),
+            denylist,
+        )
+        .with_ci(ci),
+    );
 
     if std::env::var_os(HOLD_START_UP_ENV).is_some() {
         // Test hook: hold start-up here until a stop is requested, so a test
