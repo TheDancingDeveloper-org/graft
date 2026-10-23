@@ -48,7 +48,7 @@ rustTorrent #214).
 | `main` defaults to D6 | the engine and `deploy/server.toml` gate `main` on CI checks; D22 says `direct` | WI-2298 (p1) |
 | `graft mcp` over stdio | the CLI prints "not implemented yet"; the library has the transport | WI-2300 |
 | Creating a line | no API or CLI; the trial used `graft-mirror import --line` | WI-2301 |
-| GC sweep in the server | `admin gc` and the engine's `do_gc` refuse; no scheduler | WI-2274 |
+| GC sweep in the server | `admin gc` refuses, and the engine's `do_gc` refuses a real (non-dry-run) sweep; no scheduler | WI-2274 |
 | `graft-mirror bridge` | a CLI stub for per-land PRs, which D21 rejected | WI-2302 (remove) |
 
 ## Built but switched off (phase 2, D22)
