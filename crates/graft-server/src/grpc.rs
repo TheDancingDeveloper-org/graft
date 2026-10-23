@@ -980,6 +980,42 @@ impl pb::workspace_service_server::WorkspaceService for Services {
         Ok(Response::new(out.into()))
     }
 
+    async fn get_conflicts(
+        &self,
+        request: Request<pb::GetConflictsRequest>,
+    ) -> Result<Response<pb::Conflicts>, Status> {
+        let cx = self.cx(&request, "GetConflicts")?;
+        let req: GetConflicts = wire(request.into_inner())?;
+        let repo = req.workspace.repo.clone();
+        let out = self
+            .app
+            .call("GetConflicts", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &req.workspace).await?;
+                e.get_conflicts(&cx, req).await
+            })
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(out.into()))
+    }
+
+    async fn resolve(
+        &self,
+        request: Request<pb::ResolveRequest>,
+    ) -> Result<Response<pb::Resolved>, Status> {
+        let cx = self.cx(&request, "Resolve")?;
+        let req: Resolve = wire(request.into_inner())?;
+        let repo = req.workspace.repo.clone();
+        let out = self
+            .app
+            .call("Resolve", &repo, cx, true, move |e, cx| async move {
+                own_workspace(&e, &cx, &req.workspace).await?;
+                e.resolve(&cx, req).await
+            })
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(out.into()))
+    }
+
     async fn stack(
         &self,
         request: Request<pb::StackRequest>,

@@ -56,6 +56,8 @@ pub const FORWARDED: &[(&str, &str)] = &[
     ("/graft.v1.WorkspaceService/SetHead", "SetHead"),
     ("/graft.v1.WorkspaceService/Sync", "Sync"),
     ("/graft.v1.WorkspaceService/Stack", "Stack"),
+    ("/graft.v1.WorkspaceService/GetConflicts", "GetConflicts"),
+    ("/graft.v1.WorkspaceService/Resolve", "Resolve"),
     (
         "/graft.v1.WorkspaceService/CloseWorkspace",
         "CloseWorkspace",
