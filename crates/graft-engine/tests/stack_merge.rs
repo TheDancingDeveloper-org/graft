@@ -171,9 +171,11 @@ impl<'f, M: MetaStore> T<'f, M> {
     }
 
     fn attest(&self, id: ChangesetId, check: &str) {
-        let mut cx = self.r.cx.clone();
+        // As the OIDC exchange mints it (WI-2272): attest only, pinned to
+        // the changeset it attests.
+        let mut cx = cx(&["repo:r:read", "repo:r:attest"]);
         cx.principal.kind = PrincipalKind::Ci;
-        cx.principal.subject = "ci".to_owned();
+        cx.principal.subject = format!("ci:github:o/r#{id}");
         block_on(self.r.e().attest(
             &cx,
             Attest {

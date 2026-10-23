@@ -79,7 +79,7 @@ impl JwksServer {
 /// The commit the recorded tokens say their job ran on (`gen.py`).
 const SHA: &str = "1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c";
 
-/// The `[ci]` section: `o/app` bound to graft repo `r` (write, so pinned),
+/// The `[ci]` section: `o/app` bound to graft repo `r` (attest, so pinned),
 /// `o/other` to `other`, `o/reader` to `r` for reads only. The recorded
 /// tokens were issued in 2025 and expire in 2096, so the lifetime limit is
 /// raised for them; nothing else is relaxed.
@@ -103,7 +103,7 @@ repo_id = "101"
 graft_repo = "r"
 refs = ["refs/heads/graft/"]
 workflows = ["{WORKFLOW}"]
-scopes = ["repo:r:read", "repo:r:write:.ci"]
+scopes = ["repo:r:read", "repo:r:attest"]
 
 [[ci.bindings]]
 provider = "github"
@@ -112,7 +112,7 @@ repo_id = "102"
 graft_repo = "other"
 refs = ["refs/heads/graft/"]
 workflows = ["{WORKFLOW}"]
-scopes = ["repo:other:read", "repo:other:write:.ci"]
+scopes = ["repo:other:read", "repo:other:attest"]
 
 [[ci.bindings]]
 provider = "github"

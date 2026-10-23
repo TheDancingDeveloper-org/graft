@@ -21,10 +21,10 @@
 //! graft_repo = "myrepo"
 //! refs = ["refs/heads/graft/", "refs/heads/main"]
 //! workflows = ["org/graft-ci/.github/workflows/graft-pre-land.yml@refs/heads/main"]
-//! scopes = ["repo:myrepo:read", "repo:myrepo:write:.ci"]
+//! scopes = ["repo:myrepo:read", "repo:myrepo:attest"]
 //! ```
 //!
-//! A binding with `write` can attest, so its tokens are pinned to one
+//! A binding with `attest` can attest, so its tokens are pinned to one
 //! changeset (`graft_auth::oidc::Exchange::exchange_pinned`), and only when
 //! the job's commit is one graft-mirror recorded as exported for that
 //! changeset in the binding's graft repository ([`crate::exports`]). With no
@@ -167,17 +167,20 @@ pub(crate) struct BindingConfig {
     /// matched like `refs`. Required for GitHub; empty elsewhere means any.
     #[serde(default)]
     pub(crate) workflows: Vec<String>,
-    /// The scopes an exchanged token carries: `read` and `write` on
+    /// The scopes an exchanged token carries: `read` and `attest` on
     /// `graft_repo` only.
     pub(crate) scopes: Vec<String>,
 }
 
 impl BindingConfig {
-    fn grants_write(&self) -> bool {
+    /// Whether tokens under this binding can attest (the `attest` scope, or
+    /// a `write` scope, which is refused below anyway). Such a binding must
+    /// name its refs, pin its workflow, and never be a Woodpecker pipeline.
+    fn can_attest(&self) -> bool {
         self.scopes.iter().any(|s| {
             matches!(
                 graft_auth::Scope::parse(s),
-                Ok(graft_auth::Scope::Write { .. })
+                Ok(graft_auth::Scope::Attest { .. } | graft_auth::Scope::Write { .. })
             )
         })
     }
@@ -266,7 +269,7 @@ impl CiConfig {
             // A binding that can attest must name its refs, and a Woodpecker
             // pipeline (the branch's own file) cannot be trusted to attest:
             // `exchange_pinned` refuses both, so refuse them at start-up.
-            if b.grants_write() {
+            if b.can_attest() {
                 if b.refs.is_empty() {
                     return Err(format!(
                         "ci binding {}: a binding with write must name `refs`",
@@ -614,7 +617,7 @@ repo_id = "1"
 graft_repo = "r"
 refs = ["refs/heads/graft/"]
 workflows = ["o/ci/.github/workflows/graft-pre-land.yml@refs/heads/main"]
-scopes = ["repo:r:read", "repo:r:write:.ci"]
+scopes = ["repo:r:read", "repo:r:attest"]
 "#;
 
     #[test]
@@ -647,7 +650,7 @@ scopes = ["repo:r:read", "repo:r:write:.ci"]
             r#"["repo:other:read"]"#,
             "[]",
         ] {
-            let b = BINDING.replace(r#"["repo:r:read", "repo:r:write:.ci"]"#, scopes);
+            let b = BINDING.replace(r#"["repo:r:read", "repo:r:attest"]"#, scopes);
             assert!(parse(&format!("{ISSUER}{b}")).is_err(), "{scopes}");
         }
         // A binding with no issuer of its provider, or bound twice, or a
@@ -674,7 +677,7 @@ scopes = ["repo:r:read", "repo:r:write:.ci"]
             "",
         );
         assert!(parse(&format!("{wp_issuer}{wp_write}")).is_err());
-        let wp_read = wp_write.replace(", \"repo:r:write:.ci\"", "");
+        let wp_read = wp_write.replace(", \"repo:r:attest\"", "");
         assert!(parse(&format!("{wp_issuer}{wp_read}")).is_ok());
         // Keys: exactly one source, and TLS off loopback.
         let both = ISSUER.replace("jwks_url", "jwks_file = \"/x\"\njwks_url");
