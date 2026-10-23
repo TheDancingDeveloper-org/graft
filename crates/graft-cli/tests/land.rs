@@ -56,7 +56,7 @@ fn serve(policy: Policy) -> Served {
     ];
     let repo = rt.block_on(async {
         match policy {
-            Policy::D6 => EngineRepo::new("demo", &files).await,
+            Policy::D6 => EngineRepo::d6("demo", &files).await,
             Policy::Direct => EngineRepo::direct("demo", &files).await,
         }
     });

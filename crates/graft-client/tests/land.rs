@@ -81,7 +81,7 @@ impl Env {
     /// `main` attested on `ci/build` and `ci/test` (decision D6).
     async fn d6() -> Env {
         Env {
-            repo: EngineRepo::new(REPO, &base_files()).await,
+            repo: EngineRepo::d6(REPO, &base_files()).await,
             dir: tempfile::tempdir().unwrap(),
         }
     }
