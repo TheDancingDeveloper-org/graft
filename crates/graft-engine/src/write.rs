@@ -34,7 +34,7 @@ use crate::access::{Need, require, require_changes};
 use crate::objects::Upload;
 use crate::source::{Trees, empty_tree, model_root};
 use crate::workspace::{
-    CAS_RETRIES, check_name, contended, guarded, head_conflict, holder, transition,
+    CAS_RETRIES, add_draft_paths, check_name, contended, guarded, head_conflict, holder, transition,
 };
 use crate::{Engine, errors, journal};
 
@@ -217,7 +217,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         mut hold: Option<Hold<'_>>,
     ) -> Result<Created, ApiError> {
         for _ in 0..CAS_RETRIES {
-            let (_, record) = self.changeset(repo, id).await?;
+            let (existing, record) = self.changeset(repo, id).await?;
             let Some(h) = hold.as_mut() else {
                 return Ok(created(id, root, &record));
             };
@@ -251,6 +251,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 &mut txn,
             );
             txn.writes.push(Write::PutWorkspace(next));
+            txn.writes.push(add_draft_paths(&h.ws, &existing));
             txn.writes
                 .push(journal::workspace_head_moved(&name, h.ws.head, Some(id)));
             match self.meta.commit(repo, txn).await.map_err(errors::store)? {
@@ -698,6 +699,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     let mut next = h.ws.clone();
                     next.head = Some(id);
                     txn.writes.push(Write::PutWorkspace(next));
+                    txn.writes.push(add_draft_paths(&h.ws, &cs));
                 }
             }
             let ws_name = hold.as_ref().map(|h| h.ws.name.as_str());

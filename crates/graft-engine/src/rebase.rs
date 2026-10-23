@@ -46,7 +46,7 @@
 //! the distance between base and target.
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use graft_model::merge::{MAX_TEXT_BYTES, Merge3, merge3};
 use graft_model::{
@@ -64,7 +64,9 @@ use graft_store::{
 use crate::access::{Need, require, require_changes};
 use crate::objects::Upload;
 use crate::source::{Trees, model_root};
-use crate::workspace::{CAS_RETRIES, check_name, contended, guarded, held_by, holder, transition};
+use crate::workspace::{
+    CAS_RETRIES, check_name, contended, guarded, held_by, holder, set_draft_paths, transition,
+};
 use crate::{Engine, errors, journal};
 
 /// The metadata key naming the draft a rebased changeset came from.
@@ -167,6 +169,29 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
+    /// The draft path rows for `ws` once it holds this plan's stack: the
+    /// drafts that stay as they are, and the new ones.
+    pub(crate) fn draft_paths(
+        &self,
+        ws: &WorkspaceRecord,
+        drafts: &[(ChangesetId, Changeset)],
+    ) -> Write {
+        let kept: HashSet<ChangesetId> = self
+            .steps
+            .iter()
+            .filter(|s| s.to == Some(s.from))
+            .map(|s| s.from)
+            .collect();
+        set_draft_paths(
+            ws,
+            drafts
+                .iter()
+                .filter(|(id, _)| kept.contains(id))
+                .map(|(_, cs)| cs)
+                .chain(&self.new),
+        )
+    }
+
     /// The merged blobs `cs` puts, as uploads to store with it.
     pub(crate) fn uploads(&self, cs: &Changeset) -> Vec<Upload> {
         let mut out: Vec<Upload> = Vec::new();
@@ -772,6 +797,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             next.base = target;
             next.head = (plan.head != target).then_some(plan.head);
             txn.writes.push(Write::PutWorkspace(next.clone()));
+            txn.writes.push(plan.draft_paths(&ws, &drafts));
             txn.writes.push(journal::workspace_synced(
                 &ws.name, ws.base, next.base, ws.head, next.head,
             ));

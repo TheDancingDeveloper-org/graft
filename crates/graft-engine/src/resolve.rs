@@ -346,6 +346,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             next.base = target;
             next.head = (plan.head != target).then_some(plan.head);
             txn.writes.push(Write::PutWorkspace(next.clone()));
+            txn.writes.push(plan.draft_paths(&ws, &drafts));
             txn.writes.push(journal::workspace_synced(
                 &ws.name, ws.base, next.base, ws.head, next.head,
             ));

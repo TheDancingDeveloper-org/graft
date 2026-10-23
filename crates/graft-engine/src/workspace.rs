@@ -13,9 +13,9 @@
 //! at most [`CAS_RETRIES`] times. Stack walks are bounded by
 //! `EngineConfig::max_stack`, checked by skip-list depth before any walk.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
-use graft_model::{Changeset, ChangesetId, ObjectId, ObjectKind};
+use graft_model::{Changeset, ChangesetId, ObjectId, ObjectKind, RepoPath};
 use graft_proto::types::{OpenWorkspace, Page, SetHead, WorkspaceRef, WorkspaceView};
 use graft_proto::{ApiError, CallContext};
 use graft_store::{
@@ -127,6 +127,35 @@ pub(crate) fn transition(
     record.superseded_by = superseded_by;
     txn.writes.push(Write::SetRecord { id, record });
     txn.writes.push(Write::SetExpiry { id, expires_at_ms });
+}
+
+/// Adds `cs`'s changed paths to `ws`'s draft path rows: for a draft that
+/// goes on top of its stack (`docs/notes/draft-overlap.md` §3). Cost follows
+/// the changes in that draft.
+pub(crate) fn add_draft_paths(ws: &WorkspaceRecord, cs: &Changeset) -> Write {
+    Write::AddDraftPaths {
+        workspace: ws.name.clone(),
+        line: ws.line.clone(),
+        paths: cs.changes.iter().map(|c| c.path().clone()).collect(),
+    }
+}
+
+/// Replaces `ws`'s draft path rows with the union of the paths `stack`
+/// changes: for any write that moves a head other than by one new draft on
+/// top. An empty stack removes them. Cost follows the stack.
+pub(crate) fn set_draft_paths<'a>(
+    ws: &WorkspaceRecord,
+    stack: impl IntoIterator<Item = &'a Changeset>,
+) -> Write {
+    let paths: BTreeSet<&RepoPath> = stack
+        .into_iter()
+        .flat_map(|cs| cs.changes.iter().map(|c| c.path()))
+        .collect();
+    Write::SetDraftPaths {
+        workspace: ws.name.clone(),
+        line: ws.line.clone(),
+        paths: paths.into_iter().cloned().collect(),
+    }
 }
 
 /// A transaction whose first precondition is that `ws` is unchanged.
@@ -374,10 +403,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             base,
             head: None,
             lease_until_ms: self.lease_until(req.lease_ms),
-            // Set from `cx.principal.work_item` once the SQLite store keeps
-            // the column (WI-2310 step b); a store that drops it would fail
-            // every later whole-record CAS.
-            work_item: None,
+            work_item: cx.principal.work_item.clone(),
         };
 
         for _ in 0..CAS_RETRIES {
@@ -515,11 +541,14 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             }
             let mut txn = guarded(&ws);
             let old = self.stack(repo, ws.base, ws.head, &mut txn.writes).await?;
-            let new = self.stack(repo, ws.base, req.new, &mut txn.writes).await?;
+            let new = self
+                .stack_content(repo, ws.base, req.new, &mut txn.writes)
+                .await?;
             let old_ids: HashSet<ChangesetId> = old.iter().map(|(id, _)| *id).collect();
-            let new_ids: HashSet<ChangesetId> = new.iter().map(|(id, _)| *id).collect();
+            let new_ids: HashSet<ChangesetId> = new.iter().map(|(id, ..)| *id).collect();
+            let paths = set_draft_paths(&ws, new.iter().map(|(_, cs, _)| cs));
 
-            for (id, record) in new {
+            for (id, cs, record) in new {
                 if old_ids.contains(&id) || held_by(&record, &ws.name) {
                     continue;
                 }
@@ -528,7 +557,6 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         // Adopting a changeset writes its changes into this
                         // workspace: the caller needs write on every path it
                         // changes, as `CreateChangeset` does (design §12.2).
-                        let (cs, _) = self.changeset(repo, id).await?;
                         require_changes(cx, &wref.repo, &cs.changes)?;
                         transition(
                             id,
@@ -564,6 +592,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             let mut next = ws.clone();
             next.head = req.new;
             txn.writes.push(Write::PutWorkspace(next.clone()));
+            txn.writes.push(paths);
             txn.writes
                 .push(journal::workspace_head_moved(&ws.name, ws.head, req.new));
             if let TxnOutcome::Committed(_) =

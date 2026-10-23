@@ -1623,7 +1623,9 @@ fn the_backfill_on_a_version_3_database() {
                  FROM src.changesets;
              INSERT INTO refs SELECT * FROM src.refs;
              INSERT INTO journal SELECT * FROM src.journal;
-             INSERT INTO workspaces SELECT * FROM src.workspaces;
+             INSERT INTO workspaces
+                 SELECT repo, name, owner, session, line, base, head, lease_until
+                 FROM src.workspaces;
              INSERT INTO derived SELECT * FROM src.derived;
              INSERT INTO line_pos SELECT * FROM src.line_pos;
              INSERT INTO line_paths SELECT * FROM src.line_paths;

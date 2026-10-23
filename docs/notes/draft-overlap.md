@@ -91,7 +91,7 @@ metadata transaction as the head CAS and its journal entry:
 | `CreateChangeset` with a workspace (commit) | insert the new draft's changed paths | O(changes in that draft) |
 | `commit --amend`, `Stack` ops, `SetHead` | replace the workspace's set: delete via `workspace_paths`, insert the union of the new stack's changes | O(stack depth × changes per draft) |
 | `Sync` (rebase onto a new tip) | same as replace; the `base` moves too | as above |
-| `Land` of the whole stack | delete the workspace's rows (stack empty, head on the line) | O(rows held) |
+| `Land` of the whole stack | nothing: the rows stay until the workspace's next head move, and the query drops a workspace whose head is no longer a draft it holds | O(1) |
 | `CloseWorkspace` | delete the workspace's rows, even with `keep_drafts` (kept drafts have no live holder) | O(rows held) |
 | `OpenWorkspace` | nothing (no drafts yet) | O(1) |
 
@@ -194,9 +194,11 @@ OverlappingDrafts {
   - `InvalidPath` — a malformed path, or the empty/root prefix;
   - `LimitExceeded { limit: "paths", max: 64 }` — too many input paths;
     `LimitExceeded { limit: "limit", max: 200 }` — page size too large;
-  - `InvalidPath { path: "", reason: "bad-page-token" }` — a page token
-    that fails to decode or was issued for different inputs (a dedicated
-    variant would be an additive `ApiError` change in step a);
+  - `InvalidChange { path: "", rule: "page-token" }` — a page token that
+    fails to decode or was issued for different inputs (the engine's usual
+    page-token error); an empty input list is
+    `InvalidChange { rule: "paths-required" }`, and an empty path fails
+    wire conversion;
   - `NotFound` for an unknown repository or line, as other reads do.
 
 **Optional Watch event.** A journal entry `DraftPathsChanged { workspace,
@@ -283,7 +285,7 @@ follow-up step once the bench shows the query alone helps.
 
 | Step | Crates | Contents |
 | --- | --- | --- |
-| **a. Interface PR** | `graft-auth`, `graft-proto`, `graft-store` | `Scope::Drafts` with parse, display and `grants` (+ tests); `OverlappingDrafts`/`DraftOverlap` types and the `Api` method stubbed; MetaStore port methods `draft_paths_replace`, `draft_paths_delete`, `overlapping_drafts` and `WorkspaceRecord.work_item`, with stubbed bodies |
+| **a. Interface PR** | `graft-auth`, `graft-proto`, `graft-store` | `Scope::Drafts` with parse, display and `grants` (+ tests); `OverlappingDrafts`/`DraftOverlap` types and the `Api` method stubbed; MetaStore writes `SetDraftPaths`/`AddDraftPaths`, reads `scan_draft_paths`/`workspace_draft_paths`, and `WorkspaceRecord.work_item`, with stubbed bodies |
 | **b. Store and engine** | `graft-store` (memory + conformance), `graft-store-sqlite`, `graft-engine`, `graft-gc` | Tables and schema migration (no back-fill); row maintenance in commit, amend, stack, sync, land and close; GC and `Fsck` handling; the query with the lease filter; conformance tests for the four acceptance cases (overlap seen, disjoint not, closed and expired drop out, no contents) |
 | **c. Surfaces** | `graft-server`, `graft-cli`, `graft-mcp` | gRPC and JSON facade routes with the scope check; `graft status --upstream --drafts`; `graft_draft_overlap` MCP tool; an end-to-end test in `graft-server/tests` |
 | **d. (optional) Watch** | `graft-store`, `graft-engine`, `graft-server` | `DraftPathsChanged` journal entry and its scope-gated delivery |

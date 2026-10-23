@@ -74,7 +74,12 @@ pub trait RepoApi: Send + Sync {
         req: CreateLine,
     ) -> impl Future<Output = ApiResult<RefView>> + Send {
         let _ = (cx, req);
-        async { Err(crate::ApiError::Unavailable { retry_after_ms: 0 }) }
+        // Not served here at all: back off before asking again.
+        async {
+            Err(crate::ApiError::Unavailable {
+                retry_after_ms: 60_000,
+            })
+        }
     }
     /// Stats a path.
     fn stat(
@@ -224,7 +229,12 @@ pub trait WorkspaceApi: Send + Sync {
         req: OverlappingDrafts,
     ) -> impl Future<Output = ApiResult<DraftOverlap>> + Send {
         let _ = (cx, req);
-        async { Err(crate::ApiError::Unavailable { retry_after_ms: 0 }) }
+        // Not served here at all: back off before asking again.
+        async {
+            Err(crate::ApiError::Unavailable {
+                retry_after_ms: 60_000,
+            })
+        }
     }
 }
 

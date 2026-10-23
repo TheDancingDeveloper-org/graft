@@ -43,7 +43,9 @@ use graft_store::{MetaStore, ObjectStore, RecordState, RepoId, TxnOutcome, Write
 use crate::access::{Need, require, require_changes};
 use crate::objects::Upload;
 use crate::source::{Trees, model_root};
-use crate::workspace::{CAS_RETRIES, check_name, contended, guarded, held_by, holder, transition};
+use crate::workspace::{
+    CAS_RETRIES, check_name, contended, guarded, held_by, holder, set_draft_paths, transition,
+};
 use crate::{Engine, errors, journal};
 
 /// What became of a draft.
@@ -332,6 +334,21 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             for (cs, _) in &edit.new {
                 require_changes(cx, &wref.repo, &cs.changes)?;
             }
+            // The new stack: the drafts kept as they were, and the new ones.
+            let kept: HashSet<ChangesetId> = edit
+                .fates
+                .iter()
+                .filter(|(_, fate)| matches!(fate, Fate::Kept))
+                .map(|(id, _)| *id)
+                .collect();
+            let paths = set_draft_paths(
+                &ws,
+                drafts
+                    .iter()
+                    .filter(|(id, _)| kept.contains(id))
+                    .map(|(_, cs)| cs)
+                    .chain(edit.new.iter().map(|(cs, _)| cs)),
+            );
             let mut adopt = Vec::with_capacity(edit.new.len());
             for (cs, uploads) in edit.new {
                 adopt.push(self.insert_unheld(repo, cs, uploads).await?.id);
@@ -397,6 +414,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             next.head = (edit.head != ws.base).then_some(edit.head);
             if next.head != ws.head {
                 txn.writes.push(Write::PutWorkspace(next.clone()));
+                txn.writes.push(paths);
                 txn.writes
                     .push(journal::workspace_head_moved(&ws.name, ws.head, next.head));
             }

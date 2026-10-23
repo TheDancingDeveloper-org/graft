@@ -4,7 +4,7 @@
 mod common;
 
 use common::{TempDir, block_on};
-use graft_model::{ChangesetId, ObjectId};
+use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{MetaStore, MetaTxn, StoreError, TxnOutcome, Write};
 use graft_store_sqlite::migrations::{self, MIGRATIONS, SCHEMA_VERSION};
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
@@ -14,6 +14,7 @@ const TABLES: &[&str] = &[
     "changesets",
     "derived",
     "doomed",
+    "draft_paths",
     "holders",
     "journal",
     "lands",
@@ -299,7 +300,7 @@ fn version_5_adds_line_forks_to_a_version_4_database() {
     }
     let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
     let conn = Connection::open(dir.db()).expect("inspect");
-    assert_eq!(migrations::version(&conn).expect("version"), 5);
+    assert_eq!(migrations::version(&conn).expect("version"), SCHEMA_VERSION);
     assert!(tables(&conn).contains(&"line_forks".to_owned()));
     let repo = block_on(store.repo("old")).expect("repo").expect("exists");
     assert_eq!(
@@ -314,4 +315,47 @@ fn version_5_adds_line_forks_to_a_version_4_database() {
         .query_row("SELECT count(*) FROM line_forks", [], |r| r.get(0))
         .expect("count");
     assert_eq!(forks, 0);
+}
+
+/// Version 6 (WI-2310) on a version 5 database: an existing workspace reads
+/// with no work item and no draft paths, and the new index takes rows.
+#[test]
+fn version_6_adds_draft_paths_to_a_version_5_database() {
+    let dir = TempDir::new("mig-v6");
+    {
+        let mut conn = Connection::open(dir.db()).expect("open");
+        migrations::migrate_to(&mut conn, 5).expect("migrate to v5");
+        conn.execute_batch(&format!(
+            "INSERT INTO repos (id, name) VALUES (1, 'old');
+             INSERT INTO workspaces (repo, name, owner, line, base, lease_until)
+                 VALUES (1, 'w', 'alice', 'main', X'{}', 10);",
+            "07".repeat(32)
+        ))
+        .expect("seed");
+    }
+    let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
+    let repo = block_on(store.repo("old")).expect("repo").expect("exists");
+    let ws = block_on(store.workspace(repo, "w"))
+        .expect("read")
+        .expect("exists");
+    assert_eq!(ws.work_item, None);
+    let src = RepoPath::new("src").expect("path");
+    assert!(
+        block_on(store.workspace_draft_paths(repo, "w", None, 10))
+            .expect("paths")
+            .is_empty()
+    );
+    let txn = MetaTxn {
+        preconditions: vec![],
+        writes: vec![Write::AddDraftPaths {
+            workspace: "w".into(),
+            line: "main".into(),
+            paths: vec![RepoPath::new("src/a").expect("path")],
+        }],
+    };
+    block_on(store.commit(repo, txn)).expect("commit");
+    assert_eq!(
+        block_on(store.scan_draft_paths(repo, "main", &src, None, 10)).expect("scan"),
+        vec![(RepoPath::new("src/a").expect("path"), "w".to_owned())]
+    );
 }
