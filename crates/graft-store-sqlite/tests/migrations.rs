@@ -17,6 +17,7 @@ const TABLES: &[&str] = &[
     "holders",
     "journal",
     "lands",
+    "line_forks",
     "line_paths",
     "line_pos",
     "refs",
@@ -221,4 +222,96 @@ fn the_expiry_scans_are_index_ranges() {
     for p in [&records, &rows, &held, &doomed] {
         assert!(!p.contains("TEMP B-TREE"), "no sort: {p}");
     }
+}
+
+/// Golden vector for the line fork record (WI-2316, version 5): the table
+/// shape and the stored row for `PutLineFork { line: "b", parent: "main",
+/// pos: 2 }`. Changing either is a durable format change.
+#[test]
+fn line_fork_record_golden_vector() {
+    let dir = TempDir::new("mig-fork");
+    let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
+    let repo = block_on(store.create_repo("forks")).expect("create");
+    let txn = MetaTxn {
+        preconditions: vec![],
+        writes: vec![
+            Write::PutLineFork {
+                line: "b".to_owned(),
+                parent: "main".to_owned(),
+                pos: 2,
+            },
+            Write::Journal {
+                kind: "RefMoved".to_owned(),
+                body: vec![],
+            },
+        ],
+    };
+    assert!(matches!(
+        block_on(store.commit(repo, txn)).expect("commit"),
+        TxnOutcome::Committed(_)
+    ));
+    let conn = Connection::open(dir.db()).expect("inspect");
+    let ddl: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'line_forks'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("ddl");
+    assert_eq!(
+        ddl,
+        "CREATE TABLE line_forks (
+    repo   INTEGER NOT NULL REFERENCES repos(id),
+    line   TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    pos    INTEGER NOT NULL,
+    PRIMARY KEY (repo, line)
+) WITHOUT ROWID"
+    );
+    let row: (i64, String, String, i64) = conn
+        .query_row("SELECT repo, line, parent, pos FROM line_forks", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .expect("row");
+    assert_eq!(
+        row,
+        (i64::from(repo.0), "b".to_owned(), "main".to_owned(), 2)
+    );
+}
+
+/// Version 5 (WI-2316) on a version 4 database: existing line rows are kept
+/// and still read, the line has no fork, and the new table and the lookup
+/// by changeset work.
+#[test]
+fn version_5_adds_line_forks_to_a_version_4_database() {
+    let dir = TempDir::new("mig-v5");
+    let id = ChangesetId(ObjectId([7; 32]));
+    {
+        let mut conn = Connection::open(dir.db()).expect("open");
+        migrations::migrate_to(&mut conn, 4).expect("migrate to v4");
+        conn.execute_batch(&format!(
+            "INSERT INTO repos (id, name) VALUES (1, 'old');
+             INSERT INTO line_pos (repo, line, changeset, pos)
+                 VALUES (1, 'main', X'{}', 3);",
+            "07".repeat(32)
+        ))
+        .expect("seed");
+    }
+    let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
+    let conn = Connection::open(dir.db()).expect("inspect");
+    assert_eq!(migrations::version(&conn).expect("version"), 5);
+    assert!(tables(&conn).contains(&"line_forks".to_owned()));
+    let repo = block_on(store.repo("old")).expect("repo").expect("exists");
+    assert_eq!(
+        block_on(store.line_pos(repo, "main", id)).expect("read"),
+        Some(3)
+    );
+    assert_eq!(
+        block_on(store.line_holders(repo, id, 10)).expect("holders"),
+        vec![("main".to_owned(), 3)]
+    );
+    let forks: i64 = conn
+        .query_row("SELECT count(*) FROM line_forks", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(forks, 0);
 }

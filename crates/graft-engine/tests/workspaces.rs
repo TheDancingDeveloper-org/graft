@@ -677,6 +677,14 @@ impl<M: MetaStore> MetaStore for Crashy<M> {
     ) -> StoreResult<Option<u64>> {
         self.inner.line_pos(repo, line, id).await
     }
+    async fn line_holders(
+        &self,
+        repo: RepoId,
+        id: ChangesetId,
+        limit: u32,
+    ) -> StoreResult<Vec<(String, u64)>> {
+        self.inner.line_holders(repo, id, limit).await
+    }
     async fn scan_line_path(
         &self,
         repo: RepoId,

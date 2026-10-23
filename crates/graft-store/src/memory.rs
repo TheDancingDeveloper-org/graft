@@ -27,6 +27,8 @@ struct Repo {
     derived: BTreeMap<(String, u32, Vec<u8>), Vec<u8>>,
     line_pos: BTreeMap<(String, ChangesetId), u64>,
     line_paths: BTreeMap<(String, RepoPath), BTreeSet<(u64, ChangesetId)>>,
+    /// Line → (parent line, fork position).
+    line_forks: BTreeMap<String, (String, u64)>,
     holders: BTreeSet<(ObjectId, String)>,
     /// The expiry of each timed holder row.
     row_expiry: BTreeMap<(ObjectId, String), i64>,
@@ -307,6 +309,20 @@ fn validate(repo: &Repo, txn: &MetaTxn) -> StoreResult<()> {
     let mut overlay = Overlay::new(repo);
     for write in &txn.writes {
         overlay.check(write)?;
+        if let Write::PutLineFork { line, .. } = write {
+            // As SQLite's primary key does: one fork per line, ever.
+            let twice = txn
+                .writes
+                .iter()
+                .filter(|w| matches!(w, Write::PutLineFork { line: l, .. } if l == line))
+                .count()
+                > 1;
+            if twice || repo.line_forks.contains_key(line) {
+                return Err(StoreError::Invalid(format!(
+                    "line {line} already has a fork"
+                )));
+            }
+        }
         if let Write::SetRef(record) = write {
             let guarded = txn
                 .preconditions
@@ -442,6 +458,9 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
                 pos,
             } => {
                 repo.line_pos.insert((line, changeset), pos);
+            }
+            Write::PutLineFork { line, parent, pos } => {
+                repo.line_forks.insert(line, (parent, pos));
             }
             Write::PutLinePath {
                 line,
@@ -727,7 +746,40 @@ impl MetaStore for MemoryStore {
         line: &str,
         id: ChangesetId,
     ) -> impl Future<Output = StoreResult<Option<u64>>> + Send {
-        ready(self.with(|st| Ok(st.repo(repo)?.line_pos.get(&(line.to_owned(), id)).copied())))
+        ready(self.with(|st| {
+            let st = st.repo(repo)?;
+            let mut line = line.to_owned();
+            let mut bound = u64::MAX;
+            loop {
+                if let Some(&pos) = st.line_pos.get(&(line.clone(), id)) {
+                    return Ok((pos <= bound).then_some(pos));
+                }
+                let Some((parent, at)) = st.line_forks.get(&line) else {
+                    return Ok(None);
+                };
+                bound = bound.min(*at);
+                line = parent.clone();
+            }
+        }))
+    }
+
+    fn line_holders(
+        &self,
+        repo: RepoId,
+        id: ChangesetId,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<(String, u64)>>> + Send {
+        // A test store: a scan of the positions stands in for an index.
+        ready(self.with(|st| {
+            Ok(st
+                .repo(repo)?
+                .line_pos
+                .iter()
+                .filter(|((_, c), _)| *c == id)
+                .take(page_limit(limit))
+                .map(|((line, _), pos)| (line.clone(), *pos))
+                .collect())
+        }))
     }
 
     fn scan_line_path(
@@ -739,18 +791,30 @@ impl MetaStore for MemoryStore {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<(u64, ChangesetId)>>> + Send {
         ready(self.with(|st| {
-            let rows = st
-                .repo(repo)?
-                .line_paths
-                .get(&(line.to_owned(), path.clone()));
-            Ok(rows
-                .into_iter()
-                .flatten()
-                .rev()
-                .filter(|(pos, _)| *pos < before)
-                .take(page_limit(limit))
-                .copied()
-                .collect())
+            let st = st.repo(repo)?;
+            let limit = page_limit(limit);
+            let mut out = Vec::new();
+            let mut line = line.to_owned();
+            let mut before = before;
+            loop {
+                let rows = st.line_paths.get(&(line.clone(), path.clone()));
+                out.extend(
+                    rows.into_iter()
+                        .flatten()
+                        .rev()
+                        .filter(|(pos, _)| *pos < before)
+                        .take(limit - out.len())
+                        .copied(),
+                );
+                if out.len() == limit {
+                    return Ok(out);
+                }
+                let Some((parent, at)) = st.line_forks.get(&line) else {
+                    return Ok(out);
+                };
+                before = before.min(at.saturating_add(1));
+                line = parent.clone();
+            }
         }))
     }
 
