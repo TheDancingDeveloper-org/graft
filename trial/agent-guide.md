@@ -45,6 +45,10 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
    `--workspace --exclude rtbit-desktop`), but run the full commands once
    before you land.
 4. **Commit** a draft: `g commit -m "<message>" --author-kind agent --meta vogt.work_item=WI-<n>`.
+   With `VOGT_SESSION_ID` and `VOGT_WORK_ITEM` set (Vogt sets both), the
+   draft records your session and work item and the author kind defaults to
+   `agent` (WI-2337); the batch PR's commit for your land carries them as
+   `Graft-Session` and `Graft-Work-Item` trailers.
    More edits? Commit again (a stack of drafts), or `g commit --amend`.
    `g stack` lists the drafts; `g stack squash` makes them one.
 5. **Sync** to pick up what others landed: `g sync`. Exit 0 means you are on
