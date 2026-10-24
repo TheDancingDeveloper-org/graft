@@ -87,6 +87,13 @@ async fn play(name: &str, case: Case) -> Outcome {
     assert_eq!(stopped["kind"], "conflict", "{stopped}");
     assert_eq!(stopped["paths"], json!([case.path]));
     assert_eq!(stopped["preflight"]["stop"], true, "{stopped}");
+    // WI-2417: these tokens can land but lack `repo:r:drafts`; only the
+    // overlap is skipped, and the conflict stop still runs.
+    assert_eq!(
+        stopped["preflight"]["pre_land_check"],
+        json!({"rebase": "ran", "overlap": "skipped(scope)"}),
+        "{stopped}"
+    );
 
     // Sent without the check, B's land conflicts on the server, with ids only.
     let conflict_error = b.err(

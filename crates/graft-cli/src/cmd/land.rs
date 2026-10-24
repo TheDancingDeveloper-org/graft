@@ -27,7 +27,10 @@
 //! paths. A real conflict exits 3 with the paths and sends nothing (with
 //! `--sync` the land goes ahead, so the conflicts are written into the
 //! files); files that merge cleanly and other workspaces' drafts are only
-//! reported. `--no-check` skips it. It builds and tests nothing, and the
+//! reported. `--no-check` skips it. The dry run needs only the scopes a
+//! land needs; the overlap needs `repo:<r>:drafts`, and without it only
+//! the overlap is skipped, with a note on stderr and
+//! `pre_land_check.overlap: "skipped(scope)"` in JSON. It builds and tests nothing, and the
 //! server's land still decides. JSON output carries it under `preflight`.
 //!
 //! `--merged-from <line>@<rev>` lands the resolution of a conflicted
@@ -87,6 +90,9 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
                 };
                 let found = preflight::preflight(&s.conn.remote, &s.cx, &req).await?;
                 let value = found.json();
+                for note in found.skip_notes() {
+                    eprintln!("{note}");
+                }
                 if !g.json {
                     for line in found.lines() {
                         outln!("{line}");

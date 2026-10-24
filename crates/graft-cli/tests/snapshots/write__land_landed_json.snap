@@ -20,6 +20,10 @@ expression: value
       "truncated": false
     },
     "merges_cleanly": [],
+    "pre_land_check": {
+      "overlap": "skipped(unserved)",
+      "rebase": "not_needed"
+    },
     "preview_skipped": null,
     "stop": false,
     "tip": "ceb9d51a431efa31e031494ec857b6e71b3fc89b7df21172c5365879f263cec50"

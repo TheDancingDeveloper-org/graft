@@ -60,7 +60,12 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
    Landing is immediate: there is no attestation to wait for. `g land` first
    runs the pre-land check (D27): a dry-run rebase that stops the land on a
    real conflict before anything is sent; `--no-check` skips it. Exit 0
-   means your change is on `$LINE`.
+   means your change is on `$LINE`. The dry run needs only what a land
+   needs. The draft-overlap part needs `repo:<r>:drafts` (trial tokens have
+   it); without it only that part is skipped, with
+   `pre-land: draft overlap not checked …` on stderr and
+   `preflight.pre_land_check: {"rebase": "ran", "overlap": "skipped(scope)"}`
+   in `--json`. The conflict stop still works.
 
 ## Conflicts (exit 3 from `g sync` or `g land`)
 

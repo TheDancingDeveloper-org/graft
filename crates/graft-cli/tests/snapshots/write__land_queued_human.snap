@@ -2,5 +2,4 @@
 source: crates/graft-cli/tests/write.rs
 expression: text(&out)
 ---
-pre-land: draft overlap not checked (the server does not answer it)
 queued for main: https://github.example/o/demo/pull/1

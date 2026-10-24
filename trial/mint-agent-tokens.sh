@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Mint N agent tokens for the rusttorrent repository on graft-dev and
+# Mint N agent tokens for the $GRAFT_TRIAL_REPO repository on graft-dev and
 # store them on THIS machine as ~/.config/graft/trial-<i>.token (mode 0600).
 #
 #   trial/mint-agent-tokens.sh [--session ses_…] [--work-item WI-…] [--ttl SECS] N
 #
-# Each token is kind agent, scopes repo:rusttorrent:read, :write and
-# :land:<line> (never main), valid for one day by default. Minting runs on the VM through
+# Each token is kind agent, scopes repo:<repo>:read, :write, :drafts (so
+# the pre-land check's draft-overlap read runs, WI-2417) and :land:<line>
+# (never the base line), valid for one day by default. Minting runs on the VM through
 # `tailscale ssh sprooty@graft-dev`; the token travels back on the ssh stdout
 # straight into the file. It is never printed, never in argv, never in a
 # variable. Re-running replaces the files with fresh tokens.
 #
 #   GRAFT_TRIAL_HOST    ssh target (default sprooty@graft-dev)
+#   GRAFT_TRIAL_REPO    graft repository (default rusttorrent)
+#   GRAFT_TRIAL_BASE    followed base line, never landable (default main)
 #   GRAFT_TRIAL_LINE    line the tokens may land on (default trial-1)
 #   GRAFT_TRIAL_DIR     token directory (default ~/.config/graft)
 set -euo pipefail
 
 host=${GRAFT_TRIAL_HOST:-sprooty@graft-dev}
 dir=${GRAFT_TRIAL_DIR:-$HOME/.config/graft}
-repo=rusttorrent
+repo=${GRAFT_TRIAL_REPO:-rusttorrent}
+base=${GRAFT_TRIAL_BASE:-main}
 line=${GRAFT_TRIAL_LINE:-trial-1}
 ttl=86400
 session=
@@ -25,7 +29,7 @@ work_item=
 
 log() { printf 'mint-agent-tokens: %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
-usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 n=
 while [ $# -gt 0 ]; do
@@ -41,6 +45,11 @@ done
 [ -n "$n" ] || usage
 # These are interpolated into the remote command line: accept only safe shapes.
 [[ $n =~ ^[1-9][0-9]*$ ]] && [ "$n" -le 64 ] || die "N must be 1..64"
+[[ $host =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$ ]] || die "bad GRAFT_TRIAL_HOST"
+[[ $repo =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || die "bad GRAFT_TRIAL_REPO"
+[[ $base =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "bad GRAFT_TRIAL_BASE"
+[[ $line =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "bad GRAFT_TRIAL_LINE"
+[ "$line" != "$base" ] || die "GRAFT_TRIAL_LINE must not be the base line"
 [[ $ttl =~ ^[1-9][0-9]*$ ]] || die "--ttl takes seconds"
 [ -z "$session" ] || [[ $session =~ ^ses_[A-Za-z0-9]+$ ]] || die "--session must look like ses_…"
 [ -z "$work_item" ] || [[ $work_item =~ ^WI-[0-9]+$ ]] || die "--work-item must look like WI-123"
@@ -62,7 +71,8 @@ for i in $(seq 1 "$n"); do
   # shellcheck disable=SC2086 # $extra is validated words, split on purpose
   if ! tailscale ssh "$host" docker exec graft-dev-server graft-server admin token mint \
       --subject "trial-agent-$i" --kind agent \
-      --scope "repo:$repo:read" --scope "repo:$repo:write" --scope "repo:$repo:land:$line" \
+      --scope "repo:$repo:read" --scope "repo:$repo:write" --scope "repo:$repo:drafts" \
+      --scope "repo:$repo:land:$line" \
       --ttl "$ttl" $extra >"$tmp"; then
     rm -f "$tmp"
     die "mint $i failed (nothing written for it)"

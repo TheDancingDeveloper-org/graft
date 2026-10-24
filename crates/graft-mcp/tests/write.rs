@@ -1118,6 +1118,10 @@ async fn graft_land_runs_the_pre_land_check() {
     let pre = &stopped["preflight"];
     assert_eq!(pre["stop"], true);
     assert_eq!(pre["tip"], tip.to_string());
+    assert_eq!(
+        pre["pre_land_check"],
+        json!({"rebase": "ran", "overlap": "ran"})
+    );
     assert!(rig.prs().is_empty(), "nothing was sent");
 
     // The rig's bridge can't land onto a moved tip, so this land fails

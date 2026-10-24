@@ -107,6 +107,25 @@
         "checked": {
           "type": "boolean"
         },
+        "pre_land_check": {
+          "description": "What ran: `rebase` is the dry-run conflict preview (needs only what a land needs), `overlap` the draft-overlap read (needs repo:<r>:drafts). Each is `ran`, `not_needed` (rebase only: the stack is on the tip) or `skipped(<why>)`.",
+          "type": "object",
+          "required": [
+            "rebase",
+            "overlap"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "rebase": {
+              "type": "string",
+              "pattern": "^(ran|not_needed|skipped\\([a-z-]+\\))$"
+            },
+            "overlap": {
+              "type": "string",
+              "pattern": "^(ran|skipped\\([a-z-]+\\))$"
+            }
+          }
+        },
         "tip": {
           "type": "string",
           "pattern": "^[a-z][0-9a-f]{64}$"
