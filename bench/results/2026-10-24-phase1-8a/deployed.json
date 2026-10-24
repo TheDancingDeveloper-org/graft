@@ -1,0 +1,125 @@
+{
+  "started": "2026-10-24T05:07:38Z",
+  "graft": "graft 0.0.0 (protocol 0.1)",
+  "host": "graft-dev",
+  "nproc": 4,
+  "builds_or_tests_run": 0,
+  "loadavg_start": [
+    1.9423828125,
+    2.49560546875,
+    2.05712890625
+  ],
+  "site": "graft-dev-server",
+  "identity": {
+    "matching": {
+      "commit_rc": 0,
+      "land_rc": 0,
+      "rule": null
+    },
+    "other_session": {
+      "commit_rc": 2,
+      "land_rc": null,
+      "rule": "session-metadata"
+    },
+    "other_work_item": {
+      "commit_rc": 2,
+      "land_rc": null,
+      "rule": "work-item-metadata"
+    },
+    "pass": true
+  },
+  "preland": {
+    "k": 3,
+    "latency": {
+      "fresh_check": {
+        "n": 3,
+        "p50_ms": 146.863,
+        "p95_ms": 157.61,
+        "p99_ms": 158.566,
+        "mean_ms": 128.504,
+        "max_ms": 158.804,
+        "total_s": 0.386
+      },
+      "behind_check": {
+        "n": 3,
+        "p50_ms": 167.139,
+        "p95_ms": 242.151,
+        "p99_ms": 248.819,
+        "mean_ms": 165.49,
+        "max_ms": 250.486,
+        "total_s": 0.496
+      },
+      "fresh_no_check": {
+        "n": 3,
+        "p50_ms": 36.486,
+        "p95_ms": 51.282,
+        "p99_ms": 52.597,
+        "mean_ms": 36.717,
+        "max_ms": 52.926,
+        "total_s": 0.11
+      },
+      "behind_no_check": {
+        "n": 3,
+        "p50_ms": 248.051,
+        "p95_ms": 381.243,
+        "p99_ms": 393.082,
+        "mean_ms": 239.745,
+        "max_ms": 396.042,
+        "total_s": 0.719
+      },
+      "conflict_check": {
+        "n": 3,
+        "p50_ms": 11.771,
+        "p95_ms": 12.384,
+        "p99_ms": 12.439,
+        "mean_ms": 11.772,
+        "max_ms": 12.452,
+        "total_s": 0.035
+      },
+      "conflict_no_check": {
+        "n": 3,
+        "p50_ms": 14.454,
+        "p95_ms": 39.107,
+        "p99_ms": 41.298,
+        "mean_ms": 23.581,
+        "max_ms": 41.846,
+        "total_s": 0.071
+      }
+    },
+    "conflicts": {
+      "cases": 3,
+      "check": 3,
+      "nocheck_refused": 3,
+      "sent_by_check": 0
+    }
+  },
+  "batches": [
+    {
+      "n": 5,
+      "pr_batch_rc": 0,
+      "export_s": 0.287,
+      "lands_s": 0.385,
+      "commits": 5,
+      "squashed": false,
+      "fallback_reason_in_body": null,
+      "trailers": {
+        "Graft-Changeset": 5,
+        "Graft-Session": 5,
+        "Graft-Work-Item": 5,
+        "Graft-Batch": 5
+      },
+      "commits_with_session_and_work_item": 5,
+      "commits_keeping_at_sign": 5,
+      "upstream_change_kept_at_tip": true,
+      "tip_tree": "362ee036c9647db0817e478cc0cc9480e1f8b7a1",
+      "export_ms_per_land": 57.49
+    }
+  ],
+  "server": {},
+  "loadavg_end": [
+    1.9365234375,
+    2.470703125,
+    2.056640625
+  ],
+  "finished": "2026-10-24T05:07:51Z"
+}

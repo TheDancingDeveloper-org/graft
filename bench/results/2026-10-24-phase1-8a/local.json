@@ -1,0 +1,210 @@
+{
+  "started": "2026-10-24T05:06:06Z",
+  "graft": "graft 0.0.0 (protocol 0.1)",
+  "host": "graft-dev",
+  "nproc": 4,
+  "builds_or_tests_run": 0,
+  "loadavg_start": [
+    1.6298828125,
+    2.60546875,
+    2.04150390625
+  ],
+  "site": "local",
+  "identity": {
+    "matching": {
+      "commit_rc": 0,
+      "land_rc": 0,
+      "rule": null
+    },
+    "other_session": {
+      "commit_rc": 2,
+      "land_rc": null,
+      "rule": "session-metadata"
+    },
+    "other_work_item": {
+      "commit_rc": 2,
+      "land_rc": null,
+      "rule": "work-item-metadata"
+    },
+    "pass": true
+  },
+  "preland": {
+    "k": 20,
+    "latency": {
+      "fresh_check": {
+        "n": 20,
+        "p50_ms": 9.233,
+        "p95_ms": 10.992,
+        "p99_ms": 11.66,
+        "mean_ms": 9.248,
+        "max_ms": 11.827,
+        "total_s": 0.185
+      },
+      "behind_check": {
+        "n": 20,
+        "p50_ms": 14.151,
+        "p95_ms": 16.479,
+        "p99_ms": 18.159,
+        "mean_ms": 14.226,
+        "max_ms": 18.579,
+        "total_s": 0.285
+      },
+      "fresh_no_check": {
+        "n": 20,
+        "p50_ms": 6.925,
+        "p95_ms": 8.538,
+        "p99_ms": 10.119,
+        "mean_ms": 7.127,
+        "max_ms": 10.515,
+        "total_s": 0.143
+      },
+      "behind_no_check": {
+        "n": 20,
+        "p50_ms": 10.105,
+        "p95_ms": 12.492,
+        "p99_ms": 12.774,
+        "mean_ms": 10.339,
+        "max_ms": 12.845,
+        "total_s": 0.207
+      },
+      "conflict_check": {
+        "n": 20,
+        "p50_ms": 7.441,
+        "p95_ms": 9.747,
+        "p99_ms": 10.199,
+        "mean_ms": 7.606,
+        "max_ms": 10.313,
+        "total_s": 0.152
+      },
+      "conflict_no_check": {
+        "n": 20,
+        "p50_ms": 4.998,
+        "p95_ms": 5.98,
+        "p99_ms": 6.305,
+        "mean_ms": 4.957,
+        "max_ms": 6.386,
+        "total_s": 0.099
+      }
+    },
+    "conflicts": {
+      "cases": 20,
+      "check": 20,
+      "nocheck_refused": 20,
+      "sent_by_check": 0
+    }
+  },
+  "batches": [
+    {
+      "n": 10,
+      "pr_batch_rc": 0,
+      "export_s": 0.15,
+      "lands_s": 0.153,
+      "commits": 10,
+      "squashed": false,
+      "fallback_reason_in_body": null,
+      "trailers": {
+        "Graft-Changeset": 10,
+        "Graft-Session": 10,
+        "Graft-Work-Item": 10,
+        "Graft-Batch": 10
+      },
+      "commits_with_session_and_work_item": 10,
+      "commits_keeping_at_sign": 10,
+      "upstream_change_kept_at_tip": true,
+      "tip_tree": "8754cc001733d7abc806601ae9d52e36bf118bd4",
+      "export_ms_per_land": 14.95
+    },
+    {
+      "n": 50,
+      "pr_batch_rc": 0,
+      "export_s": 0.467,
+      "lands_s": 0.768,
+      "commits": 50,
+      "squashed": false,
+      "fallback_reason_in_body": null,
+      "trailers": {
+        "Graft-Changeset": 50,
+        "Graft-Session": 50,
+        "Graft-Work-Item": 50,
+        "Graft-Batch": 50
+      },
+      "commits_with_session_and_work_item": 50,
+      "commits_keeping_at_sign": 50,
+      "upstream_change_kept_at_tip": true,
+      "tip_tree": "bb254f5083cd699da8bcb3b8455fb7d7ee2748cf",
+      "export_ms_per_land": 9.34
+    },
+    {
+      "n": 200,
+      "pr_batch_rc": 0,
+      "export_s": 1.63,
+      "lands_s": 3.067,
+      "commits": 200,
+      "squashed": false,
+      "fallback_reason_in_body": null,
+      "trailers": {
+        "Graft-Changeset": 200,
+        "Graft-Session": 200,
+        "Graft-Work-Item": 200,
+        "Graft-Batch": 200
+      },
+      "commits_with_session_and_work_item": 200,
+      "commits_keeping_at_sign": 200,
+      "upstream_change_kept_at_tip": true,
+      "tip_tree": "2b3d9b907bcd793913afaaf7d08dce21b3643319",
+      "export_ms_per_land": 8.15
+    },
+    {
+      "n": 500,
+      "pr_batch_rc": 0,
+      "export_s": 3.91,
+      "lands_s": 7.869,
+      "commits": 500,
+      "squashed": false,
+      "fallback_reason_in_body": null,
+      "trailers": {
+        "Graft-Changeset": 500,
+        "Graft-Session": 500,
+        "Graft-Work-Item": 500,
+        "Graft-Batch": 500
+      },
+      "commits_with_session_and_work_item": 500,
+      "commits_keeping_at_sign": 500,
+      "upstream_change_kept_at_tip": true,
+      "tip_tree": "bb128a245061c614ece9da7368d7e911de0f6cb4",
+      "export_ms_per_land": 7.82
+    },
+    {
+      "n": 501,
+      "pr_batch_rc": 0,
+      "export_s": 2.597,
+      "lands_s": 7.73,
+      "commits": 500,
+      "squashed": false,
+      "fallback_reason_in_body": null,
+      "trailers": {
+        "Graft-Changeset": 500,
+        "Graft-Session": 500,
+        "Graft-Work-Item": 500,
+        "Graft-Batch": 500
+      },
+      "commits_with_session_and_work_item": 500,
+      "commits_keeping_at_sign": 500,
+      "upstream_change_kept_at_tip": false,
+      "tip_tree": "e0c7ad9f7aa7254ec60cc36973402ac4ebc8d7c0",
+      "export_ms_per_land": 5.18
+    }
+  ],
+  "server": {
+    "storage_bytes": 15297316,
+    "cpu_s": 15.42,
+    "peak_rss_kib": 27648,
+    "rss_kib": 26928
+  },
+  "loadavg_end": [
+    2.2880859375,
+    2.64208984375,
+    2.0771484375
+  ],
+  "finished": "2026-10-24T05:06:47Z"
+}
