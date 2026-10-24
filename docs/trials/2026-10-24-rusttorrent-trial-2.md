@@ -17,7 +17,7 @@ PR.
 
 | Item | Value |
 | --- | --- |
-| Server | graft-dev VM, redeployed at graft `main` 3e8ba5d (#175; image `sha256:9ab165f2…`). Mirror lag 0 before the trial |
+| Server | graft-dev VM. Wave 1 (lands 1–3, 11:15–11:17Z) ran on the #140 image. #175 (graft `main` 3e8ba5d, image `sha256:9ab165f2…`) deployed at about 11:21Z, and every later land ran on it. Mirror lag was 0 after the redeploy |
 | Repository | `rusttorrent`, followed from GitHub `TheDancingDeveloper-org/rustTorrent` |
 | Line | `trial-2`, forked at GitHub `main` 7e112d7 (trial 1's batch), policy `direct` (the default line policy) |
 | Agents | 10 Opus 5.5 Vogt worker sessions (8 item workers, 2 fix-forwards), at most 4 at once, 4 agent tokens (`trial/mint-agent-tokens.sh`, `GRAFT_TRIAL_LINE=trial-2`, #174), graft CLI built from 3e8ba5d |
