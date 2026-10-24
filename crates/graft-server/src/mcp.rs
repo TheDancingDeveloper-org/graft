@@ -104,7 +104,7 @@ impl McpApi {
 
 /// One API method through [`McpApi::run`].
 macro_rules! via {
-    ($self:ident, $op:literal, $repo:expr, $cx:ident, $write:literal, |$e:ident, $c:ident| $body:expr) => {{
+    ($self:ident, $op:literal, $repo:expr, $cx:ident, $write:expr, |$e:ident, $c:ident| $body:expr) => {{
         let repo = $repo.clone();
         $self
             .run($op, &repo, $cx, $write, move |$e, $c| async move { $body })
@@ -189,7 +189,9 @@ impl RepoApi for McpApi {
             .await)
     }
     async fn rebase(&self, cx: &CallContext, req: Rebase) -> ApiResult<ChangesetId> {
-        via!(self, "Rebase", req.repo, cx, true, |e, c| e
+        // A dry run writes nothing, so it is not admitted as a write.
+        let write = !req.dry_run;
+        via!(self, "Rebase", req.repo, cx, write, |e, c| e
             .rebase(&c, req)
             .await)
     }

@@ -519,12 +519,15 @@ fn history_types_round_trip() {
 fn land_types_round_trip() {
     check::<Rebase, pb::RebaseRequest, _>(
         "Rebase",
-        (text(), cid(), cid(), merge_mode()).prop_map(|(repo, changeset, onto, merge)| Rebase {
-            repo,
-            changeset,
-            onto,
-            merge,
-        }),
+        (text(), cid(), cid(), merge_mode(), any::<bool>()).prop_map(
+            |(repo, changeset, onto, merge, dry_run)| Rebase {
+                repo,
+                changeset,
+                onto,
+                merge,
+                dry_run,
+            },
+        ),
     );
     check::<Revert, pb::RevertRequest, _>(
         "Revert",
@@ -769,9 +772,11 @@ fn unset_merge_mode_means_file() {
         changeset: vec![1; 32],
         onto: vec![2; 32],
         merge: 0,
+        dry_run: false,
     })
     .unwrap();
     assert_eq!(r.merge, MergeMode::File);
+    assert!(!r.dry_run);
 }
 
 #[test]

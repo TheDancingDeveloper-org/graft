@@ -273,6 +273,7 @@ impl<A: RepoApi + ObjectApi> Lander for FakeLand<'_, A> {
                         changeset: head,
                         onto: tip,
                         merge: MergeMode::File,
+                        dry_run: false,
                     },
                 )
                 .await?

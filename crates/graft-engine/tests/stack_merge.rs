@@ -149,6 +149,7 @@ impl<'f, M: MetaStore> T<'f, M> {
                 changeset,
                 onto,
                 merge,
+                dry_run: false,
             },
         ))
     }

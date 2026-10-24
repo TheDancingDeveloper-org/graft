@@ -756,7 +756,8 @@ impl pb::repo_service_server::RepoService for Services {
             self,
             request,
             "Rebase",
-            true,
+            // A dry run writes nothing, so it is not admitted as a write.
+            !req.dry_run,
             Rebase,
             |e, cx, req| e.rebase(&cx, req).await,
             |id| pb::ChangesetRef { id: cid(id) }
