@@ -81,12 +81,7 @@ pub(crate) const OPS: &[Op] = &[
     op("get_changesets", "RepoApi", Surface::Command("show"), true),
     op("resolve_ref", "RepoApi", Surface::Command("api"), true),
     op("list_refs", "RepoApi", Surface::Command("api"), true),
-    op(
-        "update_ref",
-        "RepoApi",
-        Surface::Excluded("moves admin and tool refs; served by graft-server admin (G1.12)"),
-        false,
-    ),
+    op("update_ref", "RepoApi", Surface::Command("tag"), false),
     op("stat", "RepoApi", Surface::Command("api"), true),
     op("list_tree", "RepoApi", Surface::Command("ls"), true),
     op("read_file", "RepoApi", Surface::Command("cat"), true),
