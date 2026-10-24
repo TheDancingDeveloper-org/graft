@@ -1,0 +1,62 @@
+{
+  "label": "res3",
+  "batch": {
+    "agents": 5,
+    "rounds": 2,
+    "lands": 10,
+    "land_tries": 10,
+    "land_conflicts": 0,
+    "land_p50_ms": 205.0,
+    "land_p90_ms": 461.8,
+    "bad_land": "cf442b8c82a7d8f2ea97654de675e3ca3f4efda3557d5783bff3745090dd75a58",
+    "batch1": {
+      "commits": 10,
+      "per_land": true,
+      "ci_passed": false,
+      "cut_s": 0.245,
+      "pr_open_after_last_land_s": 0.282
+    },
+    "authorship": {
+      "commits": 10,
+      "fully_correct": 10,
+      "share": 1.0,
+      "author": 10,
+      "session": 10,
+      "work_item": 10,
+      "kind_agent_on_graft": 10
+    },
+    "history": {
+      "bisect_first_bad_is_bad_land": true,
+      "blame_good_lands_correct": "9/9",
+      "main_commits": 11,
+      "good_lands_on_main": 9,
+      "good_lands": 9,
+      "main_commits_per_land": 1.1,
+      "bad_land_and_revert_both_on_main": true
+    },
+    "blast_radius": {
+      "good_lands_held_by_bad": 9,
+      "drop_and_recut_s": 0.166,
+      "pr1_closed": true,
+      "pr1_comment": true,
+      "batch2_commits": 11,
+      "batch2_ci_passed": true
+    },
+    "latency": {
+      "merge_simulated": "immediate rebase-merge (fast-forward) after the recut; no review wait",
+      "land_to_main_p50_s": 1.449,
+      "land_to_main_p90_s": 1.818,
+      "settle_s": 0.14,
+      "merged_sha": "21e9d5214beba774d7018e7da480f7e80e0ffc07"
+    },
+    "fake_github_calls": 12,
+    "outputs": {
+      "cut1": "batch 1 (open): 10 land(s), graft/batch-1 on main at ccb6ec6644823fe34f97c8af5586821d7bb0f91e\n  PR:     https://github.invalid/bench/upstream/pull/1\n  detail: waiting for the operator to merge",
+      "drop": "batch 1 (rejected): 10 land(s), graft/batch-1 on main at ccb6ec6644823fe34f97c8af5586821d7bb0f91e\n  PR:     https://github.invalid/bench/upstream/pull/1\n  detail: superseded: land `cf442b8c82a7d` dropped from line int (reverted); recut as a new batch\nline int: dropped cf442b8c82a7d8f2ea97654de675e3ca3f4efda3557d5783bff3745090dd75a58 (reverted by ca926fba9e640d45f269a0e41d6432e0e0536771b9d192a5fb66ae0f1191969d1)\nbatch 2 (open): 11 land(s), graft/batch-2 on main at ccb6ec6644823fe34f97c8af5586821d7bb0f91e\n  PR:     https://github.invalid/bench/upstream/pull/2\n  detail: waiting for the operator to merge",
+      "settle": "batch 2 (merged): 11 land(s), graft/batch-2 on main at ccb6ec6644823fe34f97c8af5586821d7bb0f91e\n  PR:     https://github.invalid/bench/upstream/pull/2\n  detail: merged as 21e9d5214beba774d7018e7da480f7e80e0ffc07 (graft cad6e7121407c5fff7a81f6db62d7d2bd405af346a449f7957e45a2a7686f1924)\nline int: nothing the base lacks; no batch"
+    },
+    "drop_window_s": 0.166,
+    "merge_to_settled_s": 0.143,
+    "ok": true
+  }
+}

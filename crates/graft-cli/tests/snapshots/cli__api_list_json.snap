@@ -1,5 +1,6 @@
 ---
 source: crates/graft-cli/tests/cli.rs
+assertion_line: 361
 expression: value
 ---
 [
@@ -54,8 +55,8 @@ expression: value
   },
   {
     "api": "RepoApi",
-    "command": null,
-    "excluded": "moves admin and tool refs; served by graft-server admin (G1.12)",
+    "command": "tag",
+    "excluded": null,
     "op": "update_ref",
     "raw": false
   },

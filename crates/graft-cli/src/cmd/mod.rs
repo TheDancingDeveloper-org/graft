@@ -21,5 +21,6 @@ pub(crate) mod sparse;
 pub(crate) mod stack;
 pub(crate) mod status;
 pub(crate) mod sync;
+pub(crate) mod tag;
 pub(crate) mod version;
 pub(crate) mod workspace;

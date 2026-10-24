@@ -110,6 +110,7 @@ async fn the_service_serves_tools_over_loopback_http() {
             "graft_show",
             "graft_status",
             "graft_sync",
+            "graft_tag",
             "graft_upstream",
             "graft_workspace"
         ]
@@ -124,6 +125,7 @@ async fn the_service_serves_tools_over_loopback_http() {
             "graft_resolve",
             "graft_revert",
             "graft_sync",
+            "graft_tag",
             "graft_workspace",
         ];
         assert_eq!(

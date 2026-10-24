@@ -227,6 +227,7 @@ fn land_req(head: ChangesetId, line: &str) -> Land {
         squash: false,
         merge: MergeMode::File,
         deadline_ms: None,
+        merged_from: None,
     }
 }
 

@@ -682,6 +682,7 @@ impl WorkingCopy {
             squash: opts.squash,
             merge: opts.merge,
             deadline_ms: None,
+            merged_from: None,
         };
         let (landed, rebased) = loop {
             let until = match api.land(cx, req.clone()).await {

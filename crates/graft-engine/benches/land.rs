@@ -250,6 +250,7 @@ impl Fixture {
             squash: false,
             merge: MergeMode::File,
             deadline_ms: None,
+            merged_from: None,
         };
         let start = Instant::now();
         let landed = block_on(self.engine.land(&self.admin, req));

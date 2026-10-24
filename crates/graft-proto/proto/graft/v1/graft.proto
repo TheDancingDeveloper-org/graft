@@ -356,6 +356,14 @@ message LandRequest {
   bool squash = 4;
   MergeMode merge = 5;
   optional uint64 deadline_ms = 6;
+  // Lands a merge resolution: records a merge point (D29).
+  MergedFrom merged_from = 7;
+}
+
+// The source of a merge landing (D29, design.md §8.9).
+message MergedFrom {
+  string line = 1;
+  bytes changeset = 2;
 }
 
 message Landed {

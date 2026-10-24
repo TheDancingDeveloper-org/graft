@@ -124,6 +124,18 @@ Useful options:
 | `--no-import` | | skip the `graft-mirror import` step and its repository |
 | `--label` | the output dir name | title of the summary |
 
+### Batch delivery (`--batch`, WI-2352)
+
+`python3 -m graftbench --batch [--batch-agents 5] [--batch-rounds 2]` runs
+the batch scenario on a local server: agents land at once on an integration
+line (pre-land check on), `graft-mirror pr-batch` exports one commit per land
+to a local bare repository behind a fake GitHub API, one planted land breaks
+the build (`compileall`), `pr-batch --exclude` drops it, and a simulated
+rebase-merge lands the batch. It reports authorship per commit, `git bisect`
+and `git blame` on the export, good lands held by the bad one, drop and
+recut time, and land to `main` p50/p90. `graftbench.batchlive` is the live
+counterpart against graft-dev and GitHub (docs/trials/2026-10-24-batch-delivery.md).
+
 ### Against a running server
 
 ```sh

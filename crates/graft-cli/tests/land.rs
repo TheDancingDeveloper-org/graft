@@ -982,3 +982,77 @@ fn the_pre_land_check_reports_clean_merges_and_draft_overlap() {
         "{value}"
     );
 }
+
+#[test]
+fn tag_create_then_list_and_a_tag_never_moves() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let (_app, draft) = with_draft(&s, dir.path(), None);
+    let outside = |args: &[&str]| {
+        graft(dir.path())
+            .args(["--endpoint", &s.url, "--repo", "demo"])
+            .args(args)
+            .assert()
+    };
+
+    let made = json_out(
+        outside(&["--json", "tag", "create", "v1.0"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("tag", &made);
+    assert_eq!(made["name"], json!("tags/v1.0"));
+    assert_eq!(made["kind"], json!("tag"));
+    let human = stdout(&outside(&["tag", "create", "tags/v1.1", "--at", "main"]).success());
+    assert!(human.starts_with("created tag tags/v1.1 at "), "{human}");
+
+    let list = json_out(outside(&["--json", "tag", "list"]).success().get_output());
+    assert_valid("tag-list", &list);
+    let names: Vec<_> = list["tags"]
+        .as_array()
+        .expect("tags")
+        .iter()
+        .map(|t| t["name"].as_str().expect("name").to_owned())
+        .collect();
+    assert_eq!(names, ["tags/v1.0", "tags/v1.1"]);
+    let page = json_out(
+        outside(&["--json", "tag", "list", "--limit", "1"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("tag-list", &page);
+    assert_eq!(page["next"], json!("tags/v1.0"));
+    let rest = json_out(
+        outside(&[
+            "--json",
+            "tag",
+            "list",
+            "--prefix",
+            "v1",
+            "--cursor",
+            "tags/v1.0",
+        ])
+        .success()
+        .get_output(),
+    );
+    assert_eq!(rest["tags"][0]["name"], json!("tags/v1.1"));
+    assert_eq!(rest["tags"].as_array().map(Vec::len), Some(1));
+
+    // Pointing the tag elsewhere is refused, and nothing moves.
+    let draft = draft.to_string();
+    let moved = outside(&["--json", "tag", "create", "v1.0", "--at", &draft]).failure();
+    assert_eq!(error_of(&moved)["kind"], json!("ref_conflict"));
+    let after = json_out(outside(&["--json", "tag", "list"]).success().get_output());
+    assert_eq!(after["tags"][0]["target"], made["target"]);
+    assert_eq!(after["tags"][0]["version"], json!(1));
+
+    // A tag of a draft is a new tag; a line of the same name is not a tag.
+    let fresh = json_out(
+        outside(&["--json", "tag", "create", "rc", "--at", &draft])
+            .success()
+            .get_output(),
+    );
+    assert_eq!(fresh["target"], json!(draft));
+    let clash = outside(&["--json", "line", "create", "tags/v1.0", "--from", "main"]).failure();
+    assert_eq!(error_of(&clash)["kind"], json!("ref_conflict"));
+}
