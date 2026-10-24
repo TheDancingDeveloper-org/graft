@@ -695,27 +695,30 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             ),
             None => None,
         };
-        // A merge resolution lands as its head stamped with what it merged
-        // (`graft.merged-from`, for readers and export). The stamp is
-        // deterministic, so a retry builds the same head and finds its
-        // earlier result.
-        if let Some(source) = &source {
-            let (cs, _) = self.changeset(repo, req.head).await?;
-            if let Some(stamped) = source.stamp(&cs) {
-                let id = stamped.id();
-                if let Some(done) = self.land_record(repo, id, &req.line).await? {
-                    return Ok(done);
-                }
-                req.head = self.insert_unheld(repo, stamped, Vec::new()).await?.id;
-            }
-        }
-        let (head_cs, head_record) = self.changeset(repo, req.head).await?;
+        let (mut head_cs, head_record) = self.changeset(repo, req.head).await?;
         if head_record.state == RecordState::Landed {
             return Err(errors::invalid(None, "draft-landed"));
         }
         let mut stack = self.chain(repo, req.head, line.target).await?;
         for (_, cs) in &stack {
             require_changes(cx, &req.repo, &cs.changes)?;
+        }
+        // A merge resolution lands as its head stamped with what it merged
+        // (`graft.merged-from`, for readers and export), once the caller
+        // may land it. The stamp is deterministic, so a retry builds the
+        // same head and finds its earlier result. It changes no path, so
+        // the checks above hold for it.
+        if let Some(stamped) = source.as_ref().and_then(|s| s.stamp(&head_cs)) {
+            let id = stamped.id();
+            if let Some(done) = self.land_record(repo, id, &req.line).await? {
+                return Ok(done);
+            }
+            req.head = self
+                .insert_unheld(repo, stamped.clone(), Vec::new())
+                .await?
+                .id;
+            head_cs = stamped;
+            stack = self.chain(repo, req.head, line.target).await?;
         }
         self.pre_checks(repo, &config, req.head, &head_cs, &stack)
             .await?;

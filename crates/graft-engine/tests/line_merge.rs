@@ -654,11 +654,67 @@ fn a_merge_needs_read_and_land_on_the_target_only<M: MetaStore>(f: &Fixture<M>) 
         ),
         "land on the source is not land on the target"
     );
+    // Denied on the paths: the stamped head is never stored.
+    let mut stamped = block_on(r.e().get_changesets(
+        &r.cx,
+        GetChangesets {
+            repo: r.name.clone(),
+            ids: vec![head],
+        },
+    ))
+    .expect("get changesets")
+    .found[0]
+        .changeset
+        .clone();
+    stamped
+        .metadata
+        .insert("graft.merged-from".to_owned(), format!("develop@{d2}"));
+    let stamped = stamped.id();
     assert!(matches!(
-        land_as(&["repo:r:land:main", "repo:r:write"]),
-        Ok(Landed::Landed { .. })
+        land_as(&["repo:r:land:main"]),
+        Err(ApiError::PermissionDenied { .. })
     ));
+    let stored = |id| {
+        block_on(r.e().get_changesets(
+            &r.cx,
+            GetChangesets {
+                repo: r.name.clone(),
+                ids: vec![id],
+            },
+        ))
+        .expect("get changesets")
+        .missing
+        .is_empty()
+    };
+    assert!(!stored(stamped), "a denied land leaves no draft");
+    let Ok(Landed::Landed { landed, .. }) = land_as(&["repo:r:land:main", "repo:r:write"]) else {
+        panic!("land on the target and write is enough");
+    };
+    assert_eq!(landed, stamped);
     assert_ne!(d1, d2);
+
+    // The landed head, landed on another line with `merged_from`: refused
+    // as landed, not stamped and landed a second time.
+    create(&r, "other", tip(&r, "develop"));
+    let again = block_on(r.e().land(
+        &r.cx,
+        Land {
+            repo: r.name.clone(),
+            head: landed,
+            line: "other".to_owned(),
+            squash: false,
+            merge: MergeMode::Line,
+            deadline_ms: None,
+            merged_from: Some(MergedFrom {
+                line: "develop".to_owned(),
+                changeset: d2,
+            }),
+        },
+    ));
+    match again {
+        Err(ApiError::InvalidChange { rule, .. }) => assert_eq!(rule, "draft-landed"),
+        other => panic!("expected draft-landed, got {other:?}"),
+    }
 }
 
 /// A changeset held by two lines' own rows: `MergeBase` pairs the first
