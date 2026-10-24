@@ -4,7 +4,6 @@
 //! land keeps and `pr-batch` and the exporter read.
 
 use std::env;
-use std::process::{Command, Stdio};
 
 use graft_model::{Author, AuthorKind, Metadata};
 
@@ -64,19 +63,11 @@ pub(crate) fn parse_kind(text: &str) -> Option<AuthorKind> {
 }
 
 /// The default author name and email: `GRAFT_AUTHOR_NAME` and
-/// `GRAFT_AUTHOR_EMAIL`, else the git author identity (`GIT_AUTHOR_NAME`
-/// and `GIT_AUTHOR_EMAIL`, else `user.name` and `user.email` from git's
-/// config), else the user name.
+/// `GRAFT_AUTHOR_EMAIL`, else the user name.
 pub(crate) fn default_name_email() -> (String, String) {
-    let name = var("GRAFT_AUTHOR_NAME")
-        .or_else(|| var("GIT_AUTHOR_NAME"))
-        .or_else(|| git_config("user.name"));
-    let email = var("GRAFT_AUTHOR_EMAIL")
-        .or_else(|| var("GIT_AUTHOR_EMAIL"))
-        .or_else(|| git_config("user.email"));
-    let user = || var("USER").unwrap_or_else(|| "graft".to_owned());
-    let name = name.unwrap_or_else(user);
-    let email = email.unwrap_or_else(|| format!("{}@localhost", user()));
+    let user = var("USER").unwrap_or_else(|| "graft".to_owned());
+    let name = var("GRAFT_AUTHOR_NAME").unwrap_or_else(|| user.clone());
+    let email = var("GRAFT_AUTHOR_EMAIL").unwrap_or_else(|| format!("{user}@localhost"));
     (name, email)
 }
 
@@ -84,23 +75,6 @@ pub(crate) fn default_name_email() -> (String, String) {
 pub(crate) fn default_author(kind: AuthorKind) -> Author {
     let (name, email) = default_name_email();
     Author { name, email, kind }
-}
-
-/// One value from git's config, best effort: none if git is missing or the
-/// key is unset.
-fn git_config(key: &str) -> Option<String> {
-    let out = Command::new("git")
-        .args(["config", "--get", key])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v = String::from_utf8(out.stdout).ok()?;
-    let v = v.trim();
-    (!v.is_empty()).then(|| v.to_owned())
 }
 
 #[cfg(test)]
