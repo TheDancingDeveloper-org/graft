@@ -614,9 +614,9 @@ fn annotated_and_signed_tag_objects_round_trip() {
     assert_round_trips(&git.git_dir());
 }
 
-/// Tags that name a tree or a blob, directly or through a tag object.
+/// Tags that name a tree or a blob, directly or through a tag object. The
+/// mirror map holds tags of commits only, so import refuses, naming each.
 #[test]
-#[ignore = "WI-2358: import drops these tags without a word"]
 fn tags_of_trees_and_blobs_are_reported() {
     let mut git = Git::init("tag-tree");
     git.write("a", b"a\n");
@@ -626,7 +626,19 @@ fn tags_of_trees_and_blobs_are_reported() {
     git.set_ref("refs/tags/tree-light", &tree);
     git.set_ref("refs/tags/blob-light", &blob);
     git.run(&["tag", "-a", "tree-annotated", "-m", "a tree", &tree]);
-    assert_round_trips(&git.git_dir());
+    let err = assert_refused(&git.git_dir(), |e| matches!(e, GitError::NonCommitTags(_)));
+    let GitError::NonCommitTags(tags) = err else {
+        unreachable!()
+    };
+    let named: Vec<(&str, &str)> = tags.iter().map(|t| (t.name.as_str(), t.kind)).collect();
+    assert_eq!(
+        named,
+        [
+            ("blob-light", "blob"),
+            ("tree-annotated", "tree"),
+            ("tree-light", "tree")
+        ]
+    );
 }
 
 // --- modes and kinds ------------------------------------------------------

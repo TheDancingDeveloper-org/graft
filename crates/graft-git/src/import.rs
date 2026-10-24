@@ -39,7 +39,7 @@ use crate::export::{GitSource, commit_sha, export_tree, learn_raw_trees, tree_sh
 use crate::git::{Kind, RawCommit, Repo, author, parse_commit, submodule_id};
 use crate::map::{ImportedCommit, ImportedTag, MirrorMap};
 use crate::walk::topo;
-use crate::{BadPath, GitError, GitSha, Unrepresentable};
+use crate::{BadPath, GitError, GitSha, NonCommitTag, Unrepresentable};
 
 /// The metadata key that carries an imported commit's git sha (operator
 /// decision, 2026-10-22). Without it, commits that differ only in what a
@@ -66,7 +66,8 @@ pub struct ImportConfig {
     pub repo: String,
     /// Git refs to import, mapped to graft lines (`refs/heads/main` → `main`).
     pub lines: Vec<(String, String)>,
-    /// Import every tag under `refs/tags/` that names a commit.
+    /// Import every tag under `refs/tags/`. A tag of a tree or a blob
+    /// refuses the import ([`GitError::NonCommitTags`]).
     pub tags: bool,
     /// Commits allowed to fail the fidelity check (`--allow-lossy`).
     pub allow_lossy: Vec<GitSha>,
@@ -130,13 +131,21 @@ where
         line_tips.push((line.clone(), sha));
     }
     let mut tag_tips = Vec::new();
+    let mut non_commit = Vec::new();
     if config.tags {
         for name in repo.refs_under("refs/tags/")? {
+            let short = name["refs/tags/".len()..].to_owned();
             if let Some(sha) = repo.resolve(&name)? {
                 let objects = repo.tag_chain(&name)?;
-                tag_tips.push((name["refs/tags/".len()..].to_owned(), sha, objects));
+                tag_tips.push((short, sha, objects));
+            } else if let Some(kind) = repo.non_commit_kind(&name)? {
+                non_commit.push(NonCommitTag { name: short, kind });
             }
         }
+    }
+    // Refused before anything is written: export could not restore them.
+    if !non_commit.is_empty() {
+        return Err(GitError::NonCommitTags(non_commit));
     }
     let tips: Vec<GitSha> = line_tips
         .iter()
