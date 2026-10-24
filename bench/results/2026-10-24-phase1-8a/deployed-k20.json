@@ -1,0 +1,104 @@
+{
+  "started": "2026-10-24T05:08:33Z",
+  "graft": "graft 0.0.0 (protocol 0.1)",
+  "host": "graft-dev",
+  "nproc": 4,
+  "builds_or_tests_run": 0,
+  "loadavg_start": [
+    2.01708984375,
+    2.42578125,
+    2.05908203125
+  ],
+  "site": "graft-dev-server",
+  "identity": {
+    "matching": {
+      "commit_rc": 0,
+      "land_rc": 0,
+      "rule": null
+    },
+    "other_session": {
+      "commit_rc": 2,
+      "land_rc": null,
+      "rule": "session-metadata"
+    },
+    "other_work_item": {
+      "commit_rc": 2,
+      "land_rc": null,
+      "rule": "work-item-metadata"
+    },
+    "pass": true
+  },
+  "preland": {
+    "k": 20,
+    "latency": {
+      "fresh_check": {
+        "n": 20,
+        "p50_ms": 31.617,
+        "p95_ms": 61.368,
+        "p99_ms": 64.713,
+        "mean_ms": 38.21,
+        "max_ms": 65.549,
+        "total_s": 0.764
+      },
+      "behind_check": {
+        "n": 20,
+        "p50_ms": 63.752,
+        "p95_ms": 101.229,
+        "p99_ms": 116.196,
+        "mean_ms": 65.947,
+        "max_ms": 119.937,
+        "total_s": 1.319
+      },
+      "fresh_no_check": {
+        "n": 20,
+        "p50_ms": 21.106,
+        "p95_ms": 57.464,
+        "p99_ms": 62.418,
+        "mean_ms": 32.035,
+        "max_ms": 63.657,
+        "total_s": 0.641
+      },
+      "behind_no_check": {
+        "n": 20,
+        "p50_ms": 66.303,
+        "p95_ms": 185.875,
+        "p99_ms": 277.119,
+        "mean_ms": 80.874,
+        "max_ms": 299.93,
+        "total_s": 1.617
+      },
+      "conflict_check": {
+        "n": 20,
+        "p50_ms": 10.873,
+        "p95_ms": 37.572,
+        "p99_ms": 38.757,
+        "mean_ms": 15.564,
+        "max_ms": 39.054,
+        "total_s": 0.311
+      },
+      "conflict_no_check": {
+        "n": 20,
+        "p50_ms": 12.386,
+        "p95_ms": 19.727,
+        "p99_ms": 58.843,
+        "mean_ms": 15.072,
+        "max_ms": 68.622,
+        "total_s": 0.301
+      }
+    },
+    "conflicts": {
+      "cases": 20,
+      "check": 20,
+      "nocheck_refused": 20,
+      "sent_by_check": 0
+    }
+  },
+  "batches": [],
+  "server": {},
+  "loadavg_end": [
+    2.60595703125,
+    2.52294921875,
+    2.1015625
+  ],
+  "finished": "2026-10-24T05:08:56Z"
+}

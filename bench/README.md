@@ -85,6 +85,19 @@ puts it somewhere else). Results go to `results/<UTC time>/` (or `--out DIR`):
 `results.json` and `summary.md`. The exit status is 0 when every correctness
 check passes, 1 when one fails, 2 on a harness error.
 
+### Phase-1 features (WI-2349 step 8a)
+
+```sh
+python3 -m graftbench.phase1 --bin-dir ../target/release --out results/<dir>
+```
+
+Pre-land check latency in `graft land` against `--no-check` (up to date, one
+land behind, real conflict), N lands → `pr-batch` → N commits with trailers
+and export time (`--batches 10,50,200,500,501`), and identity binding. The
+batch PR goes to a fake GitHub on loopback and a local bare upstream.
+`--container graft-dev-server --line <test-line> --prefix <repo-prefix>` runs
+it against a deployed server, in new repositories only.
+
 ### Commands per scale
 
 | Scale | Command | Time on the reference host |
