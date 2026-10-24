@@ -1,6 +1,6 @@
 # graft build plan
 
-- **Status:** Draft 2 (2026-10-23): re-phased by [D22](decisions.md#d22-phase-1-is-a-git-alternative).
+- **Status:** Draft 2 (2026-10-23; backlog updated 2026-10-24, through #170): re-phased by [D22](decisions.md#d22-phase-1-is-a-git-alternative).
   What is delivered is in [status.md](status.md).
 - **Design:** [design.md](design.md) · **Decisions:** [decisions.md](decisions.md)
 
@@ -14,7 +14,7 @@ phases are now set by D22:
 
 | Phase | Ships | State |
 | --- | --- | --- |
-| 1 | **A git alternative.** Correct storage and history; fast sparse clone and sync; workspaces; server-side rebase, line merge (D16) and lock-free CAS land; conflicts handed back to the client; CLI, MCP and LSP; git import and export; GitHub delivery as one squashed batch PR (D21). Lines default to `direct`; no build, test or CI runs in the land path | Built and in use (trial WI-2270). Backlog nearly done; what remains is below |
+| 1 | **A git alternative.** Correct storage and history; fast sparse clone and sync; workspaces; server-side rebase, line merge (D16) and lock-free CAS land; conflicts handed back to the client; CLI, MCP and LSP; git import and export; line merge between lines with merge points (D29), pick and tags; GitHub delivery as one batch PR per batch (D21) with one commit per land (D26), rebase-merged by `land-pr` (D28); a client-side pre-land conflict check (D27). Lines default to `direct`; no build, test or CI runs in the land path | Built and in use (trial WI-2270). Backlog nearly done; what remains is below |
 | 2 | **CI checks.** `attested` and `queued` policies, the attester, the CI token exchange, post-land runners, auto-revert | Code exists (G3.1, G3.8, the trial attester), switched off. Not extended until the operator starts phase 2. Phase 2 starts with the graft-primary authority switch; D25's post-land checks on the batch line (design §8.7) are its design |
 | (3) | Folded into phases 1 and 2: native landing ships in phase 1 on `direct` lines; its policy gate and CI attestations are phase 2 | — |
 | 4 | **Breadth:** per-line combiner, prefetch, symbol index, a second repository, the export drill (auto-revert moves to phase 2) | Outline, WI-2214 (p4) |
@@ -31,7 +31,7 @@ and clone speed, history integrity.
 ### Phase 1 backlog
 
 The Vogt review WI-2297 holds this list; Vogt is the source of truth for its
-state. Delivered on 2026-10-23 (#82 to #111), all done:
+state. Delivered on 2026-10-23 (#82 through #111), all done:
 
 - WI-2296 `graft land` line-merges by default (#83, #84).
 - WI-2298 every line defaults to `direct` (#85).
@@ -52,18 +52,52 @@ state. Delivered on 2026-10-23 (#82 to #111), all done:
 - WI-2313 many working copies per host (#102).
 - WI-2315 `/mcp` owner-or-admin checks (#101).
 
+Delivered on 2026-10-23 and 2026-10-24 (#112 through #170), all done:
+
+- WI-2310 draft overlap (#113, #115, #117); WI-2323 commit_run group commit
+  (#118); WI-2329 review follow-ups (#119, leftovers p4); WI-2304 10k bench (#116).
+- WI-2330 concurrent import stores (#120).
+- WI-2336 fit assessment (#121); WI-2270 trial-1 write-up (#128).
+- WI-2349 D25, D26, D27 design (#122); WI-2353 D25 is phase 2, D22 restored (#127). WI-2349 then step 0 `Rebase`
+  `dry_run` (#125), step 5 per-land batch commits (#134), step 6 metadata
+  matches the token (#131), step 7 pre-land check (#132), step 8a rollout (#140).
+- WI-2350 attribution on drafts and lands (#123).
+- WI-2351, WI-2361 D28: batch PRs reviewed and rebase-merged by `land-pr` (#129, #148).
+- WI-2340 pr-batch drop and cap (#126); WI-2354, WI-2355 mirror identity (#162).
+- WI-2338 real-PR replay (#130); WI-2352 batch bench and live batch (#145);
+  WI-2362 branching bench (#151).
+- WI-2339 path merge rule `line | none` (#135).
+- WI-2345 race/fault harness and planted bugs (#133, #136, #139, #161);
+  WI-2346 merge differential (#144); WI-2347 hostile git (#146);
+  WI-2348 hostile API clients (#154).
+- WI-2341 read paths: log and sync faster (#138); bar is "not slower than
+  git", 2x is later (#169).
+- WI-2342 GitHub tags as fixed refs (#141); WI-2357 tag objects kept (#160);
+  WI-2370 follow keeps tag objects (#167); WI-2358 non-commit tags skipped
+  and reported (#165).
+- WI-2356 export keeps subtrees under a raw tree (#150); WI-2359 git metadata
+  path names refused (#149); WI-2360 oversize blobs refused in the pre-check (#163).
+- WI-2363, WI-2368 D29 line merge with merge points, schema v7 (#152, #157,
+  #158, #159, #164, #166); WI-2372 gitflow targets met at seed 2362 (#168).
+- WI-2364 `graft pick` (#156); WI-2365 `graft tag` (#153).
+- WI-2367 bad page cursors are not echoed (#155).
+- WI-2397 hostile clone test without a wall-clock guard (#170).
+
 What remains:
 
 | Item | What |
 | --- | --- |
-| WI-2310 | draft overlap (design note #95 merged; step (a) in PR #113; the rest open) |
-| WI-2323 | group-commit chained import inserts (note #111 merged; implementation open) |
-| WI-2304 | bench at 10k and 100k on the graft-dev VM |
-| WI-2314 | CI OOM flake: quarantined (#91), root cause open |
-| WI-2307 | graft-dev alerts patch (blocked on the operator; backups #97 done) |
-| WI-2270 | rustTorrent trial batch PR #214 (blocked on the operator) |
-| WI-2317 | tailnet SSH (blocked on the operator) |
-| WI-2240 | estate token front for Vogt sessions (D10): deferred (p4) |
+| WI-2341 | read-path bench re-run on graft-dev (10k `sync`); blocked, results pending |
+| WI-2400 | read-path parity: `log` and `status` not slower than git |
+| WI-2314 | CI OOM flake: quarantined (#91); remove the quarantine after a day with `oom_kill` at 0 |
+| WI-2329 | review leftovers (p4) |
+| WI-2366 | embedded single-binary mode: a future phase (p4) |
+
+Done: WI-2307 (graft-dev alerts), WI-2317 (tailnet SSH). Won't do: WI-2240
+(D10 token front).
+
+Phase 2, not started: D25 post-land checks on the batch line (design §8.7)
+and §11.4 steps 1 to 4.
 
 New items follow the work item format below. Each names its crates, and new
 items keep the rule of one area per branch.

@@ -9,7 +9,8 @@ and starts from a clean slate, in Rust.
 > **Status: phase 1, a git alternative ([D22](docs/decisions.md#d22-phase-1-is-a-git-alternative)).**
 > Import, sparse clone, many working copies per host, line creation, commit,
 > sync, server-side rebase with line merge, lock-free land, conflict preview
-> and resolution, log, diff, blame, git export, and batch delivery to GitHub
+> and resolution, line merge with merge points, pick, tags, log, diff,
+> blame, git export, and batch delivery to GitHub (one commit per land)
 > all work end to end, through the CLI, MCP (HTTP and stdio) and LSP. GC is
 > wired in and off by default. CI
 > checks in the land path are built but switched off (phase 2). What is
