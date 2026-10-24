@@ -43,7 +43,8 @@ Already decided by the operator (2026-10-22):
   `repo:<r>:drafts`, granted only by `admin`. See
   [D24](#d24-draft-overlap-visibility).
 - **D25, D26** (operator, 2026-10-24, from the WI-2336 fit assessment):
-  post-land checks on the batch integration line only, revising D22; and
+  post-land checks on the batch integration line, the phase-2 design (it
+  starts only with the graft-primary authority switch, and D22 stands in full until then); and
   batch PRs that carry one commit per land, revising D21. See
   [D25](#d25-post-land-checks-on-the-batch-line) and
   [D26](#d26-one-commit-per-land-in-a-batch-pr). graft keeps no review state;
@@ -82,7 +83,7 @@ Already decided by the operator (2026-10-22):
 | D22 | What phase 1 is | **Decided:** graft as a git alternative; lines `direct` by default; CI checks are phase 2, switched off | — |
 | D23 | Line fork points | **Decided:** a new line writes one fork row instead of copying its parent's line index; no data migration | — |
 | D24 | Draft overlap visibility | **Decided:** a `repo:<r>:drafts` scope, granted only by `admin`; paths and principals, never contents | — |
-| D25 | Post-land checks on the batch line | **Decided:** each land on an integration line is checked after it lands and marked good or bad; a bad land is reverted and never batched. Direct lines unchanged. Revises D22 | — |
+| D25 | Post-land checks on the batch line | **Decided (phase 2):** each land on an integration line is checked after it lands and marked good or bad; a bad land is reverted and never batched. Direct lines unchanged. Starts only with the graft-primary authority switch; D22 stands until then | Phase 2 |
 | D26 | Commits in a batch PR | **Decided:** one commit per land, keeping author, session and work item; squash only as a fallback; no review state in graft. Revises D21 | — |
 | D27 | Pre-land check in `graft land` | **Decided:** conflict preview and draft-overlap check by default; a real conflict stops the land; `--no-check` skips | — |
 
@@ -488,9 +489,9 @@ batch PR carries one commit per land; squash is the fallback.*
 
 **Decided (operator, 2026-10-23): phase 1 is graft as a git alternative.
 Lines default to `direct`, and no build, test or CI runs in the land path. CI
-checks are phase 2 or later.**
-*Revised by [D25](#d25-post-land-checks-on-the-batch-line) (2026-10-24):
-post-land checks start now on batch integration lines only.*
+checks are phase 2 or later.** Phase 1 is source control: graft runs no
+build, test, check or checker anywhere. Phase 2 starts only with the
+graft-primary authority switch.
 
 Phase 1 is:
 
@@ -608,13 +609,15 @@ activity), and scanning workspaces at query time (breaks rule 2).
 
 ## D25. Post-land checks on the batch line
 
-**Decided (operator, 2026-10-24): start phase 2's post-land checks now, for
+**Decided (operator, 2026-10-24) as the phase-2 design: post-land checks for
 batch integration lines only. Each land on the line runs the repository's
 required checks after it lands and is marked good or bad before it is
 batched. A bad land is reverted on the line and never reaches a batch PR.
-Every other line is unchanged.** This revises
-[D22](#d22-phase-1-is-a-git-alternative) for one kind of line. The design is
-[design.md §8.7](design.md#87-post-land-checks-on-the-batch-line).
+Every other line is unchanged.** **Phase 2:** this starts only with the
+graft-primary authority switch. Until then
+[D22](#d22-phase-1-is-a-git-alternative) stands in full, and graft runs no
+build, test, check or checker anywhere (operator, 2026-10-24, WI-2349). The
+design is [design.md §8.7](design.md#87-post-land-checks-on-the-batch-line).
 
 - **Where.** Only a line with `checks = "post-land"` in its `[[lines]]`
   entry, which `pr-batch` requires of its integration line once the feature

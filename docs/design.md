@@ -905,7 +905,7 @@ graft supports all of these:
 
 | Policy | Meaning |
 | --- | --- |
-| `direct` | Scion's model, and the phase 1 default (D22). Land at once. On a batch integration line, post-land checks and an auto-revert mark each land good or bad (§8.7, D25); elsewhere, GitHub CI runs on the batch PR (D21) |
+| `direct` | Scion's model, and the phase 1 default (D22). Land at once. GitHub CI runs on the batch PR (D21). In phase 2, post-land checks and an auto-revert mark each land on a batch integration line good or bad (§8.7, D25) |
 | `attested` | The stack's head (pre-rebase) must carry passing attestations for the named checks (`ci/build`, `ci/test`), posted by CI through `Attest { changeset, check, status, url }`. Rebase-only changes onto a newer tip do not need re-attesting. The line-merge result can be required to re-attest (`attest_merged = true`) |
 | `queued` | The merge-queue equivalent. The candidate is tested after rebase and before the CAS, by a CI hook, in batches. This is the slowest option, and it exists for lines that need it (release lines) |
 
@@ -1169,7 +1169,11 @@ as its test oracle and `--verify` mode. GC is journalled.
 
 ### 8.7 Post-land checks on the batch line
 
-[D25](decisions.md#d25-post-land-checks-on-the-batch-line) starts phase 2's
+**Phase 2.** This section is the phase-2 design. It starts only with the
+graft-primary authority switch; until then D22 stands and graft runs no
+build, test, check or checker anywhere.
+
+[D25](decisions.md#d25-post-land-checks-on-the-batch-line) designs phase 2's
 post-land checks for batch integration lines (§11.4) only. The land path is
 unchanged: rebase, line merge, CAS. Checks run after the ref moves, on the
 landed snapshot, and mark each land good or bad before `pr-batch` will
@@ -1510,8 +1514,8 @@ integration line forked from the followed `main`, and `graft-mirror pr-batch
 <line> --base main` delivers it to GitHub as one PR at a time, which the
 operator merges. [D26](decisions.md#d26-one-commit-per-land-in-a-batch-pr)
 changes the PR's commits from one squash to one commit per land, and
-[D25](decisions.md#d25-post-land-checks-on-the-batch-line) (§8.7) decides
-where a batch is cut.
+[D25](decisions.md#d25-post-land-checks-on-the-batch-line) (§8.7, phase 2) will
+decide where a batch is cut; in phase 1 a batch is cut at the tip.
 
 **Per-land commit shape.** `graft/batch-<n>` is a chain on GitHub's current
 `main` sha `B`:
@@ -1542,7 +1546,7 @@ ck:  tree      = export(replayed snapshot k); at k = last, = export(integration 
   root id. If it does not, or a replay conflicts, the batch is exported
   squashed as before (one commit, the D21 message), and the PR body says
   why.
-- **Reverts.** A bad land and its revert (§8.7) are both commits.
+- **Reverts (phase 2).** A bad land and its revert (§8.7) are both commits.
 - **Determinism.** Every field comes from recorded data and land times, so
   the chain's shas are a function of the batch. The chain is written to the
   local mirror and recorded in the batch record (`commits`, the list of
@@ -1553,32 +1557,34 @@ ck:  tree      = export(replayed snapshot k); at k = last, = export(integration 
 - **Review.** graft keeps no review state: no review verb, approval or
   review metadata. Review happens on the GitHub batch PR, per commit, and
   the operator's merge is the approval.
-- **Cut.** A batch ends at the cut point of §8.7 step 6 on a checked line,
-  at the tip otherwise, and at 500 lands at most; the rest wait for the next
-  batch.
+- **Cut.** A batch ends at the tip in phase 1. In phase 2, on a checked
+  line, it ends at the cut point of §8.7 step 6. A batch holds 500 lands at most; the rest wait for
+  the next batch.
 - **Settle.** Follow imports the PR's merge. A rebase-merge produces new
   shas for the same trees; follow maps each back by its `Graft-Changeset`
   trailer. A squash-merge maps the batch tip as D21 does. Rejected batches
   leave the line as it is.
 
 **Implementation steps (WI-2349 follow-ups, for §8.7, §8.8 and this section).** Each is one plan item on
-disjoint crates, after step 0:
+disjoint crates, after step 0. Steps 1–4 (and step 8, which switches a line
+to `checks`) are **phase 2**: they wait for the graft-primary authority
+switch. Step 0's D25 types are phase 2 too; its `dry_run` part is phase 1.
 
 0. Interface PR (`graft-proto`, types and signatures only): a `dry_run`
    flag on `Rebase` and its result shape, plus the D25 types
    (`GetLandChecks`, `LandReverted`, line `checks` config). Bodies stubbed;
    lands before steps 2 and 7.
-1. WI-2293: the attester's journal read survives a failed `GetWorkspace`
+1. *(Phase 2.)* WI-2293: the attester's journal read survives a failed `GetWorkspace`
    (`graft-attester`).
-2. Checked lines: `checks`, `required`, `retries` in line config; the
+2. *(Phase 2.)* Checked lines: `checks`, `required`, `retries` in line config; the
    `land_checks` index and its schema migration; `Attest` and the token
    mint accept landed changesets on checked lines; `GetLandChecks`
    (paginated) and `LandReverted` (`graft-engine`, `graft-proto`,
    `graft-store-sqlite`, `graft-auth`). An interface PR with the proto
    types first.
-3. The checker's `post-land` mode: watch `RefMoved`, skip ahead, bisect,
+3. *(Phase 2.)* The checker's `post-land` mode: watch `RefMoved`, skip ahead, bisect,
    retry, revert (`graft-attester`).
-4. pr-batch cuts at the settled prefix on a checked line
+4. *(Phase 2.)* pr-batch cuts at the settled prefix on a checked line
    (`graft-mirror`).
 5. Per-land commits: replay, root check, squash fallback, the batch record's
    commit list, follow's per-commit mapping (`graft-mirror`, `graft-git`
@@ -1588,7 +1594,7 @@ disjoint crates, after step 0:
 7. The pre-land check in `graft land` and the MCP `land` tool
    (`graft-cli`, `graft-mcp`; §8.8, D27), with the engine body of
    `Rebase { dry_run }` (`graft-engine`, from step 0).
-8. graft-dev: switch the trial integration line to `checks = "post-land"`,
+8. *(Phase 2.)* graft-dev: switch the trial integration line to `checks = "post-land"`,
    run the attester profile, and measure on the bench harness: bad-land
    detection time, revert time, and batches cut per day.
 
