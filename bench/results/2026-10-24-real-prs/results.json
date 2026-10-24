@@ -1,0 +1,2953 @@
+{
+  "label": "2026-10-24-real-prs",
+  "started": "2026-10-24T03:07:07+00:00",
+  "fetched": "2026-10-24T03:04:51+00:00",
+  "oracle": true,
+  "graft_version": "graft 0.0.0 (protocol 0.1)",
+  "git_version": "git version 2.53.0",
+  "cases": [
+    {
+      "id": "rdpapp-split",
+      "repo": "rdpapp",
+      "mode": "sequence",
+      "what": "rdpapp `main.rs` split: the open PRs among #38-#50 that move gateway handlers out of main.rs",
+      "skipped": [],
+      "import_s": 12.2,
+      "n_prs": 9,
+      "graft": {
+        "lands": 9,
+        "ff": 0,
+        "merged_clean": 1,
+        "conflicts": 8,
+        "errors": 0,
+        "broken": 0,
+        "oracle_pass": 1,
+        "oracle_inherited": 0,
+        "rebases": 9,
+        "round_trips": 17,
+        "wall_s": 1.849,
+        "p50_ms": 195.8
+      },
+      "git": {
+        "lands": 9,
+        "ff": 0,
+        "merged_clean": 1,
+        "conflicts": 8,
+        "errors": 0,
+        "broken": 0,
+        "oracle_pass": 1,
+        "oracle_inherited": 0,
+        "rebases": 9,
+        "round_trips": 19,
+        "wall_s": 2.295,
+        "p50_ms": 223.7
+      },
+      "agreement": {
+        "both_clean": 1,
+        "graft_only_clean": 0,
+        "git_only_clean": 0,
+        "both_conflict": 8,
+        "same_tree": 1,
+        "different_tree": 0
+      },
+      "lands": [
+        {
+          "pr": 38,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.11661976799950935,
+          "tree": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "before": "5c43b16c20e420983dd7da08ab6e1cc9f6751aa3",
+          "own": "6a841c4a9188328718020ec54dde8f6d013f651f",
+          "oracle": "pass"
+        },
+        {
+          "pr": 38,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.5185550829919521,
+          "tree": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "before": "5c43b16c20e420983dd7da08ab6e1cc9f6751aa3",
+          "own": "6a841c4a9188328718020ec54dde8f6d013f651f",
+          "oracle": "pass"
+        },
+        {
+          "pr": 39,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.22744288100511767,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "b70f3a0df89a6ffec3d743c6455a644d3f914844",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 39,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.3325604720157571,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "b70f3a0df89a6ffec3d743c6455a644d3f914844",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 40,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.24382048801635392,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "e316a711a788a7e9ae42d2c6b0fb3c6004ca90d1",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 40,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.2531449760135729,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "e316a711a788a7e9ae42d2c6b0fb3c6004ca90d1",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 41,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.3248880759929307,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "227c99be4d97f3843e9ea3a5d5660fe0c0cfbacd",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 41,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.2489627219911199,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "227c99be4d97f3843e9ea3a5d5660fe0c0cfbacd",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 46,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.23181211299379356,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "3fab445eb96e6973c301e57a09875f4c08650e43",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 46,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.20072453300235793,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "3fab445eb96e6973c301e57a09875f4c08650e43",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 47,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.19583181498455815,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "deab2acb1ce5d86ecbd996283148a293c871817d",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 47,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.22365480399457738,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "deab2acb1ce5d86ecbd996283148a293c871817d",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 48,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.18626234799739905,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "167100adc3f466dcd484dc23ba1dd4c6a55518a6",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 48,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.21570369499386288,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "167100adc3f466dcd484dc23ba1dd4c6a55518a6",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 49,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.18045849300688133,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "6ab2d38db1f28c12b969d1efd7ec3eca3cd93578",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 49,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.1525219029863365,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "6ab2d38db1f28c12b969d1efd7ec3eca3cd93578",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 50,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.14220866598770954,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "14ff7adae92ef6fa3b7b1f2e0bc49578275d6206",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        },
+        {
+          "pr": 50,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.14961939901695587,
+          "before": "b22c8a451f0a986ec3283cc0a03f00171767ae93",
+          "own": "14ff7adae92ef6fa3b7b1f2e0bc49578275d6206",
+          "conflicts": [
+            "crates/rdpapp-gateway/src/main.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rdpapp-stack",
+      "repo": "rdpapp",
+      "mode": "stack",
+      "what": "rdpapp 11-PR stack #28 -> #51 -> ... -> #59, plus #60 (merged into #59)",
+      "skipped": [],
+      "import_s": 5.5,
+      "n_prs": 11,
+      "graft": {
+        "lands": 1,
+        "ff": 0,
+        "merged_clean": 0,
+        "conflicts": 1,
+        "errors": 0,
+        "broken": 0,
+        "oracle_pass": 0,
+        "oracle_inherited": 0,
+        "rebases": 1,
+        "round_trips": 2,
+        "wall_s": 0.091,
+        "p50_ms": 91.2
+      },
+      "git": {
+        "lands": 1,
+        "ff": 0,
+        "merged_clean": 0,
+        "conflicts": 1,
+        "errors": 0,
+        "broken": 0,
+        "oracle_pass": 0,
+        "oracle_inherited": 0,
+        "rebases": 1,
+        "round_trips": 2,
+        "wall_s": 0.169,
+        "p50_ms": 169.3
+      },
+      "lands": [
+        {
+          "pr": "stack",
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.09118521798518486,
+          "before": "5c43b16c20e420983dd7da08ab6e1cc9f6751aa3",
+          "own": "b2a2c9bd70c0e430eb1a6116c99931d123132e69",
+          "conflicts": [
+            "plan.md"
+          ]
+        },
+        {
+          "pr": 28,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.16925477801123634,
+          "before": "5c43b16c20e420983dd7da08ab6e1cc9f6751aa3",
+          "own": "58e8e5bee2db00a04cd8f2c479a3ab9449cdc206",
+          "conflicts": [
+            "plan.md"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fluent2-registration",
+      "repo": "fluent2-egui",
+      "mode": "position",
+      "what": "fluent2-egui PRs touching CHANGELOG.md or gallery/src/pages/mod.rs while the queue-ejected #58, #60, #64 and #87 were open",
+      "skipped": [
+        {
+          "pr": 68,
+          "why": "integration point is not on main"
+        }
+      ],
+      "import_s": 2.0,
+      "n_prs": 34,
+      "graft": {
+        "lands": 34,
+        "ff": 11,
+        "merged_clean": 7,
+        "conflicts": 16,
+        "errors": 0,
+        "broken": 0,
+        "oracle_pass": 7,
+        "oracle_inherited": 0,
+        "rebases": 23,
+        "round_trips": 50,
+        "wall_s": 1.77,
+        "p50_ms": 50.0
+      },
+      "git": {
+        "lands": 34,
+        "ff": 11,
+        "merged_clean": 7,
+        "conflicts": 16,
+        "errors": 0,
+        "broken": 0,
+        "oracle_pass": 7,
+        "oracle_inherited": 0,
+        "rebases": 23,
+        "round_trips": 64,
+        "wall_s": 1.959,
+        "p50_ms": 58.3
+      },
+      "agreement": {
+        "both_clean": 18,
+        "graft_only_clean": 0,
+        "git_only_clean": 0,
+        "both_conflict": 16,
+        "same_tree": 18,
+        "different_tree": 0
+      },
+      "lands": [
+        {
+          "pr": 54,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.020103499002289027,
+          "tree": "d01f4659fed651abc1c3333682d1f5fba965ceda",
+          "before": "6eb180d4be67e0e00266b26bd49f793efd5220a3",
+          "own": "d01f4659fed651abc1c3333682d1f5fba965ceda"
+        },
+        {
+          "pr": 54,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.013810077973175794,
+          "tree": "d01f4659fed651abc1c3333682d1f5fba965ceda",
+          "before": "6eb180d4be67e0e00266b26bd49f793efd5220a3",
+          "own": "d01f4659fed651abc1c3333682d1f5fba965ceda"
+        },
+        {
+          "pr": 56,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.050993538985494524,
+          "before": "d01f4659fed651abc1c3333682d1f5fba965ceda",
+          "own": "8365b77b80ba4db6eb3f406ab63f63e4e8e86c62",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 56,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.13634756801184267,
+          "before": "d01f4659fed651abc1c3333682d1f5fba965ceda",
+          "own": "8365b77b80ba4db6eb3f406ab63f63e4e8e86c62",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 58,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0564390670042485,
+          "before": "68ddbd9fb16fe7b5d430f97ee368015340830666",
+          "own": "8cb011e33e8ff10ba887ecd4c587d9b0edfc7f58",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 58,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.12706580900703557,
+          "before": "68ddbd9fb16fe7b5d430f97ee368015340830666",
+          "own": "8cb011e33e8ff10ba887ecd4c587d9b0edfc7f58",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 55,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06140426199999638,
+          "before": "8cd164138323246f32bf1ed523392280675bde18",
+          "own": "07f1a2061790e5ae870b1efab67bd0f7bc238a60",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        },
+        {
+          "pr": 55,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06030527999973856,
+          "before": "8cd164138323246f32bf1ed523392280675bde18",
+          "own": "07f1a2061790e5ae870b1efab67bd0f7bc238a60",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        },
+        {
+          "pr": 57,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06023907699272968,
+          "before": "67a2fbb1ec4816bbfe1cdb4a27638f262776401a",
+          "own": "f02ff8cee472fffb12c69f3bad37d320ebf39c20",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/fluent2-egui/Cargo.toml",
+            "crates/fluent2-egui/src/surfaces/mod.rs",
+            "crates/fluent2-egui/src/surfaces/tab_strip.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs",
+            "docs/ARCHITECTURE.md"
+          ]
+        },
+        {
+          "pr": 57,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0535022979893256,
+          "before": "67a2fbb1ec4816bbfe1cdb4a27638f262776401a",
+          "own": "f02ff8cee472fffb12c69f3bad37d320ebf39c20",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/fluent2-egui/Cargo.toml",
+            "crates/fluent2-egui/src/surfaces/mod.rs",
+            "crates/fluent2-egui/src/surfaces/tab_strip.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs",
+            "docs/ARCHITECTURE.md"
+          ]
+        },
+        {
+          "pr": 60,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06283421799889766,
+          "before": "f914795b8131678bc88e96e053f8fd9b5c285c7c",
+          "own": "8540db5056fb23d5e7560e6ebcf3e45b04d5adc7",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 60,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.04959891299949959,
+          "before": "f914795b8131678bc88e96e053f8fd9b5c285c7c",
+          "own": "8540db5056fb23d5e7560e6ebcf3e45b04d5adc7",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 63,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.029995565011631697,
+          "tree": "4a8804b290aa645e2c21f896c02f0b921f0ddb7c",
+          "before": "4ba86f584206da67c00e96976defa3d2ca6ea8e5",
+          "own": "1c943c8744e28b73f546bcea6a9773b299b672db",
+          "oracle": "pass"
+        },
+        {
+          "pr": 63,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.05928938399301842,
+          "tree": "4a8804b290aa645e2c21f896c02f0b921f0ddb7c",
+          "before": "4ba86f584206da67c00e96976defa3d2ca6ea8e5",
+          "own": "1c943c8744e28b73f546bcea6a9773b299b672db",
+          "oracle": "pass"
+        },
+        {
+          "pr": 59,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07073725300142542,
+          "before": "4a8804b290aa645e2c21f896c02f0b921f0ddb7c",
+          "own": "ae2e44e1ab47595e05fe8250c26e3ca4b1ef73aa",
+          "conflicts": [
+            "CHANGELOG.md",
+            "Cargo.lock",
+            "crates/fluent2-egui/Cargo.toml",
+            "crates/fluent2-egui/src/data/mod.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs",
+            "docs/ARCHITECTURE.md"
+          ]
+        },
+        {
+          "pr": 59,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.05938595099723898,
+          "before": "4a8804b290aa645e2c21f896c02f0b921f0ddb7c",
+          "own": "ae2e44e1ab47595e05fe8250c26e3ca4b1ef73aa",
+          "conflicts": [
+            "CHANGELOG.md",
+            "Cargo.lock",
+            "crates/fluent2-egui/Cargo.toml",
+            "crates/fluent2-egui/src/data/mod.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs",
+            "docs/ARCHITECTURE.md"
+          ]
+        },
+        {
+          "pr": 61,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0666997290099971,
+          "before": "f9702de61092031120677aaa7e8237c09b5c9a5a",
+          "own": "44b7ad0915e032655a01b25da3f72be28f06c956",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/fluent2-egui/src/data/mod.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs",
+            "upstream.toml"
+          ]
+        },
+        {
+          "pr": 61,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.057211920007830486,
+          "before": "f9702de61092031120677aaa7e8237c09b5c9a5a",
+          "own": "44b7ad0915e032655a01b25da3f72be28f06c956",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/fluent2-egui/src/data/mod.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs",
+            "upstream.toml"
+          ]
+        },
+        {
+          "pr": 65,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0654154249932617,
+          "before": "d167dff51a92f92444ad247537dc30e24324054a",
+          "own": "02ff3fcae14b695e7df8d6484678d191583cefbd",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 65,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.050413548975484446,
+          "before": "d167dff51a92f92444ad247537dc30e24324054a",
+          "own": "02ff3fcae14b695e7df8d6484678d191583cefbd",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 62,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.18516908699530177,
+          "before": "460c0799d236a2b2d329bb913ea2d49c90e90a6c",
+          "own": "fc42613e68dcc2d2bee09002242edcd815035ebe",
+          "conflicts": [
+            "CHANGELOG.md",
+            "NOTICE",
+            "crates/fluent2-egui/Cargo.toml",
+            "crates/fluent2-egui/src/data/mod.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs",
+            "docs/ARCHITECTURE.md",
+            "upstream.toml"
+          ]
+        },
+        {
+          "pr": 62,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06502467900281772,
+          "before": "460c0799d236a2b2d329bb913ea2d49c90e90a6c",
+          "own": "fc42613e68dcc2d2bee09002242edcd815035ebe",
+          "conflicts": [
+            "CHANGELOG.md",
+            "NOTICE",
+            "crates/fluent2-egui/Cargo.toml",
+            "crates/fluent2-egui/src/data/mod.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs",
+            "docs/ARCHITECTURE.md",
+            "upstream.toml"
+          ]
+        },
+        {
+          "pr": 66,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.05370073701487854,
+          "tree": "5e0ac2795ebfc4d5dd528c2c86f78f925a4a545d",
+          "before": "925445879575685d4195cf5a5b1bab0c857e33ff",
+          "own": "a4f9d12b1eed2dca38d5a78f16c43fa8d3fe9531",
+          "oracle": "pass"
+        },
+        {
+          "pr": 66,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08038603598834015,
+          "tree": "5e0ac2795ebfc4d5dd528c2c86f78f925a4a545d",
+          "before": "925445879575685d4195cf5a5b1bab0c857e33ff",
+          "own": "a4f9d12b1eed2dca38d5a78f16c43fa8d3fe9531",
+          "oracle": "pass"
+        },
+        {
+          "pr": 64,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07510514199384488,
+          "before": "3b1c77a3f53e05a969d56c861760928667622591",
+          "own": "26638e75b77e365bda38d30a6775eb3226477948",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/fluent2-egui/src/controls/mod.rs",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 64,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.17305363700143062,
+          "before": "3b1c77a3f53e05a969d56c861760928667622591",
+          "own": "26638e75b77e365bda38d30a6775eb3226477948",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/fluent2-egui/src/controls/mod.rs",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 67,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.020628097001463175,
+          "tree": "93f9d3441626349bf06a6286315aa7329593bf54",
+          "before": "eb230345a894a9edf1fcd67f2a124e62e10cd5e5",
+          "own": "93f9d3441626349bf06a6286315aa7329593bf54"
+        },
+        {
+          "pr": 67,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.030178937973687425,
+          "tree": "93f9d3441626349bf06a6286315aa7329593bf54",
+          "before": "eb230345a894a9edf1fcd67f2a124e62e10cd5e5",
+          "own": "93f9d3441626349bf06a6286315aa7329593bf54"
+        },
+        {
+          "pr": 69,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.02866404698579572,
+          "tree": "8bf4ee91da1b9923fcd29d088f15786559d80177",
+          "before": "93f9d3441626349bf06a6286315aa7329593bf54",
+          "own": "8bf4ee91da1b9923fcd29d088f15786559d80177"
+        },
+        {
+          "pr": 69,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.020519965997664258,
+          "tree": "8bf4ee91da1b9923fcd29d088f15786559d80177",
+          "before": "93f9d3441626349bf06a6286315aa7329593bf54",
+          "own": "8bf4ee91da1b9923fcd29d088f15786559d80177"
+        },
+        {
+          "pr": 70,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.02732292900327593,
+          "tree": "4e45564445e338a95b75974dd0aed1dbe4eb0980",
+          "before": "8bf4ee91da1b9923fcd29d088f15786559d80177",
+          "own": "4e45564445e338a95b75974dd0aed1dbe4eb0980"
+        },
+        {
+          "pr": 70,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.01783302502008155,
+          "tree": "4e45564445e338a95b75974dd0aed1dbe4eb0980",
+          "before": "8bf4ee91da1b9923fcd29d088f15786559d80177",
+          "own": "4e45564445e338a95b75974dd0aed1dbe4eb0980"
+        },
+        {
+          "pr": 71,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.022180930012837052,
+          "tree": "db9d866141c701c0fab12537a85f38539fc49822",
+          "before": "4e45564445e338a95b75974dd0aed1dbe4eb0980",
+          "own": "db9d866141c701c0fab12537a85f38539fc49822"
+        },
+        {
+          "pr": 71,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.03128425698378123,
+          "tree": "db9d866141c701c0fab12537a85f38539fc49822",
+          "before": "4e45564445e338a95b75974dd0aed1dbe4eb0980",
+          "own": "db9d866141c701c0fab12537a85f38539fc49822"
+        },
+        {
+          "pr": 72,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0808869379980024,
+          "before": "db9d866141c701c0fab12537a85f38539fc49822",
+          "own": "c22a807d4ac0b59a172d0a79e646fe99d14d4b5e",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        },
+        {
+          "pr": 72,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.11499641800764948,
+          "before": "db9d866141c701c0fab12537a85f38539fc49822",
+          "own": "c22a807d4ac0b59a172d0a79e646fe99d14d4b5e",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        },
+        {
+          "pr": 73,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03639521499280818,
+          "tree": "750cb928dd18c40c1e25a50337d5448ce0dc2ad1",
+          "before": "3ca3ae1ee8ba1226b486416f3df3321a460e4b10",
+          "own": "4c5163b24e4bfb7a4fd2a009469b6110460f540c",
+          "oracle": "pass"
+        },
+        {
+          "pr": 73,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08407082798657939,
+          "tree": "750cb928dd18c40c1e25a50337d5448ce0dc2ad1",
+          "before": "3ca3ae1ee8ba1226b486416f3df3321a460e4b10",
+          "own": "4c5163b24e4bfb7a4fd2a009469b6110460f540c",
+          "oracle": "pass"
+        },
+        {
+          "pr": 74,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.020953252009348944,
+          "tree": "049f9ab8475a83d71818609feaf27883514fcba4",
+          "before": "750cb928dd18c40c1e25a50337d5448ce0dc2ad1",
+          "own": "049f9ab8475a83d71818609feaf27883514fcba4"
+        },
+        {
+          "pr": 74,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.01970035198610276,
+          "tree": "049f9ab8475a83d71818609feaf27883514fcba4",
+          "before": "750cb928dd18c40c1e25a50337d5448ce0dc2ad1",
+          "own": "049f9ab8475a83d71818609feaf27883514fcba4"
+        },
+        {
+          "pr": 76,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.021625888999551535,
+          "tree": "609c50029d6759aa9da2b5c20ddef465e134bb14",
+          "before": "049f9ab8475a83d71818609feaf27883514fcba4",
+          "own": "609c50029d6759aa9da2b5c20ddef465e134bb14"
+        },
+        {
+          "pr": 76,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.0191183979914058,
+          "tree": "609c50029d6759aa9da2b5c20ddef465e134bb14",
+          "before": "049f9ab8475a83d71818609feaf27883514fcba4",
+          "own": "609c50029d6759aa9da2b5c20ddef465e134bb14"
+        },
+        {
+          "pr": 75,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07834157699835487,
+          "before": "609c50029d6759aa9da2b5c20ddef465e134bb14",
+          "own": "ef512e229521c7abfb91f11413846b58d4cf5f66",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        },
+        {
+          "pr": 75,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06850978199508972,
+          "before": "609c50029d6759aa9da2b5c20ddef465e134bb14",
+          "own": "ef512e229521c7abfb91f11413846b58d4cf5f66",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        },
+        {
+          "pr": 77,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.047875935008050874,
+          "tree": "4b021e6dbc9f01e26149b10cea70140fb56d9591",
+          "before": "9524976de59a0f09a26c2a4f36e345b63d510c97",
+          "own": "afd2a04cfa8e193c20125e38c070cae9e547c486",
+          "oracle": "pass"
+        },
+        {
+          "pr": 77,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.0639604369935114,
+          "tree": "4b021e6dbc9f01e26149b10cea70140fb56d9591",
+          "before": "9524976de59a0f09a26c2a4f36e345b63d510c97",
+          "own": "afd2a04cfa8e193c20125e38c070cae9e547c486",
+          "oracle": "pass"
+        },
+        {
+          "pr": 78,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.02365731800091453,
+          "tree": "837156a8c8a59ac9dc9d72721ded2a9e301faebb",
+          "before": "4b021e6dbc9f01e26149b10cea70140fb56d9591",
+          "own": "837156a8c8a59ac9dc9d72721ded2a9e301faebb"
+        },
+        {
+          "pr": 78,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.015982679993612692,
+          "tree": "837156a8c8a59ac9dc9d72721ded2a9e301faebb",
+          "before": "4b021e6dbc9f01e26149b10cea70140fb56d9591",
+          "own": "837156a8c8a59ac9dc9d72721ded2a9e301faebb"
+        },
+        {
+          "pr": 80,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03313951400923543,
+          "tree": "b81721aa71e094baabd1bb082259507233679a1b",
+          "before": "3799071a7179e655e3451a43d9a67cbd0403c05e",
+          "own": "6b440d9b13a535d27af1637ef1803fd52a5a5c0d",
+          "oracle": "pass"
+        },
+        {
+          "pr": 80,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.059306139999534935,
+          "tree": "b81721aa71e094baabd1bb082259507233679a1b",
+          "before": "3799071a7179e655e3451a43d9a67cbd0403c05e",
+          "own": "6b440d9b13a535d27af1637ef1803fd52a5a5c0d",
+          "oracle": "pass"
+        },
+        {
+          "pr": 81,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.023782609001500532,
+          "tree": "e7809cec83d93dc6864bd6c96a48ca574c634fea",
+          "before": "b81721aa71e094baabd1bb082259507233679a1b",
+          "own": "e7809cec83d93dc6864bd6c96a48ca574c634fea"
+        },
+        {
+          "pr": 81,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.018728747993009165,
+          "tree": "e7809cec83d93dc6864bd6c96a48ca574c634fea",
+          "before": "b81721aa71e094baabd1bb082259507233679a1b",
+          "own": "e7809cec83d93dc6864bd6c96a48ca574c634fea"
+        },
+        {
+          "pr": 82,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03408937400672585,
+          "tree": "15f7cd5bd1bbcfd45c9f46aee1c33dee5973399e",
+          "before": "e7809cec83d93dc6864bd6c96a48ca574c634fea",
+          "own": "358072f699917d71b54c6d0e5a2e93929f43a2b6",
+          "oracle": "pass"
+        },
+        {
+          "pr": 82,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.0552532669971697,
+          "tree": "15f7cd5bd1bbcfd45c9f46aee1c33dee5973399e",
+          "before": "e7809cec83d93dc6864bd6c96a48ca574c634fea",
+          "own": "358072f699917d71b54c6d0e5a2e93929f43a2b6",
+          "oracle": "pass"
+        },
+        {
+          "pr": 84,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.021609802992315963,
+          "tree": "99d3830986b6460b9f1b9c81aa2697492e6d97ae",
+          "before": "15f7cd5bd1bbcfd45c9f46aee1c33dee5973399e",
+          "own": "99d3830986b6460b9f1b9c81aa2697492e6d97ae"
+        },
+        {
+          "pr": 84,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.018604829005198553,
+          "tree": "99d3830986b6460b9f1b9c81aa2697492e6d97ae",
+          "before": "15f7cd5bd1bbcfd45c9f46aee1c33dee5973399e",
+          "own": "99d3830986b6460b9f1b9c81aa2697492e6d97ae"
+        },
+        {
+          "pr": 83,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07697116100462154,
+          "before": "99d3830986b6460b9f1b9c81aa2697492e6d97ae",
+          "own": "2bb60c1e38a971d777ac23f7e15390e5faa00bc8",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 83,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.049965074023930356,
+          "before": "99d3830986b6460b9f1b9c81aa2697492e6d97ae",
+          "own": "2bb60c1e38a971d777ac23f7e15390e5faa00bc8",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 85,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07610849099000916,
+          "before": "b7ca88a2636cc322eadb43eff77643d9c47771a0",
+          "own": "2ffa2561ab8c68e94fd50c0ea66ee8058708b3b2",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        },
+        {
+          "pr": 85,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06475479001528583,
+          "before": "b7ca88a2636cc322eadb43eff77643d9c47771a0",
+          "own": "2ffa2561ab8c68e94fd50c0ea66ee8058708b3b2",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        },
+        {
+          "pr": 86,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.0490464799804613,
+          "tree": "35e5955a532449f6ce4bb4bdee5c73e4404c5898",
+          "before": "55e9196704905ff026e20b6cb97d045fb119d5b9",
+          "own": "f3c344602a607f8f2792ad5d4e13827479726638",
+          "oracle": "pass"
+        },
+        {
+          "pr": 86,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06375775000196882,
+          "tree": "35e5955a532449f6ce4bb4bdee5c73e4404c5898",
+          "before": "55e9196704905ff026e20b6cb97d045fb119d5b9",
+          "own": "f3c344602a607f8f2792ad5d4e13827479726638",
+          "oracle": "pass"
+        },
+        {
+          "pr": 88,
+          "tool": "graft",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.020224551990395412,
+          "tree": "c478f9dc049a49cbbfc3b690bb267e8e2902809e",
+          "before": "35e5955a532449f6ce4bb4bdee5c73e4404c5898",
+          "own": "c478f9dc049a49cbbfc3b690bb267e8e2902809e"
+        },
+        {
+          "pr": 88,
+          "tool": "git",
+          "outcome": "ff",
+          "round_trips": 1,
+          "rebases": 0,
+          "secs": 0.0192038269888144,
+          "tree": "c478f9dc049a49cbbfc3b690bb267e8e2902809e",
+          "before": "35e5955a532449f6ce4bb4bdee5c73e4404c5898",
+          "own": "c478f9dc049a49cbbfc3b690bb267e8e2902809e"
+        },
+        {
+          "pr": 87,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0939293380070012,
+          "before": "c478f9dc049a49cbbfc3b690bb267e8e2902809e",
+          "own": "c8caf1b5e0a6b90ebaee1c40e38c8862bc4bb176",
+          "conflicts": [
+            "CHANGELOG.md",
+            "README.md",
+            "crates/fluent2-egui/Cargo.toml",
+            "crates/fluent2-egui/tests/readme_index.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 87,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06746757897781208,
+          "before": "c478f9dc049a49cbbfc3b690bb267e8e2902809e",
+          "own": "c8caf1b5e0a6b90ebaee1c40e38c8862bc4bb176",
+          "conflicts": [
+            "CHANGELOG.md",
+            "README.md",
+            "crates/fluent2-egui/Cargo.toml",
+            "crates/fluent2-egui/tests/readme_index.rs",
+            "crates/gallery/Cargo.toml",
+            "crates/gallery/src/pages/mod.rs"
+          ]
+        },
+        {
+          "pr": 89,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0740015979972668,
+          "before": "b84d41a47b0195065a62ec0fb1c9eef776faea80",
+          "own": "788344e37273563ec33a7818bccfe69a649baa49",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        },
+        {
+          "pr": 89,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0702308850013651,
+          "before": "b84d41a47b0195065a62ec0fb1c9eef776faea80",
+          "own": "788344e37273563ec33a7818bccfe69a649baa49",
+          "conflicts": [
+            "CHANGELOG.md"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rusttorrent-qbit",
+      "repo": "rustTorrent",
+      "mode": "position",
+      "what": "rustTorrent qbit cluster #138, #139, #141 against #150",
+      "skipped": [],
+      "import_s": 2.1,
+      "n_prs": 4,
+      "graft": {
+        "lands": 4,
+        "ff": 0,
+        "merged_clean": 0,
+        "conflicts": 4,
+        "errors": 0,
+        "broken": 0,
+        "oracle_pass": 0,
+        "oracle_inherited": 0,
+        "rebases": 4,
+        "round_trips": 8,
+        "wall_s": 0.712,
+        "p50_ms": 84.8
+      },
+      "git": {
+        "lands": 4,
+        "ff": 0,
+        "merged_clean": 0,
+        "conflicts": 4,
+        "errors": 0,
+        "broken": 0,
+        "oracle_pass": 0,
+        "oracle_inherited": 0,
+        "rebases": 4,
+        "round_trips": 8,
+        "wall_s": 0.48,
+        "p50_ms": 69.6
+      },
+      "agreement": {
+        "both_clean": 0,
+        "graft_only_clean": 0,
+        "git_only_clean": 0,
+        "both_conflict": 4,
+        "same_tree": 0,
+        "different_tree": 0
+      },
+      "lands": [
+        {
+          "pr": 138,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.08799027898930945,
+          "before": "cfa88c4aa3fbb3df959faa7660234833baa2f8d0",
+          "own": "a0d1bec1af5a845ab99535a4243969ac317ec15d",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/librtbit/src/http_api/handlers/qbit_compat.rs",
+            "crates/librtbit/src/http_api/handlers/qbit_parity_spec.json",
+            "docs/QBIT-API-PARITY.md"
+          ]
+        },
+        {
+          "pr": 138,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.2779483979975339,
+          "before": "cfa88c4aa3fbb3df959faa7660234833baa2f8d0",
+          "own": "a0d1bec1af5a845ab99535a4243969ac317ec15d",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/librtbit/src/http_api/handlers/qbit_compat.rs",
+            "crates/librtbit/src/http_api/handlers/qbit_parity_spec.json",
+            "docs/QBIT-API-PARITY.md"
+          ]
+        },
+        {
+          "pr": 139,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.08169677099795081,
+          "before": "76254d4ccd23843cce420efdeacefadb7a1ad240",
+          "own": "b442df1556cbe4b39b76e314c89b78bd90711296",
+          "conflicts": [
+            "crates/librtbit/src/http_api/handlers/qbit_compat.rs",
+            "crates/librtbit/src/session/scheduler.rs",
+            "crates/librtbit/src/session_persistence/postgres.rs"
+          ]
+        },
+        {
+          "pr": 139,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06570689601358026,
+          "before": "76254d4ccd23843cce420efdeacefadb7a1ad240",
+          "own": "b442df1556cbe4b39b76e314c89b78bd90711296",
+          "conflicts": [
+            "crates/librtbit/src/http_api/handlers/qbit_compat.rs",
+            "crates/librtbit/src/session/scheduler.rs",
+            "crates/librtbit/src/session_persistence/postgres.rs"
+          ]
+        },
+        {
+          "pr": 141,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.47023039101623,
+          "before": "6079c4051447e8586d051db4f77a93cc515e7ffe",
+          "own": "440b64a9833cd1be4202c6345deb02761f9bd695",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/librtbit/src/http_api/handlers/qbit_compat.rs",
+            "crates/librtbit/src/http_api/handlers/qbit_parity_spec.json"
+          ]
+        },
+        {
+          "pr": 141,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.073477472004015,
+          "before": "6079c4051447e8586d051db4f77a93cc515e7ffe",
+          "own": "440b64a9833cd1be4202c6345deb02761f9bd695",
+          "conflicts": [
+            "CHANGELOG.md",
+            "crates/librtbit/src/http_api/handlers/qbit_compat.rs",
+            "crates/librtbit/src/http_api/handlers/qbit_parity_spec.json"
+          ]
+        },
+        {
+          "pr": 150,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07205883800634183,
+          "before": "691f14a0c479bc242a9e3f0d690c36ac2303f471",
+          "own": "49b4fac70a203fe08b6895e6477169c6de116f53",
+          "conflicts": [
+            "crates/librtbit/src/http_api/handlers/qbit_parity.rs"
+          ]
+        },
+        {
+          "pr": 150,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06280586399952881,
+          "before": "691f14a0c479bc242a9e3f0d690c36ac2303f471",
+          "own": "49b4fac70a203fe08b6895e6477169c6de116f53",
+          "conflicts": [
+            "crates/librtbit/src/http_api/handlers/qbit_parity.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "graft-merge-back",
+      "repo": "graft",
+      "mode": "position",
+      "what": "graft PRs that merged `main` back in, landed at the `main` they merged",
+      "skipped": [
+        {
+          "pr": 55,
+          "why": "integration point is not on main"
+        }
+      ],
+      "import_s": 2.3,
+      "n_prs": 57,
+      "graft": {
+        "lands": 57,
+        "ff": 0,
+        "merged_clean": 39,
+        "conflicts": 18,
+        "errors": 0,
+        "broken": 1,
+        "oracle_pass": 38,
+        "oracle_inherited": 0,
+        "rebases": 57,
+        "round_trips": 75,
+        "wall_s": 3.376,
+        "p50_ms": 46.0
+      },
+      "git": {
+        "lands": 57,
+        "ff": 0,
+        "merged_clean": 39,
+        "conflicts": 18,
+        "errors": 0,
+        "broken": 1,
+        "oracle_pass": 38,
+        "oracle_inherited": 0,
+        "rebases": 57,
+        "round_trips": 153,
+        "wall_s": 4.29,
+        "p50_ms": 73.3
+      },
+      "agreement": {
+        "both_clean": 39,
+        "graft_only_clean": 0,
+        "git_only_clean": 0,
+        "both_conflict": 18,
+        "same_tree": 39,
+        "different_tree": 0
+      },
+      "lands": [
+        {
+          "pr": 12,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.05818703101249412,
+          "before": "f57bbe65885ed7075fbae3b7d66f90df77c8ba2b",
+          "own": "0d46be7ce4bbd9362056049d9c6937e3f141938c",
+          "conflicts": [
+            "Cargo.lock",
+            "Cargo.toml"
+          ]
+        },
+        {
+          "pr": 12,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06606377099524252,
+          "before": "f57bbe65885ed7075fbae3b7d66f90df77c8ba2b",
+          "own": "0d46be7ce4bbd9362056049d9c6937e3f141938c",
+          "conflicts": [
+            "Cargo.lock",
+            "Cargo.toml"
+          ]
+        },
+        {
+          "pr": 10,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.3305901670246385,
+          "before": "82fafad2faa7928636c5806c9ea2e73b1453afed",
+          "own": "3283ce82ebab965b4eb86d8f925395c68b14ffe8",
+          "conflicts": [
+            "Cargo.toml",
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 10,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.056177747988840565,
+          "before": "82fafad2faa7928636c5806c9ea2e73b1453afed",
+          "own": "3283ce82ebab965b4eb86d8f925395c68b14ffe8",
+          "conflicts": [
+            "Cargo.toml",
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 14,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.059645735018420964,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "c3153b7e484ed47bf7b84f3410866a492791d605",
+          "conflicts": [
+            "Cargo.lock",
+            "Cargo.toml"
+          ]
+        },
+        {
+          "pr": 14,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.055111142981331795,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "c3153b7e484ed47bf7b84f3410866a492791d605",
+          "conflicts": [
+            "Cargo.lock",
+            "Cargo.toml"
+          ]
+        },
+        {
+          "pr": 17,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07127555200713687,
+          "before": "4cb860769a10099848f8e9b3bd22d1f573b22f8c",
+          "own": "cbe097d45c6e8ab031ed1f50c2dd49ef7f608b5b",
+          "conflicts": [
+            "Cargo.toml"
+          ]
+        },
+        {
+          "pr": 17,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.04912504498497583,
+          "before": "4cb860769a10099848f8e9b3bd22d1f573b22f8c",
+          "own": "cbe097d45c6e8ab031ed1f50c2dd49ef7f608b5b",
+          "conflicts": [
+            "Cargo.toml"
+          ]
+        },
+        {
+          "pr": 20,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07442766698659398,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 20,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.052769392990740016,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 22,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.052926806994946674,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 22,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0734422370151151,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 21,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.05949007999151945,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 21,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06506678499863483,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 23,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06586609300575219,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 23,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.12464706800528802,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 24,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.21089108398882672,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 24,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.10152744900551625,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 26,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07733979300246574,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 26,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06498602501233108,
+          "before": "c3a2e547fab89d4acbe2136a6736a4990c23ea99",
+          "own": "80b627f1efd966103732512882d34316211465f7",
+          "conflicts": [
+            "crates/graft-testkit/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 27,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.06279082698165439,
+          "tree": "d61d6de5b72c15382a4f92bdd5e39aa25147ea0a",
+          "before": "fcd2f160cafdfa1d4e695da4329e5b19358da402",
+          "own": "b1521772f511bb325a8e19785312b284d14e66a9",
+          "oracle": "pass"
+        },
+        {
+          "pr": 27,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08008559799054638,
+          "tree": "d61d6de5b72c15382a4f92bdd5e39aa25147ea0a",
+          "before": "fcd2f160cafdfa1d4e695da4329e5b19358da402",
+          "own": "b1521772f511bb325a8e19785312b284d14e66a9",
+          "oracle": "pass"
+        },
+        {
+          "pr": 31,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.06136831801268272,
+          "tree": "a23b3e65aff8d826fe425d57de3a7b1f4c4eadd2",
+          "before": "791498c1f9a444ae6643a11d7844a180ac5383f9",
+          "own": "16b193caf4ab724280f1777c22270e421eb577f6",
+          "oracle": "pass"
+        },
+        {
+          "pr": 31,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.09870289798709564,
+          "tree": "a23b3e65aff8d826fe425d57de3a7b1f4c4eadd2",
+          "before": "791498c1f9a444ae6643a11d7844a180ac5383f9",
+          "own": "16b193caf4ab724280f1777c22270e421eb577f6",
+          "oracle": "pass"
+        },
+        {
+          "pr": 34,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.027532183972653,
+          "tree": "d61d6de5b72c15382a4f92bdd5e39aa25147ea0a",
+          "before": "fcd2f160cafdfa1d4e695da4329e5b19358da402",
+          "own": "b1521772f511bb325a8e19785312b284d14e66a9",
+          "oracle": "pass"
+        },
+        {
+          "pr": 34,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07096094198641367,
+          "tree": "d61d6de5b72c15382a4f92bdd5e39aa25147ea0a",
+          "before": "fcd2f160cafdfa1d4e695da4329e5b19358da402",
+          "own": "b1521772f511bb325a8e19785312b284d14e66a9",
+          "oracle": "pass"
+        },
+        {
+          "pr": 33,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.030685973004437983,
+          "tree": "d61d6de5b72c15382a4f92bdd5e39aa25147ea0a",
+          "before": "fcd2f160cafdfa1d4e695da4329e5b19358da402",
+          "own": "b1521772f511bb325a8e19785312b284d14e66a9",
+          "oracle": "pass"
+        },
+        {
+          "pr": 33,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06881532398983836,
+          "tree": "d61d6de5b72c15382a4f92bdd5e39aa25147ea0a",
+          "before": "fcd2f160cafdfa1d4e695da4329e5b19358da402",
+          "own": "b1521772f511bb325a8e19785312b284d14e66a9",
+          "oracle": "pass"
+        },
+        {
+          "pr": 32,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.031592212995747104,
+          "tree": "6b8d64911635f2ec27956b072f9126d45aba65a7",
+          "before": "791498c1f9a444ae6643a11d7844a180ac5383f9",
+          "own": "74ab687aade82189354e1007c1c8ddce6ae3910a",
+          "oracle": "pass"
+        },
+        {
+          "pr": 32,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.062410524988081306,
+          "tree": "6b8d64911635f2ec27956b072f9126d45aba65a7",
+          "before": "791498c1f9a444ae6643a11d7844a180ac5383f9",
+          "own": "74ab687aade82189354e1007c1c8ddce6ae3910a",
+          "oracle": "pass"
+        },
+        {
+          "pr": 30,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.045821834995877,
+          "tree": "eaf23f439801786a6550631e0c4713d186ebb878",
+          "before": "b1eb60d1dd998178475cccceada3a203c8841f05",
+          "own": "be1e6c97da1936d270194c5a03b35b8f1c8c9708",
+          "oracle": "pass"
+        },
+        {
+          "pr": 30,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07112952900934033,
+          "tree": "eaf23f439801786a6550631e0c4713d186ebb878",
+          "before": "b1eb60d1dd998178475cccceada3a203c8841f05",
+          "own": "be1e6c97da1936d270194c5a03b35b8f1c8c9708",
+          "oracle": "pass"
+        },
+        {
+          "pr": 35,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.05963115199119784,
+          "tree": "796d4a932e9b9b9fa87043dc9e350dd81442816b",
+          "before": "07ba820915b16d19927a0d837d62cd9b3c4ee806",
+          "own": "83ceabf13dc5d2c9fe3cf72ecf2e928773a1c4c7",
+          "oracle": "broken"
+        },
+        {
+          "pr": 35,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.09131532598985359,
+          "tree": "796d4a932e9b9b9fa87043dc9e350dd81442816b",
+          "before": "07ba820915b16d19927a0d837d62cd9b3c4ee806",
+          "own": "83ceabf13dc5d2c9fe3cf72ecf2e928773a1c4c7",
+          "oracle": "broken"
+        },
+        {
+          "pr": 36,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.0774609700019937,
+          "tree": "3ac36078a691bb6f3b20c50569983dff8e018994",
+          "before": "d8bc29e9e6bbee0d9cc65ea11af577d6841b1cfa",
+          "own": "82cd52ccb99547f589c651a429d408c4d09deeeb",
+          "oracle": "pass"
+        },
+        {
+          "pr": 36,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06690930802142248,
+          "tree": "3ac36078a691bb6f3b20c50569983dff8e018994",
+          "before": "d8bc29e9e6bbee0d9cc65ea11af577d6841b1cfa",
+          "own": "82cd52ccb99547f589c651a429d408c4d09deeeb",
+          "oracle": "pass"
+        },
+        {
+          "pr": 40,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.04693307098932564,
+          "tree": "f44e850d32fcbbd5e1ff85122a88cca2ba2fb9fe",
+          "before": "8cedc22aeb99d91b9244c0133d97ffd39fee1bdf",
+          "own": "e3f1bb720a989850ac670c9652b70b4b63411dc7",
+          "oracle": "pass"
+        },
+        {
+          "pr": 40,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06847423501312733,
+          "tree": "f44e850d32fcbbd5e1ff85122a88cca2ba2fb9fe",
+          "before": "8cedc22aeb99d91b9244c0133d97ffd39fee1bdf",
+          "own": "e3f1bb720a989850ac670c9652b70b4b63411dc7",
+          "oracle": "pass"
+        },
+        {
+          "pr": 38,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.07361046998994425,
+          "tree": "33b1bb31e83d6902c359139680711a562aeb682e",
+          "before": "d8bc29e9e6bbee0d9cc65ea11af577d6841b1cfa",
+          "own": "ce83a61d28c2a94e9808fc31e710952563ce962e",
+          "oracle": "pass"
+        },
+        {
+          "pr": 38,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07780729400110431,
+          "tree": "33b1bb31e83d6902c359139680711a562aeb682e",
+          "before": "d8bc29e9e6bbee0d9cc65ea11af577d6841b1cfa",
+          "own": "ce83a61d28c2a94e9808fc31e710952563ce962e",
+          "oracle": "pass"
+        },
+        {
+          "pr": 41,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.046008242992684245,
+          "tree": "309b3c0049247efa6bb3a206583af50b3fbddcaa",
+          "before": "01bf446f67d0287ca4d8962cc0519da48d52ef22",
+          "own": "7598904089ca002519be7ec6167a190a65fea1dd",
+          "oracle": "pass"
+        },
+        {
+          "pr": 41,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08025438399636187,
+          "tree": "309b3c0049247efa6bb3a206583af50b3fbddcaa",
+          "before": "01bf446f67d0287ca4d8962cc0519da48d52ef22",
+          "own": "7598904089ca002519be7ec6167a190a65fea1dd",
+          "oracle": "pass"
+        },
+        {
+          "pr": 51,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.04724725300911814,
+          "tree": "0f4eb5e4b233d5be72e56c340e90159d2b186e5f",
+          "before": "cd7dc37e613e5a0f3f45500b80bd2ae3b983fbd2",
+          "own": "2061dbffd83f85b40cddc5f4b9ba030f4eb694de",
+          "oracle": "pass"
+        },
+        {
+          "pr": 51,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08195632300339639,
+          "tree": "0f4eb5e4b233d5be72e56c340e90159d2b186e5f",
+          "before": "cd7dc37e613e5a0f3f45500b80bd2ae3b983fbd2",
+          "own": "2061dbffd83f85b40cddc5f4b9ba030f4eb694de",
+          "oracle": "pass"
+        },
+        {
+          "pr": 54,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03753571002744138,
+          "tree": "339cbe649e387cebce8508e4caa4589e6348d855",
+          "before": "8bb41878d8133668301c3829d5b39b003da916c8",
+          "own": "9b3a07bc5168a114e8b0c48783e51288608f9deb",
+          "oracle": "pass"
+        },
+        {
+          "pr": 54,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06716798900743015,
+          "tree": "339cbe649e387cebce8508e4caa4589e6348d855",
+          "before": "8bb41878d8133668301c3829d5b39b003da916c8",
+          "own": "9b3a07bc5168a114e8b0c48783e51288608f9deb",
+          "oracle": "pass"
+        },
+        {
+          "pr": 59,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.04106713298824616,
+          "tree": "a08677655bc19770dc56b6107bf7b7a11043ed2c",
+          "before": "830cf4783d93bf74ca627850520b4e513df8091c",
+          "own": "b58c81ec150d2ce08fbecb71221ab185da884286",
+          "oracle": "pass"
+        },
+        {
+          "pr": 59,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08129521002410911,
+          "tree": "a08677655bc19770dc56b6107bf7b7a11043ed2c",
+          "before": "830cf4783d93bf74ca627850520b4e513df8091c",
+          "own": "b58c81ec150d2ce08fbecb71221ab185da884286",
+          "oracle": "pass"
+        },
+        {
+          "pr": 60,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.038265570998191833,
+          "tree": "d8919ff557a6090b64237acb92f53b63f54123da",
+          "before": "8bb41878d8133668301c3829d5b39b003da916c8",
+          "own": "9f2ad77c1288f0f4c23292c979ca92b8d4eeb224",
+          "oracle": "pass"
+        },
+        {
+          "pr": 60,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.061102912994101644,
+          "tree": "d8919ff557a6090b64237acb92f53b63f54123da",
+          "before": "8bb41878d8133668301c3829d5b39b003da916c8",
+          "own": "9f2ad77c1288f0f4c23292c979ca92b8d4eeb224",
+          "oracle": "pass"
+        },
+        {
+          "pr": 58,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.039335567998932675,
+          "tree": "47e74507adf76880e8fb68a7fe009aae9af48e40",
+          "before": "8bb41878d8133668301c3829d5b39b003da916c8",
+          "own": "bcadb7c5b973ce847c8d7d9e72efcd50a33bf836",
+          "oracle": "pass"
+        },
+        {
+          "pr": 58,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.0681979009823408,
+          "tree": "47e74507adf76880e8fb68a7fe009aae9af48e40",
+          "before": "8bb41878d8133668301c3829d5b39b003da916c8",
+          "own": "bcadb7c5b973ce847c8d7d9e72efcd50a33bf836",
+          "oracle": "pass"
+        },
+        {
+          "pr": 63,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03530679800314829,
+          "tree": "235280a472624d97b9e4134c05e7a1a0e0e86cef",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "f3f938d95e29ee206ad27713a81114daebbdc7e7",
+          "oracle": "pass"
+        },
+        {
+          "pr": 63,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07405467799981125,
+          "tree": "235280a472624d97b9e4134c05e7a1a0e0e86cef",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "f3f938d95e29ee206ad27713a81114daebbdc7e7",
+          "oracle": "pass"
+        },
+        {
+          "pr": 65,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.04864779801573604,
+          "tree": "3957a7748c496f84707e771d8d2c3476b1c183d5",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "45d2de66d3ad1dbaabcc2ed7b74c237688744cd5",
+          "oracle": "pass"
+        },
+        {
+          "pr": 65,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.0813899110071361,
+          "tree": "3957a7748c496f84707e771d8d2c3476b1c183d5",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "45d2de66d3ad1dbaabcc2ed7b74c237688744cd5",
+          "oracle": "pass"
+        },
+        {
+          "pr": 64,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.040957514982437715,
+          "tree": "696059075098697d928cba29c75ea812c417d1dc",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "245154cabbf84e23b6500f0587d79d26bc30517c",
+          "oracle": "pass"
+        },
+        {
+          "pr": 64,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06870497501222417,
+          "tree": "696059075098697d928cba29c75ea812c417d1dc",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "245154cabbf84e23b6500f0587d79d26bc30517c",
+          "oracle": "pass"
+        },
+        {
+          "pr": 66,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.04594314401037991,
+          "tree": "6c1a6e137c738a72cdd77b95e807ce70fbf4d541",
+          "before": "5a92f1a69e41d657e8cda608c96728a70dcab32e",
+          "own": "2035fc0beb4415ad1c580f8c1a41359bc5c09448",
+          "oracle": "pass"
+        },
+        {
+          "pr": 66,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08258310199016705,
+          "tree": "6c1a6e137c738a72cdd77b95e807ce70fbf4d541",
+          "before": "5a92f1a69e41d657e8cda608c96728a70dcab32e",
+          "own": "2035fc0beb4415ad1c580f8c1a41359bc5c09448",
+          "oracle": "pass"
+        },
+        {
+          "pr": 67,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03838206798536703,
+          "tree": "3957a7748c496f84707e771d8d2c3476b1c183d5",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "45d2de66d3ad1dbaabcc2ed7b74c237688744cd5",
+          "oracle": "pass"
+        },
+        {
+          "pr": 67,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07295494998106733,
+          "tree": "3957a7748c496f84707e771d8d2c3476b1c183d5",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "45d2de66d3ad1dbaabcc2ed7b74c237688744cd5",
+          "oracle": "pass"
+        },
+        {
+          "pr": 68,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.04186732499510981,
+          "tree": "5a5c495cd9c18e6f98a58c00c2975bc62be33f82",
+          "before": "6c1a6e137c738a72cdd77b95e807ce70fbf4d541",
+          "own": "bfdd8a10218f3041e11d0c01bfe38d6bb824140c",
+          "oracle": "pass"
+        },
+        {
+          "pr": 68,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08028046699473634,
+          "tree": "5a5c495cd9c18e6f98a58c00c2975bc62be33f82",
+          "before": "6c1a6e137c738a72cdd77b95e807ce70fbf4d541",
+          "own": "bfdd8a10218f3041e11d0c01bfe38d6bb824140c",
+          "oracle": "pass"
+        },
+        {
+          "pr": 71,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.043726785021135584,
+          "tree": "3957a7748c496f84707e771d8d2c3476b1c183d5",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "45d2de66d3ad1dbaabcc2ed7b74c237688744cd5",
+          "oracle": "pass"
+        },
+        {
+          "pr": 71,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07907427800819278,
+          "tree": "3957a7748c496f84707e771d8d2c3476b1c183d5",
+          "before": "2cc59a1958302c96699a36539b6fee4cae64d1aa",
+          "own": "45d2de66d3ad1dbaabcc2ed7b74c237688744cd5",
+          "oracle": "pass"
+        },
+        {
+          "pr": 72,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03467605297919363,
+          "tree": "f07e63a0a4e6770260405a87ef73be6e3a8ab5c3",
+          "before": "5b654bbafaf06fb705753b136aec82bf16bda2ef",
+          "own": "262dba59a3ec25ed61079eb901dbe2f7806ad1ec",
+          "oracle": "pass"
+        },
+        {
+          "pr": 72,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.0779776010022033,
+          "tree": "f07e63a0a4e6770260405a87ef73be6e3a8ab5c3",
+          "before": "5b654bbafaf06fb705753b136aec82bf16bda2ef",
+          "own": "262dba59a3ec25ed61079eb901dbe2f7806ad1ec",
+          "oracle": "pass"
+        },
+        {
+          "pr": 70,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.04007233801530674,
+          "tree": "6f65e1812efb36bb723002e50462b5bb60603bc3",
+          "before": "f07e63a0a4e6770260405a87ef73be6e3a8ab5c3",
+          "own": "e6b70d1b4ddc878e9e775f8177b48cd6e7698be8",
+          "oracle": "pass"
+        },
+        {
+          "pr": 70,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07640426201396622,
+          "tree": "6f65e1812efb36bb723002e50462b5bb60603bc3",
+          "before": "f07e63a0a4e6770260405a87ef73be6e3a8ab5c3",
+          "own": "e6b70d1b4ddc878e9e775f8177b48cd6e7698be8",
+          "oracle": "pass"
+        },
+        {
+          "pr": 73,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.04285556200193241,
+          "tree": "25fd1c670b18715e108b9be0070542c6eb04b1a5",
+          "before": "e8e09dcef7f6c5a8aba68d464489cd1f1274cf83",
+          "own": "ed482b2479815a4330b2a9449a3269d3bfda65dc",
+          "oracle": "pass"
+        },
+        {
+          "pr": 73,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.0866510339837987,
+          "tree": "25fd1c670b18715e108b9be0070542c6eb04b1a5",
+          "before": "e8e09dcef7f6c5a8aba68d464489cd1f1274cf83",
+          "own": "ed482b2479815a4330b2a9449a3269d3bfda65dc",
+          "oracle": "pass"
+        },
+        {
+          "pr": 74,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03992154001025483,
+          "tree": "ac3839e58e4cc9a9c81aa1ad850cb863fad02f3b",
+          "before": "f07e63a0a4e6770260405a87ef73be6e3a8ab5c3",
+          "own": "1e9b98967746d1fda7bfc9b936e7927d77d17de4",
+          "oracle": "pass"
+        },
+        {
+          "pr": 74,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08513114400557242,
+          "tree": "ac3839e58e4cc9a9c81aa1ad850cb863fad02f3b",
+          "before": "f07e63a0a4e6770260405a87ef73be6e3a8ab5c3",
+          "own": "1e9b98967746d1fda7bfc9b936e7927d77d17de4",
+          "oracle": "pass"
+        },
+        {
+          "pr": 76,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.02987163100624457,
+          "tree": "e42e66108464c86cb4c442bed900722f33e2fc14",
+          "before": "abf365366990141363f5143c179f9ae04dab5599",
+          "own": "26a92dede7f36fbfb2bfccf5faa07d97d1742591",
+          "oracle": "pass"
+        },
+        {
+          "pr": 76,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06824652099749073,
+          "tree": "e42e66108464c86cb4c442bed900722f33e2fc14",
+          "before": "abf365366990141363f5143c179f9ae04dab5599",
+          "own": "26a92dede7f36fbfb2bfccf5faa07d97d1742591",
+          "oracle": "pass"
+        },
+        {
+          "pr": 77,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.028283188003115356,
+          "tree": "e42e66108464c86cb4c442bed900722f33e2fc14",
+          "before": "abf365366990141363f5143c179f9ae04dab5599",
+          "own": "26a92dede7f36fbfb2bfccf5faa07d97d1742591",
+          "oracle": "pass"
+        },
+        {
+          "pr": 77,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06686006797826849,
+          "tree": "e42e66108464c86cb4c442bed900722f33e2fc14",
+          "before": "abf365366990141363f5143c179f9ae04dab5599",
+          "own": "26a92dede7f36fbfb2bfccf5faa07d97d1742591",
+          "oracle": "pass"
+        },
+        {
+          "pr": 79,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.029169963003369048,
+          "tree": "ac14ea5d7478fe019c88193d339d103476fee32e",
+          "before": "3ac047822ebbbc92a9b519eed3fa5c6429e2fd11",
+          "own": "ad9d85b00005be34dbcc2768fb895900ab61bad7",
+          "oracle": "pass"
+        },
+        {
+          "pr": 79,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06494345600367524,
+          "tree": "ac14ea5d7478fe019c88193d339d103476fee32e",
+          "before": "3ac047822ebbbc92a9b519eed3fa5c6429e2fd11",
+          "own": "ad9d85b00005be34dbcc2768fb895900ab61bad7",
+          "oracle": "pass"
+        },
+        {
+          "pr": 80,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03551289500319399,
+          "tree": "a7b15006dc63754e5721722739a52fe0a712aefc",
+          "before": "ac14ea5d7478fe019c88193d339d103476fee32e",
+          "own": "a98577f489830d42f6c943e6ba023234ac0c9851",
+          "oracle": "pass"
+        },
+        {
+          "pr": 80,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.06380562399863265,
+          "tree": "a7b15006dc63754e5721722739a52fe0a712aefc",
+          "before": "ac14ea5d7478fe019c88193d339d103476fee32e",
+          "own": "a98577f489830d42f6c943e6ba023234ac0c9851",
+          "oracle": "pass"
+        },
+        {
+          "pr": 85,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.05056523298844695,
+          "tree": "9cd8765808c59473613c50a79a7aef7691686f83",
+          "before": "15c5a1d1ac2fa326672bbaea7cb785ed93e1b501",
+          "own": "702fd123918d0d6ed7914e68460f1cdcabc924c0",
+          "oracle": "pass"
+        },
+        {
+          "pr": 85,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07320333601091988,
+          "tree": "9cd8765808c59473613c50a79a7aef7691686f83",
+          "before": "15c5a1d1ac2fa326672bbaea7cb785ed93e1b501",
+          "own": "702fd123918d0d6ed7914e68460f1cdcabc924c0",
+          "oracle": "pass"
+        },
+        {
+          "pr": 87,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.038374244002625346,
+          "tree": "c847d8960b3b3c9cc68e9ba506095b6328012dae",
+          "before": "15c5a1d1ac2fa326672bbaea7cb785ed93e1b501",
+          "own": "1226ce60b8a8b48a667eaba556fb41baa9be3edf",
+          "oracle": "pass"
+        },
+        {
+          "pr": 87,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08121222798945382,
+          "tree": "c847d8960b3b3c9cc68e9ba506095b6328012dae",
+          "before": "15c5a1d1ac2fa326672bbaea7cb785ed93e1b501",
+          "own": "1226ce60b8a8b48a667eaba556fb41baa9be3edf",
+          "oracle": "pass"
+        },
+        {
+          "pr": 89,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.08390712601249106,
+          "before": "8bee7faa475dc93ba50146098a754bdff2344e9f",
+          "own": "076346d9671ccd2590c2c38a969a4e65d21ec631",
+          "conflicts": [
+            "deploy/README.md",
+            "deploy/server.toml",
+            "docs/decisions.md",
+            "docs/dev-stack.md",
+            "docs/plan.md"
+          ]
+        },
+        {
+          "pr": 89,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07076766699901782,
+          "before": "8bee7faa475dc93ba50146098a754bdff2344e9f",
+          "own": "076346d9671ccd2590c2c38a969a4e65d21ec631",
+          "conflicts": [
+            "deploy/README.md",
+            "deploy/server.toml",
+            "docs/decisions.md",
+            "docs/dev-stack.md",
+            "docs/plan.md"
+          ]
+        },
+        {
+          "pr": 90,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07871369598433375,
+          "before": "f5682aa23e22cfd1f50fd0261fb2954a157a5bcc",
+          "own": "65cd6e6ff7527ee39ed7dec4c5e76be51426d912",
+          "conflicts": [
+            "crates/graft-client/src/remote.rs",
+            "crates/graft-engine/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 90,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07846016099210829,
+          "before": "f5682aa23e22cfd1f50fd0261fb2954a157a5bcc",
+          "own": "65cd6e6ff7527ee39ed7dec4c5e76be51426d912",
+          "conflicts": [
+            "crates/graft-client/src/remote.rs",
+            "crates/graft-engine/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 93,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.08244823600398377,
+          "before": "f5682aa23e22cfd1f50fd0261fb2954a157a5bcc",
+          "own": "65cd6e6ff7527ee39ed7dec4c5e76be51426d912",
+          "conflicts": [
+            "crates/graft-client/src/remote.rs",
+            "crates/graft-engine/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 93,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07248991300002672,
+          "before": "f5682aa23e22cfd1f50fd0261fb2954a157a5bcc",
+          "own": "65cd6e6ff7527ee39ed7dec4c5e76be51426d912",
+          "conflicts": [
+            "crates/graft-client/src/remote.rs",
+            "crates/graft-engine/src/lib.rs"
+          ]
+        },
+        {
+          "pr": 97,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06739338199258782,
+          "before": "e853080fc4f844c16a8e4c83f139f07bcfb5e0ee",
+          "own": "d1172fdb2e04c1e46fb6f21a66a1baa30d833b1a",
+          "conflicts": [
+            "deploy/README.md"
+          ]
+        },
+        {
+          "pr": 97,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.05963576599606313,
+          "before": "e853080fc4f844c16a8e4c83f139f07bcfb5e0ee",
+          "own": "d1172fdb2e04c1e46fb6f21a66a1baa30d833b1a",
+          "conflicts": [
+            "deploy/README.md"
+          ]
+        },
+        {
+          "pr": 98,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.11616521497489884,
+          "before": "0d963b3afa0dc9305460ac10cb3c3c7ecdd4fc79",
+          "own": "e7cb2e4f345b6412187f456d5781fa1938a29ab1",
+          "conflicts": [
+            "crates/graft-mcp/src/lib.rs",
+            "crates/graft-mcp/src/write.rs",
+            "crates/graft-mcp/tests/http.rs",
+            "crates/graft-server/tests/mcp_conflict.rs"
+          ]
+        },
+        {
+          "pr": 98,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.08398266500444151,
+          "before": "0d963b3afa0dc9305460ac10cb3c3c7ecdd4fc79",
+          "own": "e7cb2e4f345b6412187f456d5781fa1938a29ab1",
+          "conflicts": [
+            "crates/graft-mcp/src/lib.rs",
+            "crates/graft-mcp/src/write.rs",
+            "crates/graft-mcp/tests/http.rs",
+            "crates/graft-server/tests/mcp_conflict.rs"
+          ]
+        },
+        {
+          "pr": 99,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07136392197571695,
+          "before": "ab9b043400fb17643bed754b4d2087ce1a6971c6",
+          "own": "0ff8dd27a723125d8e77f59bead12c7af7a16fc6",
+          "conflicts": [
+            "crates/graft-server/tests/mcp_conflict.rs"
+          ]
+        },
+        {
+          "pr": 99,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07793661899631843,
+          "before": "ab9b043400fb17643bed754b4d2087ce1a6971c6",
+          "own": "0ff8dd27a723125d8e77f59bead12c7af7a16fc6",
+          "conflicts": [
+            "crates/graft-server/tests/mcp_conflict.rs"
+          ]
+        },
+        {
+          "pr": 102,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0782219399989117,
+          "before": "de0c0257c815e1f23c379c27f2251b5127f3fda6",
+          "own": "b10a63260ba5837e84ca12e98d27559fbabc2c2c",
+          "conflicts": [
+            "bench/README.md",
+            "bench/graftbench/__main__.py",
+            "bench/graftbench/report.py"
+          ]
+        },
+        {
+          "pr": 102,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.0783648900105618,
+          "before": "de0c0257c815e1f23c379c27f2251b5127f3fda6",
+          "own": "b10a63260ba5837e84ca12e98d27559fbabc2c2c",
+          "conflicts": [
+            "bench/README.md",
+            "bench/graftbench/__main__.py",
+            "bench/graftbench/report.py"
+          ]
+        },
+        {
+          "pr": 103,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.05031388599309139,
+          "tree": "eddf6f275d3d2dd45a317bec1db13dd82b2454d5",
+          "before": "7d233257a67115389029a757a61448389f71b7d9",
+          "own": "19476fd112dd23d4bde9c28bee79f77c497ca881",
+          "oracle": "pass"
+        },
+        {
+          "pr": 103,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.104854853998404,
+          "tree": "eddf6f275d3d2dd45a317bec1db13dd82b2454d5",
+          "before": "7d233257a67115389029a757a61448389f71b7d9",
+          "own": "19476fd112dd23d4bde9c28bee79f77c497ca881",
+          "oracle": "pass"
+        },
+        {
+          "pr": 108,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.034327595989452675,
+          "tree": "1ffe52604ef0026e925cd440833321376b922d87",
+          "before": "6d8f6c34dd21da5fb5ec64db0fb29a5cec98275c",
+          "own": "ae5ac1bb25d34d3cabed51ebd885d9ff4349e8c9",
+          "oracle": "pass"
+        },
+        {
+          "pr": 108,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.08360972101218067,
+          "tree": "1ffe52604ef0026e925cd440833321376b922d87",
+          "before": "6d8f6c34dd21da5fb5ec64db0fb29a5cec98275c",
+          "own": "ae5ac1bb25d34d3cabed51ebd885d9ff4349e8c9",
+          "oracle": "pass"
+        },
+        {
+          "pr": 107,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.04534929900546558,
+          "tree": "40861f2db024b45fa040dcdb63d5aa102c03c58e",
+          "before": "8d1207a553ac560ac2e867a24ddf5d9568bb7e56",
+          "own": "be420ab7a7c516248f37e1f927271ab909e46d3c",
+          "oracle": "pass"
+        },
+        {
+          "pr": 107,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07783413800643757,
+          "tree": "40861f2db024b45fa040dcdb63d5aa102c03c58e",
+          "before": "8d1207a553ac560ac2e867a24ddf5d9568bb7e56",
+          "own": "be420ab7a7c516248f37e1f927271ab909e46d3c",
+          "oracle": "pass"
+        },
+        {
+          "pr": 110,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.0394857770006638,
+          "tree": "e1a6f474aacbc83982a92e036732862a6d3a28ec",
+          "before": "1e8f28f634545dd06785331ea3953d3e01015751",
+          "own": "fa2c93276832b0f8f3bca571429d4ec4382d9d3f",
+          "oracle": "pass"
+        },
+        {
+          "pr": 110,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.07334800998796709,
+          "tree": "e1a6f474aacbc83982a92e036732862a6d3a28ec",
+          "before": "1e8f28f634545dd06785331ea3953d3e01015751",
+          "own": "fa2c93276832b0f8f3bca571429d4ec4382d9d3f",
+          "oracle": "pass"
+        },
+        {
+          "pr": 112,
+          "tool": "graft",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.06137977697653696,
+          "before": "700d5269ca172cb59c7153d9089f7174bcd83717",
+          "own": "24a55379ea7a2953105b1975768c1a24ec73b005",
+          "conflicts": [
+            "docs/decisions.md"
+          ]
+        },
+        {
+          "pr": 112,
+          "tool": "git",
+          "outcome": "conflict",
+          "round_trips": 2,
+          "rebases": 1,
+          "secs": 0.07234262800193392,
+          "before": "700d5269ca172cb59c7153d9089f7174bcd83717",
+          "own": "24a55379ea7a2953105b1975768c1a24ec73b005",
+          "conflicts": [
+            "docs/decisions.md"
+          ]
+        },
+        {
+          "pr": 114,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03841824398841709,
+          "tree": "2a90edcd2e1bbf33941bb0ce31d6e48bcd385ed1",
+          "before": "b13abe039756144736d1bab4d90acc10461bb52f",
+          "own": "67810e8532de90d10cbfaad4a4e24e0cc41ee275",
+          "oracle": "pass"
+        },
+        {
+          "pr": 114,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.0721390130056534,
+          "tree": "2a90edcd2e1bbf33941bb0ce31d6e48bcd385ed1",
+          "before": "b13abe039756144736d1bab4d90acc10461bb52f",
+          "own": "67810e8532de90d10cbfaad4a4e24e0cc41ee275",
+          "oracle": "pass"
+        },
+        {
+          "pr": 113,
+          "tool": "graft",
+          "outcome": "merged",
+          "round_trips": 1,
+          "rebases": 1,
+          "secs": 0.03644145600264892,
+          "tree": "f818cc665a7a40ef9f3fcbc24836a0fe9d4c843f",
+          "before": "700d5269ca172cb59c7153d9089f7174bcd83717",
+          "own": "124311934f425968a9f64cfc25ccec359603e2c0",
+          "oracle": "pass"
+        },
+        {
+          "pr": 113,
+          "tool": "git",
+          "outcome": "merged",
+          "round_trips": 3,
+          "rebases": 1,
+          "secs": 0.0949679930054117,
+          "tree": "f818cc665a7a40ef9f3fcbc24836a0fe9d4c843f",
+          "before": "700d5269ca172cb59c7153d9089f7174bcd83717",
+          "own": "124311934f425968a9f64cfc25ccec359603e2c0",
+          "oracle": "pass"
+        }
+      ]
+    }
+  ],
+  "elapsed_s": 443.9,
+  "oracle_s": 365.2
+}

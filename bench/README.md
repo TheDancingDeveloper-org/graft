@@ -249,3 +249,31 @@ conflict rule and the merge3 regions behave as the scenarios assume.
   to zero with no harness change (WI-2296).
 - `pr-batch` (the squashed batch PR, D21) is not exercised. It needs a
   GitHub-side config.
+
+## Real overlapping PRs (WI-2338)
+
+`graftbench/realprs.py` replays real PR diffs from the estate's repositories
+(the cases in `docs/notes/graft-fit-assessment.md`, gap 4) through graft and
+git. Each PR lands from the fork point it really had: once with `graft land`
+(and `land --sync` when the server's rebase refuses), and once with git
+(`git push`; on a rejection `fetch`, `git merge-tree` to classify, `git rebase`
+and `push`). The PR's change is what the agent had before it first had to
+integrate: the oldest head before a force push, or the head before the first
+merge of `main` back in.
+
+```sh
+python3 -m graftbench.realprs fetch   # gh GraphQL + bare clones -> realprs/cases.json
+python3 -m graftbench.realprs run     # -> results/<date>-real-prs/
+```
+
+`fetch` needs `gh` signed in (rdpapp is private). `run` needs only the bare
+clones (`--cache`, default `~/.cache/graft-bench/realprs`) and the release
+binaries. Modes: `position` (each PR on its own line, at the `main` it really
+integrated with), `sequence` (open PRs one after another onto today's `main`)
+and `stack` (a PR chain: graft lands it as drafts in one call, git lands and
+rebases PR by PR). A PR stops at its first conflict; nothing is resolved.
+
+The oracle for "clean but broken" is `cargo check --workspace --all-targets`
+(CARGO_BUILD_JOBS=4) on each merged tree; a merge is broken when it fails and
+both its inputs pass. `--no-oracle` skips it. This is measurement, never a
+land check (D22).
