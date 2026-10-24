@@ -131,6 +131,15 @@ pub trait Forge: Send + Sync {
     ) -> impl Future<Output = Result<Vec<CheckRun>, ForgeError>> + Send;
     /// A token valid now, for authenticating a git push over HTTPS.
     fn token(&self) -> impl Future<Output = Result<SecretToken, ForgeError>> + Send;
+    /// Whether the PR with `node_id` is in the merge queue or set to
+    /// auto-merge: GitHub may merge it at any moment.
+    fn merging(&self, node_id: &str) -> impl Future<Output = Result<bool, ForgeError>> + Send;
+    /// Comments `comment` on PR `number`, then closes it unmerged.
+    fn close_pr(
+        &self,
+        number: u64,
+        comment: &str,
+    ) -> impl Future<Output = Result<(), ForgeError>> + Send;
 }
 
 /// An open PR as the PR import reads it (`docs/design.md` §11.3, mode B).
@@ -543,6 +552,46 @@ fn pull_from(v: Value) -> Result<Pull, ForgeError> {
 impl<C: CredentialProvider> Forge for HttpForge<C> {
     async fn token(&self) -> Result<SecretToken, ForgeError> {
         self.credentials.token().await
+    }
+
+    async fn merging(&self, node_id: &str) -> Result<bool, ForgeError> {
+        let body = json!({
+            "query": "query($id: ID!) { node(id: $id) { ... on PullRequest { isInMergeQueue autoMergeRequest { enabledAt } } } }",
+            "variables": { "id": node_id },
+        });
+        let v = self
+            .send(reqwest::Method::POST, "/graphql", &[], Some(&body))
+            .await?;
+        if let Some(err) = v
+            .get("errors")
+            .and_then(Value::as_array)
+            .and_then(|e| e.first())
+        {
+            let text = err
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|m| clean(m, MESSAGE_CHARS))
+                .unwrap_or_default();
+            return Err(ForgeError::Refused(format!("pull request state: {text}")));
+        }
+        // A null node is a PR this token cannot see: not knowing is not
+        // "not merging".
+        let pr = v
+            .pointer("/data/node")
+            .filter(|n| n.is_object())
+            .ok_or_else(|| {
+                ForgeError::Refused("GitHub did not return the pull request's merge state".into())
+            })?;
+        let queued = pr
+            .get("isInMergeQueue")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let auto = pr.get("autoMergeRequest").is_some_and(|a| !a.is_null());
+        Ok(queued || auto)
+    }
+
+    async fn close_pr(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        PullSource::close_pull(self, number, comment).await
     }
 
     async fn find_pull(&self, branch: &str) -> Result<Option<Pull>, ForgeError> {

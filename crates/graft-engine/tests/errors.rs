@@ -14,7 +14,9 @@ use graft_engine::EngineConfig;
 use graft_model::{Change, ChangesetId, EntryKind, ObjectId, ObjectKind, TreeId};
 use graft_proto::error::ApiResult;
 use graft_proto::types::*;
-use graft_proto::{AdminApi, ApiError, Codec, Frame, ObjectApi, RepoApi};
+use graft_proto::{
+    AdminApi, ApiError, CallContext, Codec, Frame, ObjectApi, PrincipalKind, RepoApi,
+};
 use graft_store::{MetaStore, MetaTxn, RecordState, RepoId, Write};
 
 fn err<T: Debug>(r: ApiResult<T>) -> ApiError {
@@ -299,6 +301,45 @@ fn invalid_change() {
         rule(repo.update_ref("t", Some(a), b, RefKind::Tag)),
         "tag-immutable"
     );
+}
+
+/// A token's session and work item bind the draft's `vogt.*` metadata;
+/// a service token may attribute to anyone.
+#[test]
+fn identity_metadata() {
+    let f = memory();
+    let repo = Repo::new(&f, "r");
+    let a = repo.commit(vec![], &[("a", b"a")], &[]).id;
+    repo.upload(&[b"b"]);
+    let mut agent = repo.cx.clone();
+    agent.principal.kind = PrincipalKind::Agent;
+    agent.principal.session = Some("ses_1".to_owned());
+    agent.principal.work_item = Some("WI-1".to_owned());
+    let req = |n: &str, session: &str, item: &str| {
+        let mut r = commit_req("r", vec![a], vec![put(n, b"b")]);
+        r.metadata
+            .insert("vogt.session".to_owned(), session.to_owned());
+        r.metadata
+            .insert("vogt.work_item".to_owned(), item.to_owned());
+        r
+    };
+    let create = |cx: &CallContext, r| block_on(f.engine.create_changeset(cx, r));
+
+    assert_eq!(
+        rule(create(&agent, req("x", "ses_2", "WI-1"))),
+        "session-metadata"
+    );
+    assert_eq!(
+        rule(create(&agent, req("x", "ses_1", "WI-2"))),
+        "work-item-metadata"
+    );
+    create(&agent, req("x", "ses_1", "WI-1")).expect("own identity");
+    // Unset metadata, or a token without a session, is not checked.
+    create(&agent, commit_req("r", vec![a], vec![put("y", b"b")])).expect("no metadata");
+    create(&repo.cx, req("z", "ses_2", "WI-2")).expect("token has no session");
+    let mut service = agent.clone();
+    service.principal.kind = PrincipalKind::Service;
+    create(&service, req("w", "ses_2", "WI-2")).expect("service acts for others");
 }
 
 #[test]
