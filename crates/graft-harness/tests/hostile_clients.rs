@@ -174,7 +174,8 @@ struct Site {
 struct State {
     refs: Vec<(String, ChangesetId, u64)>,
     workspaces: BTreeMap<String, (Option<ChangesetId>, ChangesetId, i64)>,
-    next_lsn: u64,
+    /// Journal entries and the last lsn.
+    journal: (usize, u64),
 }
 
 impl Site {
@@ -369,25 +370,35 @@ impl Site {
                 let w = self.api.get_workspace(&a, wref(name)).await.expect("ws");
                 workspaces.insert(w.name, (w.head, w.base, w.lease_until_ms));
             }
-            let next_lsn = self
-                .api
-                .watch(
-                    &a,
-                    Watch {
-                        repo: REPO.to_owned(),
-                        from_lsn: u64::MAX - 1,
-                        kinds: vec![],
-                        limit: 1,
-                        wait_ms: 0,
-                    },
-                )
-                .await
-                .map(|p| p.next_lsn)
-                .unwrap_or_default();
+            // Page the whole journal from its start: it is small here, and
+            // each page is bounded by MAX_PAGE.
+            let (mut from, mut entries, mut last) = (1, 0usize, 0u64);
+            loop {
+                let got = self
+                    .api
+                    .watch(
+                        &a,
+                        Watch {
+                            repo: REPO.to_owned(),
+                            from_lsn: from,
+                            kinds: vec![],
+                            limit: MAX_PAGE,
+                            wait_ms: 0,
+                        },
+                    )
+                    .await
+                    .expect("journal");
+                if got.entries.is_empty() {
+                    break;
+                }
+                entries += got.entries.len();
+                last = got.entries.last().map_or(last, |e| e.lsn);
+                from = got.next_lsn;
+            }
             State {
                 refs,
                 workspaces,
-                next_lsn,
+                journal: (entries, last),
             }
         })
     }
@@ -452,6 +463,8 @@ fn invalid(e: &ApiError) -> bool {
 /// Runs each attack, checks its error, its effect and its text.
 fn attack_all(site: &Site, attacks: Vec<Attack<'_>>, canaries: &[&str]) -> Vec<String> {
     let mut failures = Vec::new();
+    // The setup journalled its writes, so the journal comparison can fail.
+    assert!(site.state().journal.0 > 0, "the journal is empty");
     for a in attacks {
         let before = site.state();
         let got = (a.run)(site);
@@ -720,13 +733,15 @@ fn a_client_cannot_use_a_scope_it_does_not_hold() {
             repo: REPO.to_owned(),
             ids: vec![ObjectId::hash(ObjectKind::Blob, b"reader's upload")],
         },
-    ));
+    ))
+    .expect("has_objects");
     // HasObjects answers with the ids not stored.
-    if stored.is_ok_and(|missing| missing.is_empty()) {
+    if stored.is_empty() {
         failures.push("upload with read only: the blob was stored".to_owned());
     }
+    // Asked as an admin of "mine", so only absence can refuse it.
     if block_on(site.api.resolve_ref(
-        &admin(),
+        &cx("owner", &["repo:mine:admin"]),
         ResolveRef {
             repo: "mine".to_owned(),
             name: LINE.to_owned(),
@@ -805,29 +820,6 @@ fn oversized_and_malformed_requests_are_refused_whole() {
                 // A frame whose bytes are canary content, claimed for another id.
                 req.inline_blobs = vec![Frame::encode(ObjectKind::Blob, CANARY_CONTENT)];
                 block_on(s.api.create_changeset(&admin(), req)).map(drop)
-            }),
-        },
-        Attack {
-            name: "a path 3000 levels deep",
-            expect: invalid,
-            run: Box::new(move |s| {
-                let p = RepoPath::new(&deep).map_err(|_| ApiError::InvalidPath {
-                    path: String::new(),
-                    reason: "rejected at the boundary".to_owned(),
-                })?;
-                block_on(s.api.create_changeset(
-                    &admin(),
-                    commit_req(
-                        vec![tip],
-                        vec![Change::Put {
-                            path: p,
-                            kind: EntryKind::File,
-                            id: ObjectId::hash(ObjectKind::Blob, CANARY_CONTENT),
-                        }],
-                        None,
-                    ),
-                ))
-                .map(drop)
             }),
         },
         Attack {
@@ -910,7 +902,9 @@ fn oversized_and_malformed_requests_are_refused_whole() {
     let mut failures = attack_all(&site, attacks, &c);
     // Hostile path text never becomes a RepoPath, so it never reaches the
     // engine (rule 9: validate at the boundary).
+    // A path 3000 levels deep is one of them.
     for bad in [
+        &deep,
         "",
         "/abs",
         "a//b",
@@ -1014,28 +1008,37 @@ fn every_answer_is_bounded_and_cursors_are_not_echoed() {
         .expect("watch");
         bounded("watch", journal.entries.len(), &mut failures);
     }
-    // A patch over the per-file cap is cut, not sent whole.
-    let root = block_on(site.api.log(
-        &a,
-        Log {
-            repo: REPO.to_owned(),
-            from: site.tip,
-            until: None,
-            paths: vec![path("src/big.txt")],
-            page: page(1, None),
-        },
-    ))
-    .expect("log big")
-    .changesets
-    .last()
-    .map(|c| c.id)
-    .expect("root");
+    // A patch over the per-file cap is cut, not sent whole: a draft that
+    // changes every line of the big file.
+    let big2: Vec<u8> = String::from_utf8_lossy(&site.big)
+        .replace("line", "LINE")
+        .into_bytes();
+    let rewrite = block_on(async {
+        site.api
+            .put_objects(
+                &a,
+                PutObjects {
+                    repo: REPO.to_owned(),
+                    blobs: vec![Frame::encode(ObjectKind::Blob, &big2)],
+                },
+            )
+            .await
+            .expect("upload");
+        site.api
+            .create_changeset(
+                &a,
+                commit_req(vec![site.tip], vec![put("src/big.txt", &big2)], None),
+            )
+            .await
+            .expect("rewrite")
+            .id
+    });
     let diff = block_on(site.api.diff(
         &a,
         Diff {
             repo: REPO.to_owned(),
-            from: site.draft,
-            to: root,
+            from: site.tip,
+            to: rewrite,
             paths: vec![],
             patch: Some(PatchOptions {
                 context: u32::MAX,
@@ -1047,9 +1050,20 @@ fn every_answer_is_bounded_and_cursors_are_not_echoed() {
     match diff {
         Ok(d) => {
             bounded("diff files", d.files.len(), &mut failures);
-            let text = format!("{d:?}");
-            if text.len() as u64 > 64 * MAX_PATCH_FILE * MAX_PAGE as u64 {
-                failures.push(format!("diff: a {} byte answer", text.len()));
+            // Each patch is held to the per-file cap, and the big file's is
+            // cut (so the check is not vacuous).
+            for f in &d.files {
+                let n = f.patch.as_ref().map_or(0, String::len) as u64;
+                if n > MAX_PATCH_FILE {
+                    failures.push(format!("diff: a {n} byte patch for {}", f.change.path()));
+                }
+            }
+            if !d
+                .files
+                .iter()
+                .any(|f| f.change.path().to_string() == "src/big.txt" && f.truncated)
+            {
+                failures.push("diff: src/big.txt is not in the diff, cut".to_owned());
             }
             if site.big.len() as u64 <= MAX_PATCH_FILE {
                 failures.push("diff: the big file is under the cap".to_owned());
