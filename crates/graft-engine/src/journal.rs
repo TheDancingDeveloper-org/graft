@@ -17,6 +17,8 @@
 //! - `WorkspaceSynced`: `{"name":"w","old_base":"c…","new_base":"c…","old_head":"c…"|null,"new_head":"c…"|null}`
 //! - `LandAttempt`: `{"draft":"c…","line":"main","outcome":"landed","landed":"c…"}`
 //!   in the land's CAS transaction, or `{"draft":"c…","line":"main","outcome":"conflict","onto":"c…"}`
+//! - `LineMerged`: `{"src":"develop","dst":"main","src_changeset":"c…","src_pos":4,"dst_pos":9}`
+//!   in a merge landing's CAS transaction, after its `RefMoved` (D29)
 //! - `Attested`: `{"changeset":"c…","check":"ci/test","passed":true,"url":"…","actor":"…"}`
 //! - `RevertRequested`: `{"line":"main","changeset":"c…","check":"ci/test","url":"…"}`,
 //!   with the failing `Attested` entry of a post-land check (decision D6)
@@ -96,6 +98,26 @@ fn opt_id(out: &mut String, id: Option<ChangesetId>) {
         }
         None => out.push_str("null"),
     }
+}
+
+/// The `LineMerged` entry of a merge landing (D29): the landing at
+/// `dst_pos` on `dst` merged `src_changeset`, at `src_pos` on `src`.
+pub(crate) fn line_merged(
+    src: &str,
+    dst: &str,
+    src_changeset: ChangesetId,
+    src_pos: u64,
+    dst_pos: u64,
+) -> Write {
+    let mut body = String::from("{\"src\":");
+    json_str(&mut body, src);
+    body.push_str(",\"dst\":");
+    json_str(&mut body, dst);
+    let _ = write!(
+        body,
+        ",\"src_changeset\":\"{src_changeset}\",\"src_pos\":{src_pos},\"dst_pos\":{dst_pos}}}"
+    );
+    entry(graft_proto::types::LINE_MERGED, body)
 }
 
 /// The `ChangesetCreated` entry for a new changeset: a draft held by

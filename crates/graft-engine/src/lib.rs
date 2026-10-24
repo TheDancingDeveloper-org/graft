@@ -65,6 +65,7 @@ mod gc;
 mod history;
 pub mod journal;
 mod land;
+mod merge;
 mod objects;
 pub mod policy;
 mod protect;
@@ -162,6 +163,11 @@ pub struct EngineConfig {
     pub max_patch_input_bytes: u64,
     /// Most changed paths a `Sync` reports.
     pub max_sync_paths: u32,
+    /// Most line hops one `MergeBase` follows through fork and merge rows
+    /// before it falls back to the ancestry walk (D29, `H`).
+    pub merge_hops: u32,
+    /// Most indexed reads one `MergeBase` spends on merge points (D29, `R`).
+    pub merge_reads: u32,
 }
 
 impl Default for EngineConfig {
@@ -199,6 +205,8 @@ impl Default for EngineConfig {
             max_patch_bytes: 4 << 20,
             max_patch_input_bytes: 1 << 20,
             max_sync_paths: 100_000,
+            merge_hops: 8,
+            merge_reads: 64,
         }
     }
 }
@@ -353,6 +361,9 @@ where
     async fn merge_base(&self, cx: &CallContext, req: Pair) -> ApiResult<Option<ChangesetId>> {
         self.do_merge_base(cx, req).await
     }
+    async fn merge_base_via(&self, cx: &CallContext, req: Pair) -> ApiResult<MergeBaseResult> {
+        self.do_merge_base_via(cx, req).await
+    }
     async fn diff(&self, cx: &CallContext, req: Diff) -> ApiResult<DiffResult> {
         self.do_diff(cx, req).await
     }
@@ -367,6 +378,12 @@ where
     }
     async fn land(&self, cx: &CallContext, req: Land) -> ApiResult<Landed> {
         self.do_land(cx, req).await
+    }
+    async fn line_merge(&self, cx: &CallContext, req: LineMerge) -> ApiResult<LineMergeOutcome> {
+        self.do_line_merge(cx, req).await
+    }
+    async fn line_merges(&self, cx: &CallContext, req: LineMerges) -> ApiResult<LineMergePage> {
+        self.do_line_merges(cx, req).await
     }
     async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
         self.do_attest(cx, req).await

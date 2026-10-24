@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    ChangesetRecord, DoomMark, Lsn, MetaStore, MetaTxn, Protection, RecordState, RefRecord, RepoId,
-    StoreError, StoreResult, TimedRow, TxnOutcome, WorkspaceRecord,
+    ChangesetRecord, DoomMark, LineMergeRow, Lsn, MetaStore, MetaTxn, Protection, RecordState,
+    RefRecord, RepoId, StoreError, StoreResult, TimedRow, TxnOutcome, WorkspaceRecord,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -469,6 +469,27 @@ impl MetaStore for SqliteMetaStore {
         let (line, path) = (line.to_owned(), path.clone());
         self.read("scan_line_path", move |c| {
             reader::scan_line_path(c, repo, &line, &path, before, limit)
+        })
+        .await
+    }
+
+    async fn line_fork(&self, repo: RepoId, line: &str) -> StoreResult<Option<(String, u64)>> {
+        let line = line.to_owned();
+        self.read("line_fork", move |c| reader::line_fork(c, repo, &line))
+            .await
+    }
+
+    async fn line_merges(
+        &self,
+        repo: RepoId,
+        dst: &str,
+        src: Option<&str>,
+        at_or_below: u64,
+        limit: u32,
+    ) -> StoreResult<Vec<LineMergeRow>> {
+        let (dst, src) = (dst.to_owned(), src.map(str::to_owned));
+        self.read("line_merges", move |c| {
+            reader::line_merges(c, repo, &dst, src.as_deref(), at_or_below, limit)
         })
         .await
     }

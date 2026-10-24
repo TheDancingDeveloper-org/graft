@@ -841,6 +841,14 @@ impl MetaStore for MemoryStore {
         }))
     }
 
+    fn line_fork(
+        &self,
+        repo: RepoId,
+        line: &str,
+    ) -> impl Future<Output = StoreResult<Option<(String, u64)>>> + Send {
+        ready(self.with(|st| Ok(st.repo(repo)?.line_forks.get(line).cloned())))
+    }
+
     fn line_merges(
         &self,
         repo: RepoId,

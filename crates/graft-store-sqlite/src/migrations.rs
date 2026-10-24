@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -207,6 +207,23 @@ CREATE TABLE draft_paths (
     PRIMARY KEY (repo, line, path, workspace)
 ) WITHOUT ROWID;
 CREATE INDEX draft_paths_workspace ON draft_paths (repo, workspace, path, line);
+";
+
+/// Version 7 (WI-2368, D29): merge points between lines (`docs/design.md`
+/// §8.9, which names this version 6; the draft path index took 6 first).
+/// One row per merge landing, keyed by its target position, with an index
+/// by source for the per-pair merge point read. Append-only; no back-fill.
+const V7: &str = "
+CREATE TABLE line_merges (
+    repo          INTEGER NOT NULL REFERENCES repos(id),
+    dst           TEXT NOT NULL,
+    dst_pos       INTEGER NOT NULL,
+    src           TEXT NOT NULL,
+    src_changeset BLOB NOT NULL,
+    src_pos       INTEGER NOT NULL,
+    PRIMARY KEY (repo, dst, dst_pos)
+) WITHOUT ROWID;
+CREATE INDEX line_merges_src ON line_merges (repo, dst, src, dst_pos);
 ";
 
 /// The database's schema version.

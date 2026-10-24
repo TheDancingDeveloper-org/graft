@@ -19,6 +19,7 @@ const TABLES: &[&str] = &[
     "journal",
     "lands",
     "line_forks",
+    "line_merges",
     "line_paths",
     "line_pos",
     "refs",
@@ -358,4 +359,153 @@ fn version_6_adds_draft_paths_to_a_version_5_database() {
         block_on(store.scan_draft_paths(repo, "main", &src, None, 10)).expect("scan"),
         vec![(RepoPath::new("src/a").expect("path"), "w".to_owned())]
     );
+}
+
+/// Golden vector for the merge point record (WI-2368, D29, version 7): the
+/// table and index shapes and the stored row for `PutLineMerge { dst:
+/// "main", dst_pos: 9, src: "release/1.1", src_changeset: [7; 32], src_pos:
+/// 4 }`. Changing any of them is a durable format change.
+#[test]
+fn line_merge_record_golden_vector() {
+    let dir = TempDir::new("mig-merge");
+    let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
+    let repo = block_on(store.create_repo("merges")).expect("create");
+    let txn = MetaTxn {
+        preconditions: vec![],
+        writes: vec![
+            Write::PutLineMerge {
+                dst: "main".to_owned(),
+                dst_pos: 9,
+                src: "release/1.1".to_owned(),
+                src_changeset: ChangesetId(ObjectId([7; 32])),
+                src_pos: 4,
+            },
+            Write::Journal {
+                kind: "LineMerged".to_owned(),
+                body: vec![],
+            },
+        ],
+    };
+    assert!(matches!(
+        block_on(store.commit(repo, txn)).expect("commit"),
+        TxnOutcome::Committed(_)
+    ));
+    let conn = Connection::open(dir.db()).expect("inspect");
+    let ddl = |kind: &str, name: &str| -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            [kind, name],
+            |r| r.get(0),
+        )
+        .expect("ddl")
+    };
+    assert_eq!(
+        ddl("table", "line_merges"),
+        "CREATE TABLE line_merges (
+    repo          INTEGER NOT NULL REFERENCES repos(id),
+    dst           TEXT NOT NULL,
+    dst_pos       INTEGER NOT NULL,
+    src           TEXT NOT NULL,
+    src_changeset BLOB NOT NULL,
+    src_pos       INTEGER NOT NULL,
+    PRIMARY KEY (repo, dst, dst_pos)
+) WITHOUT ROWID"
+    );
+    assert_eq!(
+        ddl("index", "line_merges_src"),
+        "CREATE INDEX line_merges_src ON line_merges (repo, dst, src, dst_pos)"
+    );
+    let row: (i64, String, i64, String, Vec<u8>, i64) = conn
+        .query_row(
+            "SELECT repo, dst, dst_pos, src, src_changeset, src_pos FROM line_merges",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .expect("row");
+    assert_eq!(
+        row,
+        (
+            i64::from(repo.0),
+            "main".to_owned(),
+            9,
+            "release/1.1".to_owned(),
+            vec![7; 32],
+            4
+        )
+    );
+}
+
+/// Version 7 (WI-2368) on a version 6 database: existing lines have no
+/// merge points, and the new table takes rows and reads them newest first,
+/// bounded by position and filtered by source.
+#[test]
+fn version_7_adds_line_merges_to_a_version_6_database() {
+    let dir = TempDir::new("mig-v7");
+    let id = ChangesetId(ObjectId([7; 32]));
+    {
+        let mut conn = Connection::open(dir.db()).expect("open");
+        migrations::migrate_to(&mut conn, 6).expect("migrate to v6");
+        conn.execute_batch(&format!(
+            "INSERT INTO repos (id, name) VALUES (1, 'old');
+             INSERT INTO line_pos (repo, line, changeset, pos)
+                 VALUES (1, 'main', X'{}', 3);",
+            "07".repeat(32)
+        ))
+        .expect("seed");
+        assert!(!tables(&conn).contains(&"line_merges".to_owned()));
+    }
+    let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
+    let conn = Connection::open(dir.db()).expect("inspect");
+    assert_eq!(migrations::version(&conn).expect("version"), SCHEMA_VERSION);
+    let repo = block_on(store.repo("old")).expect("repo").expect("exists");
+    assert_eq!(
+        block_on(store.line_pos(repo, "main", id)).expect("read"),
+        Some(3)
+    );
+    assert!(
+        block_on(store.line_merges(repo, "main", None, u64::MAX, 10))
+            .expect("merges")
+            .is_empty()
+    );
+    let row = |dst_pos: u64, src: &str, src_pos: u64| Write::PutLineMerge {
+        dst: "main".to_owned(),
+        dst_pos,
+        src: src.to_owned(),
+        src_changeset: id,
+        src_pos,
+    };
+    let txn = MetaTxn {
+        preconditions: vec![],
+        writes: vec![row(4, "a", 1), row(6, "b", 2), row(8, "a", 3)],
+    };
+    block_on(store.commit(repo, txn)).expect("commit");
+    let got = |src: Option<&str>, at: u64, limit: u32| -> Vec<(u64, String)> {
+        block_on(store.line_merges(repo, "main", src, at, limit))
+            .expect("merges")
+            .into_iter()
+            .map(|r| (r.dst_pos, r.src))
+            .collect()
+    };
+    assert_eq!(
+        got(None, u64::MAX, 10),
+        vec![(8, "a".into()), (6, "b".into()), (4, "a".into())]
+    );
+    assert_eq!(got(None, 7, 1), vec![(6, "b".into())]);
+    assert_eq!(got(Some("a"), 7, 10), vec![(4, "a".into())]);
+    assert!(got(Some("c"), u64::MAX, 10).is_empty());
+    // One row per target position: a second one there is refused.
+    let txn = MetaTxn {
+        preconditions: vec![],
+        writes: vec![row(4, "b", 1)],
+    };
+    assert!(block_on(store.commit(repo, txn)).is_err());
 }

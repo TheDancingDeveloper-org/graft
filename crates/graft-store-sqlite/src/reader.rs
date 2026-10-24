@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    ChangesetRecord, DoomMark, Lsn, Protection, RecordState, RefRecord, RepoId, StoreError,
-    StoreResult, TimedRow, WorkspaceRecord, page_limit,
+    ChangesetRecord, DoomMark, LineMergeRow, Lsn, Protection, RecordState, RefRecord, RepoId,
+    StoreError, StoreResult, TimedRow, WorkspaceRecord, page_limit,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -313,7 +313,11 @@ pub(crate) fn derived(
 }
 
 /// The fork record of `line`: its parent line and fork position.
-fn line_fork(conn: &Connection, repo: RepoId, line: &str) -> StoreResult<Option<(String, u64)>> {
+pub(crate) fn line_fork(
+    conn: &Connection,
+    repo: RepoId,
+    line: &str,
+) -> StoreResult<Option<(String, u64)>> {
     let row: Option<(String, i64)> = conn
         .prepare_cached("SELECT parent, pos FROM line_forks WHERE repo = ?1 AND line = ?2")
         .and_then(|mut s| {
@@ -378,6 +382,58 @@ pub(crate) fn line_holders(
     rows.map(|r| {
         let (line, pos) = r.map_err(sql_err)?;
         Ok((line, uint(pos)?))
+    })
+    .collect()
+}
+
+/// A line's merge points, newest first, at or below `at_or_below`: a
+/// range of the primary key, or of `line_merges_src` for one source.
+pub(crate) fn line_merges(
+    conn: &Connection,
+    repo: RepoId,
+    dst: &str,
+    src: Option<&str>,
+    at_or_below: u64,
+    limit: u32,
+) -> StoreResult<Vec<LineMergeRow>> {
+    check_repo(conn, repo)?;
+    let top = i64::try_from(at_or_below).unwrap_or(i64::MAX);
+    let limit = page_limit(limit) as i64;
+    let mut stmt = match src {
+        None => conn.prepare_cached(
+            "SELECT dst_pos, src, src_changeset, src_pos FROM line_merges
+             WHERE repo = ?1 AND dst = ?2 AND dst_pos <= ?3
+             ORDER BY dst_pos DESC LIMIT ?4",
+        ),
+        Some(_) => conn.prepare_cached(
+            "SELECT dst_pos, src, src_changeset, src_pos FROM line_merges
+             WHERE repo = ?1 AND dst = ?2 AND src = ?5 AND dst_pos <= ?3
+             ORDER BY dst_pos DESC LIMIT ?4",
+        ),
+    }
+    .map_err(sql_err)?;
+    let map = |r: &Row<'_>| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
+    };
+    let rows = match src {
+        None => stmt.query_map(params![repo.0, dst, top, limit], map),
+        Some(s) => stmt.query_map(params![repo.0, dst, top, limit, s], map),
+    }
+    .map_err(sql_err)?;
+    rows.map(|r| {
+        let (dst_pos, src, id, src_pos) = r.map_err(sql_err)?;
+        Ok(LineMergeRow {
+            dst: dst.to_owned(),
+            dst_pos: uint(dst_pos)?,
+            src,
+            src_changeset: changeset_id(&id)?,
+            src_pos: uint(src_pos)?,
+        })
     })
     .collect()
 }
