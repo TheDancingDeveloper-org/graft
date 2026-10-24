@@ -536,3 +536,65 @@ fn rust_torrent_imports_with_zero_exceptions() {
     assert_eq!(report.verified, report.commits);
     assert!(report.lossy.is_empty());
 }
+
+#[test]
+fn oversize_blobs_stop_the_import_before_any_write() {
+    let mut git = Git::init("big");
+    let small = git.blob(b"x\n");
+    let big = vec![7u8; (graft_git::import::MAX_BLOB_BYTES + 1) as usize];
+    let big1 = git.blob(&big);
+    let root1 = git.raw_tree(&[("100644", b"a", &small)]);
+    let c1 = git.commit_tree(&root1, &[], "small");
+    let root2 = git.raw_tree(&[("100644", b"a", &small), ("100644", b"big1", &big1)]);
+    let c2 = git.commit_tree(&root2, &[&c1], "big");
+    let mut big2 = big;
+    big2[0] = 8;
+    let big2 = git.blob(&big2);
+    let root3 = git.raw_tree(&[
+        ("100644", b"a", &small),
+        ("100644", b"big1", &big1),
+        ("100644", b"big2", &big2),
+    ]);
+    let c3 = git.commit_tree(&root3, &[&c2], "bigger");
+    git.set_ref("refs/heads/main", &c3);
+    let api = FakeApi::new();
+    let map = MemoryMirrorMap::new();
+    let mut cfg = config(&git, &["main"]);
+    cfg.batch = 1;
+    let err = run(&api, &map, &cfg).unwrap_err();
+    let GitError::BadPaths(list) = err else {
+        panic!("expected BadPaths, got {err:?}");
+    };
+    let got: Vec<(String, String)> = list
+        .iter()
+        .map(|b| (b.path.clone(), b.reason.clone()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("big1".into(), "blob-bytes".into()),
+            ("big2".into(), "blob-bytes".into()),
+        ]
+    );
+    assert!(map.is_empty(), "nothing imported");
+}
+
+#[test]
+fn one_oversize_blob_at_two_paths_reports_both() {
+    let mut git = Git::init("big-twice");
+    let big = git.blob(&vec![7u8; (graft_git::import::MAX_BLOB_BYTES + 1) as usize]);
+    let root1 = git.raw_tree(&[("100644", b"one", &big)]);
+    let c1 = git.commit_tree(&root1, &[], "big");
+    let root2 = git.raw_tree(&[("100644", b"one", &big), ("100644", b"two", &big)]);
+    let c2 = git.commit_tree(&root2, &[&c1], "big again");
+    git.set_ref("refs/heads/main", &c2);
+    let api = FakeApi::new();
+    let map = MemoryMirrorMap::new();
+    let err = run(&api, &map, &config(&git, &["main"])).unwrap_err();
+    let GitError::BadPaths(list) = err else {
+        panic!("expected BadPaths, got {err:?}");
+    };
+    let got: Vec<&str> = list.iter().map(|b| b.path.as_str()).collect();
+    assert_eq!(got, vec!["one", "two"]);
+    assert!(map.is_empty(), "nothing imported");
+}

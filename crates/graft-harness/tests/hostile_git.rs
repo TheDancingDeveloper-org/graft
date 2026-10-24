@@ -797,11 +797,14 @@ fn blobs_at_the_frame_limit_round_trip_or_are_refused() {
             Err(e) => {
                 assert!(imported.map.is_empty(), "{len}: no commit mapped");
                 assert!(graft_refs(&imported).is_empty(), "{len}: no ref set");
-                results.push((len, format!("{e:?}")));
+                let e = format!("{e:?}");
+                // The commit sha varies; the refusal and path do not.
+                let e = e.split(", commit:").next().unwrap_or(&e).to_owned();
+                results.push((len, e));
             }
         }
     }
-    let over = r#"Api(LimitExceeded { limit: "blob-bytes", max: 67108864 })"#;
+    let over = r#"Git(BadPaths([BadPath { path: "big.bin", reason: "blob-bytes""#;
     assert_eq!(
         results,
         vec![
@@ -959,7 +962,6 @@ fn git_metadata_names_are_a_typed_refusal() {
 /// An oversize blob after some history, imported one commit per batch: the
 /// refusal must come before anything is written, as the path check does.
 #[test]
-#[ignore = "WI-2360: earlier batches are imported before the refusal"]
 fn an_oversize_blob_late_in_history_imports_nothing() {
     let mut git = Git::init("late-big");
     for n in 0..3 {
