@@ -448,3 +448,62 @@ async fn upstream_tags_become_immutable_graft_tags() {
         "upstream's moved v1 conflicts with graft's immutable one"
     );
 }
+
+/// WI-2370: annotated, signed and nested tags pushed after follow starts keep
+/// their tag objects, so export names them by upstream's own shas.
+#[tokio::test(flavor = "current_thread")]
+async fn tags_pushed_after_follow_starts_export_with_upstream_shas() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let m = metrics();
+    let a = w.commit();
+    w.push();
+    let mut f = w.follower(&db, &m);
+    assert!(matches!(poll(&mut f).await, LineOutcome::Imported { .. }));
+
+    w.commit();
+    w.push();
+    git(&w.work, &["tag", "-a", "-m", "release 1", "v1"]);
+    git(
+        &w.work,
+        &["tag", "-a", "-m", "the release of v1", "v1-outer", "v1"],
+    );
+    git(&w.work, &["tag", "plain"]);
+    // A signed tag: the signature is message bytes to git, so a stand-in
+    // block exercises the same path as a real one.
+    let signed = w.work.join("signed.tag");
+    std::fs::write(
+        &signed,
+        format!(
+            "object {}\ntype commit\ntag v0-signed\ntagger C O Mitter \
+             <committer@example.com> 1700000000 +0000\n\nsigned release\n\
+             -----BEGIN PGP SIGNATURE-----\n\nc3RhbmQtaW4=\n\
+             -----END PGP SIGNATURE-----\n",
+            a.to_hex()
+        ),
+    )
+    .unwrap();
+    let signed_sha = git(
+        &w.work,
+        &["hash-object", "-t", "tag", "-w", signed.to_str().unwrap()],
+    );
+    git(&w.work, &["update-ref", "refs/tags/v0-signed", &signed_sha]);
+    git(&w.work, &["push", "-q", "origin", "--tags"]);
+
+    assert!(matches!(poll(&mut f).await, LineOutcome::Imported { .. }));
+    assert_eq!(f.last_tags().created.len(), 4);
+
+    let dest = w.upstream.with_file_name("exit.git");
+    graft_mirror::export::export_all(&w.api, &cx(), &db, REPO, &dest)
+        .await
+        .unwrap();
+    for tag in ["v1", "v1-outer", "v0-signed", "plain"] {
+        let r = format!("refs/tags/{tag}");
+        assert_eq!(
+            git(&dest, &["rev-parse", &r]),
+            git(&w.upstream, &["rev-parse", &r]),
+            "{tag} exports with upstream's sha"
+        );
+    }
+    assert_eq!(git(&dest, &["cat-file", "-t", "v1-outer"]), "tag");
+}

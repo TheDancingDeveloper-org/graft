@@ -22,6 +22,25 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(300);
 /// anything but this copy.
 pub const UPSTREAM_NS: &str = "refs/graft-mirror/upstream/";
 
+/// The ref namespace in the bare mirror that follow fetches upstream tags
+/// to, for their tag objects.
+pub const TAGS_NS: &str = "refs/graft-mirror/tags/";
+
+/// The deepest tag-of-tag chain follow records.
+pub const TAG_CHAIN_MAX: usize = 16;
+
+/// One upstream tag, as `git ls-remote` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpstreamTag {
+    /// The name, without `refs/tags/`.
+    pub name: String,
+    /// The commit it peels to.
+    pub commit: GitSha,
+    /// The object the ref names: `commit` for a lightweight tag, else the
+    /// outermost tag object.
+    pub object: GitSha,
+}
+
 /// Set to `1` in the environment of every push the mirror makes. The local
 /// stand-in for GitHub's ruleset ([`crate::authority::HookGate`]) lets only
 /// such pushes through on a graft-primary branch. It is not a credential:
@@ -239,12 +258,9 @@ impl Mirror {
     }
 
     /// `git ls-remote` for upstream tags matching `pattern` under
-    /// `refs/tags/`: each tag name (without `refs/tags/`) and the commit it
-    /// names, peeled through annotated tags, sorted by name.
-    pub async fn ls_remote_tags(
-        &self,
-        pattern: &str,
-    ) -> Result<Vec<(String, GitSha)>, GitCliError> {
+    /// `refs/tags/`, sorted by name: each tag's commit (peeled through
+    /// annotated tags) and the object its ref names.
+    pub async fn ls_remote_tags(&self, pattern: &str) -> Result<Vec<UpstreamTag>, GitCliError> {
         let spec = format!("refs/tags/{pattern}");
         let out = ok(
             Some(&self.dir),
@@ -252,8 +268,8 @@ impl Mirror {
         )
         .await?;
         let text = String::from_utf8_lossy(&out);
-        let mut tags: std::collections::BTreeMap<String, GitSha> = Default::default();
-        let mut peeled = std::collections::BTreeSet::new();
+        let mut objects: std::collections::BTreeMap<String, GitSha> = Default::default();
+        let mut peeled: std::collections::HashMap<String, GitSha> = Default::default();
         for line in text.lines() {
             let mut parts = line.split('\t');
             let (Some(sha), Some(name)) = (parts.next(), parts.next()) else {
@@ -263,14 +279,60 @@ impl Mirror {
             else {
                 continue;
             };
-            if let Some(base) = name.strip_suffix("^{}") {
-                tags.insert(base.to_owned(), sha);
-                peeled.insert(base.to_owned());
-            } else if !peeled.contains(name) {
-                tags.insert(name.to_owned(), sha);
+            match name.strip_suffix("^{}") {
+                Some(base) => peeled.insert(base.to_owned(), sha),
+                None => objects.insert(name.to_owned(), sha),
+            };
+        }
+        Ok(objects
+            .into_iter()
+            .map(|(name, object)| UpstreamTag {
+                commit: peeled.get(&name).copied().unwrap_or(object),
+                name,
+                object,
+            })
+            .collect())
+    }
+
+    /// Fetches upstream's `refs/tags/<name>` for each of `names` into
+    /// [`TAGS_NS`], forced, so their tag objects are in the mirror.
+    pub async fn fetch_tags(&self, names: &[&str]) -> Result<(), GitCliError> {
+        let refs: Vec<(String, String)> = names
+            .iter()
+            .map(|n| (format!("refs/tags/{n}"), format!("{TAGS_NS}{n}")))
+            .collect();
+        self.fetch_refs(&refs).await
+    }
+
+    /// The raw tag objects from `object` down to the first non-tag, outermost
+    /// first: empty when `object` is not a tag. At most [`TAG_CHAIN_MAX`]
+    /// deep (rule 7); a longer chain is an error.
+    pub async fn tag_chain(&self, object: GitSha) -> Result<Vec<Vec<u8>>, GitCliError> {
+        let mut chain = Vec::new();
+        let mut sha = object;
+        loop {
+            let hex = sha.to_hex();
+            let kind = ok(Some(&self.dir), &["cat-file", "-t", &hex]).await?;
+            if kind.trim_ascii() != b"tag" {
+                return Ok(chain);
+            }
+            if chain.len() == TAG_CHAIN_MAX {
+                return Err(GitCliError(format!(
+                    "tag chain longer than {TAG_CHAIN_MAX}"
+                )));
+            }
+            let data = ok(Some(&self.dir), &["cat-file", "tag", &hex]).await?;
+            let next = data
+                .strip_prefix(b"object ")
+                .and_then(|l| l.get(..40))
+                .and_then(|l| std::str::from_utf8(l).ok())
+                .and_then(GitSha::from_hex);
+            chain.push(data);
+            match next {
+                Some(n) => sha = n,
+                None => return Ok(chain),
             }
         }
-        Ok(tags.into_iter().collect())
     }
 
     /// Fetches `branches` from upstream into [`UPSTREAM_NS`], forced: the

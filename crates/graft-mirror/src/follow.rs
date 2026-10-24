@@ -25,7 +25,9 @@
 //! never moved. A tag on a commit graft lacks waits for a later poll. A tag
 //! moved or deleted upstream is reported (logged and in [`TagReport`]),
 //! never mirrored. At most [`TAGS_PER_POLL`] tags reach the graft API per
-//! poll; the rest wait for the next.
+//! poll; the rest wait for the next. An annotated, signed or nested tag's
+//! tag objects are fetched (one `git fetch` per poll) and kept in the mirror
+//! map before its graft ref is created, so export reproduces upstream's sha.
 //!
 //! Lag: `graft_mirror_lag_changesets` is the number of upstream commits graft
 //! lacks, and `graft_mirror_lag_seconds` is how long the line has been
@@ -37,7 +39,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use graft_git::GitSha;
 use graft_git::import::{ImportConfig, import};
-use graft_git::map::MirrorMap;
+use graft_git::map::{ImportedTag, MirrorMap};
 use graft_model::ChangesetId;
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::types::RefKind;
@@ -310,8 +312,10 @@ where
             return Ok(report);
         };
         let upstream = self.mirror.ls_remote_tags(&pattern).await?;
-        let listed: HashMap<&str, GitSha> =
-            upstream.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+        let listed: HashMap<&str, GitSha> = upstream
+            .iter()
+            .map(|t| (t.name.as_str(), t.commit))
+            .collect();
         let mut gone: Vec<String> = self
             .seen_tags
             .keys()
@@ -329,19 +333,21 @@ where
         }
         let repo = self.config.repo.clone();
         let mut budget = TAGS_PER_POLL;
-        for (name, sha) in &upstream {
+        let mut todo = Vec::new();
+        for tag in &upstream {
+            let (name, sha) = (&tag.name, tag.commit);
             if let Some(seen) = self.seen_tags.get(name) {
-                if seen.sha != *sha {
+                if seen.sha != sha {
                     tracing::warn!(
                         repo = %repo, tag = %name, upstream = %sha,
                         "upstream moved a tag; graft tags are immutable, not mirrored"
                     );
-                    report.moved.push((name.clone(), *sha));
-                    self.seen_tags.insert(name.clone(), SeenTag { sha: *sha });
+                    report.moved.push((name.clone(), sha));
+                    self.seen_tags.insert(name.clone(), SeenTag { sha });
                 }
                 continue;
             }
-            let Some(id) = self.db.changeset_of(*sha)? else {
+            let Some(id) = self.db.changeset_of(sha)? else {
                 report.waiting += 1;
                 continue;
             };
@@ -350,10 +356,29 @@ where
                 continue;
             }
             budget -= 1;
+            todo.push((tag, id));
+        }
+        // Annotated, signed and nested tags: fetch their tag objects in one
+        // go, so export reproduces upstream's tag sha.
+        let annotated: Vec<&str> = todo
+            .iter()
+            .filter(|(t, _)| t.object != t.commit)
+            .map(|(t, _)| t.name.as_str())
+            .collect();
+        if !annotated.is_empty() {
+            self.mirror.fetch_tags(&annotated).await?;
+        }
+        for (tag, id) in todo {
+            let name = &tag.name;
+            let objects = if tag.object != tag.commit {
+                self.mirror.tag_chain(tag.object).await?
+            } else {
+                Vec::new()
+            };
             let graft_name = crate::tag_ref(name);
             let cx = self.call("tag");
             match current_ref(self.api, &cx, &repo, &graft_name).await? {
-                Some(existing) if existing == id => {}
+                Some(existing) if existing == id => self.record_tag(name, tag.commit, objects)?,
                 Some(existing) => {
                     tracing::warn!(
                         repo = %repo, tag = %name,
@@ -362,6 +387,9 @@ where
                     report.conflicting.push((name.clone(), existing));
                 }
                 None => {
+                    // The record first: the graft ref never names a tag whose
+                    // objects the mirror lost.
+                    self.record_tag(name, tag.commit, objects)?;
                     match move_ref(self.api, &cx, &repo, &graft_name, None, id, RefKind::Tag).await
                     {
                         Ok(()) => {
@@ -376,9 +404,25 @@ where
                     }
                 }
             }
-            self.seen_tags.insert(name.clone(), SeenTag { sha: *sha });
+            self.seen_tags
+                .insert(name.clone(), SeenTag { sha: tag.commit });
         }
         Ok(report)
+    }
+
+    /// Keeps the raw tag objects of an annotated upstream tag in the mirror
+    /// map, for export. A lightweight tag has no record.
+    fn record_tag(
+        &self,
+        name: &str,
+        commit: GitSha,
+        objects: Vec<Vec<u8>>,
+    ) -> Result<(), MirrorError> {
+        if objects.is_empty() {
+            return Ok(());
+        }
+        self.db.put_tag(name, ImportedTag { commit, objects })?;
+        Ok(())
     }
 
     fn call(&self, what: &str) -> CallContext {

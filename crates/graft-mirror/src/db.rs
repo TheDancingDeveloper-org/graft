@@ -1,7 +1,7 @@
 //! The mirror DB (`docs/design.md` §11.1 step 5, §11.3): a SQLite file the
 //! mirror owns, outside the graft server. It holds the mirror map (graft ids
-//! ↔ git shas, raw commit headers, raw trees, raw tag objects, blob shas) and, per followed
-//! line, how far follow has got.
+//! ↔ git shas, raw commit headers, raw trees, raw tag objects, blob shas)
+//! and, per followed line, how far follow has got.
 //!
 //! Every write is one statement or one transaction, so a crash leaves either
 //! the old row or the new one. The import records a commit only after the
@@ -1057,9 +1057,8 @@ impl BatchRow {
     }
 }
 
-/// Raw trees as `count:u32` then, per tree, an optional directory and an
-/// optional tree object, each as `present:u8` and `len:u32` + bytes. Local
-/// to the mirror DB; not a graft durable format.
+/// Raw tag objects as `count:u32` then, per object, `len:u32` + bytes.
+/// Local to the mirror DB; not a graft durable format.
 fn encode_tag_objects(objects: &[Vec<u8>]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&(objects.len() as u32).to_be_bytes());
@@ -1095,6 +1094,9 @@ fn decode_tag_objects(mut bytes: &[u8]) -> Result<Vec<Vec<u8>>, GitError> {
     Ok(out)
 }
 
+/// Raw trees as `count:u32` then, per tree, an optional directory and an
+/// optional tree object, each as `present:u8` and `len:u32` + bytes. Local
+/// to the mirror DB; not a graft durable format.
 fn encode_raw_trees(trees: &[RawTree]) -> Vec<u8> {
     fn opt(out: &mut Vec<u8>, bytes: Option<&[u8]>) {
         match bytes {
