@@ -117,8 +117,8 @@ expression: value
   },
   {
     "api": "RepoApi",
-    "command": null,
-    "excluded": "the server rebases inside sync and land",
+    "command": "pick",
+    "excluded": null,
     "op": "rebase",
     "raw": false
   },
