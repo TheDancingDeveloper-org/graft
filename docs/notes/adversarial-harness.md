@@ -109,18 +109,78 @@ Path sets are drawn to force every case:
 These are the invariants of design §4.10 and AGENTS.md rules 3 and 4,
 stated over the history:
 
-1. **No lost or duplicated land.** Every land acknowledged with `Landed` is
-   on the line exactly once. A land that returned an error, or a lost ack,
-   is on the line at most once. A retry of the same `(head, line)` returns
-   the same `Landed` (§7.9).
+1. **No lost or duplicated land.** What counts as "the same land" is
+   defined below. Every land acknowledged with `Landed` is on the line
+   exactly once. A land that returned an error, or whose ack was lost, is
+   on the line at most once. A blind retry of the same `(head, line)`
+   returns the same `Landed` (§7.9).
+
+   **Land identity.** A land's identity is its *root draft*: the draft the
+   client created with `CreateChangeset`. The recorder logs every id the
+   client is handed back, so it knows the roots.
+   - Every rebase (on land, and on `sync`, which runs the same code, §8.4)
+     writes a new changeset whose `graft.rebased-from` metadata names the
+     changeset it was rebased from (`graft-engine/src/rebase.rs`). That is
+     the immediate source, overwritten on each rebase.
+   - The checker follows `graft.rebased-from` from each landed changeset,
+     hop by hop, until it reaches a changeset the recorder saw the client
+     create. That is the land's root.
+   - An amended draft is a new root. The superseded one must never land.
+
+   **Retry after a lost ack.** A client whose land ack was lost does one of
+   two things, and the model allows exactly these outcomes:
+   - **Blind retry** (the same head). It must get back the original
+     `Landed`, through the `lands[(head, line)]` record.
+   - **Sync, then land again.** The sync rebases the client's stack onto a
+     tip that may already hold the first land, so the re-land has a new
+     head, and the `(head, line)` key no longer matches. The model accepts
+     either:
+     - a typed answer that the draft is already landed;
+     - a land whose changes against its first parent are empty.
+
+     A second land with a non-empty change from the same root is a
+     duplicate and fails the check. The first worker step pins down which
+     of the two outcomes graft gives today and records it here. If it is
+     neither, that is a finding, not a harness change.
 2. **Lines only move forward.** Each line's sequence of tips forms one
    first-parent chain. Every move is in the journal, in the same
    transaction as its index rows.
-3. **CAS only.** No two journal entries move a ref from the same expected
-   version. Nothing moves two refs at once.
-4. **Conflicts are never silent.** Two drafts that the merge rules (`EAGER`)
-   say conflict can't both land unless a resolution draft followed. The
-   final content of every path equals the model's.
+3. **CAS only.** Two checks, neither of which assumes the journal records
+   the expected version:
+   - **Expected versions come from the transaction, not the journal.**
+     `Faulty<M>` sees every `MetaTxn` before passing it on. A ref write
+     (`Write::SetRef`) must come with a `Precondition::RefIs { name,
+     expected }` on the same ref, and the wrapper records that
+     `expected: Option<(target, version)>`. No two committed transactions
+     may carry the same `expected` for one ref. No transaction may hold
+     two `SetRef` writes, so nothing moves two refs at once.
+   - **The journal chain must be gap-free.** The `RefMoved` body is
+     `{name, old, new, version, actor}` (`graft-engine/src/journal.rs`),
+     with `version` the version after the move. Per ref, in journal
+     order:
+     - versions run 1, 2, 3, … with no gap and no repeat;
+     - each entry's `old` equals the previous entry's `new` (`null` first);
+     - the final `refs` row's `(target, version)` equals the last entry.
+4. **Conflicts are never silent.** The model is independent of graft: it
+   never calls `graft-model`'s merge3 or any other diff3.
+   - **Region layout.** The generator lays each shared file out as
+     numbered regions with known gaps of unchanged lines between them, and
+     every client write replaces whole regions. Two writes conflict in the
+     model when they touch the same region, or adjacent regions with a gap
+     of zero lines (`EAGER`'s adjacency rule, restated over the layout).
+     Writes with a gap of at least `REGION_GAP` don't conflict.
+   - **Expected content.** On a conflict, clients resolve by the sorted
+     union of values (§3.2). That result doesn't depend on order, so the
+     model computes each region's expected final value directly: the
+     sorted union of the values of every acknowledged land on it, plus
+     those of lost-ack lands that the history shows on the line. No merge
+     algorithm is needed.
+   - **The checks:**
+     - Two writes that conflict in the model can't both land unless a
+       resolution draft followed.
+     - The final content of every region equals the model's value.
+     - A conflict graft reports where the model expects none is counted
+       as a spurious conflict and reported. It is not a safety failure.
 5. **Objects before metadata.** After any fault and restart, every object a
    landed changeset or line index row refers to is present and hashes to
    its id.
@@ -135,14 +195,47 @@ stated over the history:
 
 ### 3.4 Proving the harness bites
 
-A harness that never fails proves nothing. Behind a test-only cargo
-feature, plant bugs one at a time and require the harness to catch each
-within the CI seed budget:
-- a ref write that skips the CAS;
-- a land that writes metadata before its objects;
-- an idempotency check that is skipped;
-- a lease end compared with `<` instead of `<=`;
-- GC that ignores the land-attempt holder.
+A harness that never fails proves nothing. Plant bugs one at a time, and
+require the harness to catch each within the CI seed budget.
+
+Some bugs can be made by mutating what crosses the store ports, so they
+live entirely in `graft-harness`'s `Faulty<M>` and `Faulty<O>` wrappers.
+The rest are engine or GC logic and need test-only hooks in the crate that
+owns the logic:
+
+| Planted bug | Where | Needs a production-crate hook |
+| --- | --- | --- |
+| A ref write that skips the CAS | `Faulty<M>` drops the `Precondition::RefIs` from a `MetaTxn` (its fields are public) | No |
+| An object the store acknowledged but didn't keep: the port-level form of "metadata before objects" | `Faulty<O>` returns `Ok` from a put and discards the bytes | No |
+| A land that commits metadata before awaiting its object writes (the real ordering bug) | `graft-engine` land path | Yes: `graft-engine` |
+| The `lands[(head, line)]` idempotency check skipped | `graft-engine` land path | Yes: `graft-engine` |
+| A lease end compared with `<` instead of `<=` | lease checks in `graft-engine` and the sweep in `graft-gc` | Yes: `graft-engine`, `graft-gc` |
+| GC ignores the land-attempt holder | `graft-gc` sweep | Yes: `graft-gc` |
+
+The hooks:
+
+- **A cargo feature.** `cfg(test)` alone can't be seen from another crate,
+  so the hooks use a named feature, `planted-bugs`, on `graft-engine` and
+  `graft-gc`. It is off by default.
+- **Where the feature is enabled.** Only in `graft-harness`'s
+  `[dev-dependencies]`. The workspace uses resolver 3, which doesn't unify
+  features from dev-dependencies into normal builds, so `cargo build -p
+  graft-server` and every release image are built without it.
+- **Off at runtime too.** With the feature compiled in, each hook is still
+  a no-op until the harness switches it on (a test-only setter on a
+  `PlantedBug` value). So a `cargo test --workspace` build that unifies the
+  feature still behaves normally.
+- **A policy check.** CI asserts that `cargo tree -p graft-server -e
+  features` (normal edges) doesn't contain `planted-bugs`.
+- **An interface PR first.** The hooks land as their own small PR,
+  touching `graft-engine` and `graft-gc` only: the feature, the
+  `PlantedBug` type and the hook call sites, with no behaviour change
+  while the hooks are off. This follows AGENTS.md's rule for changing
+  another crate's API. It is the only change part 1 makes outside
+  `graft-harness` and `bench`.
+
+WI-2345's "done when" (a planted bug is caught and replayed from its seed)
+can be met with the two wrapper-level bugs before the interface PR lands.
 
 ### 3.5 Budgets
 
@@ -186,13 +279,40 @@ within the CI seed budget:
 
 | Part | Code | Crates touched |
 | --- | --- | --- |
-| 1 | `graft-testkit` (`adversary/`: `Faulty<M>`/`Faulty<O>`, scheduler, recorder, checker, planted bugs behind a test-only feature); `bench/graftbench/adversary.py` for the out-of-process soak | `graft-testkit`, `bench` (no engine API change; if one is needed, it goes in its own interface PR first) |
+| 1 | A new crate, `graft-harness`: `Faulty<M>`/`Faulty<O>`, the scheduler, recorder, model and checkers, and the wrapper-level planted bugs, with the runs as its integration tests. `bench/graftbench/adversary.py` runs the out-of-process soak | `graft-harness` (new), `bench`, and an interface PR first that adds the `planted-bugs` feature to `graft-engine` and `graft-gc` (§3.4). No other engine change |
 | 2 | `graft-model` tests, plus a `bench` scenario for `cargo check` | `graft-model`, `bench` |
 | 3 | `graft-mirror` and `graft-git` integration tests, with generator scripts under `tests/hostile/` | `graft-git`, `graft-mirror` |
 | 4 | `graft-server` integration tests, with a canary scanner in `graft-testkit` | `graft-server`, `graft-testkit` |
 
-The parts touch disjoint crates, apart from `graft-testkit` in parts 1 and
-4, so two workers can run at once (WI-2345 with WI-2346 or WI-2347).
+**Why a new crate, not `graft-testkit` or integration tests only.**
+- **`graft-testkit` would create a cycle.** It depends only on
+  `graft-model`, `graft-proto` and `graft-store`, and `graft-engine`,
+  `graft-gc` and nine other crates dev-depend on it. Part 1 needs the
+  engine, GC and both real stores as normal dependencies. Putting that
+  code in `graft-testkit` would make it depend on `graft-engine` while
+  `graft-engine` dev-depends on it. That is a cycle, and the engine's own
+  unit tests would see two copies of the engine crate.
+- **Integration tests alone would spread the code.** Integration tests
+  inside `graft-engine` would need `graft-gc`, `graft-store-sqlite` and
+  `graft-store-fs` added as dev-dependencies there, and the scheduler,
+  recorder and checkers couldn't be shared with the soak driver.
+- **So `graft-harness` is a leaf.** It depends normally on
+  `graft-engine`, `graft-gc`, `graft-store` (with its `testkit` feature),
+  `graft-store-sqlite`, `graft-store-fs`, `graft-proto`, `graft-model` and
+  `graft-testkit` (for `crash.rs` and `FakeClock`). Its
+  `[dev-dependencies]` repeat `graft-engine` and `graft-gc` with
+  `features = ["planted-bugs"]`. Nothing depends on `graft-harness`, so
+  there is no cycle, and no existing crate's `Cargo.toml` changes, except
+  the feature declarations in the interface PR.
+- **Cargo changes.** Add `crates/graft-harness` to the workspace
+  `members` (one entry per line, in sorted order) and to
+  `[workspace.dependencies]`, with `publish = false`. The out-of-process
+  mode runs the built `graft-server` binary as a child process, so it
+  needs no dependency on `graft-server`.
+
+The parts touch disjoint crates, apart from `bench` in parts 1 and 2
+(separate files: `adversary.py`, and a new merge scenario). So two workers
+can run at once (WI-2345 with WI-2346 or WI-2347).
 
 ## 6. Out of scope
 
