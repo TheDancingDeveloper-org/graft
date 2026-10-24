@@ -44,7 +44,8 @@ Already decided by the operator (2026-10-22):
   [D24](#d24-draft-overlap-visibility).
 - **D25, D26** (operator, 2026-10-24, from the WI-2336 fit assessment):
   post-land checks on the batch integration line, the phase-2 design (it
-  starts only with the graft-primary authority switch, and D22 stands in full until then); and
+  starts only with the graft-primary authority switch, and D22 stands in
+  full until then); and
   batch PRs that carry one commit per land, revising D21. See
   [D25](#d25-post-land-checks-on-the-batch-line) and
   [D26](#d26-one-commit-per-land-in-a-batch-pr). graft keeps no review state;

@@ -1558,32 +1558,32 @@ ck:  tree      = export(replayed snapshot k); at k = last, = export(integration 
   review metadata. Review happens on the GitHub batch PR, per commit, and
   the operator's merge is the approval.
 - **Cut.** A batch ends at the tip in phase 1. In phase 2, on a checked
-  line, it ends at the cut point of §8.7 step 6. A batch holds 500 lands at most; the rest wait for
-  the next batch.
+  line, it ends at the cut point of §8.7 step 6. A batch holds 500 lands
+  at most; the rest wait for the next batch.
 - **Settle.** Follow imports the PR's merge. A rebase-merge produces new
   shas for the same trees; follow maps each back by its `Graft-Changeset`
   trailer. A squash-merge maps the batch tip as D21 does. Rejected batches
   leave the line as it is.
 
-**Implementation steps (WI-2349 follow-ups, for §8.7, §8.8 and this section).** Each is one plan item on
-disjoint crates, after step 0. Steps 1–4 (and step 8, which switches a line
-to `checks`) are **phase 2**: they wait for the graft-primary authority
-switch. Step 0's D25 types are phase 2 too; its `dry_run` part is phase 1.
+**Implementation steps (WI-2349 follow-ups, for §8.7, §8.8 and this
+section).** Each is one plan item on
+disjoint crates, after step 0. Steps 1–4 and 8b are **phase 2**: they wait
+for the graft-primary authority switch. Step 0's D25 types are phase 2 too; its `dry_run` part is phase 1.
 
 0. Interface PR (`graft-proto`, types and signatures only): a `dry_run`
    flag on `Rebase` and its result shape, plus the D25 types
    (`GetLandChecks`, `LandReverted`, line `checks` config). Bodies stubbed;
    lands before steps 2 and 7.
-1. *(Phase 2.)* WI-2293: the attester's journal read survives a failed `GetWorkspace`
-   (`graft-attester`).
-2. *(Phase 2.)* Checked lines: `checks`, `required`, `retries` in line config; the
-   `land_checks` index and its schema migration; `Attest` and the token
+1. *(Phase 2.)* WI-2293: the attester's journal read survives a failed
+   `GetWorkspace` (`graft-attester`).
+2. *(Phase 2.)* Checked lines: `checks`, `required`, `retries` in line
+   config; the `land_checks` index and its schema migration; `Attest` and the token
    mint accept landed changesets on checked lines; `GetLandChecks`
    (paginated) and `LandReverted` (`graft-engine`, `graft-proto`,
    `graft-store-sqlite`, `graft-auth`). An interface PR with the proto
    types first.
-3. *(Phase 2.)* The checker's `post-land` mode: watch `RefMoved`, skip ahead, bisect,
-   retry, revert (`graft-attester`).
+3. *(Phase 2.)* The checker's `post-land` mode: watch `RefMoved`, skip
+   ahead, bisect, retry, revert (`graft-attester`).
 4. *(Phase 2.)* pr-batch cuts at the settled prefix on a checked line
    (`graft-mirror`).
 5. Per-land commits: replay, root check, squash fallback, the batch record's
@@ -1594,9 +1594,15 @@ switch. Step 0's D25 types are phase 2 too; its `dry_run` part is phase 1.
 7. The pre-land check in `graft land` and the MCP `land` tool
    (`graft-cli`, `graft-mcp`; §8.8, D27), with the engine body of
    `Rebase { dry_run }` (`graft-engine`, from step 0).
-8. *(Phase 2.)* graft-dev: switch the trial integration line to `checks = "post-land"`,
-   run the attester profile, and measure on the bench harness: bad-land
-   detection time, revert time, and batches cut per day.
+8. graft-dev rollout, in two parts:
+   - **8a (phase 1).** Roll out per-land commits (step 5), CLI identity
+     (step 6) and the pre-land check (step 7) on graft-dev, and measure them
+     on the bench harness: batch export time, the squash-fallback rate, and
+     conflicts the pre-land check stops.
+   - **8b (phase 2).** Switch the trial integration line to
+     `checks = "post-land"`, run the attester profile, and measure on the
+     bench harness: bad-land detection time, revert time, and batches cut
+     per day.
 
 ## 12. Auth
 
