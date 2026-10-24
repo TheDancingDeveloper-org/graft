@@ -4,6 +4,8 @@
 //! kinds produce [`graft_store::Write`] rows that the engine commits in the
 //! same transaction as the write they derive from.
 
+use std::collections::HashMap;
+
 use graft_model::{Changeset, ChangesetId, RepoPath};
 use graft_store::{MetaStore, ObjectStore, RepoId, StoreResult, Write};
 
@@ -112,6 +114,15 @@ pub struct BlameRun {
     pub origin: ChangesetId,
 }
 
+/// Eager derived values of changesets not committed yet (a run being built
+/// for one `commit_run`), so that a child's values derive from its parent's
+/// and ancestors' without reading the store.
+#[derive(Clone, Debug, Default)]
+pub struct Overlay {
+    generations: HashMap<ChangesetId, u64>,
+    skips: HashMap<ChangesetId, kinds::Skips>,
+}
+
 /// The index over a repository's stores.
 #[derive(Debug)]
 pub struct Index<M, O> {
@@ -140,9 +151,25 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
     /// version bump). Reads are O(parents + log depth) when the parents'
     /// values are present.
     pub async fn on_create(&self, repo: RepoId, cs: &Changeset) -> StoreResult<Vec<Write>> {
+        self.on_create_in(repo, cs, &mut Overlay::default()).await
+    }
+
+    /// [`Self::on_create`] for a changeset whose ancestors may be in
+    /// `overlay`: built earlier in the same run and not committed yet, so
+    /// not readable from the store. Values found there are not read and get
+    /// no rows (their own changeset's rows carry them); `overlay` gains
+    /// `cs`'s values and every one read or computed on the way.
+    pub async fn on_create_in(
+        &self,
+        repo: RepoId,
+        cs: &Changeset,
+        overlay: &mut Overlay,
+    ) -> StoreResult<Vec<Write>> {
         let id = cs.id();
-        let generation = self.derive_new::<kinds::Generation>(repo, id, cs).await?;
-        let skips = self.skip_list_new(repo, id, cs).await?;
+        let generation = self
+            .derive_new::<kinds::Generation>(repo, id, cs, &mut overlay.generations)
+            .await?;
+        let skips = self.skip_list_new(repo, id, cs, &mut overlay.skips).await?;
         let mut rows = generation.rows;
         rows.extend(skips.rows);
         Ok(rows)

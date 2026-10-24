@@ -419,6 +419,35 @@ pub trait MetaStore: Send + Sync {
         repo: RepoId,
         txn: MetaTxn,
     ) -> impl Future<Output = StoreResult<TxnOutcome>> + Send;
+    /// Applies a run of transactions in order, each atomically on its own
+    /// (its own unit, with its own journal entries), stopping at the first
+    /// that is not `Committed`. Returns one outcome per attempted
+    /// transaction: all `Committed`, or ending with the one that failed;
+    /// later ones were not attempted. A transaction sees the writes of the
+    /// ones before it in the run, so a run may chain (a changeset, then its
+    /// child). Nothing is acknowledged before every committed one is
+    /// durable. On `Err`, a prefix of the run may have been committed.
+    ///
+    /// The default commits them one by one; a store may group the run
+    /// under one durable commit (one sync instead of one per transaction).
+    fn commit_run(
+        &self,
+        repo: RepoId,
+        txns: Vec<MetaTxn>,
+    ) -> impl Future<Output = StoreResult<Vec<TxnOutcome>>> + Send {
+        async move {
+            let mut out = Vec::with_capacity(txns.len());
+            for txn in txns {
+                let outcome = self.commit(repo, txn).await?;
+                let committed = matches!(outcome, TxnOutcome::Committed(_));
+                out.push(outcome);
+                if !committed {
+                    break;
+                }
+            }
+            Ok(out)
+        }
+    }
     /// Reads a changeset's content and record.
     fn changeset(
         &self,
@@ -708,6 +737,13 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         txn: MetaTxn,
     ) -> impl Future<Output = StoreResult<TxnOutcome>> + Send {
         (**self).commit(repo, txn)
+    }
+    fn commit_run(
+        &self,
+        repo: RepoId,
+        txns: Vec<MetaTxn>,
+    ) -> impl Future<Output = StoreResult<Vec<TxnOutcome>>> + Send {
+        (**self).commit_run(repo, txns)
     }
     fn changeset(
         &self,

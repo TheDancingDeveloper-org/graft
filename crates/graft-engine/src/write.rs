@@ -13,12 +13,13 @@
 //! holds it and it is created abandoned (a line move still lands it). A land
 //! candidate is a draft held by its land-attempt lease instead.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
+use graft_index::Overlay;
 use graft_model::{
     ApplyOptions, Change, Changeset, ChangesetId, CheckOptions, EntryKind, ObjectId, ObjectKind,
     Rule, Tree, TreeId, Violation, apply_changes_with,
@@ -285,30 +286,158 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         // its frames pass `import_prewrite_bytes`, which bounds memory.
         let mut rest = req.changesets;
         let mut roots = HashMap::new();
+        let mut overlay = Overlay::default();
         let mut out = Vec::with_capacity(rest.len());
         while !rest.is_empty() {
             let (planned, written) = self.prewrite_import(repo, &rest, &mut roots).await?;
-            // One transaction per changeset: a failure keeps the ones
-            // before it. One `prewrite_import` could not derive is
-            // inserted alone, which reports why.
-            for cs in rest.drain(..planned.max(1)) {
-                let root = cs.root;
-                out.push(
-                    self.insert(
-                        repo,
-                        cs,
-                        Some(root),
-                        Vec::new(),
-                        Roots::Allowed,
-                        None,
-                        None,
-                        Some(&written),
-                    )
-                    .await?,
-                );
+            // Its metadata commits in runs of chained transactions, one
+            // per changeset with its journal entry, under one durable
+            // commit per run (WI-2323). A failure keeps the ones before
+            // it. One `prewrite_import` could not derive goes in a run of
+            // its own, which reports why.
+            let mut queue: VecDeque<Changeset> = rest.drain(..planned.max(1)).collect();
+            while !queue.is_empty() {
+                self.import_run(repo, &mut queue, &written, &mut overlay, &mut out)
+                    .await?;
             }
         }
         Ok(out)
+    }
+
+    /// Builds a run of changesets from the front of `queue` (at most
+    /// [`MAX_RUN`]), each on its parents stored or built earlier in the
+    /// run, commits it with one `commit_run`, and appends each result to
+    /// `out` in order. The run ends early at a changeset already in it
+    /// (a duplicate, left for the next run, which finds it stored) and
+    /// before its claims could lapse. A changeset that fails to build ends
+    /// the run too: the ones built before it are committed, then its error
+    /// returns. One not attempted (after a lost race) goes back on `queue`.
+    async fn import_run(
+        &self,
+        repo: RepoId,
+        queue: &mut VecDeque<Changeset>,
+        written: &HashSet<ObjectId>,
+        overlay: &mut Overlay,
+        out: &mut Vec<Created>,
+    ) -> Result<(), ApiError> {
+        let mut run = Run {
+            roots: HashMap::new(),
+            overlay: std::mem::take(overlay),
+        };
+        // Each built changeset's claims must outlast the run's commit.
+        let claim_ms = i64::try_from(self.config.claim_ms / 2).unwrap_or(i64::MAX);
+        let deadline = self.clock.now().ms.saturating_add(claim_ms);
+        let mut slots: Vec<Slot> = Vec::new();
+        let mut failure = None;
+        while slots.len() < MAX_RUN
+            && (slots.is_empty() || self.clock.now().ms < deadline)
+            && let Some(cs) = queue.pop_front()
+        {
+            let root = cs.root;
+            let built = self
+                .build(
+                    repo,
+                    cs,
+                    Some(root),
+                    Vec::new(),
+                    Roots::Allowed,
+                    None,
+                    None,
+                    Some(written),
+                    Some(&mut run),
+                )
+                .await;
+            match built {
+                Ok(Built::New(new)) => {
+                    run.roots.insert(new.id, new.root);
+                    slots.push(Slot::New(new));
+                }
+                Ok(Built::Exists {
+                    id,
+                    root,
+                    parent,
+                    cs,
+                }) => match self.existing(repo, id, root, parent, None).await {
+                    Ok(created) => slots.push(Slot::Done(created, cs)),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                },
+                Ok(Built::InRun(cs)) => {
+                    queue.push_front(*cs);
+                    break;
+                }
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            }
+        }
+        *overlay = run.overlay;
+
+        let txns: Vec<MetaTxn> = slots
+            .iter_mut()
+            .filter_map(|slot| match slot {
+                Slot::New(new) => {
+                    let mut txn = new_txn(new.id, new.revive, &new.pinned);
+                    txn.writes = std::mem::take(&mut new.writes);
+                    txn.writes.push(journal::changeset_created(new.id, None));
+                    Some(txn)
+                }
+                Slot::Done(..) => None,
+            })
+            .collect();
+        let mut outcomes = if txns.is_empty() {
+            Vec::new()
+        } else {
+            self.meta
+                .commit_run(repo, txns)
+                .await
+                .map_err(errors::store)?
+        }
+        .into_iter();
+        let mut slots = slots.into_iter();
+        while let Some(slot) = slots.next() {
+            let new = match slot {
+                Slot::Done(created, _) => {
+                    out.push(created);
+                    continue;
+                }
+                Slot::New(new) => new,
+            };
+            match outcomes.next() {
+                Some(TxnOutcome::Committed(lsns)) => out.push(Created {
+                    id: new.id,
+                    root: new.root,
+                    lsn: lsns.first().copied().unwrap_or_default(),
+                    state: draft_state(new.state),
+                }),
+                // A concurrent import stored (or revived) it first. The
+                // rest were not attempted: build them again.
+                Some(TxnOutcome::PreconditionFailed(0)) => {
+                    out.push(
+                        self.existing(repo, new.id, new.root, new.parent, None)
+                            .await?,
+                    );
+                    for later in slots.rev() {
+                        queue.push_front(match later {
+                            Slot::New(n) => n.cs,
+                            Slot::Done(_, cs) => *cs,
+                        });
+                    }
+                    break;
+                }
+                // A parent was collected after it was read.
+                Some(TxnOutcome::PreconditionFailed(i)) if i <= new.pinned.len() => {
+                    return Err(ApiError::Collected {
+                        id: new.pinned[i - 1],
+                    });
+                }
+                Some(TxnOutcome::PreconditionFailed(_)) | None => return Err(contended()),
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     /// Derives the new trees of a prefix of `changesets` in order, each on
@@ -485,7 +614,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     async fn insert(
         &self,
         repo: RepoId,
-        mut cs: Changeset,
+        cs: Changeset,
         expected: Option<TreeId>,
         inline: Vec<Upload>,
         roots: Roots,
@@ -493,6 +622,101 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         lease: Option<Lease>,
         written: Option<&HashSet<ObjectId>>,
     ) -> Result<Created, ApiError> {
+        let built = self
+            .build(
+                repo,
+                cs,
+                expected,
+                inline,
+                roots,
+                hold.as_ref(),
+                lease.as_ref(),
+                written,
+                None,
+            )
+            .await?;
+        let New {
+            cs,
+            id,
+            root,
+            parent,
+            state,
+            pinned,
+            mut writes,
+            revive,
+        } = match built {
+            Built::New(new) => *new,
+            Built::Exists {
+                id, root, parent, ..
+            } => {
+                return self.existing(repo, id, root, parent, hold).await;
+            }
+            Built::InRun(_) => unreachable!("no run without a run"),
+        };
+        for _ in 0..CAS_RETRIES {
+            let mut txn = new_txn(id, revive, &pinned);
+            match &hold {
+                // Without a workspace there is nothing to retry: move the
+                // writes rather than copy them.
+                None => txn.writes = std::mem::take(&mut writes),
+                Some(h) => {
+                    txn.preconditions.extend(guarded(&h.ws).preconditions);
+                    txn.writes = writes.clone();
+                    let mut next = h.ws.clone();
+                    next.head = Some(id);
+                    txn.writes.push(Write::PutWorkspace(next));
+                    txn.writes.push(add_draft_paths(&h.ws, &cs));
+                }
+            }
+            let ws_name = hold.as_ref().map(|h| h.ws.name.as_str());
+            txn.writes.push(match &lease {
+                Some(lease) => journal::candidate_created(id, &lease.holder),
+                None => journal::changeset_created(id, ws_name),
+            });
+            match self.meta.commit(repo, txn).await.map_err(errors::store)? {
+                TxnOutcome::Committed(lsns) => {
+                    return Ok(Created {
+                        id,
+                        root,
+                        lsn: lsns.first().copied().unwrap_or_default(),
+                        state: draft_state(state),
+                    });
+                }
+                // A concurrent retry stored (or revived) it first.
+                TxnOutcome::PreconditionFailed(0) => {
+                    return self.existing(repo, id, root, parent, hold).await;
+                }
+                // A parent was collected after it was read: a collection
+                // and a new child of it never both commit.
+                TxnOutcome::PreconditionFailed(i) if i <= pinned.len() => {
+                    return Err(ApiError::Collected { id: pinned[i - 1] });
+                }
+                // The workspace changed: still ours, live, and at the parent?
+                TxnOutcome::PreconditionFailed(_) => {
+                    let h = hold.as_mut().ok_or_else(contended)?;
+                    self.reload(repo, h, parent).await?;
+                }
+            }
+        }
+        Err(contended())
+    }
+
+    /// The checks and writes of `insert`, short of its commit. With `run`,
+    /// parents built earlier in the run (not committed yet) count as
+    /// stored, and its eager derived values come from the run's overlay.
+    #[allow(clippy::too_many_arguments)]
+    async fn build(
+        &self,
+        repo: RepoId,
+        mut cs: Changeset,
+        expected: Option<TreeId>,
+        inline: Vec<Upload>,
+        roots: Roots,
+        hold: Option<&Hold<'_>>,
+        lease: Option<&Lease>,
+        written: Option<&HashSet<ObjectId>>,
+        mut run: Option<&mut Run>,
+    ) -> Result<Built, ApiError> {
         // Rules 3, 8 and 9 (and portability); rule 2 waits for the id, so
         // that a retried root changeset still returns its id.
         let opts = CheckOptions {
@@ -509,13 +733,18 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let mut base = None;
         let mut pinned = Vec::new();
         for (i, &parent) in cs.parents.iter().enumerate() {
-            let Some((p, record)) = self.changeset_opt(repo, parent).await? else {
-                return Err(ApiError::UnknownParent { id: parent });
+            // One built earlier in the run is stored abandoned.
+            let (root, state) = match run.as_ref().and_then(|r| r.roots.get(&parent)) {
+                Some(&root) => (root, RecordState::Abandoned),
+                None => match self.changeset_opt(repo, parent).await? {
+                    Some((p, record)) => (p.root, record.state),
+                    None => return Err(ApiError::UnknownParent { id: parent }),
+                },
             };
             if i == 0 {
-                base = model_root(p.root);
+                base = model_root(root);
             }
-            if record.state != RecordState::Landed && !pinned.contains(&parent) {
+            if state != RecordState::Landed && !pinned.contains(&parent) {
                 pinned.push(parent);
             }
         }
@@ -565,13 +794,24 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         // over its tombstone, with new protection, so a land that derives
         // the candidate a crashed attempt left (and the sweep collected)
         // lands rather than failing its CAS until the line moves.
+        if run.as_ref().is_some_and(|r| r.roots.contains_key(&id)) {
+            // The same changeset twice in one run: it is not stored yet.
+            return Ok(Built::InRun(Box::new(cs)));
+        }
         let revive = match self.changeset_opt(repo, id).await {
-            Ok(Some(_)) => return self.existing(repo, id, root, parent, hold).await,
+            Ok(Some(_)) => {
+                return Ok(Built::Exists {
+                    id,
+                    root,
+                    parent,
+                    cs: Box::new(cs),
+                });
+            }
             Ok(None) => false,
             Err(ApiError::Collected { id: c }) if c == id => true,
             Err(e) => return Err(e),
         };
-        if let Some(h) = &hold {
+        if let Some(h) = hold {
             self.check_extends(repo, &h.ws, parent).await?;
         }
         if cs.parents.is_empty() && roots == Roots::IfEmpty && !self.is_empty(repo).await? {
@@ -633,7 +873,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 
         let object_holder = id.to_string();
         let now = self.clock.now().ms;
-        let (state, expires_at_ms) = match (&hold, &lease) {
+        let (state, expires_at_ms) = match (hold, lease) {
             (None, None) => (RecordState::Abandoned, self.retained_until(now)),
             (Some(_), _) => (RecordState::Draft, None),
             (None, Some(lease)) => (RecordState::Draft, Some(lease.expires_at_ms)),
@@ -646,9 +886,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 received_at_ms: now,
                 state,
                 holder: hold
-                    .as_ref()
                     .map(|h| holder(&h.ws.name))
-                    .or(lease.as_ref().map(|l| l.holder.clone())),
+                    .or(lease.map(|l| l.holder.clone())),
                 superseded_by: None,
             },
         }];
@@ -665,75 +904,88 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             object,
             holder: object_holder.clone(),
         }));
-        writes.extend(
-            self.index
-                .on_create(repo, &cs)
-                .await
-                .map_err(errors::store)?,
-        );
-
-        for _ in 0..CAS_RETRIES {
-            // [absent (or still a tombstone), each pinned parent live, the
-            // workspace guard].
-            let first = if revive {
-                Precondition::RecordStateIs {
-                    id,
-                    state: RecordState::Collected,
-                }
-            } else {
-                Precondition::ChangesetAbsent(id)
-            };
-            let mut txn = MetaTxn {
-                preconditions: vec![first],
-                writes: Vec::new(),
-            };
-            txn.preconditions
-                .extend(pinned.iter().map(|&p| Precondition::RecordLive(p)));
-            match &hold {
-                // Without a workspace there is nothing to retry: move the
-                // writes rather than copy them.
-                None => txn.writes = std::mem::take(&mut writes),
-                Some(h) => {
-                    txn.preconditions.extend(guarded(&h.ws).preconditions);
-                    txn.writes = writes.clone();
-                    let mut next = h.ws.clone();
-                    next.head = Some(id);
-                    txn.writes.push(Write::PutWorkspace(next));
-                    txn.writes.push(add_draft_paths(&h.ws, &cs));
-                }
-            }
-            let ws_name = hold.as_ref().map(|h| h.ws.name.as_str());
-            txn.writes.push(match &lease {
-                Some(lease) => journal::candidate_created(id, &lease.holder),
-                None => journal::changeset_created(id, ws_name),
-            });
-            match self.meta.commit(repo, txn).await.map_err(errors::store)? {
-                TxnOutcome::Committed(lsns) => {
-                    return Ok(Created {
-                        id,
-                        root,
-                        lsn: lsns.first().copied().unwrap_or_default(),
-                        state: draft_state(state),
-                    });
-                }
-                // A concurrent retry stored (or revived) it first.
-                TxnOutcome::PreconditionFailed(0) => {
-                    return self.existing(repo, id, root, parent, hold).await;
-                }
-                // A parent was collected after it was read: a collection
-                // and a new child of it never both commit.
-                TxnOutcome::PreconditionFailed(i) if i <= pinned.len() => {
-                    return Err(ApiError::Collected { id: pinned[i - 1] });
-                }
-                // The workspace changed: still ours, live, and at the parent?
-                TxnOutcome::PreconditionFailed(_) => {
-                    let h = hold.as_mut().ok_or_else(contended)?;
-                    self.reload(repo, h, parent).await?;
-                }
-            }
-        }
-        Err(contended())
+        let derived = match run.as_mut() {
+            None => self.index.on_create(repo, &cs).await,
+            Some(run) => self.index.on_create_in(repo, &cs, &mut run.overlay).await,
+        };
+        writes.extend(derived.map_err(errors::store)?);
+        Ok(Built::New(Box::new(New {
+            cs,
+            id,
+            root,
+            parent,
+            state,
+            pinned,
+            writes,
+            revive,
+        })))
     }
+}
+
+/// The preconditions of a new changeset's transaction: [absent (or still a
+/// tombstone when `revive`), each pinned parent live].
+fn new_txn(id: ChangesetId, revive: bool, pinned: &[ChangesetId]) -> MetaTxn {
+    let first = if revive {
+        Precondition::RecordStateIs {
+            id,
+            state: RecordState::Collected,
+        }
+    } else {
+        Precondition::ChangesetAbsent(id)
+    };
+    let mut preconditions = vec![first];
+    preconditions.extend(pinned.iter().map(|&p| Precondition::RecordLive(p)));
+    MetaTxn {
+        preconditions,
+        writes: Vec::new(),
+    }
+}
+
+/// What `build` found.
+enum Built {
+    /// Already stored (a retry): nothing to write.
+    Exists {
+        id: ChangesetId,
+        root: TreeId,
+        parent: Option<ChangesetId>,
+        cs: Box<Changeset>,
+    },
+    /// Built earlier in the same run, not committed yet: handed back.
+    InRun(Box<Changeset>),
+    /// New: its writes, short of the journal entry and any workspace move.
+    New(Box<New>),
+}
+
+/// A new changeset's writes, ready to commit.
+struct New {
+    cs: Changeset,
+    id: ChangesetId,
+    root: TreeId,
+    parent: Option<ChangesetId>,
+    state: RecordState,
+    pinned: Vec<ChangesetId>,
+    writes: Vec<Write>,
+    revive: bool,
+}
+
+/// The most changesets one import run commits together (the SQLite
+/// writer's batch bound).
+const MAX_RUN: usize = 256;
+
+/// One changeset of an import run.
+enum Slot {
+    /// Already stored before the run (kept to queue again).
+    Done(Created, Box<Changeset>),
+    /// Built, waiting for the run's commit.
+    New(Box<New>),
+}
+
+/// The changesets of an import run built but not committed yet: their
+/// roots by id, and their eager derived values.
+#[derive(Default)]
+struct Run {
+    roots: HashMap<ChangesetId, TreeId>,
+    overlay: Overlay,
 }
 
 /// The workspace a new changeset goes into, and who asked.
