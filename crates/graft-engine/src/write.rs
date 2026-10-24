@@ -21,11 +21,11 @@ use std::thread;
 
 use graft_index::Overlay;
 use graft_model::{
-    ApplyOptions, Change, Changeset, ChangesetId, CheckOptions, EntryKind, ObjectId, ObjectKind,
-    Rule, Tree, TreeId, Violation, apply_changes_with,
+    ApplyOptions, Change, Changeset, ChangesetId, CheckOptions, EntryKind, Metadata, ObjectId,
+    ObjectKind, Rule, Tree, TreeId, Violation, apply_changes_with,
 };
 use graft_proto::types::{CreateChangeset, Created, DraftState, ImportChangesets};
-use graft_proto::{ApiError, CallContext, Frame};
+use graft_proto::{ApiError, CallContext, Frame, PrincipalKind};
 use graft_store::{
     ChangesetRecord, MetaStore, MetaTxn, ObjectStore, Precondition, RecordState, RepoId,
     StoreError, TxnOutcome, WorkspaceRecord, Write,
@@ -145,6 +145,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         {
             return Err(errors::invalid(None, "reserved-metadata"));
         }
+        check_identity(cx, &req.metadata)?;
         let inline_bytes: u64 = req.inline_blobs.iter().map(|f| f.body.len() as u64).sum();
         if inline_bytes > self.config.max_inline_bytes {
             return Err(errors::limit("inline-bytes", self.config.max_inline_bytes));
@@ -1096,6 +1097,28 @@ fn put_blobs(changes: &[Change]) -> Vec<ObjectId> {
         })
         .filter(|id| seen.insert(*id))
         .collect()
+}
+
+/// A caller whose token names a Vogt session or work item can't attribute a
+/// changeset to a different one: `vogt.session` and `vogt.work_item`, when
+/// set, must match the token, so `pr-batch` trailers (D26) can be trusted. Services (the node daemon, the mirror) act for
+/// others and are trusted.
+fn check_identity(cx: &CallContext, metadata: &Metadata) -> Result<(), ApiError> {
+    let p = &cx.principal;
+    if p.kind == PrincipalKind::Service {
+        return Ok(());
+    }
+    for (key, held, rule) in [
+        ("vogt.session", &p.session, "session-metadata"),
+        ("vogt.work_item", &p.work_item, "work-item-metadata"),
+    ] {
+        if let (Some(held), Some(given)) = (held, metadata.get(key))
+            && given != held
+        {
+            return Err(errors::invalid(None, rule));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

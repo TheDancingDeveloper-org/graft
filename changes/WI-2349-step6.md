@@ -1,0 +1,1 @@
+graft-engine: a token's Vogt session and work item now bind a new changeset's `vogt.session` and `vogt.work_item` metadata, so a client can't attribute a land to another session or work item; a mismatch fails with `session-metadata` or `work-item-metadata` (WI-2349 step 6, D26). Service tokens are exempt.
