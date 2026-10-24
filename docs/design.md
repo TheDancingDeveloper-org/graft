@@ -1603,6 +1603,32 @@ and 8b are **phase 2**: they wait for the graft-primary authority switch. Step
      bench harness: bad-land detection time, revert time, and batches cut
      per day.
 
+### 11.5 Batch PR review and merge
+
+[D28](decisions.md#d28-batch-prs-are-reviewed-and-landed-like-any-pr) amends
+D21 and D26: a batch PR is reviewed and merged like any other PR, not held for
+the operator. §11.4's "which the operator merges" and "the operator's merge is
+the approval" read as this section.
+
+- **Review.** When `pr-batch` opens a batch PR, oversight starts its standard
+  Claude review (a read-only reviewer) on the PR as a whole. graft calls no
+  LLM and stores no review data (D26).
+- **Blockers name the land.** A finding names the land's commit (its
+  `Graft-Changeset` trailer). It is fixed forward by a new land on the
+  integration line, which the next batch carries, or by dropping the land.
+  graft does not rewrite an open batch.
+- **Merge.** A clean review goes to oversight's `land-pr`, which merges once
+  GitHub's required checks on the PR pass, with rebase-merge to keep the
+  per-land commits (D26). graft still never merges or queues the PR: the
+  merge is done outside graft.
+- **Checks.** The required checks are GitHub's, run by the forge on the PR.
+  graft runs none of them, so D22's "no build, test or CI in the land path"
+  holds.
+- **PR body.** It ends with a line saying how the PR is merged: reviewed by
+  oversight, then merged by `land-pr` once the required checks pass.
+- **Settle.** Unchanged: follow imports the merge and records the batch as
+  merged (§11.4).
+
 ## 12. Auth
 
 ### 12.1 Principals and tokens
