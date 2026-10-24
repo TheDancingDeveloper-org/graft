@@ -26,20 +26,31 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      # Docs-only diffs skip the build but still report the check (WI-2401).
+      - id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: .github/scripts/docs-only.sh "$BASE_SHA"
+      - if: steps.scope.outputs.docs_only == 'true'
+        run: echo "docs-only change; skipping the Rust build"
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.docs_only != 'true'
       # Only main writes the cache back (a workflow_dispatch on main seeds
       # it); the merge queue restores what main saved.
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The self-hosted image ships no language runtime.
       - uses: actions/setup-python@v5
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           python-version: "3.12"
       # Quarantine (WI-2314, docs/known-flakes.md): retry the build once
       # only when the log matches the OOM-kill signature. Remove with the
       # host fix.
       - name: build release binaries
+        if: steps.scope.outputs.docs_only != 'true'
         shell: bash
         run: |
           set +e
@@ -57,6 +68,7 @@ jobs:
       # Exit 1 is a correctness failure, 2 a harness error; either fails the
       # job. The harness drives git too, so give it a commit identity.
       - name: bench correctness smoke (scale 10)
+        if: steps.scope.outputs.docs_only != 'true'
         shell: bash
         env:
           GIT_AUTHOR_NAME: graft-bench
@@ -68,14 +80,14 @@ jobs:
           python3 -m graftbench --scales 10 --writers 4 --rounds 2 --iterations 2 \
             --out "$RUNNER_TEMP/bench"
       - name: summary
-        if: always()
+        if: always() && steps.scope.outputs.docs_only != 'true'
         shell: bash
         run: |
           if [ -f "$RUNNER_TEMP/bench/summary.md" ]; then
             cat "$RUNNER_TEMP/bench/summary.md" >> "$GITHUB_STEP_SUMMARY"
           fi
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.scope.outputs.docs_only != 'true'
         with:
           name: bench-smoke
           path: |

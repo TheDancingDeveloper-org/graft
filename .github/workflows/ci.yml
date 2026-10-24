@@ -67,40 +67,69 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      # Docs-only diffs skip the build but still report the check (WI-2401).
+      - id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: .github/scripts/docs-only.sh "$BASE_SHA"
+      - if: steps.scope.outputs.docs_only == 'true'
+        run: echo "docs-only change; skipping the Rust build"
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+        if: steps.scope.outputs.docs_only != 'true'
 
   clippy:
     runs-on: [self-hosted]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      # Docs-only diffs skip the build but still report the check (WI-2401).
+      - id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: .github/scripts/docs-only.sh "$BASE_SHA"
+      - if: steps.scope.outputs.docs_only == 'true'
+        run: echo "docs-only change; skipping the Rust build"
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           components: clippy
       # Only main writes the cache back; every ref restores what main saved.
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        if: steps.scope.outputs.docs_only != 'true'
 
   test:
     runs-on: [self-hosted]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      # Docs-only diffs skip the build but still report the check (WI-2401).
+      - id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: .github/scripts/docs-only.sh "$BASE_SHA"
+      - if: steps.scope.outputs.docs_only == 'true'
+        run: echo "docs-only change; skipping the Rust build"
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.docs_only != 'true'
       # Only main writes the cache back; every ref restores what main saved.
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Pinned cargo-nextest, run from the job's temp dir. Some self-hosted
       # runners carry an older cargo-nextest in $CARGO_HOME/bin, which cargo
       # resolves before PATH, so neither install-action nor a PATH prepend
       # is enough.
-      - run: |
+      - if: steps.scope.outputs.docs_only != 'true'
+        run: |
           curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/cargo-nextest" nextest --version
       # Quarantine (WI-2314, docs/known-flakes.md): rustc, cargo or the
@@ -109,6 +138,7 @@ jobs:
       # other failure fails at once. Runs on pull_request and merge_group
       # alike. Remove with the host fix.
       - name: nextest
+        if: steps.scope.outputs.docs_only != 'true'
         shell: bash
         run: |
           set +e
@@ -124,3 +154,4 @@ jobs:
           fi
           exit "$status"
       - run: cargo test --workspace --all-features --doc
+        if: steps.scope.outputs.docs_only != 'true'
