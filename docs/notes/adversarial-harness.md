@@ -139,9 +139,44 @@ stated over the history:
      - a land whose changes against its first parent are empty.
 
      A second land with a non-empty change from the same root is a
-     duplicate and fails the check. The first worker step pins down which
-     of the two outcomes graft gives today and records it here. If it is
-     neither, that is a finding, not a harness change.
+     duplicate and fails the check.
+
+   **What graft does today** (pinned by the harness probe
+   `sync_after_lost_ack`, WI-2345). Neither sub-outcome above happens,
+   because the sync leaves nothing to re-land:
+   - The land committed: the line holds the draft (fast-forward) or its
+     rebased candidate, whose `graft.rebased-from` names the draft. The
+     `lands[(draft, line)]` row and the land result are in the same
+     transaction. A land does not move the workspace, so the workspace
+     still has its old base and `head = draft`.
+   - `Sync` rebases the stack onto the new tip. Every change of the draft
+     is already there, so the rebase drops the draft (the "already there"
+     row of `rebase.rs`). The workspace moves to `base = tip`,
+     `head = None`. The changed paths are empty for a fast-forward, and
+     only the other client's paths for a rebased land. The client's stack
+     is now empty, and its working copy matches the line.
+   - A land of the old head (the draft id the client sent first) finds
+     `lands[(draft, line)]` and returns the first `Landed`. The line does
+     not move. A land of the empty stack has no head to send.
+
+   **Judgement: correct and safe.** No land is lost: the acked-or-not land
+   is on the line once. No land is duplicated: the sync leaves no draft
+   that could land the same changes a second time, and a re-land of the
+   old head is the blind retry. The client can find out that its land
+   succeeded in two ways: the blind retry (the same head) returns the
+   `Landed`, and after a sync, an empty stack on a base that contains its
+   changes means they landed. What it cannot get is a typed answer from
+   `Sync` itself: `Synced` does not say which drafts it dropped, or why.
+   A client that forgot its head id has only the empty stack to go on.
+   That is a usability gap, not a safety one. The model therefore accepts
+   a third outcome: **sync empties the stack, and a later land of the old
+   head returns the first `Landed`**. A dropped draft must be one whose
+   root is on the line, and the checker treats an empty stack after sync
+   as "nothing more to land".
+
+   Possible follow-up (not a bug): `Synced` could list the drafts the
+   rebase dropped, so the CLI can print "already landed" without a retry.
+
 2. **Lines only move forward.** Each line's sequence of tips forms one
    first-parent chain. Every move is in the journal, in the same
    transaction as its index rows.

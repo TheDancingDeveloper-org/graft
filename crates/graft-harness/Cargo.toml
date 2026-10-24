@@ -1,0 +1,27 @@
+[package]
+name = "graft-harness"
+description = "Adversarial test harness: racing lands under injected faults, checked against a model."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+graft-engine.workspace = true
+graft-gc.workspace = true
+graft-model.workspace = true
+graft-proto.workspace = true
+graft-store = { workspace = true, features = ["testkit"] }
+graft-testkit.workspace = true
+serde_json.workspace = true
+
+# The planted-bugs hooks are enabled here only, never in a normal build
+# (docs/notes/adversarial-harness.md §3.4).
+[dev-dependencies]
+graft-engine = { workspace = true, features = ["planted-bugs"] }
+graft-gc = { workspace = true, features = ["planted-bugs"] }

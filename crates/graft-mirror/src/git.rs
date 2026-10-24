@@ -405,6 +405,12 @@ impl Mirror {
             .ok_or_else(|| GitCliError("git hash-object: unexpected output".to_owned()))
     }
 
+    /// The raw commit object `sha` in the mirror (headers, a blank line,
+    /// the message).
+    pub async fn read_commit(&self, sha: GitSha) -> Result<Vec<u8>, GitCliError> {
+        ok(Some(&self.dir), &["cat-file", "commit", &sha.to_hex()]).await
+    }
+
     /// Whether the mirror holds `sha` as a commit.
     pub async fn has_commit(&self, sha: GitSha) -> Result<bool, GitCliError> {
         let spec = format!("{}^{{commit}}", sha.to_hex());

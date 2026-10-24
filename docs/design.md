@@ -918,6 +918,10 @@ file, landed under admin scope, can come later.
 `Sync(workspace, onto = tip)` rebases the stack onto the new tip and moves the
 workspace base and head by CAS. It returns the paths the client must update,
 or the conflicts. It is the same rebase code as land, without the ref move.
+A draft whose changes are all on the new tip is dropped from the stack. After
+a land whose ack was lost, a sync therefore empties the stack instead of
+re-landing it; the land's record still answers a retry of the old head with
+the first `Landed` (§7.9).
 
 ### 8.5 Stacks
 

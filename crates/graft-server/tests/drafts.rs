@@ -254,13 +254,23 @@ async fn an_expired_workspace_drops_out() {
 
     let mut al = server.clients(Some(&alice)).await;
     let mut bo = server.clients(Some(&bob)).await;
-    draft_leased(&mut bo, "wb", tip, &root, &[("src/a.rs", "BOB")], 1_000).await;
+    // The server runs in its own process on the real clock, so the lease is
+    // long enough to outlast a loaded host before the first query, and expiry
+    // is polled for against a bounded deadline rather than slept for.
+    let opened = std::time::Instant::now();
+    draft_leased(&mut bo, "wb", tip, &root, &[("src/a.rs", "BOB")], 5_000).await;
     let o = overlap(&mut al, &["src/a.rs"]).await.expect("while live");
     assert_eq!(seen(&o), [("wb".into(), "src/a.rs".into())]);
 
-    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
-    let o = overlap(&mut al, &["src/a.rs"]).await.expect("after expiry");
-    assert!(o.hits.is_empty() && o.workspaces.is_empty(), "{o:?}");
+    let deadline = opened + std::time::Duration::from_secs(60);
+    loop {
+        let o = overlap(&mut al, &["src/a.rs"]).await.expect("after expiry");
+        if o.hits.is_empty() && o.workspaces.is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "never expired: {o:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 
     // Its rows outlive the lease until GC; fsck takes that as consistent.
     drop(server);
