@@ -48,6 +48,10 @@ Already decided by the operator (2026-10-22):
   [D25](#d25-post-land-checks-on-the-batch-line) and
   [D26](#d26-one-commit-per-land-in-a-batch-pr). graft keeps no review state;
   review stays on the GitHub batch PR.
+- **D28** (operator, 2026-10-24, WI-2351): batch PRs get oversight's
+  standard review and are merged by `land-pr` once GitHub's required checks
+  pass. The operator no longer holds the merge button. Amends D21 and D26.
+  See [D28](#d28-batch-prs-are-reviewed-and-landed-like-any-pr).
 - **D27** (operator, 2026-10-24): `graft land` runs the conflict preview and
   the draft-overlap check by default and stops on a real conflict. See
   [D27](#d27-pre-land-check-in-graft-land).
@@ -85,6 +89,7 @@ Already decided by the operator (2026-10-22):
 | D25 | Post-land checks on the batch line | **Decided:** each land on an integration line is checked after it lands and marked good or bad; a bad land is reverted and never batched. Direct lines unchanged. Revises D22 | — |
 | D26 | Commits in a batch PR | **Decided:** one commit per land, keeping author, session and work item; squash only as a fallback; no review state in graft. Revises D21 | — |
 | D27 | Pre-land check in `graft land` | **Decided:** conflict preview and draft-overlap check by default; a real conflict stops the land; `--no-check` skips | — |
+| D28 | Batch PR review and merge | **Decided:** oversight reviews the batch PR as a whole; `land-pr` merges it once GitHub's required checks pass; graft still never merges. Amends D21, D26 | — |
 
 ---
 
@@ -451,6 +456,9 @@ on a graft integration line forked from the followed GitHub `main`; each
 batch reaches GitHub as one squashed PR, which the operator merges.**
 *Revised by [D26](#d26-one-commit-per-land-in-a-batch-pr) (2026-10-24): the
 batch PR carries one commit per land; squash is the fallback.*
+*Amended by [D28](#d28-batch-prs-are-reviewed-and-landed-like-any-pr)
+(2026-10-24): oversight reviews the batch PR and `land-pr` merges it; the
+operator no longer merges batches.*
 
 - `graft-mirror pr-batch <line> --base main` follows `main`, syncs the
   integration line onto it, and exports the line's net change as one commit
@@ -750,3 +758,34 @@ Rejected:
   already decides.
 - Stopping on draft overlap. An overlap is not a conflict, and the other
   draft may never land.
+
+## D28. Batch PRs are reviewed and landed like any PR
+
+**Decided (operator, 2026-10-24, WI-2351): a batch PR goes through
+oversight's standard Claude review and is merged by oversight's `land-pr` once
+GitHub's required checks pass, the same as every other reviewed PR.** This
+amends [D21](#d21-batch-pr-export) ("graft never merges or queues the PR; the
+operator merges") and [D26](#d26-one-commit-per-land-in-a-batch-pr) ("the
+operator's merge is the approval"). The design is
+[design.md §11.5](design.md#115-batch-pr-review-and-merge).
+
+- **graft still never merges.** Oversight merges, through `land-pr`,
+  outside graft. graft does not queue, approve or merge the PR.
+- **No per-change review.** The batch PR is reviewed as a whole by a
+  read-only reviewer. graft stores no review data and calls no LLM (D26).
+- **Blockers name the land**, by its commit (D26). They are fixed forward
+  by a new land on the integration line or by dropping the land; an open
+  batch is not rewritten.
+- **Merge shape.** `land-pr` merges with rebase-merge, keeping the per-land
+  commits of D26.
+- **Checks are the forge's.** GitHub's required checks run on the PR as
+  they do on any PR. graft runs no build, test or CI (D22 holds).
+- **PR body.** `pr-batch` ends the body with how the PR is merged.
+
+Why: rustTorrent batch #214 got no review and waited 17.3 h for the
+operator's merge, against the repository's 1.6 h median (WI-2336, gap 2).
+
+Rejected:
+
+- The operator merges each batch (D21 as written): the wait above.
+- A review step inside graft: duplicates the PR and needs an LLM in graft.
