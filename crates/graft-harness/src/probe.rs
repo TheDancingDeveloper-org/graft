@@ -7,6 +7,9 @@
 //! - [`sync_after_lost_ack`]: what a client sees when a land's ack is lost
 //!   and it syncs before landing again (§3.3 property 1, "retry after a lost
 //!   ack": the note asks the first worker step to pin this down).
+//! - [`racing_merges`]: two clients land on one base with adjacent lines,
+//!   a delete against an edit, and a binary file (§3.3 property 4: a
+//!   conflict always reaches the client).
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -385,6 +388,150 @@ pub fn sync_after_lost_ack() -> Findings {
             other => f
                 .failures
                 .push(format!("{case}: landing again answered {other:?}")),
+        }
+    }
+    f
+}
+
+/// One racing-merge case: a file at the base, then a first and a second
+/// client's version of it (`None` deletes it).
+struct RaceCase {
+    name: &'static str,
+    base: Vec<u8>,
+    first: Option<Vec<u8>>,
+    second: Option<Vec<u8>>,
+}
+
+/// Commits puts and deletes of one path each on `parent`.
+fn commit_changes(
+    e: &HarnessEngine,
+    cx: &CallContext,
+    parent: ChangesetId,
+    file: &str,
+    data: Option<&[u8]>,
+) -> Result<ChangesetId, ApiError> {
+    match data {
+        Some(d) => commit(e, cx, parent, &[(file, d.to_vec())], None),
+        None => run_local(async {
+            let req = commit_req(
+                vec![parent],
+                vec![Change::Delete { path: path(file) }],
+                None,
+                "probe",
+            );
+            Ok(e.create_changeset(cx, req).await?.id)
+        }),
+    }
+}
+
+/// Two clients branch from one base and land in turn. The first lands as
+/// a fast-forward; the second must either land with exactly what
+/// [`merge3`](graft_model::merge::merge3) makes of the two versions, or get
+/// a conflict with the line left where it was. A delete against an edit
+/// and a binary edit against a binary edit have no clean merge, so they
+/// must conflict.
+pub fn racing_merges() -> Findings {
+    use graft_model::merge::{Merge3, merge3};
+    let file = "race.txt";
+    let lines = |ls: &[&str]| {
+        ls.iter()
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+            .into_bytes()
+    };
+    let base = lines(&["a", "b", "c", "d", "e"]);
+    let blob = |b: u8| {
+        let mut v = vec![0u8, 1, 2, 3, 0, 5, 6, 7];
+        v[6] = b;
+        v
+    };
+    let cases = [
+        RaceCase {
+            name: "adjacent lines",
+            base: base.clone(),
+            first: Some(lines(&["a", "B", "c", "d", "e"])),
+            second: Some(lines(&["a", "b", "C", "d", "e"])),
+        },
+        RaceCase {
+            name: "same line",
+            base: base.clone(),
+            first: Some(lines(&["a", "b", "X", "d", "e"])),
+            second: Some(lines(&["a", "b", "Y", "d", "e"])),
+        },
+        RaceCase {
+            name: "delete then edit",
+            base: base.clone(),
+            first: None,
+            second: Some(lines(&["a", "b", "C", "d", "e"])),
+        },
+        RaceCase {
+            name: "edit then delete",
+            base: base.clone(),
+            first: Some(lines(&["a", "b", "C", "d", "e"])),
+            second: None,
+        },
+        RaceCase {
+            name: "binary edits",
+            base: blob(6),
+            first: Some(blob(0xfe)),
+            second: Some(blob(0xff)),
+        },
+    ];
+    let mut f = Findings::default();
+    for case in cases {
+        let name = case.name;
+        let mut world = quiet_world(None);
+        let engine = world.engine();
+        world.setup(&engine);
+        let (one, two) = (caller("c0"), caller("c1"));
+        let start = tip(&engine);
+        let based =
+            commit(&engine, &one, start, &[(file, case.base.clone())], None).expect("base commit");
+        run_local(engine.land(&one, land_req(based))).expect("land the base");
+        let a = commit_changes(&engine, &one, based, file, case.first.as_deref()).expect("first");
+        let b = commit_changes(&engine, &two, based, file, case.second.as_deref()).expect("second");
+        if let Err(e) = run_local(engine.land(&one, land_req(a))) {
+            f.failures
+                .push(format!("{name}: the first land failed: {e:?}"));
+            continue;
+        }
+        let after_first = tip(&engine);
+        let want = match (&case.first, &case.second) {
+            (Some(x), Some(y)) => match merge3(&case.base, x, y) {
+                Merge3::Clean(m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        };
+        let got = run_local(engine.land(&two, land_req(b)));
+        let now = tip(&engine);
+        let read = run_local(engine.read_file(
+            &caller("probe"),
+            graft_proto::types::PathAt {
+                repo: REPO.to_owned(),
+                at: now,
+                path: path(file),
+            },
+        ))
+        .ok()
+        .map(|r| r.data);
+        match (&got, &want) {
+            (Ok(Landed::Landed { .. }), Some(m)) if read.as_deref() == Some(&m[..]) => {
+                f.notes.push(format!("{name}: landed the clean merge"));
+            }
+            (Err(ApiError::Conflict { .. }), None) if now == after_first => {
+                f.notes
+                    .push(format!("{name}: the conflict reached the client"));
+            }
+            _ => f.failures.push(format!(
+                "{name}: the second land answered {got:?} (tip {now}, file {read:?}); \
+                 merge3 {}",
+                if want.is_some() {
+                    "merges it cleanly"
+                } else {
+                    "has no clean merge"
+                }
+            )),
         }
     }
     f

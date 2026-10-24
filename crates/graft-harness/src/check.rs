@@ -305,6 +305,15 @@ fn check_lands(
             continue;
         };
         report.acked += 1;
+        if rd.view(*id).is_some_and(|v| v.changeset.changes.is_empty()) {
+            report.fail(
+                "1 no lost or duplicated land",
+                format!(
+                    "acknowledged land {id} of {} carries no changes",
+                    token(*client, *intent)
+                ),
+            );
+        }
         if !on_chain.contains_key(id) {
             report.fail(
                 "1 no lost or duplicated land",
@@ -480,7 +489,12 @@ fn check_journal(
                     format!("RefMoved at {lsn} moves from {old:?}, the line was at {want_old:?}"),
                 );
             }
-            if let Some(old) = old
+            if old == Some(new) {
+                report.fail(
+                    "2 lines move forward",
+                    format!("RefMoved at {lsn} is a no-op move to {new}"),
+                );
+            } else if let Some(old) = old
                 && !rd.first_parent_reaches(new, old, 64)
             {
                 report.fail(
@@ -504,10 +518,39 @@ fn check_journal(
 }
 
 /// Property 3 at the store port: no two committed ref writes expected the
-/// same version, and no transaction moved two refs.
+/// same version, no transaction moved two refs, no write left the target
+/// where it was, and each write carries its `RefMoved` entry in the same
+/// transaction.
 fn check_cas(out: &Outcome, report: &mut Report) {
     let mut seen: HashSet<(String, Option<(ChangesetId, u64)>)> = HashSet::new();
     for txn in out.world.faults.txns() {
+        for w in &txn.refs {
+            if let Some(Some((old, _))) = w.expected
+                && old == w.new.0
+            {
+                report.fail(
+                    "3 CAS only",
+                    format!("a write of {} left it at {old} (a no-op move)", w.name),
+                );
+            }
+            let journaled = txn.journal.iter().any(|(_, kind, body)| {
+                kind == graft_engine::journal::REF_MOVED
+                    && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|v| {
+                        v["name"] == w.name.as_str()
+                            && v["new"].as_str() == Some(w.new.0.to_string().as_str())
+                            && v["version"].as_u64() == Some(w.new.1)
+                    })
+            });
+            if !journaled {
+                report.fail(
+                    "3 CAS only",
+                    format!(
+                        "the write of {} to {:?} has no RefMoved in its transaction",
+                        w.name, w.new
+                    ),
+                );
+            }
+        }
         if txn.refs.len() > 1 {
             report.fail(
                 "3 CAS only",

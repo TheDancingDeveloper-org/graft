@@ -140,6 +140,8 @@ pub struct RefWrite {
 pub struct CommittedTxn {
     /// Its ref writes, in order.
     pub refs: Vec<RefWrite>,
+    /// Its journal entries: LSN, kind and body, in order.
+    pub journal: Vec<(u64, String, Vec<u8>)>,
 }
 
 /// A record the sweep collected.
@@ -583,11 +585,24 @@ impl<M: MetaStore> MetaStore for FaultyMeta<M> {
             self.skip_cas(repo, &mut txn).await?;
         }
         let collections = self.collections(repo, &txn).await?;
+        let entries: Vec<(String, Vec<u8>)> = txn
+            .writes
+            .iter()
+            .filter_map(|w| match w {
+                Write::Journal { kind, body } => Some((kind.clone(), body.clone())),
+                _ => None,
+            })
+            .collect();
         let out = self.inner.commit(repo, txn).await?;
-        if matches!(out, TxnOutcome::Committed(_)) {
+        if let TxnOutcome::Committed(lsns) = &out {
             let mut st = self.faults.st();
             if !refs.is_empty() {
-                st.txns.push(CommittedTxn { refs });
+                let journal = lsns
+                    .iter()
+                    .zip(entries)
+                    .map(|(l, (k, b))| (*l, k, b))
+                    .collect();
+                st.txns.push(CommittedTxn { refs, journal });
             }
             st.collections.extend(collections);
         }
