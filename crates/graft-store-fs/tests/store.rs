@@ -371,3 +371,38 @@ fn delete_uncounts_and_lru_forgets() {
     assert_eq!(block_on(store.get(REPO, id)).expect("get"), None);
     assert!(files(dir.path()).is_empty());
 }
+
+/// Many threads putting at once share directory syncs and every put
+/// still returns stored (WI-2330).
+#[test]
+fn concurrent_puts_share_directory_syncs() {
+    let dir = TempDir::new("fs-concurrent");
+    let store = Arc::new(open(dir.path(), FsMode::Authoritative));
+    let threads: Vec<_> = (0..16u64)
+        .map(|t| {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || {
+                let mut ids = Vec::new();
+                for n in 0..40u64 {
+                    // A few seeds repeat across threads: puts of one object.
+                    let (id, frame) = blob(if n % 8 == 0 { n } else { t * 1000 + n }, 64);
+                    block_on(store.put(REPO, id, frame)).expect("put");
+                    ids.push(id);
+                }
+                ids
+            })
+        })
+        .collect();
+    let mut all = std::collections::HashSet::new();
+    for t in threads {
+        for id in t.join().expect("thread") {
+            all.insert(id);
+        }
+    }
+    let ids: Vec<ObjectId> = all.iter().copied().collect();
+    assert_eq!(
+        block_on(store.has(REPO, &ids)).expect("has").len(),
+        ids.len()
+    );
+    assert_eq!(stats(&store).objects, ids.len() as u64);
+}

@@ -20,7 +20,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
 use graft_model::ObjectId;
@@ -72,6 +72,9 @@ pub struct FsObjectStore {
     lru: Option<Mutex<Lru>>,
     /// Directories whose entry in their parent is known to be durable.
     durable_dirs: Mutex<HashSet<PathBuf>>,
+    /// Shared shard-directory syncs (see [`FsObjectStore::sync_dir`]).
+    dir_syncs: Mutex<HashMap<PathBuf, DirSync>>,
+    dir_synced: Condvar,
     next_tmp: AtomicU64,
     _lock: Option<File>,
 }
@@ -120,6 +123,8 @@ impl FsObjectStore {
             bytes: AtomicU64::new(bytes),
             lru,
             durable_dirs: Mutex::new(durable_dirs),
+            dir_syncs: Mutex::new(HashMap::new()),
+            dir_synced: Condvar::new(),
             next_tmp: AtomicU64::new(0),
             _lock: lock,
         };
@@ -235,12 +240,49 @@ impl FsObjectStore {
         self.sync_dir(&dir)
     }
 
-    /// [`sync_dir`], unless syncing is off.
+    /// Makes every entry renamed into `dir` before this call durable,
+    /// unless syncing is off. Concurrent callers on one directory share a
+    /// sync (WI-2330): a sync that starts after a caller's rename covers
+    /// it, so a caller waits for the one running to end and then for the
+    /// next, which at most one of them runs. A failed sync covers no one:
+    /// each waiter tries again itself.
     fn sync_dir(&self, dir: &Path) -> StoreResult<()> {
-        if self.sync_writes {
-            sync_dir(dir)
-        } else {
-            Ok(())
+        if !self.sync_writes {
+            return Ok(());
+        }
+        let mut syncs = self
+            .dir_syncs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let wanted = syncs.entry(dir.to_path_buf()).or_default().next;
+        loop {
+            let state = syncs.entry(dir.to_path_buf()).or_default();
+            if state.done.is_some_and(|done| done >= wanted) {
+                return Ok(());
+            }
+            if state.running {
+                syncs = self
+                    .dir_synced
+                    .wait(syncs)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            state.running = true;
+            let epoch = state.next;
+            state.next += 1;
+            drop(syncs);
+            let result = sync_dir(dir);
+            syncs = self
+                .dir_syncs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let state = syncs.entry(dir.to_path_buf()).or_default();
+            state.running = false;
+            if result.is_ok() {
+                state.done = Some(epoch);
+            }
+            self.dir_synced.notify_all();
+            result?;
         }
     }
 
@@ -413,6 +455,15 @@ impl ObjectStore for FsObjectStore {
     async fn stats(&self) -> StoreResult<StoreStats> {
         self.stats_sync()
     }
+}
+
+/// The syncs of one shard directory. A sync takes epoch `next` when it
+/// starts; `done` is the latest epoch whose sync succeeded.
+#[derive(Debug, Default)]
+struct DirSync {
+    next: u64,
+    done: Option<u64>,
+    running: bool,
 }
 
 /// Why a read found no frame.
