@@ -25,6 +25,7 @@ use graft_mirror::pulls::PrImporter;
 use graft_mirror::reconcile::{Resolution, reconcile};
 use graft_mirror::server::Server;
 use graft_mirror::{Mirror, MirrorDb, MirrorError};
+use graft_model::ChangesetId;
 use graft_proto::{CallContext, Principal, PrincipalKind};
 use graft_telemetry::{Telemetry, TelemetryConfig};
 
@@ -41,6 +42,8 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
   reconcile --config <file> --line <l> (--land | --discard)
                                         resolve an export divergence by hand
   pr-batch <line> --base <branch> --config <file> [--track]
+           [--exclude <changeset>]... [--reason <text>]
+           [--max-lands <n>] [--max-age <seconds>]
                                         sync an integration line onto the
                                         followed base, export its net change
                                         as one squashed PR (D21); never merges
@@ -533,6 +536,10 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     let mut base = None;
     let mut config = None;
     let mut track = false;
+    let mut exclude = Vec::new();
+    let mut reason = None;
+    let mut max_lands = None;
+    let mut max_age_ms = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = |flag: &str| {
@@ -544,6 +551,31 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
             "--base" => base = Some(value("--base")?),
             "--config" => config = Some(PathBuf::from(value("--config")?)),
             "--track" => track = true,
+            "--exclude" => {
+                let v = value("--exclude")?;
+                exclude
+                    .push(ChangesetId::parse(&v).map_err(|_| {
+                        CmdError::Usage(format!("--exclude: not a changeset: {v}"))
+                    })?);
+            }
+            "--reason" => reason = Some(value("--reason")?),
+            "--max-lands" => {
+                let n: usize = value("--max-lands")?
+                    .parse()
+                    .map_err(|_| CmdError::Usage("--max-lands needs a count".into()))?;
+                if n == 0 {
+                    return Err(CmdError::Usage("--max-lands must be at least 1".into()));
+                }
+                max_lands = Some(n);
+            }
+            "--max-age" => {
+                let secs: i64 = value("--max-age")?
+                    .parse()
+                    .ok()
+                    .filter(|s| *s >= 0)
+                    .ok_or_else(|| CmdError::Usage("--max-age needs seconds".into()))?;
+                max_age_ms = Some(secs.saturating_mul(1000));
+            }
             s if s.starts_with('-') => return Err(CmdError::Usage(format!("unknown flag {s}"))),
             s if line.is_none() => line = Some(s.to_owned()),
             s => return Err(CmdError::Usage(format!("unexpected argument {s}"))),
@@ -563,7 +595,16 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     }
     let api = Server::connect(&file.server, token(file.token_file.as_deref())?).await?;
     let db = MirrorDb::open(&file.db).map_err(MirrorError::from)?;
-    let batch = BatchConfig::new(line, base, file.follow()?);
+    if track && !exclude.is_empty() {
+        return Err(CmdError::Usage(
+            "--track only reads; --exclude changes the line".into(),
+        ));
+    }
+    let mut batch = BatchConfig::new(line, base, file.follow()?);
+    batch.exclude = exclude;
+    batch.drop_reason = reason;
+    batch.max_lands = max_lands;
+    batch.max_age_ms = max_age_ms;
     with_credentials(
         file.github.as_ref(),
         RunBatch {
@@ -619,6 +660,9 @@ impl AsyncCredentialFn<()> for RunBatch<'_> {
         if let Some(rec) = &run.settled {
             print_batch(rec);
         }
+        for (land, revert) in &run.dropped {
+            println!("line {line}: dropped {land} (reverted by {revert})");
+        }
         if let Some(m) = run.synced {
             println!("line {line}: synced onto the base as {m}");
         }
@@ -643,6 +687,12 @@ impl AsyncCredentialFn<()> for RunBatch<'_> {
             }
             BatchOutcome::BaseStopped(why) => {
                 return Err(MirrorError::Config(why).into());
+            }
+            BatchOutcome::NotDue { lands, oldest_ms } => {
+                println!(
+                    "line {line}: {lands} land(s) waiting (oldest authored at {oldest_ms} ms); \
+                     not due for a batch yet"
+                );
             }
         }
         Ok(())
