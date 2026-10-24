@@ -37,7 +37,7 @@ use graft_proto::{CallContext, Frame};
 use crate::diff::{DirDiff, changed_dirs, check_paths, git_changes};
 use crate::export::{GitSource, commit_sha, export_tree, learn_raw_trees, tree_sha};
 use crate::git::{Kind, RawCommit, Repo, author, parse_commit, submodule_id};
-use crate::map::{ImportedCommit, MirrorMap};
+use crate::map::{ImportedCommit, ImportedTag, MirrorMap};
 use crate::walk::topo;
 use crate::{BadPath, GitError, GitSha, Unrepresentable};
 
@@ -105,6 +105,8 @@ pub struct ImportReport {
     pub lines: Vec<(String, ChangesetId)>,
     /// Each imported tag (name without `refs/tags/`) and its changeset.
     pub tags: Vec<(String, ChangesetId)>,
+    /// Tags whose raw tag objects (annotated, signed, nested) were recorded.
+    pub tag_objects: u64,
 }
 
 /// Imports everything reachable from the configured refs that is not yet in
@@ -131,11 +133,16 @@ where
     if config.tags {
         for name in repo.refs_under("refs/tags/")? {
             if let Some(sha) = repo.resolve(&name)? {
-                tag_tips.push((name["refs/tags/".len()..].to_owned(), sha));
+                let objects = repo.tag_chain(&name)?;
+                tag_tips.push((name["refs/tags/".len()..].to_owned(), sha, objects));
             }
         }
     }
-    let tips: Vec<GitSha> = line_tips.iter().chain(&tag_tips).map(|(_, s)| *s).collect();
+    let tips: Vec<GitSha> = line_tips
+        .iter()
+        .map(|(_, s)| *s)
+        .chain(tag_tips.iter().map(|(_, s, _)| *s))
+        .collect();
     let walk = topo(&repo, &tips, |sha| Ok(map.changeset_of(sha)?.is_some()))?;
     let mut importer = Importer::new(api, cx, map, config, repo);
     importer.precheck(&walk.order, walk.misshapen)?;
@@ -156,8 +163,20 @@ where
     for (line, sha) in line_tips {
         report.lines.push((line, importer.ids.changeset(map, sha)?));
     }
-    for (tag, sha) in tag_tips {
-        report.tags.push((tag, importer.ids.changeset(map, sha)?));
+    for (tag, sha, objects) in tag_tips {
+        let id = importer.ids.changeset(map, sha)?;
+        // After the commits: the record names a commit already mapped.
+        if !objects.is_empty() {
+            map.put_tag(
+                &tag,
+                ImportedTag {
+                    commit: sha,
+                    objects,
+                },
+            )?;
+            report.tag_objects += 1;
+        }
+        report.tags.push((tag, id));
     }
     Ok(report)
 }
