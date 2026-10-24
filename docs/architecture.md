@@ -174,7 +174,7 @@ sequenceDiagram
   else conflict
     S-->>A: Conflict {paths, tip}, nothing moves; the client syncs and resolves, as with git
   end
-  Note over M: D21: pr-batch sends the line to GitHub as one squashed PR
+  Note over M: pr-batch sends the line to GitHub as a batch PR, one commit per land (D26); land-pr rebase-merges it (D28)
 ```
 
 ### One land with an attested policy (phase 2, off by default)
@@ -276,13 +276,14 @@ flowchart TB
   mir -- "land via graft; PR closes as merged" --> prs
 ```
 
-### 3c. Batch mode: an integration line, one squashed PR per batch (D21)
+### 3c. Batch mode: an integration line, one batch PR with one commit per land (D21, D26, D28)
 
 The near-term way of working. `main` stays git-primary and graft follows it.
 Agents land on a graft integration line forked from graft's `main`.
-`graft-mirror pr-batch <line> --base main` sends the line's net change to
-GitHub as one squashed PR. The operator merges it, and GitHub CI runs once
-per batch.
+`graft-mirror pr-batch <line> --base main` sends the line's lands to GitHub
+as one batch PR carrying one commit per land (D26). Oversight reviews the PR
+as a whole and `land-pr` rebase-merges it once GitHub's required checks pass
+(D28). GitHub CI runs once per batch.
 
 ```mermaid
 sequenceDiagram
@@ -290,15 +291,15 @@ sequenceDiagram
   participant S as graft-server
   participant M as graft-mirror pr-batch
   participant G as GitHub
-  participant O as operator
+  participant O as oversight (land-pr)
   A->>S: land on integration (many times)
   M->>G: follow main (ls-remote, fetch, import)
   M->>S: sync: Rebase the line's net change onto main; CAS the line
-  M->>M: one squashed commit on GitHub's main (deterministic)
+  M->>M: one commit per land on GitHub's main (deterministic)
   M->>G: push graft/batch-n (lease: must not exist)
-  M->>G: open the PR (lands, sessions, work items, attestations, Graft-Batch)
-  O->>G: review and merge (graft never merges or queues it)
-  M->>G: follow imports the merge commit
+  M->>G: open the PR (lands, sessions, work items, Graft-Batch)
+  O->>G: review; rebase-merge once required checks pass (graft never merges)
+  M->>G: follow imports the merged commits
   M->>S: batch recorded as merged; the next batch counts from its tip
 ```
 
@@ -307,15 +308,28 @@ sequenceDiagram
   changeset (first parent the line tip, second `main`'s tip) moves the line
   by compare-and-swap, so the move is a fast-forward. A conflict is
   reported with its paths, and nothing moves.
-- **Every land is listed.** The squashed commit's message lists every land.
-  The PR body lists as many as fit under GitHub's body limit, and names the
-  commit message for the rest. Listings stop at the newest 5,000 lands.
+- **One commit per land.** `graft/batch-<n>` is a chain of commits on
+  GitHub's `main`, one per land in land order (sync changesets skipped),
+  each with the land's author and message and `Graft-Changeset`,
+  `Graft-Session`, `Graft-Work-Item` and `Graft-Checks` trailers. The last
+  commit's tree equals the integration tip's tree. A batch carries at most
+  500 per-land commits; a longer line is cut into consecutive batches.
+- **Squash is the fallback.** When replaying the lands onto the base does
+  not reproduce the integration tip, the batch is exported as one squashed
+  commit, and the PR body and the commit say why.
+- **Every land is listed.** The PR body lists as many lands as fit under
+  GitHub's body limit, and names the commit messages for the rest.
+  Listings stop at the newest 5,000 lands.
+- **Review and merge.** Oversight reviews the batch PR as a whole. For a
+  head named `graft/batch-<n>`, `land-pr` waits for the required checks and
+  rebase-merges past the squashing merge queue (`--admin`), keeping the
+  per-land commits. graft never merges, queues or approves the PR.
 - **One batch open per line.** While its PR is open, a run only reports it.
   A PR closed unmerged marks the batch rejected, and its lands stay on the
   line for the next batch.
-- **Retries are safe.** The squashed commit is built from recorded fields
-  and stored before it is pushed, so a re-run pushes the same sha and
-  adopts the PR already on the branch.
+- **Retries are safe.** The commit chain is built from recorded fields and
+  each land's own time, and stored before it is pushed, so a re-run pushes
+  the same shas and adopts the PR already on the branch.
 
 ---
 
