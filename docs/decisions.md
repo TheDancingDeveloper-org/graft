@@ -54,6 +54,9 @@ Already decided by the operator (2026-10-22):
   standard review and are merged by `land-pr` once GitHub's required checks
   pass. The operator no longer holds the merge button. Amends D21 and D26.
   See [D28](#d28-batch-prs-are-reviewed-and-landed-like-any-pr).
+- **D29** (operator, 2026-10-24, WI-2363): a merge between lines records a
+  merge point per (source, target) pair, read by `MergeBase`; history stays
+  first-parent. See [D29](#d29-merge-points-between-lines).
 - **D27** (operator, 2026-10-24): `graft land` runs the conflict preview and
   the draft-overlap check by default and stops on a real conflict. See
   [D27](#d27-pre-land-check-in-graft-land).
@@ -92,6 +95,7 @@ Already decided by the operator (2026-10-22):
 | D26 | Commits in a batch PR | **Decided:** one commit per land, keeping author, session and work item; squash only as a fallback; no review state in graft. Revises D21 | — |
 | D27 | Pre-land check in `graft land` | **Decided:** conflict preview and draft-overlap check by default; a real conflict stops the land; `--no-check` skips | — |
 | D28 | Batch PR review and merge | **Decided:** oversight reviews the batch PR as a whole; `land-pr` merges it once GitHub's required checks pass; graft still never merges. Amends D21, D26 | — |
+| D29 | Merges between lines | **Decided:** one merge point per (source, target) line pair, written with the land and read by `MergeBase`; first-parent history, no second parent, no encoding change | — |
 
 ---
 
@@ -793,3 +797,46 @@ Rejected:
 
 - The operator merges each batch (D21 as written): the wait above.
 - A review step inside graft: duplicates the PR and needs an LLM in graft.
+
+## D29. Merge points between lines
+
+**Decided (operator, 2026-10-24, WI-2363): a merge from one line into
+another records a merge point for that (source, target) pair, and
+`MergeBase` reads it. History stays first-parent: no second parent and no
+change to the frozen changeset encoding.** The design is
+[design.md §8.9](design.md#89-merges-between-lines).
+
+- **What is stored.** Each merge landing appends one `line_merges` row
+  (SQLite schema version 6): the source line, the target line, the source
+  changeset and its position, and the target position the merge landed at.
+  The latest row for a pair is that pair's merge point.
+- **One transaction.** The row is written in the land's CAS transaction,
+  with its journal entry (`LineMerged`). Only the target ref moves; the
+  source is read, never moved (AGENTS.md rules 3 and 4).
+- **`MergeBase` reads it.** Between two lines it returns the newest target
+  point that the source already contains, following fork rows (D23) and
+  merge rows a bounded number of hops. So a repeated back-merge starts from
+  the last merge, and a merge whose earlier merges reached the source by
+  another line (git flow's release/1.1 → main) is clean, as in git.
+- **Surface.** `LineMerge` in the API; `graft line merge <src> [--into
+  <dst>]` in the CLI; `graft_merge` in MCP. A conflict is handed back like a
+  land conflict, and the client lands its resolution with `--merged-from`,
+  which records the same row.
+- **Costs follow the change.** Reading a merge point is an indexed read per
+  hop, capped. Nothing walks history or scans the journal.
+- **Git export.** A merge landing exports as a one-parent commit with a
+  `Graft-Merged-From:` trailer. No git merge commits.
+
+Why: the branching-strategies trial (WI-2362). Carries between lines are
+squashes with no record, so `merge_base` never advances: release/1.1 → main
+met 11 conflict blocks that git does not, repeated back-merges re-conflict,
+and each carry cost 7 to 22 round trips against git's 2.
+
+Rejected:
+
+- A second parent on a landed changeset. It changes the frozen changeset
+  encoding and makes the line index, blame, export and fork rows deal with
+  non-first-parent history.
+- Merge metadata only in the changeset (`graft.merged-from`) read by
+  `MergeBase`. Finding it means scanning a line's changesets, which breaks
+  costs-follow-the-change; the metadata is still written, for readers.
