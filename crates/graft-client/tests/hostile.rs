@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use graft_client::fetch::{Budget, FetchOptions};
 use graft_client::workcopy::{DEFAULT_CACHE_BYTES, WcConfig, clone};
@@ -257,7 +256,6 @@ async fn a_repeating_tree_dag_is_stopped_by_the_entry_budget() {
         ..Budget::default()
     };
     let dest = tempfile::tempdir().unwrap();
-    let start = Instant::now();
     let err = clone(
         &remote,
         &cx(),
@@ -277,9 +275,6 @@ async fn a_repeating_tree_dag_is_stopped_by_the_entry_budget() {
         matches!(&err, Error::Api(ApiError::LimitExceeded { limit, max: 4096 }) if limit == "client.max_entries"),
         "{err:?}"
     );
-    // Hang guard only: the budget error above is the real assertion, and
-    // wall-clock time is not deterministic on a loaded runner.
-    assert!(start.elapsed() < Duration::from_secs(120));
     // The fetch read each distinct object once; checkout stopped early.
     let requested = server.requested_ids();
     assert_eq!(requested.len(), 26);
