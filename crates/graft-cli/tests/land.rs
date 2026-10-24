@@ -475,6 +475,60 @@ fn revert_then_land_restores_the_file() {
 }
 
 #[test]
+fn pick_reapplies_a_landed_changeset_and_writes_its_conflicts() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let (app, head) = with_draft(&s, dir.path(), None);
+    json_run(&app, &["land"]);
+    json_run(&app, &["revert", "main"]);
+    json_run(&app, &["land"]);
+    assert_eq!(
+        fs::read_to_string(app.join("README.md")).unwrap(),
+        "hello\n"
+    );
+
+    // A clean pick: a draft on the head, with the changeset's changes.
+    let value = json_run(&app, &["pick", &head.to_string()]);
+    assert_valid("pick", &value);
+    assert_eq!(value["picked"], json!(head.to_string()));
+    assert_eq!(fs::read_to_string(app.join("README.md")).unwrap(), "mine\n");
+    let out = run(&app, &["stack"]).success();
+    assert!(stdout(&out).contains("mine"), "{}", stdout(&out));
+    json_run(&app, &["land"]);
+    let tip = s.rt.block_on(s.repo.tip());
+    assert_eq!(s.rt.block_on(s.repo.files(tip))["README.md"], b"mine\n");
+
+    // Picking a draft is refused: it would move the drafts below it.
+    fs::write(app.join("docs/guide.md"), "draft\n").unwrap();
+    let draft = json_run(&app, &["commit", "-m", "draft"]);
+    let a = wc_cmd(&app)
+        .args(["--json", "pick", draft["id"].as_str().unwrap()])
+        .assert()
+        .code(1);
+    assert_eq!(error_of(&a)["kind"], json!("state"));
+    json_run(&app, &["land"]);
+
+    // A line that changed the file since: 3, with the conflict in the file.
+    s.rt.block_on(s.repo.advance(put("README.md", "later\n")));
+    run(&app, &["sync"]).success();
+    let a = wc_cmd(&app)
+        .args(["--json", "pick", &head.to_string()])
+        .assert()
+        .code(3);
+    assert_eq!(error_of(&a)["kind"], json!("conflicted"));
+    assert_eq!(
+        fs::read_to_string(app.join("README.md")).unwrap(),
+        "<<<<<<< ours\nmine\n||||||| base\nhello\n=======\nlater\n>>>>>>> theirs\n"
+    );
+    fs::write(app.join("README.md"), "both\n").unwrap();
+    let draft = json_run(&app, &["commit"]);
+    assert!(draft["id"].is_string());
+    json_run(&app, &["land"]);
+    let tip = s.rt.block_on(s.repo.tip());
+    assert_eq!(s.rt.block_on(s.repo.files(tip))["README.md"], b"both\n");
+}
+
+#[test]
 fn stack_operations_rewrite_the_drafts() {
     let s = serve(Policy::Direct);
     let dir = scratch();

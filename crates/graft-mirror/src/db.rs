@@ -1,6 +1,6 @@
 //! The mirror DB (`docs/design.md` §11.1 step 5, §11.3): a SQLite file the
 //! mirror owns, outside the graft server. It holds the mirror map (graft ids
-//! ↔ git shas, raw commit headers, raw trees, blob shas) and, per followed
+//! ↔ git shas, raw commit headers, raw trees, raw tag objects, blob shas) and, per followed
 //! line, how far follow has got.
 //!
 //! Every write is one statement or one transaction, so a crash leaves either
@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use graft_git::map::{ImportedCommit, MirrorMap, RawTree};
+use graft_git::map::{ImportedCommit, ImportedTag, MirrorMap, RawTree};
 use graft_git::{GitError, GitSha};
 use graft_model::{BlobId, ChangesetId, ObjectId, RepoPath};
 
@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS commits (
     headers BLOB NOT NULL,
     message BLOB,
     raw_trees BLOB NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS tags (
+    name TEXT PRIMARY KEY,
+    sha BLOB NOT NULL,
+    objects BLOB NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS blobs (
     blob BLOB PRIMARY KEY,
@@ -867,6 +872,36 @@ impl MirrorMap for MirrorDb {
         }))
     }
 
+    fn put_tag(&self, name: &str, tag: ImportedTag) -> Result<(), GitError> {
+        self.conn()
+            .execute(
+                "INSERT INTO tags (name, sha, objects) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (name) DO UPDATE SET sha = ?2, objects = ?3",
+                params![name, &tag.commit.0[..], encode_tag_objects(&tag.objects)],
+            )
+            .map(drop)
+            .map_err(db_err)
+    }
+
+    fn tag(&self, name: &str) -> Result<Option<ImportedTag>, GitError> {
+        let row: Option<(Vec<u8>, Vec<u8>)> = self
+            .conn()
+            .query_row(
+                "SELECT sha, objects FROM tags WHERE name = ?1",
+                params![name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(db_err)?;
+        let Some((sha, objects)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(ImportedTag {
+            commit: sha_col(Some(sha))?.expect("present"),
+            objects: decode_tag_objects(&objects)?,
+        }))
+    }
+
     fn put_blob_shas(&self, pairs: &[(BlobId, GitSha)]) -> Result<(), GitError> {
         if pairs.is_empty() {
             return Ok(());
@@ -1025,6 +1060,41 @@ impl BatchRow {
 /// Raw trees as `count:u32` then, per tree, an optional directory and an
 /// optional tree object, each as `present:u8` and `len:u32` + bytes. Local
 /// to the mirror DB; not a graft durable format.
+fn encode_tag_objects(objects: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(objects.len() as u32).to_be_bytes());
+    for o in objects {
+        out.extend_from_slice(&(o.len() as u32).to_be_bytes());
+        out.extend_from_slice(o);
+    }
+    out
+}
+
+fn decode_tag_objects(mut bytes: &[u8]) -> Result<Vec<Vec<u8>>, GitError> {
+    fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Result<&'a [u8], GitError> {
+        if bytes.len() < n {
+            return Err(GitError::Map("mirror db: malformed tag objects".to_owned()));
+        }
+        let (head, rest) = bytes.split_at(n);
+        *bytes = rest;
+        Ok(head)
+    }
+    fn len(bytes: &mut &[u8]) -> Result<usize, GitError> {
+        let b = take(bytes, 4)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    }
+    let n = len(&mut bytes)?;
+    let mut out = Vec::with_capacity(n.min(16));
+    for _ in 0..n {
+        let l = len(&mut bytes)?;
+        out.push(take(&mut bytes, l)?.to_vec());
+    }
+    if !bytes.is_empty() {
+        return Err(GitError::Map("mirror db: malformed tag objects".to_owned()));
+    }
+    Ok(out)
+}
+
 fn encode_raw_trees(trees: &[RawTree]) -> Vec<u8> {
     fn opt(out: &mut Vec<u8>, bytes: Option<&[u8]>) {
         match bytes {
@@ -1136,6 +1206,47 @@ mod tests {
         assert_eq!(db.line("main").unwrap().behind_since_ms, Some(5));
         assert_eq!(db.line("other").unwrap(), LineState::default());
         assert_eq!(db.commit_count().unwrap(), 1);
+    }
+
+    /// A mirror DB written before the `tags` table existed gains it on open,
+    /// keeps its commits, and records tags from then on.
+    #[test]
+    fn a_db_without_the_tags_table_is_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mirror.sqlite");
+        let db = MirrorDb::open(&path).unwrap();
+        let id = ChangesetId(ObjectId([7; 32]));
+        let commit = ImportedCommit {
+            sha: GitSha([9; 20]),
+            headers: b"author A <a@b> 1 +0000\n\n".to_vec(),
+            message: None,
+            raw_trees: Vec::new(),
+        };
+        db.put_imported(id, commit.clone()).unwrap();
+        db.conn().execute_batch("DROP TABLE tags").unwrap();
+        drop(db);
+
+        let db = MirrorDb::open(&path).unwrap();
+        assert_eq!(db.imported(id).unwrap(), Some(commit));
+        assert_eq!(db.tag("v1").unwrap(), None);
+        let tag = ImportedTag {
+            commit: GitSha([9; 20]),
+            objects: vec![b"object outer".to_vec(), b"object inner".to_vec()],
+        };
+        db.put_tag("v1", tag.clone()).unwrap();
+        drop(db);
+        let db = MirrorDb::open(&path).unwrap();
+        assert_eq!(db.tag("v1").unwrap(), Some(tag));
+    }
+
+    #[test]
+    fn malformed_tag_objects_are_refused() {
+        assert!(decode_tag_objects(&[0, 0, 0, 1, 0, 0, 0, 2, 1]).is_err());
+        assert!(decode_tag_objects(&[0, 0, 0, 0, 9]).is_err());
+        assert_eq!(
+            decode_tag_objects(&[0, 0, 0, 0]).unwrap(),
+            Vec::<Vec<u8>>::new()
+        );
     }
 
     #[test]

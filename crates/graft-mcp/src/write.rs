@@ -17,10 +17,10 @@ use graft_proto::{
     ApiError, CallContext, Frame, PrincipalKind,
     api::{RepoApi, WorkspaceApi},
     types::{
-        ConflictReason, ConflictSide, ConflictView, CreateChangeset, CreateLine, GetConflicts,
-        Land, Landed, LineMerge, LineMergeOutcome, MergeBaseVia, MergeMode, MergedFrom,
-        OpenWorkspace, Page, PathResolution, RefKind, Resolution, ResolvedContent, Revert,
-        UpdateRef, WorkspaceRef, WorkspaceView,
+        ConflictReason, ConflictSide, ConflictView, CreateChangeset, CreateLine, DraftState,
+        GetChangesets, GetConflicts, Land, Landed, LineMerge, LineMergeOutcome, MergeBaseVia,
+        MergeMode, MergedFrom, OpenWorkspace, Page, PathResolution, Rebase, RefKind, Resolution,
+        ResolvedContent, Revert, SetHead, UpdateRef, WorkspaceRef, WorkspaceView,
     },
 };
 use rmcp::{
@@ -323,7 +323,121 @@ pub struct RevertArgs {
     pub workspace: Option<String>,
 }
 
+/// Arguments of `graft_pick`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PickArgs {
+    /// Repository name.
+    pub repo: String,
+    /// The landed changeset to re-apply (an id or a ref name).
+    pub changeset: String,
+    /// Where to apply it (an id or a ref name). Give this or `workspace`,
+    /// not both.
+    pub onto: Option<String>,
+    /// The workspace whose head the new draft becomes (compare-and-swap):
+    /// it goes on the workspace head, or its base when it has no drafts.
+    pub workspace: Option<String>,
+    /// `line` (default): three-way line merge for text files. `file`: any
+    /// path changed on both sides conflicts.
+    #[schemars(extend("default" = "line"))]
+    pub merge: Option<MergeArg>,
+}
+
 impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
+    async fn pick(&self, cx: &CallContext, args: PickArgs) -> Result<CallToolResult, ToolError> {
+        check_name("repo", &args.repo)?;
+        if let Some(ws) = &args.workspace {
+            check_name("workspace", ws)?;
+        }
+        let merge = merge_mode(args.merge);
+        let changeset = self.resolve(cx, &args.repo, &args.changeset).await?;
+        self.check_landed(cx, &args.repo, changeset).await?;
+        let (onto, held) = match (&args.onto, &args.workspace) {
+            (Some(_), Some(_)) => return Err(invalid("give `onto` or `workspace`, not both")),
+            (Some(rev), None) => (self.resolve(cx, &args.repo, rev).await?, None),
+            (None, Some(ws)) => {
+                let view = self.workspace(cx, &args.repo, ws).await?;
+                (view.head.unwrap_or(view.base), Some((ws, view.head)))
+            }
+            (None, None) => return Err(invalid("give `onto` or `workspace`")),
+        };
+        let id = self
+            .api
+            .rebase(
+                cx,
+                Rebase {
+                    repo: args.repo.clone(),
+                    changeset,
+                    onto,
+                    merge,
+                    dry_run: false,
+                },
+            )
+            .await
+            .map_err(ToolError::Api)?;
+        let fresh = id != onto && id != changeset;
+        if let (Some((ws, expected)), true) = (held, fresh) {
+            self.api
+                .set_head(
+                    cx,
+                    SetHead {
+                        workspace: ws_ref(&args.repo, ws),
+                        expected,
+                        new: Some(id),
+                    },
+                )
+                .await
+                .map_err(ToolError::Api)?;
+        }
+        bounded(json!({
+            "id": id.to_string(),
+            "picked": changeset.to_string(),
+            "onto": onto.to_string(),
+            "changed": fresh,
+            "workspace": args.workspace.as_deref().map(|w| clip(w, FIELD_MAX_BYTES).0),
+        }))
+    }
+
+    /// Refuses a pick of a changeset that is not landed, or is a root:
+    /// `Rebase` of a draft would copy the drafts below it too.
+    async fn check_landed(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+        changeset: ChangesetId,
+    ) -> Result<(), ToolError> {
+        let got = self
+            .api
+            .get_changesets(
+                cx,
+                GetChangesets {
+                    repo: repo.to_owned(),
+                    ids: vec![changeset],
+                },
+            )
+            .await
+            .map_err(ToolError::Api)?;
+        if got.collected.contains(&changeset) {
+            return Err(ToolError::Api(ApiError::Collected { id: changeset }));
+        }
+        let view = got
+            .found
+            .into_iter()
+            .find(|v| v.changeset.id() == changeset)
+            .ok_or_else(|| {
+                ToolError::Api(ApiError::NotFound {
+                    what: format!("changeset {changeset}"),
+                })
+            })?;
+        if view.state != DraftState::Landed {
+            return Err(invalid("only a landed changeset can be picked"));
+        }
+        if view.changeset.first_parent().is_none() {
+            return Err(invalid("a root changeset has nothing to pick"));
+        }
+        Ok(())
+    }
+
     async fn conflicts(
         &self,
         cx: &CallContext,
@@ -1071,6 +1185,29 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         Ok(respond(async {
             let cx = self.call_context(&ctx)?;
             self.revert(&cx, args).await
+        })
+        .await)
+    }
+
+    #[tool(
+        name = "graft_pick",
+        description = "Create a draft that re-applies a landed changeset's own changes (a cherry-pick) on `onto`, or on the workspace head, which then moves to it. Merges by line by default; a clash is a conflict error naming the paths. Land it with graft_land.",
+        annotations(
+            title = "Pick",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn graft_pick(
+        &self,
+        Parameters(args): Parameters<PickArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(respond(async {
+            let cx = self.call_context(&ctx)?;
+            self.pick(&cx, args).await
         })
         .await)
     }

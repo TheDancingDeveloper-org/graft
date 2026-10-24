@@ -589,7 +589,6 @@ fn signed_commits_and_extra_headers_round_trip() {
 /// Lightweight and annotated tags on commits, a signed annotated tag, and a
 /// tag of a tag. The annotated tag objects must come back with their shas.
 #[test]
-#[ignore = "WI-2357: export writes tags as lightweight refs to the commit"]
 fn annotated_and_signed_tag_objects_round_trip() {
     let mut git = Git::init("tags");
     git.write("a", b"a\n");
@@ -615,9 +614,10 @@ fn annotated_and_signed_tag_objects_round_trip() {
     assert_round_trips(&git.git_dir());
 }
 
-/// Tags that name a tree or a blob, directly or through a tag object.
+/// Tags that name a tree or a blob, directly or through a tag object. The
+/// mirror map holds tags of commits only, so import skips them and reports
+/// each by name and kind; everything else imports.
 #[test]
-#[ignore = "WI-2358: import drops these tags without a word"]
 fn tags_of_trees_and_blobs_are_reported() {
     let mut git = Git::init("tag-tree");
     git.write("a", b"a\n");
@@ -627,7 +627,31 @@ fn tags_of_trees_and_blobs_are_reported() {
     git.set_ref("refs/tags/tree-light", &tree);
     git.set_ref("refs/tags/blob-light", &blob);
     git.run(&["tag", "-a", "tree-annotated", "-m", "a tree", &tree]);
-    assert_round_trips(&git.git_dir());
+    git.run(&["tag", "kept"]);
+    let (result, imported) = import(&git.git_dir());
+    let outcome = result.expect("import succeeds");
+    assert_eq!(imported.map.len(), 1, "the commit is imported");
+    let tags: Vec<&str> = outcome
+        .report
+        .tags
+        .iter()
+        .map(|(t, _)| t.as_str())
+        .collect();
+    assert_eq!(tags, ["kept"]);
+    let named: Vec<(&str, &str)> = outcome
+        .report
+        .skipped_tags
+        .iter()
+        .map(|t| (t.name.as_str(), t.kind))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("blob-light", "blob"),
+            ("tree-annotated", "tree"),
+            ("tree-light", "tree")
+        ]
+    );
 }
 
 // --- modes and kinds ------------------------------------------------------
@@ -798,11 +822,14 @@ fn blobs_at_the_frame_limit_round_trip_or_are_refused() {
             Err(e) => {
                 assert!(imported.map.is_empty(), "{len}: no commit mapped");
                 assert!(graft_refs(&imported).is_empty(), "{len}: no ref set");
-                results.push((len, format!("{e:?}")));
+                let e = format!("{e:?}");
+                // The commit sha varies; the refusal and path do not.
+                let e = e.split(", commit:").next().unwrap_or(&e).to_owned();
+                results.push((len, e));
             }
         }
     }
-    let over = r#"Api(LimitExceeded { limit: "blob-bytes", max: 67108864 })"#;
+    let over = r#"Git(BadPaths([BadPath { path: "big.bin", reason: "blob-bytes""#;
     assert_eq!(
         results,
         vec![
@@ -960,7 +987,6 @@ fn git_metadata_names_are_a_typed_refusal() {
 /// An oversize blob after some history, imported one commit per batch: the
 /// refusal must come before anything is written, as the path check does.
 #[test]
-#[ignore = "WI-2360: earlier batches are imported before the refusal"]
 fn an_oversize_blob_late_in_history_imports_nothing() {
     let mut git = Git::init("late-big");
     for n in 0..3 {

@@ -87,6 +87,8 @@ pub(crate) enum Command {
     Land(LandArgs),
     /// Add a draft that inverts a changeset
     Revert(RevertArgs),
+    /// Add a draft that re-applies a landed changeset (a cherry-pick; conflicts are written into the files)
+    Pick(PickArgs),
     /// Record a check result for a changeset (for CI)
     Attest(AttestArgs),
     /// CI helpers: exchange the job's identity token for a graft token
@@ -497,6 +499,15 @@ pub(crate) enum LandMerge {
 pub(crate) struct RevertArgs {
     /// The changeset to invert: an id or a ref
     pub(crate) rev: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PickArgs {
+    /// The landed changeset to re-apply: an id or a ref
+    pub(crate) rev: String,
+    /// How a file both sides changed is merged
+    #[arg(long, value_enum, value_name = "MODE", default_value_t = LandMerge::Line)]
+    pub(crate) merge: LandMerge,
 }
 
 #[derive(Debug, Args)]

@@ -492,7 +492,7 @@ fn every_schema_file_compiles() {
         count += 1;
     }
     assert_eq!(
-        count, 28,
+        count, 29,
         "one schema per command, plus error, api-list, line-list, line-merge, line-merges, tag-list and workspace-list"
     );
 }

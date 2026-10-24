@@ -37,9 +37,9 @@ use graft_proto::{CallContext, Frame};
 use crate::diff::{DirDiff, changed_dirs, check_paths, git_changes};
 use crate::export::{GitSource, commit_sha, export_tree, learn_raw_trees, tree_sha};
 use crate::git::{Kind, RawCommit, Repo, author, parse_commit, submodule_id};
-use crate::map::{ImportedCommit, MirrorMap};
+use crate::map::{ImportedCommit, ImportedTag, MirrorMap};
 use crate::walk::topo;
-use crate::{BadPath, GitError, GitSha, Unrepresentable};
+use crate::{BadPath, GitError, GitSha, NonCommitTag, Unrepresentable};
 
 /// The metadata key that carries an imported commit's git sha (operator
 /// decision, 2026-10-22). Without it, commits that differ only in what a
@@ -54,6 +54,8 @@ const PUT_BLOBS_PER_CALL: usize = 32;
 const PUTS_IN_FLIGHT: usize = 8;
 /// Bytes of blobs held before they are uploaded.
 const PUT_BYTES_MAX: usize = 16 * 1024 * 1024;
+/// The largest blob the server accepts by default (its `blob-bytes` limit).
+pub const MAX_BLOB_BYTES: u64 = 64 << 20;
 /// Ids per `HasObjects` call.
 const HAS_OBJECTS_MAX: usize = 1024;
 
@@ -66,7 +68,8 @@ pub struct ImportConfig {
     pub repo: String,
     /// Git refs to import, mapped to graft lines (`refs/heads/main` → `main`).
     pub lines: Vec<(String, String)>,
-    /// Import every tag under `refs/tags/` that names a commit.
+    /// Import every tag under `refs/tags/` that names a commit. Tags of a
+    /// tree or a blob are skipped and listed in [`ImportReport::skipped_tags`].
     pub tags: bool,
     /// Commits allowed to fail the fidelity check (`--allow-lossy`).
     pub allow_lossy: Vec<GitSha>,
@@ -105,6 +108,10 @@ pub struct ImportReport {
     pub lines: Vec<(String, ChangesetId)>,
     /// Each imported tag (name without `refs/tags/`) and its changeset.
     pub tags: Vec<(String, ChangesetId)>,
+    /// Tags whose raw tag objects (annotated, signed, nested) were recorded.
+    pub tag_objects: u64,
+    /// Tags skipped because they name a tree or a blob; export loses them.
+    pub skipped_tags: Vec<NonCommitTag>,
 }
 
 /// Imports everything reachable from the configured refs that is not yet in
@@ -128,14 +135,23 @@ where
         line_tips.push((line.clone(), sha));
     }
     let mut tag_tips = Vec::new();
+    let mut non_commit = Vec::new();
     if config.tags {
         for name in repo.refs_under("refs/tags/")? {
+            let short = name["refs/tags/".len()..].to_owned();
             if let Some(sha) = repo.resolve(&name)? {
-                tag_tips.push((name["refs/tags/".len()..].to_owned(), sha));
+                let objects = repo.tag_chain(&name)?;
+                tag_tips.push((short, sha, objects));
+            } else if let Some(kind) = repo.non_commit_kind(&name)? {
+                non_commit.push(NonCommitTag { name: short, kind });
             }
         }
     }
-    let tips: Vec<GitSha> = line_tips.iter().chain(&tag_tips).map(|(_, s)| *s).collect();
+    let tips: Vec<GitSha> = line_tips
+        .iter()
+        .map(|(_, s)| *s)
+        .chain(tag_tips.iter().map(|(_, s, _)| *s))
+        .collect();
     let walk = topo(&repo, &tips, |sha| Ok(map.changeset_of(sha)?.is_some()))?;
     let mut importer = Importer::new(api, cx, map, config, repo);
     importer.precheck(&walk.order, walk.misshapen)?;
@@ -153,11 +169,24 @@ where
         return Err(GitError::Fidelity(importer.failed));
     }
     let mut report = importer.report;
+    report.skipped_tags = non_commit;
     for (line, sha) in line_tips {
         report.lines.push((line, importer.ids.changeset(map, sha)?));
     }
-    for (tag, sha) in tag_tips {
-        report.tags.push((tag, importer.ids.changeset(map, sha)?));
+    for (tag, sha, objects) in tag_tips {
+        let id = importer.ids.changeset(map, sha)?;
+        // After the commits: the record names a commit already mapped.
+        if !objects.is_empty() {
+            map.put_tag(
+                &tag,
+                ImportedTag {
+                    commit: sha,
+                    objects,
+                },
+            )?;
+            report.tag_objects += 1;
+        }
+        report.tags.push((tag, id));
     }
     Ok(report)
 }
@@ -356,10 +385,13 @@ where
         }
     }
 
-    /// Step 2: every path rule and representability check, before any write.
+    /// Step 2: every path rule, blob size and representability check, before
+    /// any write. Only the entries each commit changes are read, and blob
+    /// sizes come from object headers.
     fn precheck(&mut self, order: &[GitSha], misshapen: Vec<GitSha>) -> Result<(), GitError> {
         let mut bad: BTreeMap<(Vec<u8>, String), GitSha> = BTreeMap::new();
         let skip: HashSet<GitSha> = misshapen.iter().copied().collect();
+        let mut sizes: HashMap<GitSha, u64> = HashMap::new();
         let mut unrepresentable: Vec<Unrepresentable> = misshapen
             .into_iter()
             .map(|commit| Unrepresentable {
@@ -379,7 +411,26 @@ where
             let dirs = changed_dirs(&mut self.repo, parent_tree, Some(raw.tree))?;
             let offences = check_paths(&mut self.repo, &dirs)?;
             if offences.is_empty() {
-                if raw.parents.len() < 2 && git_changes(&mut self.repo, &dirs)?.is_empty() {
+                let changes = git_changes(&mut self.repo, &dirs)?;
+                for c in &changes {
+                    let Some((kind, blob)) = c.new else { continue };
+                    if kind == EntryKind::Submodule {
+                        continue;
+                    }
+                    let size = match sizes.get(&blob) {
+                        Some(n) => *n,
+                        None => {
+                            let n = self.repo.size(blob)?;
+                            sizes.insert(blob, n);
+                            n
+                        }
+                    };
+                    if size > MAX_BLOB_BYTES {
+                        let path = c.path.as_str().as_bytes().to_vec();
+                        bad.entry((path, "blob-bytes".to_owned())).or_insert(sha);
+                    }
+                }
+                if raw.parents.len() < 2 && changes.is_empty() {
                     unrepresentable.push(Unrepresentable {
                         commit: sha,
                         reason: "empty-changeset",

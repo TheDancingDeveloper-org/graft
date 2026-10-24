@@ -7,7 +7,7 @@ use std::rc::Rc;
 use graft_engine::{PlantedBug, PlantedBugs};
 use graft_harness::faulty::{FaultRates, WrapperBug};
 use graft_harness::scenario::{EngineHook, Plan, Shape};
-use graft_harness::shrink::{explain, replay_command, run_and_check, shrink};
+use graft_harness::shrink::{explain, replay_command, replay_seed, run_and_check, shrink};
 
 /// A hook that plants `bug` on a fresh handle for each run.
 fn planting(bug: Option<PlantedBug>) -> impl Fn() -> Option<EngineHook> {
@@ -21,7 +21,8 @@ fn planting(bug: Option<PlantedBug>) -> impl Fn() -> Option<EngineHook> {
 }
 
 /// Runs seeds until one fails; checks it replays, shrinks it, and returns
-/// the properties it broke.
+/// the properties it broke. With `GRAFT_HARNESS_SEED` set (the printed
+/// replay command) it runs that seed only.
 fn caught(
     name: &str,
     shape: &Shape,
@@ -30,7 +31,11 @@ fn caught(
     seeds: u64,
 ) -> Vec<&'static str> {
     let hook = planting(engine);
-    for seed in 1..=seeds {
+    let range = match replay_seed() {
+        Some(s) => s..=s,
+        None => 1..=seeds,
+    };
+    for seed in range.clone() {
         let mut plan = Plan::generate(seed, shape);
         plan.bugs = wrapper.to_vec();
         let (report, _) = run_and_check(&plan, hook());
@@ -56,7 +61,7 @@ fn caught(
         props.dedup();
         return props;
     }
-    panic!("{name}: no seed in 1..={seeds} caught the planted bug");
+    panic!("{name}: no seed in {range:?} caught the planted bug");
 }
 
 fn racing() -> Shape {

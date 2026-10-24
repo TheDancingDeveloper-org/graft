@@ -99,6 +99,7 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         Command::Sync => cmd::sync::run(g),
         Command::Land(args) => cmd::land::run(g, args),
         Command::Revert(args) => cmd::revert::run(g, args),
+        Command::Pick(args) => cmd::pick::run(g, args),
         Command::Attest(args) => cmd::attest::run(g, args),
         Command::Ci(args) => cmd::ci::run(g, args),
         Command::Api(args) => api::run(g, args),

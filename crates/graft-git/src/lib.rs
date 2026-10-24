@@ -75,7 +75,8 @@ pub struct BadPath {
     pub path: String,
     /// The rule broken: a [`graft_model::PathError::reason`], the
     /// portability rule (`portability (case-clash)`), `duplicate-entry` or
-    /// `unsupported-mode`.
+    /// `unsupported-mode`; or `blob-bytes` for a blob over
+    /// [`import::MAX_BLOB_BYTES`](crate::import::MAX_BLOB_BYTES).
     pub reason: String,
     /// The first commit (in import order) that introduced it.
     pub commit: GitSha,
@@ -90,6 +91,16 @@ pub struct Unrepresentable {
     /// which validity rule 9 forbids) or `commit-shape` (the object does not
     /// start with a tree line and parent lines).
     pub reason: &'static str,
+}
+
+/// A tag import skipped: it names a tree or a blob, directly or through tag
+/// objects. The mirror map records tags of commits only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonCommitTag {
+    /// The tag name, without `refs/tags/`.
+    pub name: String,
+    /// What it peels to: `tree` or `blob`.
+    pub kind: &'static str,
 }
 
 /// A git interop failure.

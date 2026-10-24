@@ -264,7 +264,7 @@ Canonical payload: `u8 version(1)`, then for each entry
 | `author` | yes | `{ name, email, kind: human \| agent \| bot \| ci }` |
 | `authored_at` | yes | Client-supplied time: ms since epoch and UTC offset in minutes |
 | `message` | yes | Free text |
-| `metadata` | yes | Sorted string map. Keys under `graft.` are reserved (`graft.rebased-from`, `graft.reverts`, `graft.merged-paths`). Tool keys are namespaced (`vogt.session`, `vogt.work_item`, `review.url`) |
+| `metadata` | yes | Sorted string map. Keys under `graft.` are reserved (`graft.rebased-from`, `graft.reverts`, `graft.merged-paths`, `graft.merged-from`). Tool keys are namespaced (`vogt.session`, `vogt.work_item`, `review.url`) |
 
 A change is one of:
 
@@ -620,7 +620,7 @@ frame = magic "GRF1" ‖ u8 kind ‖ u8 codec (0 = raw, 1 = gzip) ‖ u64 uncomp
   `line_paths(repo, line, path, pos)`, `line_forks(repo, line, parent, pos)`
   (schema version 5, one row per forked line),
   `line_merges(repo, dst, dst_pos, src, src_changeset, src_pos)` (schema
-  version 6, one row per merge landing, §8.9), `holders(repo, object, holder)`,
+  version 7, one row per merge landing, §8.9), `holders(repo, object, holder)`,
   `uploads(repo, object, owner, expires)`, `doomed(repo, object, since, deleting)`,
   `lands(repo, draft, ref, landed, at)`, `tombstones(repo, id, at, reason)`.
 - Capacity: one writer handles thousands of small transactions a second on
@@ -1322,8 +1322,8 @@ one-parent changeset on the target line. What makes it a merge is a **merge
 point**, recorded beside the line index, which `MergeBase` reads.
 
 **Storage.** `line_merges(repo, dst, dst_pos, src, src_changeset, src_pos)`
-(SQLite schema version 6), one row per merge landing, keyed by
-`(repo, dst, dst_pos)` with an index on `(repo, dst, src, dst_pos)`. The
+(SQLite schema version 7; version 6 is the draft path index), one row per
+merge landing, keyed by `(repo, dst, dst_pos)` with an index on `(repo, dst, src, dst_pos)`. The
 latest row for a `(src, dst)` pair is that pair's merge point. Rows are
 append-only; a line position is never re-landed, so a row is never wrong. The
 changeset also carries `graft.merged-from = <src>@<src_changeset>` in its
@@ -1343,6 +1343,8 @@ query:
    that holds both holds it.
 
 Each rule reads only indexed rows "at or below a position", newest first.
+The `MetaStore` reads are `line_fork` (a line's fork row, D23) and the
+`line_merges` rows into a line at or below a position.
 
 **`MergeBase`.** For two changesets on lines, `MergeBase` first tries the
 merge points: walking `dst`'s merge rows newest first (rule 3 and 4 limited to

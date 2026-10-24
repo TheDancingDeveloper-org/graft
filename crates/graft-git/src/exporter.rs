@@ -133,11 +133,34 @@ where
         let tips: Vec<ChangesetId> = refs.iter().map(|(_, id)| *id).collect();
         self.write_history(&tips).await?;
         for (name, id) in refs {
-            let sha = self.sha_of(*id)?;
+            let commit = self.sha_of(*id)?;
+            let sha = self.tag_objects(name, commit)?.unwrap_or(commit);
             self.dest().set_ref(name, sha)?;
             self.report.refs.push((name.clone(), sha));
         }
         Ok(self.report.clone())
+    }
+
+    /// Writes the imported tag objects of `name` (a `refs/tags/` ref), inner
+    /// first, and returns the outermost one's sha. `None` when the ref is not
+    /// a tag, the tag was lightweight, or its record ends at another commit
+    /// (the tag was not imported from this history).
+    fn tag_objects(&self, name: &str, commit: GitSha) -> Result<Option<GitSha>, GitError> {
+        let Some(tag) = name.strip_prefix("refs/tags/") else {
+            return Ok(None);
+        };
+        let Some(record) = self.map.tag(tag)? else {
+            return Ok(None);
+        };
+        if record.commit != commit {
+            return Ok(None);
+        }
+        let dest = self.dest();
+        let mut sha = None;
+        for object in record.objects.iter().rev() {
+            sha = Some(dest.write(Kind::Tag, object)?);
+        }
+        Ok(sha)
     }
 
     async fn write_history(&mut self, tips: &[ChangesetId]) -> Result<(), GitError> {

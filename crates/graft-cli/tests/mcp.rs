@@ -289,6 +289,107 @@ fn outside_a_working_copy_only_the_repository_tools_answer() {
     assert!(!stderr.contains("s3cret"), "{stderr}");
 }
 
+/// `graft_pick` on the real engine: a landed changeset re-applied onto an
+/// older changeset (a release line's tip), then onto a tip that changed the
+/// same line since, which is a conflict.
+#[test]
+fn pick_re_applies_a_landed_changeset() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let files: Vec<(&str, &[u8])> = vec![
+        ("README.md", b"hello\n"),
+        ("src/lib.rs", b"fn a() {}\nfn b() {}\nfn c() {}\n"),
+    ];
+    let repo = rt.block_on(engine::EngineRepo::direct(REPO, &files));
+    let server = rt.block_on(graft_testkit::server::TestServer::tcp_workspaces(
+        repo.clone(),
+    ));
+    let url = server.url().to_owned();
+    let root = rt.block_on(repo.tip()).to_string();
+    let dir = scratch();
+    graft(dir.path())
+        .args(["--endpoint", &url, "clone", REPO, "app"])
+        .assert()
+        .success();
+    let app = dir.path().join("app");
+    let land = |path: &str, content: &str| {
+        std::fs::write(app.join(path), content).unwrap();
+        for args in [&["commit", "-m", path][..], &["land"][..]] {
+            graft(&app)
+                .env("GRAFT_AUTHOR_NAME", "Test Author")
+                .env("GRAFT_AUTHOR_EMAIL", "author@example.com")
+                .args(args)
+                .assert()
+                .success();
+        }
+        rt.block_on(repo.tip()).to_string()
+    };
+    let readme = land("README.md", "mine\n");
+    let lib = land("src/lib.rs", "fn a() {}\nfn b() {}\nfn c() { 1 }\n");
+    land("README.md", "later\n");
+
+    let mut mcp = Mcp::start(&app, &["--endpoint", &url], &[]);
+    let picked = mcp.ok(
+        "graft_pick",
+        json!({"repo": REPO, "changeset": lib, "onto": root}),
+    );
+    assert_eq!(picked["picked"], json!(lib), "{picked}");
+    assert_eq!(picked["onto"], json!(root), "{picked}");
+    assert_eq!(picked["changed"], true, "{picked}");
+    let read = mcp.ok(
+        "graft_read",
+        json!({"repo": REPO, "at": picked["id"], "path": "README.md"}),
+    );
+    assert_eq!(read["content"], "hello\n", "only the picked changes");
+
+    let (conflict, error) = mcp.call(
+        "graft_pick",
+        json!({"repo": REPO, "changeset": readme, "onto": "main"}),
+    );
+    assert!(error, "{conflict}");
+    assert_eq!(conflict["kind"], "conflict", "{conflict}");
+
+    // A draft is refused, and nothing moves: no new changeset on any line.
+    std::fs::write(app.join("docs.md"), "draft\n").unwrap();
+    graft(&app)
+        .env("GRAFT_AUTHOR_NAME", "Test Author")
+        .env("GRAFT_AUTHOR_EMAIL", "author@example.com")
+        .args(["commit", "-m", "draft"])
+        .assert()
+        .success();
+    let cli_status = || {
+        let out = graft(&app).args(["--json", "status"]).assert().success();
+        json_out(out.get_output())
+    };
+    let status = cli_status();
+    let draft = status["head"].clone();
+    assert!(draft.is_string(), "{status}");
+    let tip = rt.block_on(repo.tip());
+    let (refused, error) = mcp.call(
+        "graft_pick",
+        json!({"repo": REPO, "changeset": draft, "onto": root}),
+    );
+    assert!(error, "{refused}");
+    assert_eq!(refused["kind"], "invalid_argument", "{refused}");
+    assert_eq!(rt.block_on(repo.tip()), tip);
+    assert_eq!(
+        cli_status()["head"],
+        draft,
+        "the workspace head did not move"
+    );
+
+    let (both, error) = mcp.call(
+        "graft_pick",
+        json!({"repo": REPO, "changeset": lib, "onto": root, "workspace": "w"}),
+    );
+    assert!(error);
+    assert_eq!(both["kind"], "invalid_argument", "{both}");
+    mcp.finish();
+}
+
 #[test]
 fn the_token_never_reaches_the_output() {
     let s = serve();

@@ -1,5 +1,5 @@
 //! The mirror map: graft ids ↔ git shas, the raw headers of imported commits,
-//! and the raw git trees graft's model cannot express. Owned by the mirror,
+//! the raw tag objects of imported tags, and the raw git trees graft's model cannot express. Owned by the mirror,
 //! outside the graft server (`docs/design.md` §11).
 
 use std::collections::HashMap;
@@ -41,6 +41,17 @@ pub struct ImportedCommit {
     pub raw_trees: Vec<RawTree>,
 }
 
+/// An imported annotated (or signed, or nested) tag: the raw tag objects its
+/// ref peels through, so the export reproduces the ref's sha. Lightweight
+/// tags have no record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedTag {
+    /// The commit the chain ends at.
+    pub commit: GitSha,
+    /// The raw tag objects, outermost (the one the ref names) first.
+    pub objects: Vec<Vec<u8>>,
+}
+
 /// Storage for the mirror map (SQLite in `graft-mirror`).
 pub trait MirrorMap: Send + Sync {
     /// The git sha recorded for a changeset.
@@ -51,6 +62,11 @@ pub trait MirrorMap: Send + Sync {
     fn put_imported(&self, id: ChangesetId, commit: ImportedCommit) -> Result<(), GitError>;
     /// The record of an imported commit.
     fn imported(&self, id: ChangesetId) -> Result<Option<ImportedCommit>, GitError>;
+    /// Records the tag objects of an imported tag (name without
+    /// `refs/tags/`), replacing any earlier record.
+    fn put_tag(&self, name: &str, tag: ImportedTag) -> Result<(), GitError>;
+    /// The record of an imported tag.
+    fn tag(&self, name: &str) -> Result<Option<ImportedTag>, GitError>;
     /// Records the git sha of blobs (the export's blob sha cache).
     fn put_blob_shas(&self, pairs: &[(BlobId, GitSha)]) -> Result<(), GitError>;
     /// The git sha recorded for a blob.
@@ -62,6 +78,7 @@ struct Maps {
     by_changeset: HashMap<ChangesetId, ImportedCommit>,
     by_sha: HashMap<GitSha, ChangesetId>,
     blobs: HashMap<BlobId, GitSha>,
+    tags: HashMap<String, ImportedTag>,
 }
 
 /// An in-memory [`MirrorMap`], for tests and one-shot tools.
@@ -109,6 +126,15 @@ impl MirrorMap for MemoryMirrorMap {
 
     fn imported(&self, id: ChangesetId) -> Result<Option<ImportedCommit>, GitError> {
         Ok(self.lock().by_changeset.get(&id).cloned())
+    }
+
+    fn put_tag(&self, name: &str, tag: ImportedTag) -> Result<(), GitError> {
+        self.lock().tags.insert(name.to_owned(), tag);
+        Ok(())
+    }
+
+    fn tag(&self, name: &str) -> Result<Option<ImportedTag>, GitError> {
+        Ok(self.lock().tags.get(name).cloned())
     }
 
     fn put_blob_shas(&self, pairs: &[(BlobId, GitSha)]) -> Result<(), GitError> {
