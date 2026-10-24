@@ -84,7 +84,7 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "graft_draft_overlap",
-        description: "Other live workspaces with open drafts on these paths (no contents).",
+        description: "Other live workspaces with open drafts on these paths (no contents). Needs repo:<r>:drafts.",
         read_only: true,
     },
     ToolSpec {

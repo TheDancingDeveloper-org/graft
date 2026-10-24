@@ -28,13 +28,25 @@ async fn draft(
     before: &BTreeMap<String, Vec<u8>>,
     files: &[(&str, &str)],
 ) -> ChangesetId {
+    draft_leased(c, name, base, before, files, 600_000).await
+}
+
+/// [`draft`] with a lease of `lease_ms`.
+async fn draft_leased(
+    c: &mut Clients,
+    name: &str,
+    base: ChangesetId,
+    before: &BTreeMap<String, Vec<u8>>,
+    files: &[(&str, &str)],
+    lease_ms: u64,
+) -> ChangesetId {
     c.workspaces
         .open_workspace(pb::OpenWorkspaceRequest {
             repo: "r".into(),
             name: Some(name.into()),
             line: "main".into(),
             at: None,
-            lease_ms: 600_000,
+            lease_ms,
         })
         .await
         .expect("open");
@@ -150,9 +162,12 @@ async fn drafts_on_one_file_see_each_other() {
     let o = overlap(&mut bo, &["src"]).await.expect("bob asks a prefix");
     assert_eq!(seen(&o), [("wa".into(), "src/a.rs".into())]);
 
-    // Disjoint drafts don't see each other.
-    let o = overlap(&mut ca, &["docs"]).await.expect("carol asks");
-    assert!(o.hits.is_empty(), "{o:?}");
+    // Disjoint drafts don't see each other: the drafts on src don't
+    // answer for docs, and carol's on docs don't answer for src.
+    let o = overlap(&mut al, &["docs"]).await.expect("alice asks docs");
+    assert_eq!(seen(&o), [("wc".into(), "docs/c.md".into())]);
+    let o = overlap(&mut bo, &["src"]).await.expect("bob asks src");
+    assert!(seen(&o).iter().all(|(w, _)| w != "wc"), "{o:?}");
     let o = overlap(&mut al, &["src/b.rs"])
         .await
         .expect("untouched file");
@@ -214,4 +229,43 @@ async fn drafts_on_one_file_see_each_other() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "fsck: {stdout}");
     assert!(stdout.contains("2 workspaces, 0 problems"), "{stdout}");
+}
+
+/// A workspace whose lease has lapsed drops out of the answer, though GC
+/// has not cleared its rows yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_workspace_drops_out() {
+    let site = Site::new("server-drafts-expired", "");
+    let admin = site.mint(&["repo:r:admin"]);
+    let scopes = ["repo:r:write", "repo:r:drafts"];
+    let alice = site.mint_as("alice", &scopes, 3600);
+    let bob = site.mint_as("bob", &scopes, 3600);
+    let server = site.start();
+
+    let mut a = server.clients(Some(&admin)).await;
+    a.create_repo("r").await.expect("create");
+    let root = BTreeMap::from([("src/a.rs".to_string(), b"a0".to_vec())]);
+    let tip = a
+        .commit("r", None, &BTreeMap::new(), &root, 0)
+        .await
+        .expect("commit")
+        .id;
+    a.set_line("r", "main", tip).await.expect("line");
+
+    let mut al = server.clients(Some(&alice)).await;
+    let mut bo = server.clients(Some(&bob)).await;
+    draft_leased(&mut bo, "wb", tip, &root, &[("src/a.rs", "BOB")], 1_000).await;
+    let o = overlap(&mut al, &["src/a.rs"]).await.expect("while live");
+    assert_eq!(seen(&o), [("wb".into(), "src/a.rs".into())]);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    let o = overlap(&mut al, &["src/a.rs"]).await.expect("after expiry");
+    assert!(o.hits.is_empty() && o.workspaces.is_empty(), "{o:?}");
+
+    // Its rows outlive the lease until GC; fsck takes that as consistent.
+    drop(server);
+    let out = site.admin(&["fsck", "r"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "fsck: {stdout}");
+    assert!(stdout.contains("0 problems"), "{stdout}");
 }

@@ -342,6 +342,7 @@ impl MetaStore for SqliteMetaStore {
             .await?
         {
             Written::Run(outcomes) => Ok(outcomes),
+            Written::RunErr(e) => Err(e),
             _ => Err(StoreError::Backend("unexpected writer reply".to_owned())),
         }
     }

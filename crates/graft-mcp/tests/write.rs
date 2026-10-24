@@ -290,6 +290,13 @@ impl WorkspaceApi for Rig {
     async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
         self.engine.get_workspace(cx, req).await
     }
+    async fn overlapping_drafts(
+        &self,
+        cx: &CallContext,
+        req: OverlappingDrafts,
+    ) -> ApiResult<DraftOverlap> {
+        self.engine.overlapping_drafts(cx, req).await
+    }
     async fn list_workspaces(
         &self,
         cx: &CallContext,
@@ -998,4 +1005,74 @@ async fn upstream_predicts_the_merge_of_a_workspaces_drafts_without_moving_anyth
         )
         .await;
     agent.fails("graft_upstream", json!({"repo": REPO})).await;
+}
+
+/// WI-2310: `graft_draft_overlap` names the other agent's workspace with a
+/// draft on the same file, never contents or head ids; it needs the drafts
+/// scope, and its arguments are bounded.
+#[tokio::test]
+async fn draft_overlap_names_the_other_workspace_and_needs_the_scope() {
+    let (rig, _) = Rig::new().await;
+    let addr = serve(rig.clone()).await;
+    let scopes = ["repo:r:write", "repo:r:drafts"];
+    let mut one = Agent::connect(addr, token("agent-1", &scopes)).await;
+    let mut two = Agent::connect(addr, token("agent-2", &scopes)).await;
+    let ws_one = one.open().await;
+    let ws_two = two.open().await;
+    for (agent, ws, body) in [
+        (&mut one, &ws_one, "ONE-SECRET\n"),
+        (&mut two, &ws_two, "TWO-SECRET\n"),
+    ] {
+        agent
+            .ok(
+                "graft_commit",
+                json!({
+                    "repo": REPO, "workspace": ws, "message": "draft",
+                    "files": [{"path": "README.md", "content": body}],
+                }),
+            )
+            .await;
+    }
+
+    let found = one
+        .ok(
+            "graft_draft_overlap",
+            json!({"repo": REPO, "paths": ["README.md"]}),
+        )
+        .await;
+    assert_eq!(found["line"], "main");
+    let overlaps = found["overlaps"].as_array().expect("overlaps");
+    assert_eq!(overlaps.len(), 1, "{found}");
+    assert_eq!(overlaps[0]["workspace"], ws_two.as_str());
+    assert_eq!(overlaps[0]["owner"], "agent-2");
+    assert_eq!(overlaps[0]["paths"], json!(["README.md"]));
+    assert_eq!(found["next"], Value::Null);
+    let text = found.to_string();
+    assert!(!text.contains("SECRET"), "{text}");
+    let mine = one
+        .ok(
+            "graft_draft_overlap",
+            json!({"repo": REPO, "paths": ["README.md"], "include_own": true}),
+        )
+        .await;
+    assert_eq!(mine["overlaps"].as_array().map(Vec::len), Some(2), "{mine}");
+
+    for bad in [
+        json!({"repo": REPO, "paths": []}),
+        json!({"repo": REPO, "paths": ["README.md"], "limit": 0}),
+        json!({"repo": REPO, "paths": ["../x"]}),
+    ] {
+        one.fails("graft_draft_overlap", bad).await;
+    }
+    let mut writer = Agent::connect(addr, token("agent-3", WRITER)).await;
+    let refused = writer
+        .fails(
+            "graft_draft_overlap",
+            json!({"repo": REPO, "paths": ["README.md"]}),
+        )
+        .await;
+    assert!(
+        refused.to_string().contains("permission_denied"),
+        "{refused}"
+    );
 }
