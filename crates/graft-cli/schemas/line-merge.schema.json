@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft line merge --json",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "outcome",
+        "src",
+        "dst",
+        "landed",
+        "line_version",
+        "pos",
+        "base",
+        "via",
+        "merged_paths"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "const": "merged"
+        },
+        "src": {
+          "type": "string"
+        },
+        "dst": {
+          "type": "string"
+        },
+        "landed": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "line_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pos": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        },
+        "via": {
+          "description": "How the merge base was found (D29): a merge point, a fork row, or the ancestry walk when the bounded search fell back.",
+          "enum": [
+            "merge_point",
+            "fork",
+            "ancestry"
+          ]
+        },
+        "merged_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "outcome",
+        "src",
+        "dst",
+        "landed",
+        "line_version",
+        "pos",
+        "base",
+        "via",
+        "merged_paths",
+        "tip"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "const": "up_to_date"
+        },
+        "src": {
+          "type": "string"
+        },
+        "dst": {
+          "type": "string"
+        },
+        "landed": {
+          "type": "null"
+        },
+        "line_version": {
+          "type": "null"
+        },
+        "pos": {
+          "type": "null"
+        },
+        "base": {
+          "type": "null"
+        },
+        "via": {
+          "type": "null"
+        },
+        "merged_paths": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "tip": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+        }
+      }
+    }
+  ]
+}

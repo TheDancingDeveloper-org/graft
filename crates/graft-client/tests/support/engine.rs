@@ -883,6 +883,18 @@ impl RepoApi for EngineRepo {
         let out = self.engine.land(&c, req).await;
         self.leave("Land", out)
     }
+    async fn line_merge(&self, cx: &CallContext, req: LineMerge) -> ApiResult<LineMergeOutcome> {
+        delegate!(self, "LineMerge", cx, |c| self
+            .engine
+            .line_merge(&c, req)
+            .await)
+    }
+    async fn line_merges(&self, cx: &CallContext, req: LineMerges) -> ApiResult<LineMergePage> {
+        delegate!(self, "LineMerges", cx, |c| self
+            .engine
+            .line_merges(&c, req)
+            .await)
+    }
     async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
         delegate!(self, "Attest", cx, |c| self.engine.attest(&c, req).await)
     }

@@ -1056,3 +1056,102 @@ fn tag_create_then_list_and_a_tag_never_moves() {
     let clash = outside(&["--json", "line", "create", "tags/v1.0", "--from", "main"]).failure();
     assert_eq!(error_of(&clash)["kind"], json!("ref_conflict"));
 }
+
+/// D29 through the CLI: `line merge` lands a clean merge and records a
+/// merge point, says how the base was found, answers up to date the second
+/// time, exits 3 on a conflict with the tip, base and source ids, and
+/// `land --merged-from` lands the resolution with its merge point.
+#[test]
+fn line_merge_then_merges_and_a_conflict_resolved_with_merged_from() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let outside = |args: &[&str]| {
+        graft(dir.path())
+            .args(["--endpoint", &s.url, "--repo", "demo"])
+            .args(args)
+            .assert()
+    };
+    outside(&["line", "create", "develop", "--from", "main"]).success();
+    graft(dir.path())
+        .args([
+            "--endpoint",
+            &s.url,
+            "clone",
+            "demo",
+            "dev",
+            "--line",
+            "develop",
+        ])
+        .assert()
+        .success();
+    let dev = dir.path().join("dev");
+    fs::write(dev.join("docs/guide.md"), "guide, developed\n").unwrap();
+    json_run(&dev, &["commit", "-m", "develop the guide"]);
+    json_run(&dev, &["land"]);
+
+    let merged = json_out(
+        outside(&["--json", "line", "merge", "develop", "--into", "main"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("line-merge", &merged);
+    assert_eq!(merged["outcome"], json!("merged"), "{merged}");
+    assert_eq!(merged["via"], json!("fork"), "{merged}");
+    let again = json_out(
+        outside(&["--json", "line", "merge", "develop", "--into", "main"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("line-merge", &again);
+    assert_eq!(again["outcome"], json!("up_to_date"), "{again}");
+
+    let list = json_out(
+        outside(&["--json", "line", "merges", "main"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("line-merges", &list);
+    assert_eq!(list["merges"].as_array().map(Vec::len), Some(1), "{list}");
+    assert_eq!(list["merges"][0]["src"], json!("develop"));
+    assert_eq!(list["merges"][0]["dst_changeset"], merged["landed"]);
+    let human = stdout(&outside(&["line", "merges", "main", "--from", "develop"]).success());
+    assert!(human.contains("merged develop@"), "{human}");
+
+    // Both lines change the README: the merge conflicts and nothing moves.
+    fs::write(dev.join("README.md"), "from develop\n").unwrap();
+    json_run(&dev, &["commit", "-m", "develop readme"]);
+    json_run(&dev, &["land"]);
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join("README.md"), "from main\n").unwrap();
+    json_run(&app, &["commit", "-m", "main readme"]);
+    json_run(&app, &["land"]);
+    let conflict = outside(&["--json", "line", "merge", "develop", "--into", "main"]).code(3);
+    let error = error_of(&conflict);
+    assert_eq!(error["kind"], json!("conflict"), "{error}");
+    assert_eq!(error["conflicts"][0]["path"], json!("README.md"));
+    assert_eq!(error["base"], merged["landed"], "{error}");
+    let source = error["source"].as_str().expect("source").to_owned();
+    let tip = error["onto"].as_str().expect("onto").to_owned();
+
+    // Resolve on main and land it as the merge of `source`.
+    fs::write(app.join("README.md"), "from both\n").unwrap();
+    json_run(&app, &["commit", "-m", "merge develop"]);
+    let from = format!("develop@{source}");
+    let landed = json_run(&app, &["land", "--merged-from", &from]);
+    assert_eq!(landed["outcome"], json!("landed"), "{landed}");
+    assert_ne!(landed["landed"], json!(tip));
+    let list = json_out(
+        outside(&["--json", "line", "merges", "main", "--limit", "1"])
+            .success()
+            .get_output(),
+    );
+    assert_valid("line-merges", &list);
+    assert_eq!(list["merges"][0]["src_changeset"], json!(source), "{list}");
+    assert!(list["next"].is_string(), "{list}");
+    let usage = run(&app, &["land", "--merged-from", "no-at-sign"]).failure();
+    assert!(
+        stderr(&usage).contains("<line>@<rev>"),
+        "{}",
+        stderr(&usage)
+    );
+}

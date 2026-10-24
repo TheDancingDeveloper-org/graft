@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft line merges --json",
+  "type": "object",
+  "required": [
+    "dst",
+    "merges",
+    "next"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "dst": {
+      "type": "string"
+    },
+    "merges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "src",
+          "src_changeset",
+          "src_pos",
+          "dst_changeset",
+          "dst_pos"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "src": {
+            "type": "string"
+          },
+          "src_changeset": {
+            "type": "string",
+            "pattern": "^[a-z][0-9a-f]{64}$",
+            "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+          },
+          "src_pos": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dst_changeset": {
+            "type": "string",
+            "pattern": "^[a-z][0-9a-f]{64}$",
+            "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+          },
+          "dst_pos": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "next": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

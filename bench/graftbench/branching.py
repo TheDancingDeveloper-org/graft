@@ -27,6 +27,14 @@ choose BASE for a repeated merge between the same two lines:
 - `mergebase`: it asks the server (`graft api merge_base`), which can only
   answer the original fork point, because a carry records no second parent.
 
+A third variant uses the server's merge (D29, WI-2368):
+
+- `linemerge`: `graft line merge SRC --into DST` merges on the server and
+  records a merge point, so the next merge starts from it. On a conflict the
+  error carries the base, the source and the tip; the client carries
+  base..source into a working copy on DST, resolves by rule and lands with
+  `graft land --merged-from SRC@SOURCE`, which records the merge point.
+
 Tags: graft has no tag command (tag refs come only from `graft-mirror
 follow`, WI-2342), so a tag is a line `tags/<name>` made with
 `graft line create --from`. It is mutable, unlike a git tag.
@@ -57,7 +65,7 @@ PAD = 4
 VALUE_RE = re.compile(r'^([A-Za-z0-9_]+) = "([^"]*)"$')
 MAX_ATTEMPTS = 12
 STRATEGIES = ("trunk", "gitflow", "release")
-GRAFT_VARIANTS = ("tracked", "mergebase")
+GRAFT_VARIANTS = ("tracked", "mergebase", "linemerge")
 
 
 # --------------------------------------------------------------- content
@@ -334,11 +342,12 @@ class GraftRun:
             blocks += b
         return blocks
 
-    def land(self, wc: Path) -> str:
+    def land(self, wc: Path, extra: list[str] | None = None) -> str:
         sync = False
         hit = False
         for _ in range(MAX_ATTEMPTS):
-            r, j = self.jcall(["land", "--sync"] if sync else ["land"], cwd=wc, check=False)
+            args = (["land", "--sync"] if sync else ["land"]) + (extra or [])
+            r, j = self.jcall(args, cwd=wc, check=False)
             kind = j.get("error", {}).get("kind")
             if r.rc == 0:
                 self.c.line_merged_paths += len(j.get("preflight", {}).get("merges_cleanly", []) or [])
@@ -391,7 +400,7 @@ class GraftRun:
             return None
         return base64.b64decode(j["content"]) if j.get("encoding") == "base64" else j["content"].encode()
 
-    def carry(self, base: str, src: str, dst: str) -> None:
+    def carry(self, base: str, src: str, dst: str, land_extra: list[str] | None = None) -> None:
         """Applies base..src onto dst's tip in a working copy and lands it."""
         self.c.carries += 1
         wc = self.wc("int", dst)
@@ -429,11 +438,36 @@ class GraftRun:
         self.c.commands += 1
         if not json.loads(st.out).get("clean", True):
             self.call(["commit", "-m", f"carry {src[:12]} onto {dst}"], cwd=wc)
-            self.land(wc)
+            self.land(wc, land_extra)
         else:
             self.notes.append(f"carry onto {dst}: nothing to land")
 
+    def line_merge(self, op: Op) -> None:
+        """`graft line merge`; on a conflict, carry from the server's base and
+        land the resolution with `--merged-from`."""
+        for _ in range(MAX_ATTEMPTS):
+            args = ["line", "merge", op.src, "--into", op.line, "--repo", self.repo]
+            r, j = self.jcall(args, cwd=self.w, check=False)
+            if r.rc == 0:
+                self.c.carries += 1
+                self.c.carry_clean += 1
+                self.c.line_merged_paths += len(j.get("merged_paths", []) or [])
+                if j.get("via") == "ancestry":
+                    self.notes.append(f"merge {op.src} -> {op.line}: base via ancestry")
+                return
+            if r.rc == 4:
+                continue
+            e = j.get("error", {})
+            if r.rc == 3 and e.get("kind") == "conflict" and e.get("base") and e.get("source"):
+                self.carry(e["base"], e["source"], op.line, ["--merged-from", f"{op.src}@{e['source']}"])
+                return
+            raise StepError(f"graft line merge exit {r.rc} ({e.get('kind')}): {(r.err or r.out).strip()[:300]}")
+        raise StepError(f"graft line merge did not succeed in {MAX_ATTEMPTS} attempts")
+
     def merge(self, op: Op) -> None:
+        if self.variant == "linemerge":
+            self.line_merge(op)
+            return
         src_tip = self.tip(op.src)
         if self.variant == "tracked" and (op.src, op.line) in self.carried:
             base = self.carried[(op.src, op.line)]

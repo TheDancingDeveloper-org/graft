@@ -215,18 +215,20 @@ fn workspace_ref() -> impl Strategy<Value = WorkspaceRef> {
     (text(), text()).prop_map(|(repo, name)| WorkspaceRef { repo, name })
 }
 fn api_error() -> impl Strategy<Value = ApiError> {
-    let conflict_path = (
-        text(),
-        proptest::option::of(oid()),
-        proptest::option::of(oid()),
-        proptest::option::of(oid()),
-    )
-        .prop_map(|(path, base, ours, theirs)| ConflictPath {
-            path,
-            base,
-            ours,
-            theirs,
-        });
+    let conflict_path = || {
+        (
+            text(),
+            proptest::option::of(oid()),
+            proptest::option::of(oid()),
+            proptest::option::of(oid()),
+        )
+            .prop_map(|(path, base, ours, theirs)| ConflictPath {
+                path,
+                base,
+                ours,
+                theirs,
+            })
+    };
     prop_oneof![
         text().prop_map(|what| ApiError::NotFound { what }),
         cid().prop_map(|id| ApiError::Collected { id }),
@@ -235,7 +237,7 @@ fn api_error() -> impl Strategy<Value = ApiError> {
         cid().prop_map(|id| ApiError::UnknownParent { id }),
         oids().prop_map(|ids| ApiError::MissingObjects { ids }),
         (text(), ocid()).prop_map(|(name, actual)| ApiError::RefConflict { name, actual }),
-        (prop::collection::vec(conflict_path, 0..3), cid())
+        (prop::collection::vec(conflict_path(), 0..3), cid())
             .prop_map(|(paths, onto)| ApiError::Conflict { paths, onto }),
         (text(), cid()).prop_map(|(line, tip)| ApiError::Contended { line, tip }),
         (text(), text()).prop_map(|(policy, detail)| ApiError::Rejected { policy, detail }),
@@ -247,6 +249,17 @@ fn api_error() -> impl Strategy<Value = ApiError> {
         any::<u64>().prop_map(|retry_after_ms| ApiError::Unavailable { retry_after_ms }),
         Just(ApiError::Unauthenticated),
         text().prop_map(|server| ApiError::IncompatibleProtocol { server }),
+        (
+            prop::collection::vec(conflict_path(), 0..3),
+            cid(),
+            cid(),
+            cid()
+        )
+            .prop_map(
+                |(paths, onto, base, source)| ApiError::MergeConflict(Box::new(
+                    graft_proto_merge_conflict(paths, onto, base, source)
+                ))
+            ),
     ]
 }
 
@@ -951,4 +964,96 @@ fn draft_overlap_types_round_trip() {
                 next,
             }),
     );
+}
+
+#[test]
+fn line_merge_types_round_trip() {
+    let via = prop_oneof![
+        Just(MergeBaseVia::MergePoint),
+        Just(MergeBaseVia::Fork),
+        Just(MergeBaseVia::Ancestry),
+    ];
+    check::<LineMerge, pb::LineMergeRequest, _>(
+        "LineMerge",
+        (
+            text(),
+            text(),
+            text(),
+            ocid(),
+            merge_mode(),
+            proptest::option::of(any::<u64>()),
+            otext(),
+        )
+            .prop_map(
+                |(repo, src, dst, src_at, merge, deadline_ms, message)| LineMerge {
+                    repo,
+                    src,
+                    dst,
+                    src_at,
+                    merge,
+                    deadline_ms,
+                    message,
+                },
+            ),
+    );
+    check::<LineMergeOutcome, pb::LineMergeOutcome, _>(
+        "LineMergeOutcome",
+        prop_oneof![
+            (cid(), any::<u64>(), any::<u64>(), paths(), cid(), via).prop_map(
+                |(landed, line_version, pos, merged_paths, base, via)| {
+                    LineMergeOutcome::Merged {
+                        landed,
+                        line_version,
+                        pos,
+                        merged_paths,
+                        base,
+                        via,
+                    }
+                }
+            ),
+            cid().prop_map(|tip| LineMergeOutcome::UpToDate { tip }),
+        ],
+    );
+    check::<LineMerges, pb::LineMergesRequest, _>(
+        "LineMerges",
+        (text(), text(), otext(), page()).prop_map(|(repo, dst, src, page)| LineMerges {
+            repo,
+            dst,
+            src,
+            page,
+        }),
+    );
+    let point = (text(), cid(), any::<u64>(), cid(), any::<u64>()).prop_map(
+        |(src, src_changeset, src_pos, dst_changeset, dst_pos)| LineMergePoint {
+            src,
+            src_changeset,
+            src_pos,
+            dst_changeset,
+            dst_pos,
+        },
+    );
+    check::<LineMergePage, pb::LineMergePage, _>(
+        "LineMergePage",
+        (prop::collection::vec(point, 0..3), otext())
+            .prop_map(|(merges, next)| LineMergePage { merges, next }),
+    );
+}
+
+fn graft_proto_merge_conflict(
+    paths: Vec<ConflictPath>,
+    onto: ChangesetId,
+    base: ChangesetId,
+    source: ChangesetId,
+) -> crate::error::MergeConflict {
+    crate::error::MergeConflict {
+        paths,
+        onto,
+        base,
+        source,
+    }
+}
+
+#[test]
+fn the_merge_conflict_variant_does_not_grow_api_error() {
+    assert!(std::mem::size_of::<ApiError>() <= 64);
 }
