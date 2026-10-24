@@ -56,8 +56,10 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
 5. **Sync** to pick up what others landed: `g sync`. Exit 0 means you are on
    the line tip (your stack is rebased). Exit 3 means conflicts, see below.
 6. **Land**: `g land` (add `--squash` to land the stack as one changeset).
-   Landing is immediate: there is no attestation to wait for. Exit 0 means
-   your change is on `trial-1`.
+   Landing is immediate: there is no attestation to wait for. `g land` first
+   runs the pre-land check (D27): a dry-run rebase that stops the land on a
+   real conflict before anything is sent; `--no-check` skips it. Exit 0
+   means your change is on `trial-1`.
 
 ## Conflicts (exit 3 from `g sync` or `g land`)
 
