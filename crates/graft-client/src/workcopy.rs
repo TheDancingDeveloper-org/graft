@@ -41,6 +41,7 @@ use crate::fetch::{
     FetchOptions, FetchStats, fetch_objects, fetch_slice, load_blob, load_tree, over_budget,
     resolve_root,
 };
+use crate::ignore::{Ignore, Rules};
 use crate::sparse::{escape, unescape};
 use crate::{Error, Result, Sparse};
 
@@ -226,6 +227,15 @@ impl FileStatus {
             FileStatus::Added(p) | FileStatus::Modified(p) | FileStatus::Deleted(p) => p,
         }
     }
+}
+
+/// An untracked entry the ignore files ignore.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Ignored {
+    /// The path.
+    pub path: RepoPath,
+    /// Whether it is a directory (never entered).
+    pub dir: bool,
 }
 
 /// What an update did.
@@ -531,7 +541,7 @@ impl WorkingCopy {
                 out.push(change);
             }
         }
-        for path in self.files_in_slice()? {
+        for path in self.files_in_slice(None)? {
             if !self.index.entries.contains_key(&path) {
                 out.push(FileStatus::Added(path));
             }
@@ -568,23 +578,57 @@ impl WorkingCopy {
         Ok((kind != entry.kind || id != entry.id).then(|| FileStatus::Modified(path.clone())))
     }
 
-    /// Every file on disk in the slice (never descending elsewhere).
-    fn files_in_slice(&self) -> io::Result<BTreeSet<RepoPath>> {
+    /// Every file on disk in the slice (never descending elsewhere), less
+    /// the ignored ones, which go to `ignored` when given.
+    fn files_in_slice(
+        &self,
+        mut ignored: Option<&mut Vec<Ignored>>,
+    ) -> io::Result<BTreeSet<RepoPath>> {
         let mut out = BTreeSet::new();
+        let mut ignore = Ignore::default();
         if self.sparse.is_full() {
-            walk(&self.root, None, &mut out)?;
+            walk(&self.root, None, &mut ignore, &mut out, &mut ignored)?;
             return Ok(out);
         }
+        ignore.push(Rules::load(&self.root, None)?);
         let mut dirs = RealDirs::default();
-        for prefix in &self.sparse.prefixes {
+        'prefixes: for prefix in &self.sparse.prefixes {
             // Never list through a symlinked parent.
             if !dirs.parent_is_real(&self.root, prefix)? {
                 continue;
             }
-            match fs::symlink_metadata(self.root.join(prefix.as_str())) {
-                Ok(m) if m.is_dir() => {
-                    walk(&self.root.join(prefix.as_str()), Some(prefix), &mut out)?
+            // The rules of the directories above the prefix, and whether
+            // one of those directories is itself ignored.
+            let mut scoped = ignore.clone();
+            let mut above: Option<RepoPath> = None;
+            for name in prefix.components().take(prefix.components().count() - 1) {
+                let dir = match &above {
+                    None => RepoPath::new(name),
+                    Some(a) => a.join(name),
                 }
+                .map_err(|e| io::Error::new(ErrorKind::InvalidData, format!("{e:?}")))?;
+                if scoped.is_ignored(&dir, true) {
+                    continue 'prefixes;
+                }
+                scoped.push(Rules::load(&self.root.join(dir.as_str()), Some(&dir))?);
+                above = Some(dir);
+            }
+            match fs::symlink_metadata(self.root.join(prefix.as_str())) {
+                Ok(m) if scoped.is_ignored(prefix, m.is_dir()) => {
+                    if let Some(list) = &mut ignored {
+                        list.push(Ignored {
+                            path: prefix.clone(),
+                            dir: m.is_dir(),
+                        });
+                    }
+                }
+                Ok(m) if m.is_dir() => walk(
+                    &self.root.join(prefix.as_str()),
+                    Some(prefix),
+                    &mut scoped,
+                    &mut out,
+                    &mut ignored,
+                )?,
                 Ok(_) => {
                     out.insert(prefix.clone());
                 }
@@ -599,11 +643,29 @@ impl WorkingCopy {
                     continue;
                 }
                 if let Some(path) = entry_path(None, &entry) {
-                    out.insert(path);
+                    if ignore.is_ignored(&path, false) {
+                        if let Some(list) = &mut ignored {
+                            list.push(Ignored { path, dir: false });
+                        }
+                    } else {
+                        out.insert(path);
+                    }
                 }
             }
         }
         Ok(out)
+    }
+
+    /// The untracked entries in the slice that the ignore files ignore
+    /// (`.gitignore`, `.graftignore`), sorted. An ignored directory is one
+    /// entry: it is never entered. Tracked files are never ignored, so a
+    /// file the index holds is left out.
+    pub fn ignored(&self) -> io::Result<Vec<Ignored>> {
+        let mut list = Vec::new();
+        self.files_in_slice(Some(&mut list))?;
+        list.retain(|i| i.dir || !self.index.entries.contains_key(&i.path));
+        list.sort();
+        Ok(list)
     }
 
     /// The snapshot the files and the index hold: the head draft, else the
@@ -1218,19 +1280,46 @@ fn remove_entry(root: &Path, path: &RepoPath) -> Result<()> {
 }
 
 /// Collects every file under `dir` (whose repository path is `prefix`),
-/// skipping `.graft` at the root, checkout temp files and names that are
-/// not valid repository paths.
-fn walk(dir: &Path, prefix: Option<&RepoPath>, out: &mut BTreeSet<RepoPath>) -> io::Result<()> {
+/// skipping `.graft` at the root, checkout temp files, names that are not
+/// valid repository paths, and what the ignore files ignore. An ignored
+/// directory is never entered; ignored entries go to `ignored` when given.
+fn walk(
+    dir: &Path,
+    prefix: Option<&RepoPath>,
+    ignore: &mut Ignore,
+    out: &mut BTreeSet<RepoPath>,
+    ignored: &mut Option<&mut Vec<Ignored>>,
+) -> io::Result<()> {
+    ignore.push(Rules::load(dir, prefix)?);
+    let result = walk_entries(dir, prefix, ignore, out, ignored);
+    ignore.pop();
+    result
+}
+
+fn walk_entries(
+    dir: &Path,
+    prefix: Option<&RepoPath>,
+    ignore: &mut Ignore,
+    out: &mut BTreeSet<RepoPath>,
+    ignored: &mut Option<&mut Vec<Ignored>>,
+) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let Some(path) = entry_path(prefix, &entry) else {
             continue;
         };
-        if entry.file_type()?.is_dir() {
-            if prefix.is_none() && path.as_str() == GRAFT_DIR {
-                continue;
+        let is_dir = entry.file_type()?.is_dir();
+        if is_dir && prefix.is_none() && path.as_str() == GRAFT_DIR {
+            continue;
+        }
+        if ignore.is_ignored(&path, is_dir) {
+            if let Some(list) = ignored {
+                list.push(Ignored { path, dir: is_dir });
             }
-            walk(&entry.path(), Some(&path), out)?;
+            continue;
+        }
+        if is_dir {
+            walk(&entry.path(), Some(&path), ignore, out, ignored)?;
         } else {
             out.insert(path);
         }

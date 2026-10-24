@@ -70,6 +70,39 @@
       "description": "An update stopped half way; the next sync or land finishes it.",
       "type": "boolean"
     },
+    "ignored": {
+      "description": "With --ignored: the untracked entries .gitignore and .graftignore ignore; an ignored directory is one entry.",
+      "type": "object",
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "dir"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "dir": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
     "upstream": {
       "$ref": "#/$defs/upstream"
     }

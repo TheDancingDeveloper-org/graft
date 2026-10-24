@@ -14,6 +14,7 @@ use graft_proto::ApiError;
 use graft_store::StoreError;
 
 pub mod fetch;
+pub mod ignore;
 pub mod remote;
 pub mod sparse;
 pub mod workcopy;
