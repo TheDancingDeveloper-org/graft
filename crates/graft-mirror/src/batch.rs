@@ -169,7 +169,7 @@ pub enum BatchState {
     Planned,
     /// `graft/batch-<n>` holds the batch's commits.
     Pushed,
-    /// A PR is open on the branch, waiting for the operator.
+    /// A PR is open on the branch, waiting for review and `land-pr`.
     Open,
     /// The PR merged and follow has imported its merge commit. Final.
     Merged,
@@ -467,6 +467,18 @@ fn ident_part(s: &str) -> String {
         "unknown".to_owned()
     } else {
         out
+    }
+}
+
+/// The git ident of a land's per-land commit: its author, or `committer`
+/// when the author has no email. A land made with a token, such as the
+/// revert that drops a land, is authored by the token's subject alone,
+/// and `subject <unknown>` is no identity on GitHub.
+fn land_ident(author: &Author, committer: &Committer) -> (String, String) {
+    if author.email.trim().is_empty() {
+        (ident_part(&committer.name), ident_part(&committer.email))
+    } else {
+        (ident_part(&author.name), ident_part(&author.email))
     }
 }
 
@@ -1098,7 +1110,7 @@ where
                     .get(REVERTS_KEY)
                     .and_then(|r| ChangesetId::parse(r).ok()),
                 parent: cs.first_parent(),
-                ident: (ident_part(&cs.author.name), ident_part(&cs.author.email)),
+                ident: land_ident(&cs.author, &self.config.committer),
                 authored: cs.authored_at,
                 message: clean_message(&cs.message, MESSAGE_CHARS, true),
                 trailer_session: cs
@@ -1780,7 +1792,7 @@ where
         };
         self.record_pull(rec, &pull);
         rec.state = BatchState::Open;
-        rec.detail = "waiting for the operator to merge".to_owned();
+        rec.detail = "waiting for review; land-pr merges it once its checks pass".to_owned();
         self.db.put_batch(rec)?;
         tracing::info!(
             line = %rec.line, batch = rec.number, pr = pull.number,
@@ -2392,6 +2404,25 @@ mod tests {
     fn idents_and_offsets_are_safe() {
         assert_eq!(ident_part("Ev<il>\nName"), "EvilName");
         assert_eq!(ident_part(" \n"), "unknown");
+        let bot = default_committer();
+        let token = Author {
+            name: "wi2352-mirror".to_owned(),
+            email: String::new(),
+            kind: AuthorKind::Human,
+        };
+        assert_eq!(
+            land_ident(&token, &bot),
+            ("graft".to_owned(), "graft@graft.invalid".to_owned())
+        );
+        let tess = Author {
+            email: "tess@example.com".to_owned(),
+            name: "Tess".to_owned(),
+            ..token
+        };
+        assert_eq!(
+            land_ident(&tess, &bot),
+            ("Tess".to_owned(), "tess@example.com".to_owned())
+        );
         let t = Timestamp {
             ms: 1_000,
             offset_min: -330,
