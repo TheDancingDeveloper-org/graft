@@ -22,16 +22,18 @@
 //!    second the base tip) carries the line to the rebased snapshot, and the
 //!    line moves to it by compare-and-swap: a fast-forward, never a rewrite.
 //! 4. **Export** the batch as a linear chain on GitHub's current `main`,
-//!    one commit per land, oldest first (D26). Each land's own change (the
-//!    diff from its first parent) is replayed onto the base as an unlanded
-//!    changeset, and each replay's git tree (written by `graft-git`'s
-//!    deterministic exporter) becomes that land's commit: the land's author
-//!    and author time, the mirror as committer at the same time, the land's
-//!    message, and `Graft-Changeset`, `Graft-Session`, `Graft-Work-Item`,
-//!    `Graft-Checks` and `Graft-Batch` trailers. A revert land is its own
-//!    commit. The last commit's tree must equal the cut tip's tree (the
-//!    root check). When it does not (a land's change does not replay onto a
-//!    moved base), or the batch has more than [`MAX_COMMITS`] lands, the
+//!    one commit per land, oldest first (D26). Each land is rebased with
+//!    line merge (D16) onto the replay before it, starting at the base, as
+//!    an unlanded changeset: a cherry-pick of the land's own change that
+//!    keeps what the base changed in the same files. Each replay's git tree
+//!    (written by `graft-git`'s deterministic exporter) becomes that land's
+//!    commit: the land's author and author time, the mirror as committer at
+//!    the same time, the land's message, and `Graft-Changeset`,
+//!    `Graft-Session`, `Graft-Work-Item` and `Graft-Batch` trailers. A
+//!    revert land is its own commit. The last commit's tree must equal the
+//!    cut tip's tree (the root check). When a land does not merge onto the
+//!    replay before it, the root check fails, or the batch has more than
+//!    [`MAX_COMMITS`] lands, the
 //!    batch is exported as one squashed commit instead, as D21 did, and the
 //!    PR body and the commit say why. Commit objects are built byte for
 //!    byte from recorded fields (`graft_git::export::commit_object`),
@@ -94,7 +96,7 @@ use crate::export::default_committer;
 use crate::follow::{FollowConfig, FollowLine, Follower, LineOutcome};
 use crate::git::{Mirror, PushOutcome};
 use crate::github::{Forge, Pull};
-use crate::text::clean_text;
+use crate::text::{clean_message, clean_text};
 use crate::{MirrorError, current_ref, move_ref};
 
 /// The authority batch mode claims for an integration line: nothing else
@@ -125,10 +127,6 @@ pub const CHANGESET_TRAILER: &str = "Graft-Changeset:";
 
 /// The longest land message a per-land commit keeps, in characters.
 const MESSAGE_CHARS: usize = 8000;
-
-/// The metadata key on a replay changeset (unlanded), naming the land it
-/// replays.
-pub const REPLAY_KEY: &str = "mirror.batch-replay";
 
 /// The prefix of a batch branch: `graft/batch-<n>`.
 pub const BRANCH_PREFIX: &str = "graft/batch-";
@@ -401,8 +399,11 @@ struct LandLine {
     ident: (String, String),
     /// Author time, with its offset.
     authored: Timestamp,
-    /// The whole message, cleaned and bounded.
+    /// The whole message, cleaned for a commit (`@` kept) and bounded.
     message: String,
+    /// The session and work item for commit trailers (`@` kept).
+    trailer_session: Option<String>,
+    trailer_work_item: Option<String>,
 }
 
 /// A land dropped from a batch: it and its revert are both in the batch.
@@ -1099,7 +1100,15 @@ where
                 parent: cs.first_parent(),
                 ident: (ident_part(&cs.author.name), ident_part(&cs.author.email)),
                 authored: cs.authored_at,
-                message: clean_text(&cs.message, MESSAGE_CHARS, true),
+                message: clean_message(&cs.message, MESSAGE_CHARS, true),
+                trailer_session: cs
+                    .metadata
+                    .get(SESSION_KEY)
+                    .map(|v| clean_message(v, FIELD_CHARS, false)),
+                trailer_work_item: cs
+                    .metadata
+                    .get(WORK_ITEM_KEY)
+                    .map(|v| clean_message(v, FIELD_CHARS, false)),
             });
         }
         if lands.is_empty() {
@@ -1512,7 +1521,9 @@ where
                     message: None,
                     raw_trees: Vec::new(),
                 };
-                let message = format!("{title}\n\n{message_body}");
+                // The body was cleaned for GitHub's markdown; a commit
+                // message keeps `@` as written (emails, co-author lines).
+                let message = format!("{title}\n\n{message_body}").replace("@\u{200b}", "@");
                 let raw = commit_object(tree, &[base_sha], &record, &message);
                 self.mirror.write_commit(&raw).await?
             }
@@ -1575,32 +1586,43 @@ where
                 lands.len()
             )));
         }
-        // Oldest first: each replay sits on the one before it.
+        // Oldest first: each land is rebased (line merge) onto the replay
+        // before it. Its parent is landed, so `Rebase` moves the land alone:
+        // a cherry-pick of its own change that keeps whatever the base
+        // changed in the same files, never a whole-file overwrite.
         let mut replays = Vec::with_capacity(lands.len());
         let mut prev = base;
         for land in lands.iter().rev() {
-            let Some(parent) = land.parent else {
+            if land.parent.is_none() {
                 return Ok(Err(format!("land {} has no parent", short(land.id))));
-            };
-            let changes = self.diff(parent, land.id).await?;
-            if !changes.is_empty() {
-                let mut metadata = Metadata::new();
-                metadata.insert(REPLAY_KEY.to_owned(), land.id.to_string());
-                let message = format!("graft: replay land {} for batch {number}", land.id);
-                prev = match self
-                    .create_with(vec![prev], changes, message, metadata, land.authored)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(ApiError::InvalidChange { .. } | ApiError::InvalidPath { .. }) => {
-                        return Ok(Err(format!(
-                            "land {} does not replay onto the base",
-                            short(land.id)
-                        )));
-                    }
-                    Err(e) => return Err(e.into()),
-                };
             }
+            let cx = self.call("replay");
+            prev = match self
+                .api
+                .rebase(
+                    &cx,
+                    Rebase {
+                        repo: self.config.repo.clone(),
+                        changeset: land.id,
+                        onto: prev,
+                        merge: MergeMode::Line,
+                        dry_run: false,
+                    },
+                )
+                .await
+            {
+                Ok(id) => id,
+                Err(ApiError::Conflict { paths, .. }) => {
+                    return Ok(Err(format!(
+                        "land {} does not merge onto the base and the lands before it \
+                         ({} conflicting path{})",
+                        short(land.id),
+                        paths.len(),
+                        if paths.len() == 1 { "" } else { "s" }
+                    )));
+                }
+                Err(e) => return Err(e.into()),
+            };
             replays.push(prev);
         }
         let mut trees = Vec::with_capacity(replays.len());
@@ -1996,13 +2018,15 @@ fn land_message(number: u64, land: &LandLine) -> String {
         text.to_owned()
     };
     m.push_str(&format!("\n\n{CHANGESET_TRAILER} {}\n", land.id));
-    if let Some(s) = &land.session {
+    if let Some(s) = &land.trailer_session {
         m.push_str(&format!("Graft-Session: {s}\n"));
     }
-    if let Some(w) = &land.work_item {
+    if let Some(w) = &land.trailer_work_item {
         m.push_str(&format!("Graft-Work-Item: {w}\n"));
     }
-    m.push_str(&format!("Graft-Checks: {}\n", checks_text(land)));
+    // No `Graft-Checks` trailer: phase 1 consumes no checks (D22). Check
+    // results in commits are phase-2 surface (D25), which starts only with
+    // the graft-primary authority switch.
     m.push_str(&format!("{BATCH_TRAILER} {number}\n"));
     m
 }
@@ -2032,12 +2056,14 @@ fn land_commit(
     commit_object(tree, &[parent], &record, &land_message(number, land))
 }
 
-/// A raw commit's parents, and the land its message names when it has
-/// exactly one `Graft-Changeset` trailer line (a squash-merge of several
-/// lands names more and maps to none).
+/// A raw commit's parents, and the land its message names when its last
+/// paragraph (the trailers) has exactly one `Graft-Changeset` line. A
+/// squash-merge of several lands names more and maps to none; a line in
+/// the message body is not a trailer.
 fn parse_commit(raw: &[u8]) -> (Vec<GitSha>, Option<ChangesetId>) {
     let text = String::from_utf8_lossy(raw);
     let (head, message) = text.split_once("\n\n").unwrap_or((text.as_ref(), ""));
+    let message = message.trim_end().rsplit("\n\n").next().unwrap_or("");
     let parents = head
         .lines()
         .filter_map(|l| l.strip_prefix("parent "))
@@ -2249,6 +2275,8 @@ mod tests {
                 offset_min: 600,
             },
             message: text("subject "),
+            trailer_session: Some(text("ses_x")),
+            trailer_work_item: Some(text("WI-1")),
         }
     }
 
@@ -2320,11 +2348,44 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("committer graft-mirror <mirror@graft> 1700000000 +1000\n"));
-        assert!(text.ends_with("Graft-Checks: ci/check-0| passed\nGraft-Batch: 3\n"));
+        assert!(
+            text.ends_with("Graft-Session: ses_x\nGraft-Work-Item: WI-1\nGraft-Batch: 3\n"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Graft-Checks"),
+            "phase 1 has no checks trailer"
+        );
         assert_eq!(parse_commit(&raw), (vec![GitSha([1; 20])], Some(l.id)));
         // A squash-merge message naming two lands maps to none.
-        let two = format!("{text}\n{CHANGESET_TRAILER} {}\n", land(5, false).id);
+        let two = format!("{text}{CHANGESET_TRAILER} {}\n", land(5, false).id);
         assert_eq!(parse_commit(two.as_bytes()).1, None);
+    }
+
+    #[test]
+    fn a_commit_message_keeps_at_and_only_trailers_name_the_land() {
+        let mut l = land(4, false);
+        l.message = clean_message(
+            "fix\n\nGraft-Changeset: not-a-trailer\n\nCo-authored-by: A <a@b.c>",
+            MESSAGE_CHARS,
+            true,
+        );
+        let msg = land_message(1, &l);
+        assert!(msg.contains("Co-authored-by: A <a@b.c>\n"), "{msg}");
+        assert!(!msg.contains('\u{200b}'));
+        let committer = Committer {
+            name: "m".to_owned(),
+            email: "m@m".to_owned(),
+        };
+        let raw = land_commit(1, &l, GitSha([2; 20]), GitSha([1; 20]), &committer);
+        assert_eq!(parse_commit(&raw).1, Some(l.id), "the body line is ignored");
+        // A commit whose only Graft-Changeset line is in its body names none.
+        let body_only = format!(
+            "tree {}\n\nsubject\n\nGraft-Changeset: {}\n\nlast paragraph\n",
+            GitSha([2; 20]),
+            l.id
+        );
+        assert_eq!(parse_commit(body_only.as_bytes()).1, None);
     }
 
     #[test]
