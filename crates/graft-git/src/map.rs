@@ -1,6 +1,7 @@
 //! The mirror map: graft ids ↔ git shas, the raw headers of imported commits,
-//! the raw tag objects of imported tags, and the raw git trees graft's model cannot express. Owned by the mirror,
-//! outside the graft server (`docs/design.md` §11).
+//! the raw tag objects of imported tags, and the raw git trees graft's model
+//! cannot express. Owned by the mirror, outside the graft server
+//! (`docs/design.md` §11).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
