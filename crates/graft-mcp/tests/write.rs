@@ -258,8 +258,13 @@ impl RepoApi for Rig {
     async fn blame(&self, cx: &CallContext, req: Blame) -> ApiResult<BlameResult> {
         self.engine.blame(cx, req).await
     }
-    async fn rebase(&self, _: &CallContext, _: Rebase) -> ApiResult<ChangesetId> {
-        Err(fake())
+    async fn rebase(&self, cx: &CallContext, req: Rebase) -> ApiResult<ChangesetId> {
+        // The pre-land check's dry run writes nothing, so the engine runs it.
+        if req.dry_run {
+            self.engine.rebase(cx, req).await
+        } else {
+            Err(fake())
+        }
     }
     async fn revert(&self, _: &CallContext, _: Revert) -> ApiResult<ChangesetId> {
         Err(fake())
@@ -1075,4 +1080,70 @@ async fn draft_overlap_names_the_other_workspace_and_needs_the_scope() {
         refused.to_string().contains("permission_denied"),
         "{refused}"
     );
+}
+
+/// D27: `graft_land` runs the pre-land check first. A real conflict stops
+/// it before anything is sent; a clean merge and another agent's drafts on
+/// the same file are reported; `check: false` skips it.
+#[tokio::test]
+async fn graft_land_runs_the_pre_land_check() {
+    let (rig, _) = Rig::new().await;
+    let addr = serve(rig.clone()).await;
+    let scopes = ["repo:r:write", "repo:r:drafts"];
+    let mut one = Agent::connect(addr, token("agent-1", &scopes)).await;
+    let mut two = Agent::connect(addr, token("agent-2", &scopes)).await;
+    let ws_one = one.open().await;
+    let ws_two = two.open().await;
+    let commit = |ws: &str, path: &str, body: &str| {
+        json!({
+            "repo": REPO, "workspace": ws, "message": "draft",
+            "files": [{"path": path, "content": body}],
+        })
+    };
+    // One edits line 1, two rewrites the file; the line then edits line 3.
+    one.ok(
+        "graft_commit",
+        commit(&ws_one, "README.md", "# mine\n\nThe fixture repository.\n"),
+    )
+    .await;
+    two.ok("graft_commit", commit(&ws_two, "README.md", "TWO\n"))
+        .await;
+    let tip = advance_readme(&rig, "# r\n\nThe fixture repository, theirs.\n").await;
+
+    let stopped = two
+        .fails("graft_land", json!({"repo": REPO, "workspace": ws_two}))
+        .await;
+    assert_eq!(stopped["kind"], "conflict", "{stopped}");
+    assert_eq!(stopped["paths"], json!(["README.md"]));
+    let pre = &stopped["preflight"];
+    assert_eq!(pre["stop"], true);
+    assert_eq!(pre["tip"], tip.to_string());
+    assert!(rig.prs().is_empty(), "nothing was sent");
+
+    // The rig's bridge can't land onto a moved tip, so this land fails
+    // after the check; the failure carries the check's report.
+    let landed = one
+        .fails("graft_land", json!({"repo": REPO, "workspace": ws_one}))
+        .await;
+    assert_eq!(landed["kind"], "rejected", "{landed}");
+    let pre = &landed["preflight"];
+    assert_eq!(pre["stop"], false);
+    assert_eq!(pre["conflicts"], json!([]));
+    assert_eq!(pre["merges_cleanly"], json!(["README.md"]));
+    let overlaps = pre["drafts"]["overlaps"].as_array().expect("overlaps");
+    assert_eq!(overlaps.len(), 1, "{landed}");
+    assert_eq!(overlaps[0]["workspace"], ws_two.as_str());
+    assert_eq!(overlaps[0]["owner"], "agent-2");
+    assert_eq!(overlaps[0]["paths"], json!(["README.md"]));
+    assert!(!landed.to_string().contains("TWO"), "never contents");
+
+    // `check: false`: the land is sent as is, and the bridge refuses it.
+    let unchecked = two
+        .fails(
+            "graft_land",
+            json!({"repo": REPO, "workspace": ws_two, "check": false}),
+        )
+        .await;
+    assert_eq!(unchecked["kind"], "rejected", "{unchecked}");
+    assert_eq!(unchecked["preflight"], json!({"checked": false}));
 }

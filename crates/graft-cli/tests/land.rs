@@ -854,3 +854,77 @@ fn line_create_then_list_then_land_on_the_new_line() {
     assert_eq!(after["lines"][0]["version"], json!(2));
     assert_eq!(after["lines"][2], list["lines"][2], "main did not move");
 }
+
+/// D27: the pre-land check stops a land on a real conflict without sending
+/// it, and `--no-check` sends it, so the server's land reports the conflict.
+#[test]
+fn the_pre_land_check_stops_a_real_conflict_and_no_check_skips_it() {
+    let s = serve(Policy::Direct);
+    let (one, two) = (scratch(), scratch());
+    let app = two_writers_on_one_file(
+        &s,
+        one.path(),
+        two.path(),
+        "fn a() {}\nfn b() {}\nfn c() { 2 }\n",
+    );
+    let tip = s.rt.block_on(s.repo.tip());
+    let a = wc_cmd(&app).args(["--json", "land"]).assert().code(3);
+    let error = error_of(&a);
+    assert_eq!(error["kind"], json!("conflict"));
+    let pre = &error["preflight"];
+    assert_eq!(pre["checked"], json!(true), "{error}");
+    assert_eq!(pre["stop"], json!(true));
+    assert_eq!(pre["conflicts"], json!(["src/lib.rs"]));
+    assert_eq!(pre["tip"], json!(tip.to_string()));
+    let text = stdout(&wc_cmd(&app).arg("land").assert().code(3));
+    assert!(text.contains("pre-land: conflict src/lib.rs"), "{text}");
+
+    let a = wc_cmd(&app)
+        .args(["--json", "land", "--no-check"])
+        .assert()
+        .code(3);
+    let error = error_of(&a);
+    assert_eq!(error["kind"], json!("conflict"));
+    assert_eq!(error["preflight"], json!({"checked": false}));
+    assert_eq!(s.rt.block_on(s.repo.tip()), tip);
+}
+
+/// D27: a file both sides changed that merges cleanly is reported and the
+/// land goes on; without the drafts scope the overlap read is skipped with
+/// a note.
+#[test]
+fn the_pre_land_check_reports_clean_merges_and_draft_overlap() {
+    let s = serve(Policy::Direct);
+    let (one, two) = (scratch(), scratch());
+    let app = two_writers_on_one_file(
+        &s,
+        one.path(),
+        two.path(),
+        "fn a() { 2 }\nfn b() {}\nfn c() {}\n",
+    );
+
+    let value = json_run(&app, &["land"]);
+    assert_valid("land", &value);
+    assert_eq!(value["outcome"], json!("landed"));
+    let pre = &value["preflight"];
+    assert_eq!(pre["stop"], json!(false), "{value}");
+    assert_eq!(pre["conflicts"], json!([]));
+    assert_eq!(pre["merges_cleanly"], json!(["src/lib.rs"]));
+    // Every working copy here has the same owner, and the overlap leaves
+    // out the caller's own workspaces (graft-mcp's tests cover a hit).
+    assert_eq!(pre["drafts"]["checked"], json!(true));
+
+    // Without the drafts scope the overlap is skipped, and the land goes on.
+    s.repo
+        .set_scopes(&["repo:demo:read", "repo:demo:write", "repo:demo:land:main"]);
+    fs::write(app.join("README.md"), "mine\n").unwrap();
+    json_run(&app, &["commit", "-m", "mine"]);
+    let value = json_run(&app, &["land"]);
+    assert_valid("land", &value);
+    let drafts = &value["preflight"]["drafts"];
+    assert_eq!(drafts["checked"], json!(false), "{value}");
+    assert!(
+        drafts["skipped"].as_str().expect("note").contains("drafts"),
+        "{value}"
+    );
+}

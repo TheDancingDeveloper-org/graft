@@ -5,6 +5,7 @@
 //! server's `/mcp` endpoint (streamable HTTP, in-process engine).
 
 mod drafts;
+pub mod preflight;
 mod render;
 mod server;
 mod upstream;

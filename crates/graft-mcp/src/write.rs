@@ -30,6 +30,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::preflight;
 use crate::render::{FIELD_MAX_BYTES, ToolError, bounded, clip, fit};
 use crate::server::{McpServer, kind_name, parse_path, respond, state_name};
 use crate::workcopy::{WorkingCopyCommit, WorkingCopyLand, WorkingCopySync};
@@ -182,6 +183,11 @@ pub struct LandArgs {
     /// sides conflicts.
     #[schemars(extend("default" = "line"))]
     pub merge: Option<MergeArg>,
+    /// Run the pre-land check first (default true): a dry-run rebase onto
+    /// the tip, which stops the land on a real conflict without sending
+    /// it, and the draft-overlap read, which is only reported. It runs no
+    /// build or test, and the land still decides.
+    pub check: Option<bool>,
 }
 
 /// Arguments of `graft_line_create`.
@@ -542,6 +548,66 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         if let Some(line) = &args.line {
             check_name("line", line)?;
         }
+        let preflight = if args.check.unwrap_or(true) {
+            let found = self.preflight(cx, &args).await?;
+            if found.stops() {
+                let preflight = found.json();
+                let value = json!({
+                    "kind": "conflict",
+                    "onto": found.tip.to_string(),
+                    "paths": preflight["conflicts"],
+                    "retryable": false,
+                    "message": "the pre-land check found a real conflict, so nothing was sent: graft_sync to resolve it, or land with check false",
+                    "preflight": preflight,
+                });
+                return Ok(CallToolResult::structured_error(value));
+            }
+            found.json()
+        } else {
+            preflight::skipped_json()
+        };
+        // A failed land carries the check too, as the CLI's error does.
+        let mut result = match self.land_unchecked(cx, args).await {
+            Ok(result) => result,
+            Err(e) => e.into_result(),
+        };
+        if let Some(Value::Object(map)) = result.structured_content.as_mut() {
+            map.insert("preflight".to_owned(), preflight);
+        }
+        Ok(result)
+    }
+
+    /// The pre-land check for `args`: the stack head and line it names, or
+    /// the workspace's.
+    async fn preflight(
+        &self,
+        cx: &CallContext,
+        args: &LandArgs,
+    ) -> Result<preflight::Preflight, ToolError> {
+        let ws = self.workspace(cx, &args.repo, &args.workspace).await?;
+        let head = match &args.head {
+            Some(rev) => self.resolve(cx, &args.repo, rev).await?,
+            None => ws
+                .head
+                .ok_or_else(|| invalid("the workspace has no drafts to land"))?,
+        };
+        let req = preflight::PreflightRequest {
+            repo: args.repo.clone(),
+            line: args.line.clone().unwrap_or(ws.line),
+            base: ws.base,
+            head,
+            merge: merge_mode(args.merge),
+        };
+        preflight::preflight(&*self.api, cx, &req)
+            .await
+            .map_err(ToolError::Api)
+    }
+
+    async fn land_unchecked(
+        &self,
+        cx: &CallContext,
+        args: LandArgs,
+    ) -> Result<CallToolResult, ToolError> {
         if let Some(wc) = &self.working_copy {
             let req = WorkingCopyLand {
                 repo: args.repo.clone(),
@@ -754,7 +820,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
 
     #[tool(
         name = "graft_land",
-        description = "Land a workspace's stack on a line. On a git-primary line it is handed to the PR bridge and returns `queued` with the pull request URL.",
+        description = "Land a workspace's stack on a line. First a pre-land check (skip with `check: false`) previews the rebase onto the tip: a real conflict stops the land with its paths and sends nothing; files that merge cleanly and other agents' drafts on the same paths are reported under `preflight`. On a git-primary line it is handed to the PR bridge and returns `queued` with the pull request URL.",
         annotations(
             title = "Land",
             read_only_hint = false,
