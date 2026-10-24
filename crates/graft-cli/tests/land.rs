@@ -742,6 +742,41 @@ fn status_upstream_predicts_the_land_and_moves_nothing() {
     run(&app, &["land"]).code(3);
 }
 
+/// WI-2310: `graft status --drafts` asks about the changed files, or the
+/// PATHS named; without the drafts scope it fails alone, but with
+/// `--upstream` the upstream answer still prints and the refusal is noted.
+#[test]
+fn status_drafts_asks_and_a_missing_scope_keeps_upstream() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join("README.md"), "mine\n").unwrap();
+
+    let found = json_run(&app, &["status", "--drafts"]);
+    let d = &found["drafts"];
+    assert_eq!(d["asked"], json!(1), "{found}");
+    assert_eq!(d["overlaps"], json!([]));
+    assert_eq!(d["truncated"], json!(false));
+    assert_eq!(d["denied"], Value::Null);
+    let named = json_run(&app, &["status", "--drafts", "src/", "docs"]);
+    assert_eq!(named["drafts"]["asked"], json!(2), "{named}");
+    let text = stdout(&run(&app, &["status", "--drafts"]).success());
+    assert!(text.contains("no other live workspace"), "{text}");
+
+    s.repo.set_scopes(&["repo:demo:read", "repo:demo:write"]);
+    let both = json_run(&app, &["status", "--upstream", "--drafts"]);
+    assert_eq!(both["upstream"]["up_to_date"], json!(true), "{both}");
+    let denied = both["drafts"]["denied"].as_str().expect("denied scope");
+    assert!(denied.contains("drafts"), "{both}");
+    let text = stdout(&run(&app, &["status", "--upstream", "--drafts"]).success());
+    assert!(text.contains("drafts: not shown"), "{text}");
+    let alone = wc_cmd(&app)
+        .args(["--json", "status", "--drafts"])
+        .assert()
+        .failure();
+    assert_eq!(error_of(&alone)["kind"], json!("permission_denied"));
+}
+
 #[test]
 fn line_create_then_list_then_land_on_the_new_line() {
     let s = serve(Policy::Direct);

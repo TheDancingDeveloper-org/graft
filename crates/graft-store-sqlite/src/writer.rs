@@ -42,6 +42,9 @@ pub(crate) enum Written {
     Repo(RepoId),
     Txn(TxnOutcome),
     Run(Vec<TxnOutcome>),
+    /// A run that hit an error after committing a prefix: the prefix is
+    /// kept, as the default `commit_run` keeps it, and the error returns.
+    RunErr(StoreError),
 }
 
 impl Written {
@@ -49,7 +52,10 @@ impl Written {
     fn keeps(&self) -> bool {
         matches!(
             self,
-            Written::Repo(_) | Written::Txn(TxnOutcome::Committed(_)) | Written::Run(_)
+            Written::Repo(_)
+                | Written::Txn(TxnOutcome::Committed(_))
+                | Written::Run(_)
+                | Written::RunErr(_)
         )
     }
 }
@@ -121,16 +127,17 @@ fn apply(conn: &Connection, op: WriteOp) -> StoreResult<Written> {
     match op {
         WriteOp::CreateRepo(name) => create_repo(conn, &name).map(Written::Repo),
         WriteOp::Commit(repo, txn) => commit(conn, repo, txn).map(Written::Txn),
-        WriteOp::CommitRun(repo, txns) => commit_run(conn, repo, txns).map(Written::Run),
+        WriteOp::CommitRun(repo, txns) => commit_run(conn, repo, txns),
     }
 }
 
 /// Applies a run in order, each txn inside its own savepoint, and stops
 /// after the first that is not committed (its savepoint rolled back). The
 /// committed ones stay in the job's savepoint, and the batch's one `COMMIT`
-/// makes them durable together. An error fails the whole job, so its
-/// savepoint rolls the run back.
-fn commit_run(conn: &Connection, repo: RepoId, txns: Vec<MetaTxn>) -> StoreResult<Vec<TxnOutcome>> {
+/// makes them durable together. An error rolls back only its own txn: the
+/// committed prefix is kept and the error returns (`Written::RunErr`), as
+/// the trait's default keeps it.
+fn commit_run(conn: &Connection, repo: RepoId, txns: Vec<MetaTxn>) -> StoreResult<Written> {
     let mut out = Vec::with_capacity(txns.len());
     for txn in txns {
         conn.execute_batch("SAVEPOINT run_txn").map_err(sql_err)?;
@@ -142,12 +149,15 @@ fn commit_run(conn: &Connection, repo: RepoId, txns: Vec<MetaTxn>) -> StoreResul
             "ROLLBACK TO run_txn; RELEASE run_txn"
         };
         conn.execute_batch(end).map_err(sql_err)?;
-        out.push(outcome?);
+        match outcome {
+            Ok(o) => out.push(o),
+            Err(e) => return Ok(Written::RunErr(e)),
+        }
         if !committed {
             break;
         }
     }
-    Ok(out)
+    Ok(Written::Run(out))
 }
 
 fn create_repo(conn: &Connection, name: &str) -> StoreResult<RepoId> {

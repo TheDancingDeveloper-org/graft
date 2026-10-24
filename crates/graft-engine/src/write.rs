@@ -286,7 +286,6 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         // its frames pass `import_prewrite_bytes`, which bounds memory.
         let mut rest = req.changesets;
         let mut roots = HashMap::new();
-        let mut overlay = Overlay::default();
         let mut out = Vec::with_capacity(rest.len());
         while !rest.is_empty() {
             let (planned, written) = self.prewrite_import(repo, &rest, &mut roots).await?;
@@ -297,7 +296,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             // its own, which reports why.
             let mut queue: VecDeque<Changeset> = rest.drain(..planned.max(1)).collect();
             while !queue.is_empty() {
-                self.import_run(repo, &mut queue, &written, &mut overlay, &mut out)
+                self.import_run(repo, &mut queue, &written, &mut out)
                     .await?;
             }
         }
@@ -311,18 +310,20 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// (a duplicate, left for the next run, which finds it stored) and
     /// before its claims could lapse. A changeset that fails to build ends
     /// the run too: the ones built before it are committed, then its error
-    /// returns. One not attempted (after a lost race) goes back on `queue`.
+    /// returns. One not attempted (after a lost race) goes back on `queue`,
+    /// unless a build failed too: then the ones before the failure are
+    /// committed in runs of their own before its error returns. The
+    /// overlay is the run's own, so nothing uncommitted outlives it.
     async fn import_run(
         &self,
         repo: RepoId,
         queue: &mut VecDeque<Changeset>,
         written: &HashSet<ObjectId>,
-        overlay: &mut Overlay,
         out: &mut Vec<Created>,
     ) -> Result<(), ApiError> {
         let mut run = Run {
             roots: HashMap::new(),
-            overlay: std::mem::take(overlay),
+            overlay: Overlay::default(),
         };
         // Each built changeset's claims must outlast the run's commit.
         let claim_ms = i64::try_from(self.config.claim_ms / 2).unwrap_or(i64::MAX);
@@ -374,7 +375,6 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 }
             }
         }
-        *overlay = run.overlay;
 
         let txns: Vec<MetaTxn> = slots
             .iter_mut()
@@ -420,11 +420,21 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         self.existing(repo, new.id, new.root, new.parent, None)
                             .await?,
                     );
-                    for later in slots.rev() {
-                        queue.push_front(match later {
-                            Slot::New(n) => n.cs,
-                            Slot::Done(_, cs) => *cs,
-                        });
+                    let later = slots.map(|later| match later {
+                        Slot::New(n) => n.cs,
+                        Slot::Done(_, cs) => *cs,
+                    });
+                    if failure.is_none() {
+                        for cs in later.rev() {
+                            queue.push_front(cs);
+                        }
+                        break;
+                    }
+                    // The failed one comes after these: commit them
+                    // first, then report it.
+                    let mut before: VecDeque<Changeset> = later.collect();
+                    while !before.is_empty() {
+                        Box::pin(self.import_run(repo, &mut before, written, out)).await?;
                     }
                     break;
                 }

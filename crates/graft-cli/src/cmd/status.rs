@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use graft_client::Remote;
 use graft_client::workcopy::{FileStatus, Outcome, Upstream, WorkingCopy};
 use graft_model::RepoPath;
+use graft_proto::ApiError;
 use graft_proto::api::{RepoApi, WorkspaceApi};
 use graft_proto::context::CallContext;
 use graft_proto::types::{
@@ -28,6 +29,9 @@ use crate::render::{print_json, short};
 const MAX_DRAFT_PATHS: usize = 1024;
 /// The most overlap hits gathered before the answer is cut.
 const MAX_DRAFT_HITS: usize = 2000;
+/// The most pages either loop reads before the answer is cut (a page can
+/// be short, so a page count bounds the calls where a hit count can't).
+const MAX_DRAFT_PAGES: usize = 64;
 
 /// One other workspace with drafts on some of the paths asked about.
 struct DraftOverlapRow {
@@ -42,6 +46,9 @@ struct Drafts {
     asked: usize,
     /// Whether a bound cut the paths asked about or the hits gathered.
     truncated: bool,
+    /// The scope the caller lacks, when the server refused and `--upstream`
+    /// was asked too (so its answer still prints).
+    denied: Option<String>,
 }
 
 impl Drafts {
@@ -61,6 +68,7 @@ impl Drafts {
                 })
             }).collect::<Vec<_>>(),
             "truncated": self.truncated,
+            "denied": self.denied,
         })
     }
 }
@@ -91,7 +99,7 @@ async fn draft_paths(
     let mut truncated = false;
     if let Some(head) = state.head {
         let mut token = None;
-        loop {
+        for page_no in 1.. {
             let req = Diff {
                 repo: repo.to_owned(),
                 from: state.base,
@@ -103,7 +111,7 @@ async fn draft_paths(
             let page = remote.diff(cx, req).await?;
             paths.extend(page.files.into_iter().map(|f| f.change.path().clone()));
             token = page.next;
-            if paths.len() >= MAX_DRAFT_PATHS {
+            if paths.len() >= MAX_DRAFT_PATHS || (page_no >= MAX_DRAFT_PAGES && token.is_some()) {
                 truncated = true;
                 break;
             }
@@ -121,7 +129,8 @@ async fn draft_paths(
 }
 
 /// Asks `OverlappingDrafts` about `paths`, 64 at a time, paging each batch
-/// to its end, and groups the hits by workspace.
+/// to its end, and groups the hits by workspace. With `soft`, a refusal
+/// for want of a scope is reported in the answer rather than as an error.
 async fn drafts(
     remote: &Remote,
     cx: &CallContext,
@@ -129,10 +138,12 @@ async fn drafts(
     line: &str,
     paths: Vec<RepoPath>,
     mut truncated: bool,
+    soft: bool,
 ) -> Result<Drafts, Failure> {
     let asked = paths.len();
     let mut rows: BTreeMap<String, DraftOverlapRow> = BTreeMap::new();
     let mut hits = 0;
+    let mut pages = 0;
     'batches: for batch in paths.chunks(MAX_OVERLAP_PATHS) {
         let mut token = None;
         loop {
@@ -146,7 +157,19 @@ async fn drafts(
                     token,
                 },
             };
-            let page = remote.overlapping_drafts(cx, req).await?;
+            let page = match remote.overlapping_drafts(cx, req).await {
+                Ok(page) => page,
+                Err(ApiError::PermissionDenied { scope, .. }) if soft => {
+                    return Ok(Drafts {
+                        rows: Vec::new(),
+                        asked,
+                        truncated: false,
+                        denied: Some(scope),
+                    });
+                }
+                Err(e) => return Err(e.into()),
+            };
+            pages += 1;
             for w in page.workspaces {
                 rows.entry(w.workspace.clone()).or_insert(DraftOverlapRow {
                     workspace: w,
@@ -160,7 +183,7 @@ async fn drafts(
                 }
             }
             token = page.next;
-            if hits >= MAX_DRAFT_HITS {
+            if hits >= MAX_DRAFT_HITS || pages >= MAX_DRAFT_PAGES {
                 truncated |= token.is_some();
                 break 'batches;
             }
@@ -173,6 +196,7 @@ async fn drafts(
         rows: rows.into_values().collect(),
         asked,
         truncated,
+        denied: None,
     })
 }
 
@@ -248,7 +272,18 @@ pub(crate) fn run(g: &Global, args: &StatusArgs) -> Result<(), Failure> {
                 let (paths, cut) =
                     draft_paths(&conn.remote, &cx, &conn.repo, &wc, &changes, args).await?;
                 let line = wc.state().line.clone();
-                Some(drafts(&conn.remote, &cx, &conn.repo, &line, paths, cut).await?)
+                Some(
+                    drafts(
+                        &conn.remote,
+                        &cx,
+                        &conn.repo,
+                        &line,
+                        paths,
+                        cut,
+                        args.upstream,
+                    )
+                    .await?,
+                )
             } else {
                 None
             };
@@ -307,6 +342,10 @@ pub(crate) fn run(g: &Global, args: &StatusArgs) -> Result<(), Failure> {
 }
 
 fn print_drafts(d: &Drafts) -> Result<(), Failure> {
+    if let Some(scope) = &d.denied {
+        outln!("drafts: not shown (needs the {scope} scope)");
+        return Ok(());
+    }
     if d.asked == 0 {
         outln!("drafts: nothing changed to ask about (name PATHS)");
         return Ok(());

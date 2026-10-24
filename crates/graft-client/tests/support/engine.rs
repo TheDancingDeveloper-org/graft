@@ -901,6 +901,16 @@ impl WorkspaceApi for EngineRepo {
             .open_workspace(&c, req)
             .await)
     }
+    async fn overlapping_drafts(
+        &self,
+        cx: &CallContext,
+        req: OverlappingDrafts,
+    ) -> ApiResult<DraftOverlap> {
+        delegate!(self, "OverlappingDrafts", cx, |c| self
+            .engine
+            .overlapping_drafts(&c, req)
+            .await)
+    }
     async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
         delegate!(self, "GetWorkspace", cx, |c| self
             .engine
