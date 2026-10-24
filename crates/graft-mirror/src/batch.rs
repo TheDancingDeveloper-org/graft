@@ -1605,6 +1605,7 @@ where
                     changeset: squashed,
                     onto: state.synced,
                     merge: MergeMode::Line,
+                    dry_run: false,
                 },
             )
             .await
