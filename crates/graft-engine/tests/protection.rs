@@ -580,6 +580,7 @@ fn land<M: MetaStore>(r: &Repo<'_, M>, head: ChangesetId) -> ApiResult<Landed> {
             squash: false,
             merge: MergeMode::File,
             deadline_ms: None,
+            merged_from: None,
         },
     ))
 }
@@ -1002,6 +1003,7 @@ fn queued_candidates_keep_their_expiry_until_they_land() {
             squash: false,
             merge: MergeMode::File,
             deadline_ms: None,
+            merged_from: None,
         },
     ));
     assert!(

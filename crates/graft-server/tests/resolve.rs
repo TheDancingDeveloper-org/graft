@@ -71,6 +71,7 @@ async fn land(c: &mut common::Clients, head: ChangesetId) -> Result<ChangesetId,
             squash: false,
             merge: graft_proto::types::MergeMode::Line,
             deadline_ms: None,
+            merged_from: None,
         }))
         .await
         .map_err(api)?

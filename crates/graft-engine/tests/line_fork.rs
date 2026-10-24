@@ -40,6 +40,7 @@ fn land<M: MetaStore>(r: &Repo<'_, M>, line: &str, head: ChangesetId) {
             squash: false,
             merge: MergeMode::File,
             deadline_ms: None,
+            merged_from: None,
         },
     ));
     assert!(matches!(landed, Ok(Landed::Landed { .. })), "{landed:?}");

@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 
 use crate::meta::{
-    ChangesetRecord, DoomMark, Lsn, MetaStore, MetaTxn, Precondition, Protection, RecordState,
-    RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
+    ChangesetRecord, DoomMark, LineMergeRow, Lsn, MetaStore, MetaTxn, Precondition, Protection,
+    RecordState, RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
 };
 use crate::object::{ObjectStore, StoreStats};
 use crate::{RepoId, StoreError, StoreResult, page_limit};
@@ -34,6 +34,8 @@ struct Repo {
     line_paths: BTreeMap<(String, RepoPath), BTreeSet<(u64, ChangesetId)>>,
     /// Line → (parent line, fork position).
     line_forks: BTreeMap<String, (String, u64)>,
+    /// Merge points (D29), keyed as SQLite's primary key: (dst, dst_pos).
+    line_merges: BTreeMap<(String, u64), LineMergeRow>,
     holders: BTreeSet<(ObjectId, String)>,
     /// The expiry of each timed holder row.
     row_expiry: BTreeMap<(ObjectId, String), i64>,
@@ -481,6 +483,22 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
             Write::PutLineFork { line, parent, pos } => {
                 repo.line_forks.insert(line, (parent, pos));
             }
+            Write::PutLineMerge {
+                dst,
+                dst_pos,
+                src,
+                src_changeset,
+                src_pos,
+            } => {
+                let row = LineMergeRow {
+                    dst: dst.clone(),
+                    dst_pos,
+                    src,
+                    src_changeset,
+                    src_pos,
+                };
+                repo.line_merges.insert((dst, dst_pos), row);
+            }
             Write::PutLinePath {
                 line,
                 path,
@@ -819,6 +837,28 @@ impl MetaStore for MemoryStore {
                 .filter(|((_, c), _)| *c == id)
                 .take(page_limit(limit))
                 .map(|((line, _), pos)| (line.clone(), *pos))
+                .collect())
+        }))
+    }
+
+    fn line_merges(
+        &self,
+        repo: RepoId,
+        dst: &str,
+        src: Option<&str>,
+        at_or_below: u64,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<LineMergeRow>>> + Send {
+        ready(self.with(|st| {
+            Ok(st
+                .repo(repo)?
+                .line_merges
+                .range((dst.to_owned(), 0)..=(dst.to_owned(), at_or_below))
+                .rev()
+                .map(|(_, row)| row)
+                .filter(|row| src.is_none_or(|s| row.src == s))
+                .take(page_limit(limit))
+                .cloned()
                 .collect())
         }))
     }

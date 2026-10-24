@@ -284,6 +284,22 @@ pub enum Write {
         /// The fork point's position, on both lines.
         pos: u64,
     },
+    /// Records a merge point (D29, `docs/design.md` §8.9): the landing at
+    /// `dst_pos` on `dst` merged `src_changeset`, at `src_pos` on `src`.
+    /// Append-only, one row per merge landing, written in the land's CAS
+    /// transaction with its `LineMerged` journal entry.
+    PutLineMerge {
+        /// The target line.
+        dst: String,
+        /// Position of the merge landing on `dst`.
+        dst_pos: u64,
+        /// The source line.
+        src: String,
+        /// The source changeset merged.
+        src_changeset: ChangesetId,
+        /// Its position on `src`.
+        src_pos: u64,
+    },
     /// Adds a line path index row for a path or directory prefix. The
     /// engine writes one row per prefix of each changed path.
     PutLinePath {
@@ -547,6 +563,20 @@ pub trait MetaStore: Send + Sync {
             Ok(out)
         }
     }
+    /// A line's merge points (D29), newest first: rows of `dst` at
+    /// positions at or below `at_or_below`, only those from `src` when it
+    /// is given, up to `limit`. An indexed read, never a scan of the line.
+    /// A store without the `line_merges` table answers `StoreError::Backend`.
+    fn line_merges(
+        &self,
+        _repo: RepoId,
+        _dst: &str,
+        _src: Option<&str>,
+        _at_or_below: u64,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<LineMergeRow>>> + Send {
+        async { Err(unsupported("line_merges")) }
+    }
     /// Line path index scan, newest first, positions below `before`,
     /// continuing on the parent line below a fork point.
     fn scan_line_path(
@@ -720,6 +750,21 @@ pub trait MetaStore: Send + Sync {
 }
 
 /// The error a store answers for an optional index it does not have yet.
+/// One merge point row (D29, `docs/design.md` §8.9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineMergeRow {
+    /// The target line.
+    pub dst: String,
+    /// Position of the merge landing on `dst`.
+    pub dst_pos: u64,
+    /// The source line.
+    pub src: String,
+    /// The source changeset merged.
+    pub src_changeset: ChangesetId,
+    /// Its position on `src`.
+    pub src_pos: u64,
+}
+
 fn unsupported(what: &str) -> StoreError {
     StoreError::Backend(format!("{what} is not implemented by this store"))
 }
@@ -839,6 +884,16 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<(u64, ChangesetId)>>> + Send {
         (**self).scan_line_path(repo, line, path, before, limit)
+    }
+    fn line_merges(
+        &self,
+        repo: RepoId,
+        dst: &str,
+        src: Option<&str>,
+        at_or_below: u64,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<LineMergeRow>>> + Send {
+        (**self).line_merges(repo, dst, src, at_or_below, limit)
     }
     fn holders(
         &self,

@@ -636,6 +636,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             squash: args.squash.unwrap_or(false),
             merge: merge_mode(args.merge),
             deadline_ms: None,
+            merged_from: None,
         };
         let landed = self.api.land(cx, req).await.map_err(ToolError::Api)?;
         let base = json!({"head": head.to_string(), "line": line});

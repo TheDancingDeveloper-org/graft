@@ -953,6 +953,7 @@ impl<M: MetaStore + 'static> World<M> {
                 squash: false,
                 merge: MergeMode::File,
                 deadline_ms: None,
+                merged_from: None,
             },
         ))
     }

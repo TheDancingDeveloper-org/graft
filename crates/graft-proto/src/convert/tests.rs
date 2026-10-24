@@ -547,15 +547,20 @@ fn land_types_round_trip() {
             any::<bool>(),
             merge_mode(),
             proptest::option::of(any::<u64>()),
+            proptest::option::of((text(), cid())),
         )
-            .prop_map(|(repo, head, line, squash, merge, deadline_ms)| Land {
-                repo,
-                head,
-                line,
-                squash,
-                merge,
-                deadline_ms,
-            }),
+            .prop_map(
+                |(repo, head, line, squash, merge, deadline_ms, merged_from)| Land {
+                    repo,
+                    head,
+                    line,
+                    squash,
+                    merge,
+                    deadline_ms,
+                    merged_from: merged_from
+                        .map(|(line, changeset)| MergedFrom { line, changeset }),
+                },
+            ),
     );
     check::<Landed, pb::Landed, _>(
         "Landed",

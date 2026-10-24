@@ -1148,6 +1148,10 @@ impl From<Land> for pb::LandRequest {
             squash: r.squash,
             merge: merge_mode(r.merge),
             deadline_ms: r.deadline_ms,
+            merged_from: r.merged_from.map(|m| pb::MergedFrom {
+                line: m.line,
+                changeset: cb(m.changeset),
+            }),
         }
     }
 }
@@ -1162,6 +1166,15 @@ impl TryFrom<pb::LandRequest> for Land {
             squash: r.squash,
             merge: merge_mode_from(r.merge)?,
             deadline_ms: r.deadline_ms,
+            merged_from: r
+                .merged_from
+                .map(|m| -> R<MergedFrom> {
+                    Ok(MergedFrom {
+                        line: m.line,
+                        changeset: cid(m.changeset, "merged_from.changeset")?,
+                    })
+                })
+                .transpose()?,
         })
     }
 }

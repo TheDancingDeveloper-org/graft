@@ -493,6 +493,7 @@ pub fn land_req(head: ChangesetId) -> Land {
         squash: false,
         merge: MergeMode::Line,
         deadline_ms: None,
+        merged_from: None,
     }
 }
 

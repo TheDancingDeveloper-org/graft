@@ -254,6 +254,7 @@ impl<M: MetaStore + 'static> Run<'_, M> {
                                 squash: false,
                                 merge: MergeMode::File,
                                 deadline_ms: None,
+                                merged_from: None,
                             },
                         )
                         .await;

@@ -140,6 +140,7 @@ impl<'f, M: MetaStore> T<'f, M> {
                 squash: false,
                 merge,
                 deadline_ms: None,
+                merged_from: None,
             },
         ))
     }

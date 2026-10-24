@@ -466,6 +466,139 @@ pub struct Land {
     pub merge: MergeMode,
     /// Give up after this many ms.
     pub deadline_ms: Option<u64>,
+    /// Set when landing a merge resolution: the land records a merge point
+    /// from this source (D29, `docs/design.md` §8.9).
+    pub merged_from: Option<MergedFrom>,
+}
+
+/// The source of a merge landing (D29).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergedFrom {
+    /// The source line.
+    pub line: String,
+    /// The source changeset merged; on `line`'s line index.
+    pub changeset: ChangesetId,
+}
+
+/// `LineMerge` request: merge line `src` into line `dst` (D29,
+/// `docs/design.md` §8.9). Only `dst` moves, by CAS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineMerge {
+    /// Repository.
+    pub repo: String,
+    /// The source line, only read.
+    pub src: String,
+    /// The target line.
+    pub dst: String,
+    /// The source changeset to merge; `src`'s tip when absent.
+    pub src_at: Option<ChangesetId>,
+    /// Merge mode for the three-way merge.
+    pub merge: MergeMode,
+    /// Give up after this many ms.
+    pub deadline_ms: Option<u64>,
+    /// Message of the merge landing.
+    pub message: Option<String>,
+}
+
+/// `LineMerge` success. The failures are `Conflict` (carrying `base`,
+/// `tip` and the source changeset), `Contended` and `Rejected` in
+/// [`crate::ApiError`], as for `Land`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LineMergeOutcome {
+    /// The merge landed on `dst` and recorded a merge point.
+    Merged {
+        /// The merge landing.
+        landed: ChangesetId,
+        /// Line version after the move.
+        line_version: u64,
+        /// Line position of `landed`.
+        pos: u64,
+        /// Paths resolved by line merge.
+        merged_paths: Vec<RepoPath>,
+    },
+    /// `dst` already contains the source changeset; nothing moved.
+    UpToDate {
+        /// `dst`'s tip.
+        tip: ChangesetId,
+    },
+}
+
+/// `LineMerges` request: a line's merge points, newest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineMerges {
+    /// Repository.
+    pub repo: String,
+    /// The target line.
+    pub dst: String,
+    /// Only merges from this line.
+    pub src: Option<String>,
+    /// Paging (limit 100, max 1,000).
+    pub page: Page,
+}
+
+/// One merge point.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineMergePoint {
+    /// The source line.
+    pub src: String,
+    /// The source changeset merged.
+    pub src_changeset: ChangesetId,
+    /// Its position on `src`.
+    pub src_pos: u64,
+    /// The merge landing on the target line.
+    pub dst_changeset: ChangesetId,
+    /// Its position on the target line.
+    pub dst_pos: u64,
+}
+
+/// `LineMerges` response.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineMergePage {
+    /// Newest first.
+    pub merges: Vec<LineMergePoint>,
+    /// Resume token.
+    pub next: Option<String>,
+}
+
+/// Journal kind of a merge landing (D29).
+pub const LINE_MERGED: &str = "LineMerged";
+
+/// Body of a `LineMerged` journal entry, written in the merge landing's
+/// CAS transaction beside its `RefMoved`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineMerged {
+    /// The source line.
+    pub src: String,
+    /// The target line.
+    pub dst: String,
+    /// The source changeset merged.
+    pub src_changeset: ChangesetId,
+    /// Its position on `src`.
+    pub src_pos: u64,
+    /// Position of the merge landing on `dst`.
+    pub dst_pos: u64,
+}
+
+/// How `MergeBase` found its answer (D29), so a capped search is visible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MergeBaseVia {
+    /// A recorded merge point.
+    MergePoint,
+    /// A line fork row (D23).
+    Fork,
+    /// The ancestry walk (§7.2).
+    #[default]
+    Ancestry,
+}
+
+/// `MergeBase` answer with how it was found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeBaseResult {
+    /// The merge base, if any.
+    pub base: Option<ChangesetId>,
+    /// How it was found.
+    pub via: MergeBaseVia,
 }
 
 /// `Land` success. The failures are `Conflict`, `Contended` and `Rejected`
