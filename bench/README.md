@@ -212,6 +212,24 @@ A refused `graft land` can name fewer paths than the `land --sync` that
 follows marks as conflicted: the summary counts those refusals
 ("named fewer paths").
 
+## Branching strategies (WI-2362)
+
+```sh
+python3 -m graftbench.branching --out results/<dir>     # seed 2362
+```
+
+Trunk-based, git flow and release-branches-only histories, generated from
+`--seed`, replayed through graft and git on a local server and a bare
+repository, and checked against a model: every line and tag tree must equal
+the model and each other. It reports commands, round trips, conflicts,
+refused lands and line-merged paths, and for each merge or cherry-pick
+between lines the conflict blocks and round trips on each side. graft has no
+merge or cherry-pick command, so it carries work across with `graft diff`,
+`graft cat`, a local three-way merge, `commit` and `land`, in two variants
+(`tracked` remembers the last carried point; `mergebase` asks
+`graft api merge_base`). Tags are `tags/<name>` lines. See
+`docs/trials/2026-10-24-branching-strategies.md`.
+
 ## Tests
 
 ```sh
@@ -235,6 +253,7 @@ conflict rule and the merge3 regions behave as the scenarios assume.
 | `graftbench/conc.py` | the concurrent-writer scenarios and the tip poller |
 | `graftbench/copies.py` | the many-working-copies scenario (`--many-copies`) |
 | `graftbench/livea.py` | the live-awareness script, scheduler, policies and oracle |
+| `graftbench/branching.py` | the branching-strategy scenarios (`python3 -m graftbench.branching`) |
 | `graftbench/mcp.py` | a minimal MCP client for `/mcp` |
 | `graftbench/report.py` | machine info and the Markdown summary |
 | `results/` | committed example runs |

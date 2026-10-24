@@ -1,0 +1,742 @@
+{
+  "meta": {
+    "date": "2026-10-24",
+    "git_version": "git version 2.53.0",
+    "graft_version": "graft 0.0.0 (protocol 0.1)",
+    "seed": 2362
+  },
+  "results": [
+    {
+      "ops": {
+        "feature": 18,
+        "feature_commits": 37,
+        "tag": 3
+      },
+      "strategy": "trunk",
+      "systems": {
+        "git": {
+          "counts": {
+            "carries": 0,
+            "carry_clean": 0,
+            "carry_conflicted": 0,
+            "commands": 156,
+            "conflict_blocks": 5,
+            "conflicts": 3,
+            "land_retries": 0,
+            "line_merged_paths": 0,
+            "round_trips": 60
+          },
+          "diffs": {},
+          "history": {
+            "main": {
+              "commits": 38,
+              "merge_commits": 0
+            }
+          },
+          "lines": {
+            "main": {
+              "digest": "dab90d0e745b29e3",
+              "equal": true
+            }
+          },
+          "model_ok": true,
+          "oplog": [],
+          "tags": {
+            "v0.0": true,
+            "v0.1": true,
+            "v0.2": true
+          }
+        },
+        "graft-mergebase": {
+          "counts": {
+            "carries": 0,
+            "carry_clean": 0,
+            "carry_conflicted": 0,
+            "commands": 85,
+            "conflict_blocks": 4,
+            "conflicts": 3,
+            "land_retries": 3,
+            "line_merged_paths": 6,
+            "round_trips": 85
+          },
+          "diffs": {},
+          "equals_git": true,
+          "lines": {
+            "main": {
+              "digest": "dab90d0e745b29e3",
+              "equal": true
+            }
+          },
+          "model_ok": true,
+          "notes": [],
+          "oplog": [],
+          "tags": {
+            "v0.0": true,
+            "v0.1": true,
+            "v0.2": true
+          }
+        },
+        "graft-tracked": {
+          "counts": {
+            "carries": 0,
+            "carry_clean": 0,
+            "carry_conflicted": 0,
+            "commands": 85,
+            "conflict_blocks": 4,
+            "conflicts": 3,
+            "land_retries": 3,
+            "line_merged_paths": 6,
+            "round_trips": 85
+          },
+          "diffs": {},
+          "equals_git": true,
+          "lines": {
+            "main": {
+              "digest": "dab90d0e745b29e3",
+              "equal": true
+            }
+          },
+          "model_ok": true,
+          "notes": [],
+          "oplog": [],
+          "tags": {
+            "v0.0": true,
+            "v0.1": true,
+            "v0.2": true
+          }
+        }
+      }
+    },
+    {
+      "ops": {
+        "cut": 3,
+        "feature": 36,
+        "feature_commits": 72,
+        "fix": 8,
+        "merge": 6,
+        "pick": 2,
+        "tag": 4
+      },
+      "strategy": "gitflow",
+      "systems": {
+        "git": {
+          "counts": {
+            "carries": 0,
+            "carry_clean": 0,
+            "carry_conflicted": 0,
+            "commands": 436,
+            "conflict_blocks": 18,
+            "conflicts": 14,
+            "land_retries": 0,
+            "line_merged_paths": 0,
+            "round_trips": 154
+          },
+          "diffs": {},
+          "history": {
+            "develop": {
+              "commits": 126,
+              "merge_commits": 45
+            },
+            "main": {
+              "commits": 95,
+              "merge_commits": 34
+            },
+            "release/1.0": {
+              "commits": 30,
+              "merge_commits": 9
+            },
+            "release/1.1": {
+              "commits": 91,
+              "merge_commits": 31
+            }
+          },
+          "lines": {
+            "develop": {
+              "digest": "4957520606e2643d",
+              "equal": true
+            },
+            "main": {
+              "digest": "469506bcc58fbb7b",
+              "equal": true
+            },
+            "release/1.0": {
+              "digest": "8cccd34df27c8c73",
+              "equal": true
+            },
+            "release/1.1": {
+              "digest": "0b5a987a92b4708c",
+              "equal": true
+            }
+          },
+          "model_ok": true,
+          "oplog": [
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 16,
+              "round_trips": 2,
+              "src": "release/1.0"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "main",
+              "kind": "merge",
+              "op": 21,
+              "round_trips": 2,
+              "src": "release/1.0"
+            },
+            {
+              "blocks": 2,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 23,
+              "round_trips": 2,
+              "src": "release/1.0"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "pick",
+              "op": 29,
+              "round_trips": 2,
+              "src": "hf0"
+            },
+            {
+              "blocks": 2,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 45,
+              "round_trips": 2,
+              "src": "release/1.1"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "main",
+              "kind": "merge",
+              "op": 50,
+              "round_trips": 2,
+              "src": "release/1.1"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 52,
+              "round_trips": 2,
+              "src": "release/1.1"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "pick",
+              "op": 58,
+              "round_trips": 2,
+              "src": "hf1"
+            }
+          ],
+          "tags": {
+            "v1.0.0": true,
+            "v1.0.1": true,
+            "v1.1.0": true,
+            "v1.1.1": true
+          }
+        },
+        "graft-mergebase": {
+          "counts": {
+            "carries": 8,
+            "carry_clean": 1,
+            "carry_conflicted": 7,
+            "commands": 311,
+            "conflict_blocks": 32,
+            "conflicts": 15,
+            "land_retries": 8,
+            "line_merged_paths": 11,
+            "round_trips": 303
+          },
+          "diffs": {},
+          "equals_git": true,
+          "lines": {
+            "develop": {
+              "digest": "4957520606e2643d",
+              "equal": true
+            },
+            "main": {
+              "digest": "469506bcc58fbb7b",
+              "equal": true
+            },
+            "release/1.0": {
+              "digest": "8cccd34df27c8c73",
+              "equal": true
+            },
+            "release/1.1": {
+              "digest": "0b5a987a92b4708c",
+              "equal": true
+            }
+          },
+          "model_ok": true,
+          "notes": [],
+          "oplog": [
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 16,
+              "round_trips": 10,
+              "src": "release/1.0"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "main",
+              "kind": "merge",
+              "op": 21,
+              "round_trips": 22,
+              "src": "release/1.0"
+            },
+            {
+              "blocks": 3,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 23,
+              "round_trips": 14,
+              "src": "release/1.0"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "pick",
+              "op": 29,
+              "round_trips": 7,
+              "src": "hf0"
+            },
+            {
+              "blocks": 2,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 45,
+              "round_trips": 10,
+              "src": "release/1.1"
+            },
+            {
+              "blocks": 11,
+              "conflict": true,
+              "dst": "main",
+              "kind": "merge",
+              "op": 50,
+              "round_trips": 22,
+              "src": "release/1.1"
+            },
+            {
+              "blocks": 3,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 52,
+              "round_trips": 12,
+              "src": "release/1.1"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "pick",
+              "op": 58,
+              "round_trips": 7,
+              "src": "hf1"
+            }
+          ],
+          "tags": {
+            "v1.0.0": true,
+            "v1.0.1": true,
+            "v1.1.0": true,
+            "v1.1.1": true
+          }
+        },
+        "graft-tracked": {
+          "counts": {
+            "carries": 8,
+            "carry_clean": 1,
+            "carry_conflicted": 7,
+            "commands": 301,
+            "conflict_blocks": 29,
+            "conflicts": 15,
+            "land_retries": 8,
+            "line_merged_paths": 11,
+            "round_trips": 293
+          },
+          "diffs": {},
+          "equals_git": true,
+          "lines": {
+            "develop": {
+              "digest": "4957520606e2643d",
+              "equal": true
+            },
+            "main": {
+              "digest": "469506bcc58fbb7b",
+              "equal": true
+            },
+            "release/1.0": {
+              "digest": "8cccd34df27c8c73",
+              "equal": true
+            },
+            "release/1.1": {
+              "digest": "0b5a987a92b4708c",
+              "equal": true
+            }
+          },
+          "model_ok": true,
+          "notes": [],
+          "oplog": [
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 16,
+              "round_trips": 10,
+              "src": "release/1.0"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "main",
+              "kind": "merge",
+              "op": 21,
+              "round_trips": 22,
+              "src": "release/1.0"
+            },
+            {
+              "blocks": 2,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 23,
+              "round_trips": 9,
+              "src": "release/1.0"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "pick",
+              "op": 29,
+              "round_trips": 7,
+              "src": "hf0"
+            },
+            {
+              "blocks": 2,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 45,
+              "round_trips": 10,
+              "src": "release/1.1"
+            },
+            {
+              "blocks": 11,
+              "conflict": true,
+              "dst": "main",
+              "kind": "merge",
+              "op": 50,
+              "round_trips": 22,
+              "src": "release/1.1"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "merge",
+              "op": 52,
+              "round_trips": 7,
+              "src": "release/1.1"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "develop",
+              "kind": "pick",
+              "op": 58,
+              "round_trips": 7,
+              "src": "hf1"
+            }
+          ],
+          "tags": {
+            "v1.0.0": true,
+            "v1.0.1": true,
+            "v1.1.0": true,
+            "v1.1.1": true
+          }
+        }
+      }
+    },
+    {
+      "ops": {
+        "cut": 2,
+        "feature": 24,
+        "feature_commits": 49,
+        "fix": 5,
+        "pick": 4,
+        "tag": 6
+      },
+      "strategy": "release",
+      "systems": {
+        "git": {
+          "counts": {
+            "carries": 0,
+            "carry_clean": 0,
+            "carry_conflicted": 0,
+            "commands": 272,
+            "conflict_blocks": 11,
+            "conflicts": 9,
+            "land_retries": 0,
+            "line_merged_paths": 0,
+            "round_trips": 106
+          },
+          "diffs": {},
+          "history": {
+            "main": {
+              "commits": 53,
+              "merge_commits": 0
+            },
+            "release/2.0": {
+              "commits": 22,
+              "merge_commits": 0
+            },
+            "release/2.1": {
+              "commits": 51,
+              "merge_commits": 0
+            }
+          },
+          "lines": {
+            "main": {
+              "digest": "5403d0c837f3da32",
+              "equal": true
+            },
+            "release/2.0": {
+              "digest": "3fad60a9b63cad25",
+              "equal": true
+            },
+            "release/2.1": {
+              "digest": "b8fd3e4d8050d75d",
+              "equal": true
+            }
+          },
+          "model_ok": true,
+          "oplog": [
+            {
+              "blocks": 2,
+              "conflict": true,
+              "dst": "release/2.0",
+              "kind": "pick",
+              "op": 15,
+              "round_trips": 2,
+              "src": "mf0"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "release/2.1",
+              "kind": "pick",
+              "op": 33,
+              "round_trips": 2,
+              "src": "mf1"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "release/2.0",
+              "kind": "pick",
+              "op": 37,
+              "round_trips": 2,
+              "src": "late"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "release/2.1",
+              "kind": "pick",
+              "op": 38,
+              "round_trips": 2,
+              "src": "late"
+            }
+          ],
+          "tags": {
+            "v2.0.0": true,
+            "v2.0.1": true,
+            "v2.0.2": true,
+            "v2.1.0": true,
+            "v2.1.1": true,
+            "v2.1.2": true
+          }
+        },
+        "graft-mergebase": {
+          "counts": {
+            "carries": 4,
+            "carry_clean": 2,
+            "carry_conflicted": 2,
+            "commands": 177,
+            "conflict_blocks": 11,
+            "conflicts": 9,
+            "land_retries": 7,
+            "line_merged_paths": 4,
+            "round_trips": 173
+          },
+          "diffs": {},
+          "equals_git": true,
+          "lines": {
+            "main": {
+              "digest": "5403d0c837f3da32",
+              "equal": true
+            },
+            "release/2.0": {
+              "digest": "3fad60a9b63cad25",
+              "equal": true
+            },
+            "release/2.1": {
+              "digest": "b8fd3e4d8050d75d",
+              "equal": true
+            }
+          },
+          "model_ok": true,
+          "notes": [],
+          "oplog": [
+            {
+              "blocks": 2,
+              "conflict": true,
+              "dst": "release/2.0",
+              "kind": "pick",
+              "op": 15,
+              "round_trips": 9,
+              "src": "mf0"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "release/2.1",
+              "kind": "pick",
+              "op": 33,
+              "round_trips": 9,
+              "src": "mf1"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "release/2.0",
+              "kind": "pick",
+              "op": 37,
+              "round_trips": 7,
+              "src": "late"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "release/2.1",
+              "kind": "pick",
+              "op": 38,
+              "round_trips": 7,
+              "src": "late"
+            }
+          ],
+          "tags": {
+            "v2.0.0": true,
+            "v2.0.1": true,
+            "v2.0.2": true,
+            "v2.1.0": true,
+            "v2.1.1": true,
+            "v2.1.2": true
+          }
+        },
+        "graft-tracked": {
+          "counts": {
+            "carries": 4,
+            "carry_clean": 2,
+            "carry_conflicted": 2,
+            "commands": 177,
+            "conflict_blocks": 11,
+            "conflicts": 9,
+            "land_retries": 7,
+            "line_merged_paths": 4,
+            "round_trips": 173
+          },
+          "diffs": {},
+          "equals_git": true,
+          "lines": {
+            "main": {
+              "digest": "5403d0c837f3da32",
+              "equal": true
+            },
+            "release/2.0": {
+              "digest": "3fad60a9b63cad25",
+              "equal": true
+            },
+            "release/2.1": {
+              "digest": "b8fd3e4d8050d75d",
+              "equal": true
+            }
+          },
+          "model_ok": true,
+          "notes": [],
+          "oplog": [
+            {
+              "blocks": 2,
+              "conflict": true,
+              "dst": "release/2.0",
+              "kind": "pick",
+              "op": 15,
+              "round_trips": 9,
+              "src": "mf0"
+            },
+            {
+              "blocks": 1,
+              "conflict": true,
+              "dst": "release/2.1",
+              "kind": "pick",
+              "op": 33,
+              "round_trips": 9,
+              "src": "mf1"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "release/2.0",
+              "kind": "pick",
+              "op": 37,
+              "round_trips": 7,
+              "src": "late"
+            },
+            {
+              "blocks": 0,
+              "conflict": false,
+              "dst": "release/2.1",
+              "kind": "pick",
+              "op": 38,
+              "round_trips": 7,
+              "src": "late"
+            }
+          ],
+          "tags": {
+            "v2.0.0": true,
+            "v2.0.1": true,
+            "v2.0.2": true,
+            "v2.1.0": true,
+            "v2.1.1": true,
+            "v2.1.2": true
+          }
+        }
+      }
+    }
+  ]
+}
