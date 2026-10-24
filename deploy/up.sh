@@ -8,16 +8,18 @@
 #      written by a throwaway root container from the pinned image, mode 0600,
 #      owned by uid 10001. Neither is ever printed.
 #   2. Pull the pinned image and pre-flight: check deploy/server.toml and
-#      deploy/mirror.toml with that image's own binaries. A config the image
+#      every deploy/mirror*.toml with that image's own binaries. A config the image
 #      can't parse stops the deploy here, with the running stack untouched
 #      (WI-2291).
 #   3. `compose up -d --wait` and wait for /readyz. If the new stack does not
 #      come up, put back the last good image pin and configs (kept under
 #      $GRAFT_SECRETS_DIR/last-good by the last successful deploy), bring that
 #      stack up and exit non-zero. A good deploy records itself as last good.
-#   4. Create the repositories `rusttorrent` and `graft-dev` (a retry of an
-#      existing repo is a success), mint the mirror token if absent or due for renewal.
-#   5. Health-check /healthz, then the /v1 facade: the refs of `rusttorrent`.
+#   4. Create the repositories `rusttorrent`, `graft-dev`, `fluent2-egui` and
+#      `vogt` (a retry of an existing repo is a success), mint each mirror's
+#      token if absent or due for renewal.
+#   5. Health-check /healthz, then the /v1 facade: the refs of each followed
+#      repository (rusttorrent, fluent2-egui, vogt).
 #
 # With GRAFT_ATTESTER=1 (WI-2276; off by default) it also turns on the compose
 # profile `attester`: it mints the attester's token (`read` and `attest` on
@@ -31,7 +33,10 @@
 #   GRAFT_SECRETS_DIR       secrets directory (default /etc/graft)
 #   GRAFT_REMINT=1          mint a new mirror token even if the current one is fresh
 #   GRAFT_TOKEN_RENEW_DAYS  re-mint a token older than this (default 20; TTL is 30)
-#   GRAFT_REFS_WAIT         seconds to wait for rusttorrent's first ref (default 600)
+#   GRAFT_REFS_WAIT         seconds to wait for rusttorrent's first ref (default 600);
+#                           the other followed repos are waited on too, but a
+#                           first import still running at the deadline is
+#                           only a warning
 #   GRAFT_ATTESTER=1        run the trial attester (profile `attester`)
 #   GRAFT_ATTESTER_REPO     the repository it attests (default rusttorrent)
 #   GRAFT_ATTESTER_LINE     the line whose drafts it attests (default trial-1)
@@ -64,7 +69,22 @@ set +a
 
 repo=rusttorrent
 # Every repository the stack serves; creating one that exists is a no-op.
-repos=(rusttorrent graft-dev)
+repos=(rusttorrent graft-dev fluent2-egui vogt)
+# The followed repositories, one graft-mirror service each (trial 3):
+# service, graft repository, token file under $secrets, config in deploy/.
+# A new repository's first follow is its initial import.
+mirrors=(
+  "graft-mirror rusttorrent mirror-token mirror.toml"
+  "graft-mirror-fluent2 fluent2-egui mirror-token-fluent2 mirror-fluent2.toml"
+  "graft-mirror-vogt vogt mirror-token-vogt mirror-vogt.toml"
+)
+mirror_services=()
+mirror_configs=()
+for m in "${mirrors[@]}"; do
+  read -r svc _ _ cfg <<<"$m"
+  mirror_services+=("$svc")
+  mirror_configs+=("$cfg")
+done
 ttl=2592000
 attester=${GRAFT_ATTESTER:-0}
 attester_repo=${GRAFT_ATTESTER_REPO:-rusttorrent}
@@ -120,7 +140,7 @@ command -v curl >/dev/null || die "curl is required"
 
 log "pulling $GRAFT_IMAGE"
 # The attester (profile `attester`) is built here, not pulled.
-compose pull --quiet graft-server graft-mirror
+compose pull --quiet graft-server "${mirror_services[@]}"
 
 # Pre-flight (WI-2291): the configs must parse in the image about to run
 # them, or a config can land ahead of the image that knows its fields and
@@ -145,31 +165,34 @@ check_server_config() {
 # then reads the token file. With no token mounted, reaching that read means
 # the config passed.
 check_mirror_config() {
-  local out rc=0
+  local cfg=$1 out rc=0
   out=$(timeout 60 docker run --rm --network none --user 10001:10001 \
-    --entrypoint graft-mirror -v "$here/mirror.toml:/c/mirror.toml:ro" \
+    --entrypoint graft-mirror -v "$here/$cfg:/c/mirror.toml:ro" \
     "$GRAFT_IMAGE" follow --config /c/mirror.toml 2>&1) || rc=$?
   if ! printf '%s' "$out" | grep -q 'reading the token file'; then
     printf '%s\n' "$out" | tail -n 5 >&2
-    die "pre-flight: deploy/mirror.toml does not load in $GRAFT_IMAGE (exit $rc); the running stack is unchanged"
+    die "pre-flight: deploy/$cfg does not load in $GRAFT_IMAGE (exit $rc); the running stack is unchanged"
   fi
 }
 
-log "pre-flight: checking server.toml and mirror.toml with $GRAFT_IMAGE"
+log "pre-flight: checking server.toml and ${mirror_configs[*]} with $GRAFT_IMAGE"
 check_server_config
-check_mirror_config
+for cfg in "${mirror_configs[@]}"; do
+  check_mirror_config "$cfg"
+done
 
-# The last good deploy: image.env, server.toml and mirror.toml as they were
+# The last good deploy: image.env, server.toml and the mirror configs as they were
 # when the stack last came up healthy. Kept under the secrets directory
 # (root-owned, written like the secrets) so it survives a fresh checkout.
-# They hold no secrets.
+# They hold no secrets. A record made before a mirror config existed lacks
+# that file; a rollback then leaves the checkout's copy in place.
 last_good=last-good
 have_last_good() {
   as_root "test -s /s/$last_good/image.env && test -s /s/$last_good/server.toml && test -s /s/$last_good/mirror.toml"
 }
 
 record_last_good() {
-  tar -C "$here" -cf - image.env server.toml mirror.toml \
+  tar -C "$here" -cf - image.env server.toml "${mirror_configs[@]}" \
     | as_root "set -e
       rm -rf /s/.$last_good.tmp
       mkdir -m 0755 /s/.$last_good.tmp
@@ -177,6 +200,12 @@ record_last_good() {
       chmod 0644 /s/.$last_good.tmp/*
       rm -rf /s/$last_good
       mv /s/.$last_good.tmp /s/$last_good"
+}
+
+# GRAFT_CONFIG_HASH: a change to any config recreates the containers.
+config_hash() {
+  GRAFT_CONFIG_HASH=$( (cd "$here" && cat server.toml "${mirror_configs[@]}") | sha256sum | cut -c1-16)
+  export GRAFT_CONFIG_HASH
 }
 
 # Wait up to $ready_wait seconds for the server's /readyz.
@@ -198,7 +227,8 @@ rollback() {
   fi
   log "rolling back to the last good image pin and configs"
   local f
-  for f in image.env server.toml mirror.toml; do
+  for f in image.env server.toml "${mirror_configs[@]}"; do
+    as_root "test -s /s/$last_good/$f" || continue
     as_root "cat /s/$last_good/$f" > "$here/.$f.tmp"
     mv "$here/.$f.tmp" "$here/$f"
   done
@@ -206,9 +236,8 @@ rollback() {
   # shellcheck source=/dev/null
   . "$here/image.env"
   set +a
-  GRAFT_CONFIG_HASH=$(cat "$here/server.toml" "$here/mirror.toml" | sha256sum | cut -c1-16)
-  export GRAFT_CONFIG_HASH
-  if compose up -d --wait --remove-orphans graft-server graft-mirror && wait_ready; then
+  config_hash
+  if compose up -d --wait --remove-orphans graft-server "${mirror_services[@]}" && wait_ready; then
     die "$why; rolled back to $GRAFT_IMAGE, which is up"
   fi
   die "$why; the rollback to $GRAFT_IMAGE did not come up either (see: docker logs graft-dev-server)"
@@ -219,8 +248,7 @@ if [ ! -e "$secrets/signing.key" ]; then
   as_root "head -c 32 /dev/urandom" | store_secret signing.key
 fi
 
-GRAFT_CONFIG_HASH=$(cat "$here/server.toml" "$here/mirror.toml" | sha256sum | cut -c1-16)
-export GRAFT_CONFIG_HASH
+config_hash
 
 log "starting graft-server"
 compose up -d --wait graft-server \
@@ -247,16 +275,18 @@ due() {
   fi
 }
 
-mint=0
-due mirror-token "mirror token" && mint=1
-# Whether the mirror already runs: only then does a new token need a restart.
-mirror_was_up=$(compose ps -q graft-mirror)
-if [ "$mint" = 1 ]; then
+# Each mirror's token, scoped to its own repository. A mirror that was
+# already running when its token was re-minted is restarted to read it.
+restart_mirrors=()
+for m in "${mirrors[@]}"; do
+  read -r svc mrepo tok _ <<<"$m"
+  due "$tok" "$svc token" || continue
+  [ -n "$(compose ps -q "$svc")" ] && restart_mirrors+=("$svc")
   compose exec -T graft-server graft-server admin token mint \
-    --subject graft-mirror-rusttorrent --kind service \
-    --scope "repo:$repo:admin" --ttl "$ttl" \
-    | store_secret mirror-token
-fi
+    --subject "graft-mirror-$mrepo" --kind service \
+    --scope "repo:$mrepo:admin" --ttl "$ttl" \
+    | store_secret "$tok"
+done
 
 attester_mint=0
 attester_was_up=
@@ -279,9 +309,9 @@ fi
 log "starting the stack"
 compose up -d --wait --remove-orphans \
   || rollback "the stack did not become healthy on $GRAFT_IMAGE"
-if [ "$mint" = 1 ] && [ -n "$mirror_was_up" ]; then
+if [ "${#restart_mirrors[@]}" -gt 0 ]; then
   # A new token for a mirror that was running: restart it so it reads it.
-  compose up -d --wait --no-deps --force-recreate graft-mirror
+  compose up -d --wait --no-deps --force-recreate "${restart_mirrors[@]}"
 fi
 if [ "$attester_mint" = 1 ] && [ -n "$attester_was_up" ]; then
   compose up -d --wait --no-deps --force-recreate graft-attester
@@ -295,24 +325,37 @@ log "recorded $GRAFT_IMAGE and its configs as the last good deploy"
 
 # The /v1 facade, authenticated with the mirror token. The token goes to curl
 # on stdin (-H @-), never in arguments, and is never printed.
+# Each repository is asked with its own mirror's token.
 refs() {
-  as_root "cat /s/mirror-token" \
+  as_root "cat /s/$2" \
     | sed 's/^/Authorization: Bearer /' \
-    | curl -fsS -H @- "$base/v1/repos/$repo/refs?limit=100"
+    | curl -fsS -H @- "$base/v1/repos/$1/refs?limit=100"
 }
 
-log "health: $base/v1/repos/$repo/refs (waiting up to ${refs_wait}s for a ref)"
+# Every followed repository must have a ref. rusttorrent is the gate; the
+# others may still be in their first import (vogt is large), so a deadline
+# there is a warning and the mirror carries on in the background.
 deadline=$((SECONDS + refs_wait))
-while :; do
-  if body=$(refs); then
-    count=$(printf '%s' "$body" | grep -o '"name"' | wc -l)
-    if [ "$count" -gt 0 ]; then
-      log "ok: $repo has $count ref(s); stack is up"
+for m in "${mirrors[@]}"; do
+  read -r svc mrepo tok _ <<<"$m"
+  log "health: $base/v1/repos/$mrepo/refs (waiting until ${refs_wait}s for a ref)"
+  while :; do
+    if body=$(refs "$mrepo" "$tok"); then
+      count=$(printf '%s' "$body" | grep -o '"name"' | wc -l)
+      if [ "$count" -gt 0 ]; then
+        log "ok: $mrepo has $count ref(s)"
+        break
+      fi
+    else
+      log "/v1 refs request for $mrepo failed; retrying"
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      [ "$mrepo" = "$repo" ] \
+        && die "$mrepo has no refs after ${refs_wait}s (see: docker logs graft-dev-${svc#graft-})"
+      log "warning: $mrepo has no refs yet; its first import may still be running (see: docker logs graft-dev-${svc#graft-})"
       break
     fi
-  else
-    log "/v1 refs request failed; retrying"
-  fi
-  [ "$SECONDS" -lt "$deadline" ] || die "$repo has no refs after ${refs_wait}s (see: docker logs graft-dev-mirror)"
-  sleep 10
+    sleep 10
+  done
 done
+log "stack is up"

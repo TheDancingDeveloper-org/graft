@@ -6,6 +6,8 @@
 #   graft-server  gRPC, the /v1 JSON facade, /healthz, /readyz, /metrics
 #   graft-mirror  follows github.com/TheDancingDeveloper-org/rustTorrent main
 #                 into the graft repository `rusttorrent`
+#   graft-mirror-fluent2, graft-mirror-vogt  follow fluent2-egui and vogt
+#                 main into the repositories `fluent2-egui` and `vogt`
 #   graft-attester  (profile `attester`, off by default) checks new drafts on
 #                 the trial line `trial-1` of `rusttorrent` and posts Attest
 #                 for ci/fmt, ci/clippy and ci/test (WI-2276, decision D21);
@@ -20,12 +22,16 @@
 #   17888  graft-server: gRPC, /v1, /healthz, /readyz, /metrics
 #   17889  graft-server metrics listener: /metrics, /healthz, /readyz
 #   17890  graft-mirror /metrics
+#   17891  graft-mirror-fluent2 /metrics
+#   17892  graft-mirror-vogt /metrics
 #
 # Secrets: none in this file, the repo or the environment. Host files under
 # /etc/graft, mounted read-only; a missing file fails the start instead of
 # being created as a directory.
 #   /etc/graft/signing.key   server token signing key (0600, uid 10001)
 #   /etc/graft/mirror-token  graft-mirror's service token (0600, uid 10001)
+#   /etc/graft/mirror-token-fluent2, mirror-token-vogt  the same for the
+#                            fluent2 and vogt mirrors
 #   /etc/graft/attester-token  graft-attester's token (0600, uid 0: only the
 #                            attester reads it, never the checks it runs)
 name: graft-dev
@@ -112,7 +118,7 @@ services:
         bind:
           create_host_path: false
       - graft-dev-mirror:/var/lib/graft/mirror
-    healthcheck:
+    healthcheck: &mirror-health
       test:
         - CMD
         - bash
@@ -125,6 +131,58 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # Trial 3 (WI-2297): one graft-mirror per followed repository, since the
+  # mirror config takes one `repo`. Same hardening and health check as
+  # graft-mirror; its own config, token file, volume and metrics port.
+  graft-mirror-fluent2:
+    <<: *graft
+    container_name: graft-dev-mirror-fluent2
+    hostname: graft-dev-mirror-fluent2
+    depends_on:
+      graft-server:
+        condition: service_healthy
+    environment:
+      GRAFT_DEPLOY_CONFIG_HASH: ${GRAFT_CONFIG_HASH:-}
+    command: ["graft-mirror", "follow", "--config", "/etc/graft/deploy/mirror.toml"]
+    ports:
+      - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_FLUENT2_METRICS_PORT:-17891}:9465"
+    volumes:
+      - ./mirror-fluent2.toml:/etc/graft/deploy/mirror.toml:ro
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-fluent2
+        target: /run/secrets/graft-mirror-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - graft-dev-mirror-fluent2:/var/lib/graft/mirror
+    healthcheck: *mirror-health
+
+  # Trial 3 (WI-2297): one graft-mirror per followed repository, since the
+  # mirror config takes one `repo`. Same hardening and health check as
+  # graft-mirror; its own config, token file, volume and metrics port.
+  graft-mirror-vogt:
+    <<: *graft
+    container_name: graft-dev-mirror-vogt
+    hostname: graft-dev-mirror-vogt
+    depends_on:
+      graft-server:
+        condition: service_healthy
+    environment:
+      GRAFT_DEPLOY_CONFIG_HASH: ${GRAFT_CONFIG_HASH:-}
+    command: ["graft-mirror", "follow", "--config", "/etc/graft/deploy/mirror.toml"]
+    ports:
+      - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_VOGT_METRICS_PORT:-17892}:9465"
+    volumes:
+      - ./mirror-vogt.toml:/etc/graft/deploy/mirror.toml:ro
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-vogt
+        target: /run/secrets/graft-mirror-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - graft-dev-mirror-vogt:/var/lib/graft/mirror
+    healthcheck: *mirror-health
 
   # The trial attester (WI-2276). Off unless the `attester` profile is on
   # (GRAFT_ATTESTER=1 for up.sh). It runs as root with four capabilities
@@ -193,6 +251,10 @@ volumes:
     name: graft-dev-meta
   graft-dev-mirror:
     name: graft-dev-mirror
+  graft-dev-mirror-fluent2:
+    name: graft-dev-mirror-fluent2
+  graft-dev-mirror-vogt:
+    name: graft-dev-mirror-vogt
   graft-dev-attester:
     name: graft-dev-attester
   graft-dev-attester-cache:
