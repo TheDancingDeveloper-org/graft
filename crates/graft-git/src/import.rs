@@ -66,8 +66,8 @@ pub struct ImportConfig {
     pub repo: String,
     /// Git refs to import, mapped to graft lines (`refs/heads/main` → `main`).
     pub lines: Vec<(String, String)>,
-    /// Import every tag under `refs/tags/`. A tag of a tree or a blob
-    /// refuses the import ([`GitError::NonCommitTags`]).
+    /// Import every tag under `refs/tags/` that names a commit. Tags of a
+    /// tree or a blob are skipped and listed in [`ImportReport::skipped_tags`].
     pub tags: bool,
     /// Commits allowed to fail the fidelity check (`--allow-lossy`).
     pub allow_lossy: Vec<GitSha>,
@@ -108,6 +108,8 @@ pub struct ImportReport {
     pub tags: Vec<(String, ChangesetId)>,
     /// Tags whose raw tag objects (annotated, signed, nested) were recorded.
     pub tag_objects: u64,
+    /// Tags skipped because they name a tree or a blob; export loses them.
+    pub skipped_tags: Vec<NonCommitTag>,
 }
 
 /// Imports everything reachable from the configured refs that is not yet in
@@ -143,10 +145,6 @@ where
             }
         }
     }
-    // Refused before anything is written: export could not restore them.
-    if !non_commit.is_empty() {
-        return Err(GitError::NonCommitTags(non_commit));
-    }
     let tips: Vec<GitSha> = line_tips
         .iter()
         .map(|(_, s)| *s)
@@ -169,6 +167,7 @@ where
         return Err(GitError::Fidelity(importer.failed));
     }
     let mut report = importer.report;
+    report.skipped_tags = non_commit;
     for (line, sha) in line_tips {
         report.lines.push((line, importer.ids.changeset(map, sha)?));
     }

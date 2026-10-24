@@ -92,8 +92,8 @@ pub struct Unrepresentable {
     pub reason: &'static str,
 }
 
-/// A tag graft cannot import: it names a tree or a blob, directly or
-/// through tag objects. The mirror map records tags of commits only.
+/// A tag import skipped: it names a tree or a blob, directly or through tag
+/// objects. The mirror map records tags of commits only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NonCommitTag {
     /// The tag name, without `refs/tags/`.
@@ -112,9 +112,6 @@ pub enum GitError {
     BadPaths(Vec<BadPath>),
     /// Commits graft cannot represent. Nothing was imported.
     Unrepresentable(Vec<Unrepresentable>),
-    /// Tags that name a tree or a blob, every one of them. Export could not
-    /// restore them, so nothing was imported.
-    NonCommitTags(Vec<NonCommitTag>),
     /// Commits whose export does not reproduce their sha and that
     /// `allow_lossy` does not name. Changesets before the first of them were
     /// imported; none after.
@@ -161,17 +158,6 @@ impl fmt::Display for GitError {
             }
             GitError::Unrepresentable(commits) => {
                 write!(f, "{} commits cannot be represented", commits.len())
-            }
-            GitError::NonCommitTags(tags) => {
-                write!(
-                    f,
-                    "{} tags name a tree or a blob, not a commit:",
-                    tags.len()
-                )?;
-                for t in tags {
-                    write!(f, " {} ({})", t.name, t.kind)?;
-                }
-                Ok(())
             }
             GitError::Fidelity(shas) => {
                 write!(f, "{} commits do not export to their sha", shas.len())

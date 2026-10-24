@@ -208,6 +208,9 @@ async fn cmd_import(args: &[String]) -> Result<(), CmdError> {
     for (tag, id) in &out.tags_conflicting {
         println!("tag {tag}: graft already names another changeset (git: {id})");
     }
+    for t in &r.skipped_tags {
+        println!("tag {}: skipped, names a {} not a commit", t.name, t.kind);
+    }
     Ok(())
 }
 
