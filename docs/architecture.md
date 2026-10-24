@@ -174,7 +174,7 @@ sequenceDiagram
   else conflict
     S-->>A: Conflict {paths, tip}, nothing moves; the client syncs and resolves, as with git
   end
-  Note over M: D21: pr-batch sends the line to GitHub as one squashed PR
+  Note over M: pr-batch sends the line to GitHub as a batch PR, one commit per land (D26); land-pr rebase-merges it (D28)
 ```
 
 ### One land with an attested policy (phase 2, off by default)

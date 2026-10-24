@@ -27,8 +27,9 @@ Already decided by the operator (2026-10-22):
 - **D8, D10** (operator, 2026-10-22): a GitHub App on the org for the mirror;
   Vogt mints a graft token per session. Each was the recommendation below.
 - **D21** (operator, 2026-10-23): batch PR export. Agents iterate on a
-  graft integration line, and each batch reaches GitHub as one squashed PR
-  that the operator merges.
+  graft integration line, and each batch reaches GitHub as one batch PR.
+  Amended by D26 and D28: the PR carries one commit per land, and oversight's
+  `land-pr` rebase-merges it once the required checks pass.
 - **D22** (operator, 2026-10-23): phase 1 is graft as a git alternative.
   Lines default to `direct`, and no build, test or CI runs in the land path.
   CI checks (attestation, the attester, the CI token exchange, post-land
@@ -87,7 +88,7 @@ Already decided by the operator (2026-10-22):
 | D18 | Phase 1 kill criteria | **Decided:** as in plan.md, unchanged. Written for the read pilot; targets only under D20 and D22 | — |
 | D19 | Import identity | **Decided:** `mirror.git-commit = <sha>` metadata on every imported changeset | — |
 | D20 | Pilot period | **Decided:** none; G1.18 dropped, phase 2 not gated (replaces D18's gate) | — |
-| D21 | Batch PR export | **Decided:** agents land on a graft integration line; each batch goes to GitHub as one squashed PR the operator merges | — |
+| D21 | Batch PR export | **Decided:** agents land on a graft integration line; each batch goes to GitHub as one squashed PR the operator merges; amended by D26, D28 (one commit per land; `land-pr` rebase merge) | — |
 | D22 | What phase 1 is | **Decided:** graft as a git alternative; lines `direct` by default; CI checks are phase 2, switched off | — |
 | D23 | Line fork points | **Decided:** a new line writes one fork row instead of copying its parent's line index; no data migration | — |
 | D24 | Draft overlap visibility | **Decided:** a `repo:<r>:drafts` scope, granted only by `admin`; paths and principals, never contents | — |
