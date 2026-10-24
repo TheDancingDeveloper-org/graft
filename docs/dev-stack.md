@@ -237,7 +237,7 @@ auto-revert) is the phase-2 opt-in for `main`, through a `[[lines]]` entry.
 | `checks` | required checks; needed for `attested` and `queued`, refused for `direct` |
 | `attest_merged` | re-attest line-merged results; `attested` only |
 | `authority` | `graft-primary` (default) or `git-primary` |
-| `path_rules` | `{ prefix, checks, human_review }`: extra requirements under a path |
+| `path_rules` | `{ prefix, checks, human_review, merge }`: extra requirements under a path; `merge = "none"` makes any concurrent change under it a rebase conflict (the client regenerates), `"line"` restores the line merge. `Cargo.lock` and `package-lock.json` are `none` at any depth unless a rule says otherwise |
 | `post_land` | `{ checks, auto_revert }`: post-land testing |
 
 An entry replaces the default for its name: list `main` with

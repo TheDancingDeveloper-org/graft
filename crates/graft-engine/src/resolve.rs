@@ -113,6 +113,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 target,
                 onto_root,
                 MergeMode::Line,
+                &self.line_config(&ws.line),
                 &Overrides::default(),
             )
             .await?
@@ -304,7 +305,15 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 if let (true, Some(old)) = (ws.base == target, expected) {
                     let stack = self.chain(repo, old, target).await?;
                     if let Ok(plan) = self
-                        .plan_with(repo, &stack, target, onto_root, MergeMode::Line, &overrides)
+                        .plan_with(
+                            repo,
+                            &stack,
+                            target,
+                            onto_root,
+                            MergeMode::Line,
+                            &self.line_config(&ws.line),
+                            &overrides,
+                        )
                         .await?
                         && ws.head.unwrap_or(target) == plan.head
                     {
@@ -329,6 +338,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     target,
                     onto_root,
                     MergeMode::Line,
+                    &self.line_config(&ws.line),
                     &overrides,
                 )
                 .await?

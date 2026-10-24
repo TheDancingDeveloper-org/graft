@@ -6,7 +6,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::*;
-use graft_engine::policy::LandPolicy;
+use graft_engine::policy::{LandPolicy, PathMerge, PathRule};
 use graft_engine::{EngineConfig, LineConfig, MERGED_PATHS, REBASED_FROM, REVERTS};
 use graft_model::ChangesetId;
 use graft_model::merge::{Merge3, merge3};
@@ -15,7 +15,7 @@ use graft_proto::types::*;
 use graft_proto::{ApiError, PrincipalKind, RepoApi, WorkspaceApi};
 use graft_store::{MetaStore, RecordState};
 
-/// `main` is direct; `att` is attested with `attest_merged`; `soft` is
+/// `main` is direct, with `gen` (except `gen/hand`) unmerged; `att` is attested with `attest_merged`; `soft` is
 /// attested without it.
 fn config() -> EngineConfig {
     let checks = vec!["ci/test".to_owned()];
@@ -29,8 +29,19 @@ fn config() -> EngineConfig {
         checks,
         attest_merged: false,
     };
+    let mut main = LineConfig::direct("main");
+    let rule = |prefix: &str, merge| PathRule {
+        prefix: graft_model::RepoPath::new(prefix).expect("path"),
+        checks: Vec::new(),
+        human_review: false,
+        merge: Some(merge),
+    };
+    main.path_rules = vec![
+        rule("gen", PathMerge::None),
+        rule("gen/hand", PathMerge::Line),
+    ];
     EngineConfig {
-        lines: vec![LineConfig::direct("main"), att, soft],
+        lines: vec![main, att, soft],
         ..EngineConfig::default()
     }
 }
@@ -50,6 +61,7 @@ on_both!(
     two_lands_on_different_regions_both_land,
     file_mode_and_overlapping_edits_still_conflict,
     only_small_text_files_merge_by_line,
+    merge_none_paths_conflict_on_any_concurrent_change,
     the_executable_bit_follows_the_side_that_changed_it,
     sync_merges_by_line,
     attest_merged_forces_re_attesting,
@@ -357,6 +369,35 @@ fn file_mode_and_overlapping_edits_still_conflict<M: MetaStore>(f: &Fixture<M>) 
     // A delete against an edit is a conflict in either mode.
     let gone = t.r.commit(vec![t.root], &[], &["a"]).id;
     assert_eq!(conflict_paths(t.land(gone, "main")), ["a"]);
+}
+
+fn merge_none_paths_conflict_on_any_concurrent_change<M: MetaStore>(f: &Fixture<M>) {
+    let none = ["Cargo.lock", "web/package-lock.json", "gen/api.ts"];
+    let line = ["a", "gen/hand/x.rs", "Cargo.lock.md"];
+    let files: Vec<(&str, &[u8])> = none.iter().chain(&line).map(|p| (*p, BASE)).collect();
+    let t = T::new(f, &files);
+    // Disjoint edits to every file: a clean line merge for each.
+    let tops: Vec<(&str, &[u8])> = none.iter().chain(&line).map(|p| (*p, TOP)).collect();
+    landed(t.land(t.commit(t.root, &tops), "main"));
+    let tip = t.tip("main");
+    let bottoms: Vec<(&str, &[u8])> = none.iter().chain(&line).map(|p| (*p, BOTTOM)).collect();
+    let second = t.commit(t.root, &bottoms);
+    // Lockfiles and the `gen` rule conflict, so the client regenerates;
+    // nothing moves.
+    let mut want: Vec<String> = none.iter().map(|p| (*p).to_owned()).collect();
+    want.sort();
+    let mut got = conflict_paths(t.land(second, "main"));
+    got.sort();
+    assert_eq!(got, want);
+    assert_eq!(t.tip("main"), tip);
+    // Without the `none` paths, the rest still merges by line.
+    let rest: Vec<(&str, &[u8])> = line.iter().map(|p| (*p, BOTTOM)).collect();
+    let (_, mut merged) = landed(t.land(t.commit(t.root, &rest), "main"));
+    merged.sort();
+    assert_eq!(merged, ["Cargo.lock.md", "a", "gen/hand/x.rs"]);
+    // A change only one side made is no conflict.
+    let untouched = t.commit(t.tip("main"), &[("Cargo.lock", BOTH)]);
+    landed(t.land(untouched, "main"));
 }
 
 fn only_small_text_files_merge_by_line<M: MetaStore>(f: &Fixture<M>) {

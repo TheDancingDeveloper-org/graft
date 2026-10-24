@@ -63,6 +63,7 @@ use graft_store::{
 
 use crate::access::{Need, require, require_changes};
 use crate::objects::Upload;
+use crate::policy::{LineConfig, PathMerge};
 use crate::source::{Trees, model_root};
 use crate::workspace::{
     CAS_RETRIES, check_name, contended, guarded, held_by, holder, set_draft_paths, transition,
@@ -326,9 +327,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         stack: &[(ChangesetId, Changeset)],
         onto: ChangesetId,
         mode: MergeMode,
+        line: &LineConfig,
     ) -> Result<Plan, ApiError> {
         let onto_root = self.root_of(repo, onto).await?;
-        self.plan_onto(repo, stack, onto, onto_root, mode).await
+        self.plan_onto(repo, stack, onto, onto_root, mode, line)
+            .await
     }
 
     /// [`Engine::plan`] onto a changeset whose root is `onto_root`, which
@@ -341,9 +344,18 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         onto: ChangesetId,
         onto_root: TreeId,
         mode: MergeMode,
+        line: &LineConfig,
     ) -> Result<Plan, ApiError> {
         match self
-            .plan_with(repo, stack, onto, onto_root, mode, &Overrides::default())
+            .plan_with(
+                repo,
+                stack,
+                onto,
+                onto_root,
+                mode,
+                line,
+                &Overrides::default(),
+            )
             .await?
         {
             Ok(plan) => Ok(plan),
@@ -357,6 +369,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// where it stopped instead of a `Conflict` error, so `GetConflicts`
     /// can describe it. Every override must be used: one for a path that
     /// does not conflict is refused.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn plan_with(
         &self,
         repo: RepoId,
@@ -364,6 +377,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         onto: ChangesetId,
         onto_root: TreeId,
         mode: MergeMode,
+        line: &LineConfig,
         overrides: &Overrides,
     ) -> Result<Result<Plan, Failed>, ApiError> {
         let trees = Trees::new(&*self.objects, repo);
@@ -419,8 +433,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 } else if ours == o {
                     // The change is already there: drop it.
                 } else if let Some((kind, id, payload)) = match mode {
-                    MergeMode::Line => self.line_merge(repo, b, ours, o, &plan.blobs).await?,
-                    MergeMode::File => None,
+                    // A `merge = none` path conflicts on any concurrent
+                    // change, so the client regenerates it.
+                    MergeMode::Line if line.path_merge(path) == PathMerge::Line => {
+                        self.line_merge(repo, b, ours, o, &plan.blobs).await?
+                    }
+                    MergeMode::Line | MergeMode::File => None,
                 } {
                     // A merge whose result is already there is dropped.
                     if Some((kind, id)) != o {
@@ -616,7 +634,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         for (_, cs) in &stack {
             require_changes(cx, &req.repo, &cs.changes)?;
         }
-        let plan = self.plan(repo, &stack, req.onto, req.merge).await?;
+        let plan = self
+            .plan(repo, &stack, req.onto, req.merge, &self.config.default_line)
+            .await?;
         // A dry run returns the id the rebase would make; planning reads only.
         if !req.dry_run {
             self.store_plan(repo, &plan).await?;
@@ -772,7 +792,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 drafts.push((id, cs));
             }
             // Decision D16: a sync merges by line.
-            let plan = self.plan(repo, &drafts, target, MergeMode::Line).await?;
+            let line = self.line_config(&ws.line);
+            let plan = self
+                .plan(repo, &drafts, target, MergeMode::Line, &line)
+                .await?;
 
             self.store_plan(repo, &plan).await?;
 
