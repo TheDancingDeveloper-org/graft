@@ -460,11 +460,17 @@ them can't be re-exported to its git sha.
 **Decided (operator, 2026-10-23): the near-term way of working. Agents land
 on a graft integration line forked from the followed GitHub `main`; each
 batch reaches GitHub as one squashed PR, which the operator merges.**
-*Revised by [D26](#d26-one-commit-per-land-in-a-batch-pr) (2026-10-24): the
-batch PR carries one commit per land; squash is the fallback.*
-*Amended by [D28](#d28-batch-prs-are-reviewed-and-landed-like-any-pr)
-(2026-10-24): oversight reviews the batch PR and `land-pr` merges it; the
-operator no longer merges batches.*
+
+> **Amended by [D26](#d26-one-commit-per-land-in-a-batch-pr) and
+> [D28](#d28-batch-prs-are-reviewed-and-landed-like-any-pr) (2026-10-24).**
+> The text below is D21 as decided; where it differs, D26 and D28 win. A
+> batch PR is no longer one squashed commit: it carries one commit per land,
+> in land order, each keeping its author, session and work item, and squash
+> is only the fallback when replaying the lands does not reproduce the
+> integration tip (D26). The operator no longer merges batches: oversight
+> reviews the batch PR as a whole and `land-pr` rebase-merges it (bypassing
+> the squashing merge queue) once GitHub's required checks pass. graft
+> itself still never merges or queues the PR (D28).
 
 - `graft-mirror pr-batch <line> --base main` follows `main`, syncs the
   integration line onto it, and exports the line's net change as one commit
