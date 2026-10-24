@@ -9,6 +9,8 @@
 //! token_file = "/run/secrets/graft-mirror-token"  # or GRAFT_TOKEN
 //! poll_interval_secs = 15              # default 15 (decision D9)
 //! metrics_addr = "127.0.0.1:9465"      # serves /metrics; optional
+//! tags = "*"                           # upstream tags to follow; default
+//!                                      # "*" (all), "" turns tags off
 //!
 //! [[lines]]
 //! branch = "main"                      # upstream refs/heads/main
@@ -60,6 +62,10 @@ pub struct FileConfig {
     /// Commits allowed to fail the fidelity check (40-hex shas).
     #[serde(default)]
     pub allow_lossy: Vec<String>,
+    /// The upstream tags follow imports, as a pattern under `refs/tags/`.
+    /// Default `*`; empty: none.
+    #[serde(default)]
+    pub tags: Option<String>,
     /// The followed branches.
     pub lines: Vec<LineConfig>,
     /// The GitHub repository and credential for batch PRs, PR import and the
@@ -275,6 +281,11 @@ impl FileConfig {
             interval: self
                 .poll_interval_secs
                 .map_or(POLL_INTERVAL, Duration::from_secs),
+            tags: match self.tags.as_deref() {
+                None => Some("*".to_owned()),
+                Some("") => None,
+                Some(p) => Some(p.to_owned()),
+            },
         })
     }
 }

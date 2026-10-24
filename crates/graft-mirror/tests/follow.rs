@@ -161,6 +161,7 @@ impl World {
             allow_lossy: Vec::new(),
             batch: 2,
             interval: graft_mirror::follow::POLL_INTERVAL,
+            tags: Some("*".to_owned()),
         };
         let mirror = Mirror::new(&self.mirror_dir, self.upstream.to_str().unwrap());
         Follower::new(&self.api, cx(), db, mirror, config)
@@ -377,4 +378,73 @@ async fn import_sets_lines_and_tags_and_reruns_cleanly() {
     w.push();
     let mut f = w.follower(&db, &m);
     assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_tags_become_immutable_graft_tags() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let m = metrics();
+    let a = w.commit();
+    git(&w.work, &["tag", "v1"]);
+    let b = w.commit();
+    git(&w.work, &["tag", "-a", "-m", "release 2", "v2"]);
+    w.push();
+    git(&w.work, &["push", "-q", "origin", "v1", "v2"]);
+
+    let mut f = w.follower(&db, &m);
+    assert!(matches!(poll(&mut f).await, LineOutcome::Imported { .. }));
+    let tags = f.last_tags().clone();
+    let id_a = db.changeset_of(a).unwrap().unwrap();
+    let id_b = db.changeset_of(b).unwrap().unwrap();
+    assert_eq!(
+        tags.created,
+        vec![("v1".to_owned(), id_a), ("v2".to_owned(), id_b)],
+        "the annotated tag is peeled to its commit"
+    );
+    let v2 = current_ref(&w.api, &cx(), REPO, &tag_ref("v2"))
+        .await
+        .unwrap();
+    assert_eq!(v2, Some(id_b));
+
+    // A tag on a commit graft lacks waits; the next poll imports and tags it.
+    git(&w.work, &["checkout", "-q", "-b", "side"]);
+    w.commit();
+    git(&w.work, &["tag", "v-side"]);
+    git(&w.work, &["push", "-q", "origin", "v-side"]);
+    git(&w.work, &["checkout", "-q", "main"]);
+    assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
+    assert_eq!(f.last_tags().waiting, 1);
+    assert!(f.last_tags().created.is_empty());
+
+    // Moved and deleted upstream: reported, graft unchanged.
+    git(&w.work, &["tag", "-f", "v1", &b.to_hex()]);
+    git(&w.work, &["push", "-q", "--force", "origin", "v1"]);
+    git(&w.work, &["push", "-q", "origin", ":refs/tags/v2"]);
+    assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
+    assert_eq!(f.last_tags().moved, vec![("v1".to_owned(), b)]);
+    assert_eq!(f.last_tags().deleted, vec!["v2".to_owned()]);
+    let v1 = current_ref(&w.api, &cx(), REPO, &tag_ref("v1"))
+        .await
+        .unwrap();
+    assert_eq!(v1, Some(id_a), "graft tags never move");
+    let v2 = current_ref(&w.api, &cx(), REPO, &tag_ref("v2"))
+        .await
+        .unwrap();
+    assert_eq!(v2, Some(id_b), "nor disappear");
+
+    // Reported once, then quiet.
+    assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
+    assert!(f.last_tags().moved.is_empty() && f.last_tags().deleted.is_empty());
+
+    // A restarted follower re-checks against graft and creates nothing.
+    drop(f);
+    let mut f = w.follower(&db, &m);
+    assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
+    assert!(f.last_tags().created.is_empty());
+    assert_eq!(
+        f.last_tags().conflicting,
+        vec![("v1".to_owned(), id_a)],
+        "upstream's moved v1 conflicts with graft's immutable one"
+    );
 }

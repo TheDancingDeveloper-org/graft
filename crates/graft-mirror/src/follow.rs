@@ -18,10 +18,20 @@
 //!    map, so nothing already imported is sent again), then move the line by
 //!    admin `UpdateRef` CAS from the tip read in step 2.
 //!
+//! Tags (`docs/design.md` §4.6, §11.1 step 6): when
+//! [`FollowConfig::tags`] is set, each poll also lists upstream's matching
+//! tags in one `git ls-remote`. A tag whose commit graft already holds
+//! becomes the immutable graft ref `tags/<name>`, created once by CAS and
+//! never moved. A tag on a commit graft lacks waits for a later poll. A tag
+//! moved or deleted upstream is reported (logged and in [`TagReport`]),
+//! never mirrored. At most [`TAGS_PER_POLL`] tags reach the graft API per
+//! poll; the rest wait for the next.
+//!
 //! Lag: `graft_mirror_lag_changesets` is the number of upstream commits graft
 //! lacks, and `graft_mirror_lag_seconds` is how long the line has been
 //! behind (since follow first saw upstream ahead), 0 when caught up.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -40,6 +50,9 @@ use crate::{MirrorError, current_ref, move_ref};
 
 /// The poll interval of phase 1 (decision D9).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
+
+/// The most tags one poll resolves or creates in graft (rule 7).
+pub const TAGS_PER_POLL: usize = 64;
 
 /// One upstream branch followed into one graft line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +76,33 @@ pub struct FollowConfig {
     pub batch: usize,
     /// Time between polls.
     pub interval: Duration,
+    /// Upstream tags to follow, as a `git ls-remote` pattern under
+    /// `refs/tags/` (`v*`, or `*` for all). `None`: tags are not followed.
+    pub tags: Option<String>,
+}
+
+/// What one poll did with upstream's tags.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TagReport {
+    /// Tags this poll created in graft, and their changesets.
+    pub created: Vec<(String, ChangesetId)>,
+    /// Tags already in graft naming another changeset than upstream's
+    /// commit maps to: left alone (tags are immutable).
+    pub conflicting: Vec<(String, ChangesetId)>,
+    /// Tags upstream moved since follow saw them: reported, not mirrored.
+    pub moved: Vec<(String, GitSha)>,
+    /// Tags upstream deleted since follow saw them: graft keeps its ref.
+    pub deleted: Vec<String>,
+    /// Tags on commits graft does not hold yet; retried each poll.
+    pub waiting: usize,
+    /// Tags left for a later poll by the [`TAGS_PER_POLL`] bound.
+    pub deferred: usize,
+}
+
+/// A tag follow has finished with, by the upstream commit it saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SeenTag {
+    sha: GitSha,
 }
 
 /// Why a line stopped.
@@ -128,6 +168,9 @@ pub struct Follower<'a, A> {
     metrics: Option<Metrics>,
     clock: fn() -> i64,
     polls: u64,
+    /// Tags settled in graft (created, already there, or conflicting).
+    seen_tags: HashMap<String, SeenTag>,
+    last_tags: TagReport,
 }
 
 fn system_ms() -> i64 {
@@ -157,6 +200,8 @@ where
             metrics: None,
             clock: system_ms,
             polls: 0,
+            seen_tags: HashMap::new(),
+            last_tags: TagReport::default(),
         }
     }
 
@@ -240,7 +285,100 @@ where
             }
             out.push((l.line.clone(), outcome));
         }
+        if self.config.tags.is_some() {
+            match self.poll_tags().await {
+                Ok(report) => self.last_tags = report,
+                Err(e) => tracing::warn!(
+                    repo = %self.config.repo, error = %e, "mirror tag poll failed"
+                ),
+            }
+        }
         Ok(out)
+    }
+
+    /// What the last poll's tag pass did.
+    pub fn last_tags(&self) -> &TagReport {
+        &self.last_tags
+    }
+
+    /// One pass over upstream's followed tags (see the module docs). Runs
+    /// after the lines, so a tag on a commit just imported lands in the same
+    /// poll.
+    pub async fn poll_tags(&mut self) -> Result<TagReport, MirrorError> {
+        let mut report = TagReport::default();
+        let Some(pattern) = self.config.tags.clone() else {
+            return Ok(report);
+        };
+        let upstream = self.mirror.ls_remote_tags(&pattern).await?;
+        let listed: HashMap<&str, GitSha> =
+            upstream.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+        let mut gone: Vec<String> = self
+            .seen_tags
+            .keys()
+            .filter(|n| !listed.contains_key(n.as_str()))
+            .cloned()
+            .collect();
+        gone.sort();
+        for name in gone {
+            self.seen_tags.remove(&name);
+            tracing::warn!(
+                repo = %self.config.repo, tag = %name,
+                "upstream deleted a tag; graft keeps its tag ref"
+            );
+            report.deleted.push(name);
+        }
+        let repo = self.config.repo.clone();
+        let mut budget = TAGS_PER_POLL;
+        for (name, sha) in &upstream {
+            if let Some(seen) = self.seen_tags.get(name) {
+                if seen.sha != *sha {
+                    tracing::warn!(
+                        repo = %repo, tag = %name, upstream = %sha,
+                        "upstream moved a tag; graft tags are immutable, not mirrored"
+                    );
+                    report.moved.push((name.clone(), *sha));
+                    self.seen_tags.insert(name.clone(), SeenTag { sha: *sha });
+                }
+                continue;
+            }
+            let Some(id) = self.db.changeset_of(*sha)? else {
+                report.waiting += 1;
+                continue;
+            };
+            if budget == 0 {
+                report.deferred += 1;
+                continue;
+            }
+            budget -= 1;
+            let graft_name = crate::tag_ref(name);
+            let cx = self.call("tag");
+            match current_ref(self.api, &cx, &repo, &graft_name).await? {
+                Some(existing) if existing == id => {}
+                Some(existing) => {
+                    tracing::warn!(
+                        repo = %repo, tag = %name,
+                        "graft already has this tag on another changeset; left alone"
+                    );
+                    report.conflicting.push((name.clone(), existing));
+                }
+                None => {
+                    match move_ref(self.api, &cx, &repo, &graft_name, None, id, RefKind::Tag).await
+                    {
+                        Ok(()) => {
+                            tracing::info!(repo = %repo, tag = %name, "mirror tag created");
+                            report.created.push((name.clone(), id));
+                        }
+                        // Created concurrently: report it rather than guess.
+                        Err(ApiError::RefConflict { .. }) => {
+                            report.conflicting.push((name.clone(), id));
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
+            self.seen_tags.insert(name.clone(), SeenTag { sha: *sha });
+        }
+        Ok(report)
     }
 
     fn call(&self, what: &str) -> CallContext {
