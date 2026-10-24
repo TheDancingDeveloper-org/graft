@@ -1566,9 +1566,9 @@ ck:  tree      = export(replayed snapshot k); at k = last, = export(integration 
   leave the line as it is.
 
 **Implementation steps (WI-2349 follow-ups, for §8.7, §8.8 and this
-section).** Each is one plan item on
-disjoint crates, after step 0. Steps 1–4 and 8b are **phase 2**: they wait
-for the graft-primary authority switch. Step 0's D25 types are phase 2 too; its `dry_run` part is phase 1.
+section).** Each is one plan item on disjoint crates, after step 0. Steps 1–4
+and 8b are **phase 2**: they wait for the graft-primary authority switch. Step
+0's D25 types are phase 2 too; its `dry_run` part is phase 1.
 
 0. Interface PR (`graft-proto`, types and signatures only): a `dry_run`
    flag on `Rebase` and its result shape, plus the D25 types
@@ -1576,12 +1576,11 @@ for the graft-primary authority switch. Step 0's D25 types are phase 2 too; its 
    lands before steps 2 and 7.
 1. *(Phase 2.)* WI-2293: the attester's journal read survives a failed
    `GetWorkspace` (`graft-attester`).
-2. *(Phase 2.)* Checked lines: `checks`, `required`, `retries` in line
-   config; the `land_checks` index and its schema migration; `Attest` and the token
-   mint accept landed changesets on checked lines; `GetLandChecks`
-   (paginated) and `LandReverted` (`graft-engine`, `graft-proto`,
-   `graft-store-sqlite`, `graft-auth`). An interface PR with the proto
-   types first.
+2. *(Phase 2.)* Checked lines: `checks`, `required`, `retries` in line config;
+   the `land_checks` index and its schema migration; `Attest` and the token
+   mint accept landed changesets on checked lines; `GetLandChecks` (paginated)
+   and `LandReverted` (`graft-engine`, `graft-proto`, `graft-store-sqlite`,
+   `graft-auth`). An interface PR with the proto types first.
 3. *(Phase 2.)* The checker's `post-land` mode: watch `RefMoved`, skip
    ahead, bisect, retry, revert (`graft-attester`).
 4. *(Phase 2.)* pr-batch cuts at the settled prefix on a checked line
