@@ -212,3 +212,37 @@ fn path_errors_have_stable_reasons() {
     );
     assert_eq!(Portability::CaseClash.as_str(), "case-clash");
 }
+
+#[test]
+fn git_metadata_names_are_not_portable() {
+    for p in [
+        ".git",
+        ".GIT",
+        "a/.Git/config",
+        "git~1",
+        "GIT~1",
+        ".git\u{200c}",
+        "\u{feff}.g\u{200d}it",
+        ".git. .",
+        ".git::$INDEX_ALLOCATION",
+        "git~1:stream",
+        ".git\\hooks",
+    ] {
+        assert_eq!(
+            path(p).check_portable(),
+            Err(PathError::NotPortable(Portability::GitMetadata)),
+            "{p:?}"
+        );
+    }
+    for p in [
+        ".github",
+        ".gitignore",
+        "git",
+        ".git-blame",
+        "git~2",
+        "x.git",
+    ] {
+        assert!(path(p).check_portable().is_ok(), "{p}");
+    }
+    assert_eq!(Portability::GitMetadata.as_str(), "git-metadata");
+}
