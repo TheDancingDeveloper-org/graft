@@ -574,9 +574,14 @@ impl<C: CredentialProvider> Forge for HttpForge<C> {
                 .unwrap_or_default();
             return Err(ForgeError::Refused(format!("pull request state: {text}")));
         }
-        let pr = v.pointer("/data/node").ok_or_else(|| {
-            ForgeError::Refused("GitHub's pull request state has an unexpected shape".into())
-        })?;
+        // A null node is a PR this token cannot see: not knowing is not
+        // "not merging".
+        let pr = v
+            .pointer("/data/node")
+            .filter(|n| n.is_object())
+            .ok_or_else(|| {
+                ForgeError::Refused("GitHub did not return the pull request's merge state".into())
+            })?;
         let queued = pr
             .get("isInMergeQueue")
             .and_then(Value::as_bool)

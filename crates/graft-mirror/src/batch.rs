@@ -237,6 +237,9 @@ pub struct BatchLine {
     /// `None` for a line recorded before WI-2340: such a batch is not cut
     /// before a sync until its next merge records it.
     pub start_base: Option<ChangesetId>,
+    /// A merged batch cut before the line's newest sync: the next sync
+    /// starts from that batch rebased onto `synced`, not from `sync_from`.
+    pub sync_batch: Option<u64>,
 }
 
 /// What batch mode works on.
@@ -646,6 +649,7 @@ where
             sync_from: fork,
             start: fork,
             start_base: Some(fork),
+            sync_batch: None,
         };
         self.db.set_batch_line(&self.config.line, &state)?;
         tracing::info!(
@@ -772,17 +776,25 @@ where
     ) -> Result<Result<Option<ChangesetId>, BatchOutcome>, MirrorError> {
         // The line's own change, as one changeset on the snapshot it holds
         // of the base, rebased onto the base tip.
-        let net = self.diff(state.sync_from, tip).await?;
+        let from = match state.sync_batch {
+            Some(number) => {
+                let rec = self
+                    .db
+                    .batch(number)?
+                    .ok_or_else(|| config_err(format!("batch {number} is not recorded")))?;
+                self.merged_on_synced(&rec, state).await?
+            }
+            None => state.sync_from,
+        };
+        let net = self.diff(from, tip).await?;
         let target = if net.is_empty() {
             base_tip
         } else {
             let message = format!(
-                "graft: net change of line {} since {}",
-                self.config.line, state.sync_from
+                "graft: net change of line {} since {from}",
+                self.config.line
             );
-            let squashed = self
-                .create(vec![state.sync_from], net, message, base_tip)
-                .await?;
+            let squashed = self.create(vec![from], net, message, base_tip).await?;
             let cx = self.call("rebase");
             match self
                 .api
@@ -840,6 +852,7 @@ where
         };
         state.synced = base_tip;
         state.sync_from = base_tip;
+        state.sync_batch = None;
         self.db.set_batch_line(&self.config.line, state)?;
         tracing::info!(
             repo = %self.config.repo, line = %self.config.line, onto = %base_tip,
@@ -1520,16 +1533,21 @@ where
                 .db
                 .batch_line(&rec.line)?
                 .ok_or_else(|| config_err(format!("line {} has no batch record", rec.line)))?;
-            let sync_from = if rec.base == state.synced {
-                rec.tip
-            } else {
-                self.merged_on_synced(rec, &state).await?
-            };
+            // A batch cut before the line's newest sync: the next sync
+            // rebuilds its starting point from this batch (see
+            // `merged_on_synced`) rather than keep an unlanded changeset
+            // across runs, which nothing would protect from collection.
+            let cut_before_sync = rec.base != state.synced;
             let next = BatchLine {
                 synced: state.synced,
-                sync_from,
+                sync_from: if cut_before_sync {
+                    state.sync_from
+                } else {
+                    rec.tip
+                },
                 start: rec.tip,
                 start_base: Some(rec.base),
+                sync_batch: cut_before_sync.then_some(rec.number),
             };
             self.db.settle_batch(rec, &rec.line, &next)?;
             tracing::info!(
@@ -1553,7 +1571,9 @@ where
 
     /// The sync point after merging batch `rec`, cut before the line's
     /// newest sync: the batch's change rebased onto the base the line
-    /// absorbed since. The line past the cut holds that base plus the
+    /// absorbed since. Built by the sync that uses it, from landed
+    /// changesets only (`rec.base`, `rec.tip`, `state.synced`), so nothing
+    /// unlanded outlives the run. The line past the cut holds that base plus the
     /// batch, so the next sync diffs only the lands after the batch, and
     /// none of the merged ones is applied again. When the batch does not
     /// rebase onto that base (the line's own sync merged it), the old sync

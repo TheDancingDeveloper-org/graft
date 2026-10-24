@@ -1002,6 +1002,11 @@ async fn a_merged_cut_before_a_sync_does_not_reapply_its_lands() {
     assert_eq!(w.changed(&main, &squash), ["a.txt", "b.txt"]);
     assert_eq!(w.show(&squash, "a.txt"), "a2");
     assert!(w.files_at(&squash).contains(&"n.txt".to_owned()));
+    // The sync that rebuilt the starting point cleared it: nothing unlanded
+    // is kept as a sync point across runs.
+    let state = w.db.batch_line(LINE).unwrap().unwrap();
+    assert_eq!(state.sync_batch, None);
+    assert_ne!(state.sync_from, state.start);
 }
 
 #[test]
@@ -1030,6 +1035,7 @@ fn a_db_from_before_batch_cuts_opens_and_its_lines_are_not_cut() {
     let state = db.batch_line(LINE).unwrap().unwrap();
     assert_eq!((state.synced, state.start), (id, id));
     assert_eq!(state.start_base, None, "unknown, not guessed");
+    assert_eq!(state.sync_batch, None);
     db.put_batch_drop(LINE, id, id, "why").unwrap();
     assert_eq!(
         db.batch_drop_reason(LINE, id).unwrap().as_deref(),
@@ -1037,8 +1043,10 @@ fn a_db_from_before_batch_cuts_opens_and_its_lines_are_not_cut() {
     );
     let mut next = state;
     next.start_base = Some(id);
+    next.sync_batch = Some(7);
     db.set_batch_line(LINE, &next).unwrap();
     drop(db);
     let db = MirrorDb::open(&path).unwrap();
-    assert_eq!(db.batch_line(LINE).unwrap().unwrap().start_base, Some(id));
+    let back = db.batch_line(LINE).unwrap().unwrap();
+    assert_eq!((back.start_base, back.sync_batch), (Some(id), Some(7)));
 }
