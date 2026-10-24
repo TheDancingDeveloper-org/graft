@@ -42,6 +42,11 @@ Already decided by the operator (2026-10-22):
 - **D24** (operator, 2026-10-23): draft overlap is gated by a new scope,
   `repo:<r>:drafts`, granted only by `admin`. See
   [D24](#d24-draft-overlap-visibility).
+- **D25, D26** (operator, 2026-10-24, from the WI-2336 fit assessment):
+  post-land checks on the batch integration line only, revising D22; and
+  batch PRs that carry one commit per land, revising D21. See
+  [D25](#d25-post-land-checks-on-the-batch-line) and
+  [D26](#d26-one-commit-per-land-in-a-batch-pr).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -73,6 +78,8 @@ Already decided by the operator (2026-10-22):
 | D22 | What phase 1 is | **Decided:** graft as a git alternative; lines `direct` by default; CI checks are phase 2, switched off | — |
 | D23 | Line fork points | **Decided:** a new line writes one fork row instead of copying its parent's line index; no data migration | — |
 | D24 | Draft overlap visibility | **Decided:** a `repo:<r>:drafts` scope, granted only by `admin`; paths and principals, never contents | — |
+| D25 | Post-land checks on the batch line | **Decided:** each land on an integration line is checked after it lands and marked good or bad; a bad land is reverted and never batched. Direct lines unchanged. Revises D22 | — |
+| D26 | Commits in a batch PR | **Decided:** one commit per land, keeping author, session and work item; squash only as a fallback. Revises D21 | — |
 
 ---
 
@@ -437,6 +444,8 @@ them can't be re-exported to its git sha.
 **Decided (operator, 2026-10-23): the near-term way of working. Agents land
 on a graft integration line forked from the followed GitHub `main`; each
 batch reaches GitHub as one squashed PR, which the operator merges.**
+*Revised by [D26](#d26-one-commit-per-land-in-a-batch-pr) (2026-10-24): the
+batch PR carries one commit per land; squash is the fallback.*
 
 - `graft-mirror pr-batch <line> --base main` follows `main`, syncs the
   integration line onto it, and exports the line's net change as one commit
@@ -475,6 +484,8 @@ batch reaches GitHub as one squashed PR, which the operator merges.**
 **Decided (operator, 2026-10-23): phase 1 is graft as a git alternative.
 Lines default to `direct`, and no build, test or CI runs in the land path. CI
 checks are phase 2 or later.**
+*Revised by [D25](#d25-post-land-checks-on-the-batch-line) (2026-10-24):
+post-land checks start now on batch integration lines only.*
 
 Phase 1 is:
 
@@ -589,3 +600,101 @@ The design is [notes/draft-overlap.md](notes/draft-overlap.md) (WI-2310).
 
 Rejected: gating by `read` (every reader would see every agent's
 activity), and scanning workspaces at query time (breaks rule 2).
+
+## D25. Post-land checks on the batch line
+
+**Decided (operator, 2026-10-24): start phase 2's post-land checks now, for
+batch integration lines only. Each land on the line runs the repository's
+required checks after it lands and is marked good or bad before it is
+batched. A bad land is reverted on the line and never reaches a batch PR.
+Every other line is unchanged.** This revises
+[D22](#d22-phase-1-is-a-git-alternative) for one kind of line. The design is
+[design.md §8.7](design.md#87-post-land-checks-on-the-batch-line).
+
+- **Where.** Only a line with `checks = "post-land"` in its `[[lines]]`
+  entry, which `pr-batch` requires of its integration line once the feature
+  ships. `direct` lines and the followed base line are unchanged; nothing
+  else in phase 2 (`attested`, `queued`) is switched on.
+- **Land latency is unchanged.** The land is still rebase, line merge and
+  CAS. Checks run after the CAS, on the landed snapshot, so they test the
+  line-merged result that pre-land CI never sees (the clean-merging,
+  build-breaking land).
+- **Which checks.** The checks the target repository requires on GitHub
+  `main`, named per line in `server.toml` (`required = ["ci/fmt",
+  "ci/clippy", "ci/test"]`). The commands live with the checker, not in
+  graft.
+- **Who runs them.** The existing attester (`graft-attester`), retargeted
+  from drafts to landed changesets, with the attest-only token of G3.8
+  (WI-2211, WI-2265). A GitHub Actions runner can post through the same OIDC
+  exchange instead. The server still never runs a build.
+- **Good and bad.** A land is `good` when every required check passed on
+  it, `bad` when one failed after its retry, otherwise `pending`. The mark
+  is stored by the attestation's own transaction in an index keyed by land,
+  so reading it never scans the journal (rule 2).
+- **Bad lands.** The checker lands a `Revert` of the first bad land on the
+  line (bisecting when it checked several lands at once). Lands after it
+  stay; they are re-checked on top of the revert. `pr-batch` cuts a batch
+  only up to the newest land whose prefix is all good or reverted, so one
+  bad land no longer sinks a batch.
+- **Prerequisite.** WI-2293 (a failed `GetWorkspace` stalls the
+  attester's journal read) is fixed first; the post-land checker stands on
+  that read.
+
+Why: the fit assessment (WI-2336, gap 1). rustnzb failed 73 of 405
+merge-queue runs after per-PR CI passed; vogt failed 15 of 120. Under D21 and
+D22 that breakage reaches the batch PR, and a red batch is rejected whole.
+
+Rejected:
+
+- `attested` (pre-land checks) on the integration line. It makes land
+  latency CI latency, which D22 rejected, and it checks the draft, not the
+  merged result, so it misses the failure that matters.
+- `queued` on the integration line. It catches merged breakage but
+  serialises every land behind CI.
+- Keeping D21's "reject the whole batch" with a manual
+  `pr-batch --exclude`. It needs the operator to find the bad land, and
+  later lands built on it still carry the breakage.
+- Post-land checks on every line. Not asked for; the other lines stay the
+  phase-1 measurement of source control.
+
+## D26. One commit per land in a batch PR
+
+**Decided (operator, 2026-10-24): a batch PR carries one commit per land, in
+land order, each keeping its author, Vogt session and work item, so the
+batch can be reviewed, blamed and bisected per change.** This revises
+[D21](#d21-batch-pr-export), which squashed the batch into one commit. The
+design is [design.md §11.4](design.md#114-batch-pr-export).
+
+- **Shape.** `graft/batch-<n>` holds a chain of commits on GitHub's
+  current `main`: one per land (sync changesets skipped), with the land's
+  author, its message, and `Graft-Changeset`, `Graft-Session`,
+  `Graft-Work-Item` and `Graft-Checks` trailers. The committer is the
+  mirror. The last commit's tree equals the integration tip's tree.
+- **Reverted lands.** A bad land and its revert (D25) are both commits, so
+  the history says what happened.
+- **Deterministic.** Each commit is built from recorded fields and the
+  land's own time, and the chain is recorded before the push, so a retry
+  pushes the same shas.
+- **Merge.** The operator merges with rebase-merge to keep the commits, or
+  squash as before. graft still never merges or queues the PR.
+- **Fallback.** When replaying the lands onto the base does not reproduce
+  the integration tip (a conflict against a moved base, which sync would
+  also report), the batch is exported squashed, as D21 did, and both the PR
+  body and the commit say why.
+- **Bounds.** A batch carries at most 500 per-land commits; a line with more
+  lands is cut into consecutive batches. The PR body keeps D21's caps.
+- **Identity.** It is only useful once lands carry identity: gap 5 of the
+  fit assessment (the CLI passes `VOGT_SESSION_ID` and `VOGT_WORK_ITEM`) is
+  a separate small item, and should land first.
+
+Why: the fit assessment (WI-2336, gap 2). rustTorrent #214 carried four
+lands as one commit, had no review, and waited 17.3 h against a 1.6 h
+median.
+
+Rejected:
+
+- One PR per land (the removed G2.6 bridge): CI and review per land again.
+- Squash only (D21 as written): one review and one blame entry per batch.
+- Exporting the integration line's history as is: its sync merge
+  changesets would put graft's merges into GitHub's history and need a
+  merge-commit merge.

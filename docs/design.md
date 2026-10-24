@@ -905,7 +905,7 @@ graft supports all of these:
 
 | Policy | Meaning |
 | --- | --- |
-| `direct` | Scion's model, and the phase 1 default (D22). Land at once. In phase 2, post-land CI and an auto-revert bot catch breakage; in phase 1, under D21, GitHub CI runs on the batch PR |
+| `direct` | Scion's model, and the phase 1 default (D22). Land at once. On a batch integration line, post-land checks and an auto-revert mark each land good or bad (§8.7, D25); elsewhere, GitHub CI runs on the batch PR (D21) |
 | `attested` | The stack's head (pre-rebase) must carry passing attestations for the named checks (`ci/build`, `ci/test`), posted by CI through `Attest { changeset, check, status, url }`. Rebase-only changes onto a newer tip do not need re-attesting. The line-merge result can be required to re-attest (`attest_merged = true`) |
 | `queued` | The merge-queue equivalent. The candidate is tested after rebase and before the CAS, by a CI hook, in batches. This is the slowest option, and it exists for lines that need it (release lines) |
 
@@ -1167,6 +1167,101 @@ is held, lapsed and collectable at any time. The dry run reads the
 protection records once a repository has them, and keeps the ancestry walk
 as its test oracle and `--verify` mode. GC is journalled.
 
+### 8.7 Post-land checks on the batch line
+
+[D25](decisions.md#d25-post-land-checks-on-the-batch-line) starts phase 2's
+post-land checks for batch integration lines (§11.4) only. The land path is
+unchanged: rebase, line merge, CAS. Checks run after the ref moves, on the
+landed snapshot, and mark each land good or bad before `pr-batch` will
+include it. `direct` lines without `checks` behave as in §8.3.
+
+**Configuration.** Per line in `server.toml`:
+
+```toml
+[[lines]]
+name = "integration"
+policy = "direct"
+checks = "post-land"
+required = ["ci/fmt", "ci/clippy", "ci/test"]
+retries = 1          # a failed check is run once more before the land is bad
+```
+
+`required` names the checks GitHub requires on the target repository's
+`main`, so a batch that is good in graft is the batch GitHub CI expects to
+pass. The commands live with the checker.
+
+**Flow.**
+
+```mermaid
+sequenceDiagram
+  participant A as agent
+  participant S as graft server
+  participant C as post-land checker (graft-attester)
+  participant M as graft-mirror pr-batch
+  A->>S: Land (rebase, line merge, CAS)
+  S-->>A: Landed (latency unchanged)
+  S->>S: journal RefMoved; land_checks row = pending
+  C->>S: Watch RefMoved on the line
+  C->>S: Fetch landed snapshot (sparse, by id)
+  C->>C: run required checks (sandboxed, timed out)
+  C->>S: Attest {land, check, passed, url}
+  S->>S: same txn: Attested entry + land_checks mark
+  alt a required check failed (after retries)
+    C->>S: Land Revert(bad land), metadata graft.reverts
+  end
+  M->>S: GetLandChecks(line, from batch start)
+  M->>M: cut batch at newest land with an all-settled prefix
+```
+
+1. **Pending.** A land on a checked line gets `pending` in a `land_checks`
+   index (`repo, line, pos, changeset, state`) in the land's own
+   transaction (rule 3). No journal scan finds it later.
+2. **Checked.** The checker watches `RefMoved` on its line, fetches the
+   landed snapshot by id, and runs each required check in a cleared
+   environment with a timeout, as the trial attester does for drafts. When
+   it is behind, it checks the newest unchecked land first (skip ahead, as
+   a merge queue batches): if that passes, every land up to it is good.
+3. **Marked.** `Attest` on a landed changeset of a checked line is
+   accepted from an attest-only token for that changeset. It writes the
+   `Attested` journal entry and updates `land_checks` in one transaction:
+   `good` when every required check has passed, `bad` when one failed after
+   `retries`, `pending` otherwise. A check that errors (timeout, checkout
+   failure) is retried and then counts as failed, with its log.
+4. **Bisected.** When a skipped-ahead check fails, the checker checks the
+   lands between the last good one and the failure, halving each time, so
+   the first bad land is found in O(log n) runs. Lands before it are good.
+5. **Reverted.** The checker lands `Revert` of the first bad land on the
+   line, with metadata `graft.reverts = <land>` and `graft.revert-check =
+   <check url>`, through the ordinary land path. The revert is a land like
+   any other and is checked too. The journal carries `LandReverted { land,
+   revert, check }`, so the author's session (from the land's metadata)
+   can be told. Lands after the bad one stay; their next check runs on top
+   of the revert. A revert that conflicts is not forced: the line is marked
+   `blocked` and the operator decides (`graft line unblock`).
+6. **Batched.** `pr-batch` reads `land_checks` from the batch start by
+   position (paged, O(lands in the batch)). It cuts the batch at the
+   newest land such that every land up to it is `good`, or `bad` with a
+   good revert after it inside the cut. Pending lands wait for the next
+   batch; a run with nothing settled waits. A bad land never reaches a
+   batch PR without its revert.
+
+**Reuse of the phase-2 code.**
+
+| Piece | From | Change |
+| --- | --- | --- |
+| Attest-only token, CI OIDC exchange | G3.8 / G3.8b (WI-2211, WI-2265, WI-2271) | Mint for a landed changeset of a checked line as well as a draft |
+| `Attest` RPC and `Attested` journal entry | G3.1 | Accept landed changesets on checked lines; write `land_checks` in the same transaction |
+| Checker | the trial attester (WI-2276, WI-2292) | A `post-land` mode: watch `RefMoved` instead of drafts, skip ahead, bisect, revert |
+| Journal read robustness | WI-2293 | Fixed first: one failed `GetWorkspace` must not stall the read |
+| GitHub Actions path | `ci/github/graft-pre-land.yml` | Optional: export a land as `graft/land-<id>` and attest through the OIDC exchange. The self-hosted checker is the default (no branch per land on GitHub) |
+| Auto-revert bot (plan phase 4 table) | not started | Built here, inside the checker, for checked lines only |
+
+The `attested` and `queued` policies stay off.
+
+**Bounds.** The checker's queue is bounded and the journal is its backlog.
+A check's log is capped. `GetLandChecks` is paginated. A flaky check
+retried and passing is counted in `graft_post_land_flakes_total{check}`.
+
 ## 9. Client and working copy
 
 ### 9.1 Layout
@@ -1367,6 +1462,85 @@ at once. That is how the mirror avoids split-brain.
    native, and point the ruleset bypass at the mirror's App only.
 5. Unfreeze. The rollback (B → A) is the same steps in reverse. Graft's
    history is already on GitHub, so nothing is lost.
+
+### 11.4 Batch PR export
+
+Under [D21](decisions.md#d21-batch-pr-export) agents land on a graft
+integration line forked from the followed `main`, and `graft-mirror pr-batch
+<line> --base main` delivers it to GitHub as one PR at a time, which the
+operator merges. [D26](decisions.md#d26-one-commit-per-land-in-a-batch-pr)
+changes the PR's commits from one squash to one commit per land, and
+[D25](decisions.md#d25-post-land-checks-on-the-batch-line) (§8.7) decides
+where a batch is cut.
+
+**Per-land commit shape.** `graft/batch-<n>` is a chain on GitHub's current
+`main` sha `B`:
+
+```
+B ── c1 ── c2 ── … ── ck        (k ≤ 500; sync changesets skipped)
+
+ck:  tree      = export(replayed snapshot k); at k = last, = export(integration tip)
+     parent    = c(k-1), or B
+     author    = the land's author (name, email; kind agent or human), land time
+     committer = the mirror identity, land time
+     message   = the land's message, then:
+       Graft-Changeset: <land id>
+       Graft-Session: <Vogt session or ->
+       Graft-Work-Item: <work item or ->
+       Graft-Checks: ci/fmt=passed ci/clippy=passed ci/test=passed
+       Graft-Batch: <n>
+```
+
+- **Replay.** The lands' trees on the integration line sit on whichever
+  base the line had absorbed then. pr-batch replays each land's own diff
+  (land against its first parent), in land order, onto the base tip with
+  graft `Rebase` (line merge, D16). The replayed changesets are held by a
+  mirror workspace `batch-<n>` that is closed when the batch settles, so GC
+  collects them (§8.6). Cost: one diff and one rebase per land, never a
+  snapshot walk.
+- **Check.** The last replayed snapshot must have the integration tip's
+  root id. If it does not, or a replay conflicts, the batch is exported
+  squashed as before (one commit, the D21 message), and the PR body says
+  why.
+- **Reverts.** A bad land and its revert (§8.7) are both commits.
+- **Determinism.** Every field comes from recorded data and land times, so
+  the chain's shas are a function of the batch. The chain is written to the
+  local mirror and recorded in the batch record (`commits`, the list of
+  `(land, sha)`) before the push; a retry pushes the same shas.
+- **PR body.** As D21: the land table (now with each land's commit sha),
+  the caps (60,000 characters, at most 8 checks per land) and the
+  `Graft-Batch` trailers.
+- **Cut.** A batch ends at the cut point of §8.7 step 6 on a checked line,
+  at the tip otherwise, and at 500 lands at most; the rest wait for the next
+  batch.
+- **Settle.** Follow imports the PR's merge. A rebase-merge produces new
+  shas for the same trees; follow maps each back by its `Graft-Changeset`
+  trailer. A squash-merge maps the batch tip as D21 does. Rejected batches
+  leave the line as it is.
+
+**Implementation steps (WI-2349 follow-ups).** Each is one plan item on
+disjoint crates:
+
+1. WI-2293: the attester's journal read survives a failed `GetWorkspace`
+   (`graft-attester`).
+2. Checked lines: `checks`, `required`, `retries` in line config; the
+   `land_checks` index and its schema migration; `Attest` and the token
+   mint accept landed changesets on checked lines; `GetLandChecks`
+   (paginated) and `LandReverted` (`graft-engine`, `graft-proto`,
+   `graft-store-sqlite`, `graft-auth`). An interface PR with the proto
+   types first.
+3. The checker's `post-land` mode: watch `RefMoved`, skip ahead, bisect,
+   retry, revert (`graft-attester`).
+4. pr-batch cuts at the settled prefix on a checked line
+   (`graft-mirror`).
+5. Per-land commits: replay, root check, squash fallback, the batch record's
+   commit list, follow's per-commit mapping (`graft-mirror`, `graft-git`
+   for the commit builder). Golden test for the chain's shas.
+6. CLI identity (fit assessment gap 5, its own item, `graft-cli`): needed
+   for D26's authors, and lands before step 5 ships.
+7. graft-dev: switch the trial integration line to `checks = "post-land"`,
+   run the attester profile, and measure on the bench harness: bad-land
+   detection time, revert time, and batches cut per day.
 
 ## 12. Auth
 
