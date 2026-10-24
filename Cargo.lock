@@ -1961,6 +1961,7 @@ dependencies = [
 name = "graft-harness"
 version = "0.0.0"
 dependencies = [
+ "graft-auth",
  "graft-engine",
  "graft-gc",
  "graft-git",
