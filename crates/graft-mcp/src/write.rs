@@ -18,8 +18,8 @@ use graft_proto::{
     api::{RepoApi, WorkspaceApi},
     types::{
         ConflictReason, ConflictSide, ConflictView, CreateChangeset, CreateLine, GetConflicts,
-        Land, Landed, MergeMode, OpenWorkspace, Page, PathResolution, Resolution, ResolvedContent,
-        Revert, WorkspaceRef, WorkspaceView,
+        Land, Landed, MergeMode, OpenWorkspace, Page, PathResolution, RefKind, Resolution,
+        ResolvedContent, Revert, UpdateRef, WorkspaceRef, WorkspaceView,
     },
 };
 use rmcp::{
@@ -200,6 +200,18 @@ pub struct LineCreateArgs {
     pub name: String,
     /// Where the line starts: a changeset id or a ref name.
     pub from: String,
+}
+
+/// Arguments of `graft_tag`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TagArgs {
+    /// Repository name.
+    pub repo: String,
+    /// The tag's name; `tags/` is added when missing.
+    pub name: String,
+    /// What to tag: a changeset id or a ref name.
+    pub at: String,
 }
 
 /// What `graft_workspace` does.
@@ -504,6 +516,38 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
                     repo: args.repo,
                     name: args.name,
                     from,
+                },
+            )
+            .await
+            .map_err(ToolError::Api)?;
+        bounded(json!({
+            "name": view.name,
+            "target": view.target.to_string(),
+            "version": view.version,
+        }))
+    }
+
+    async fn tag(&self, cx: &CallContext, args: TagArgs) -> Result<CallToolResult, ToolError> {
+        check_name("repo", &args.repo)?;
+        check_name("name", &args.name)?;
+        check_name("at", &args.at)?;
+        let at = self.resolve(cx, &args.repo, &args.at).await?;
+        let name = if args.name.starts_with("tags/") {
+            args.name
+        } else {
+            format!("tags/{}", args.name)
+        };
+        // A CAS from absent: a tag never moves and is never overwritten.
+        let view = self
+            .api
+            .update_ref(
+                cx,
+                UpdateRef {
+                    repo: args.repo,
+                    name,
+                    expected: None,
+                    new: at,
+                    kind: RefKind::Tag,
                 },
             )
             .await
@@ -929,6 +973,29 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         Ok(respond(async {
             let cx = self.call_context(&ctx)?;
             self.line_create(&cx, args).await
+        })
+        .await)
+    }
+
+    #[tool(
+        name = "graft_tag",
+        description = "Create an immutable tag tags/<name> at a changeset (an id or a ref name). A tag never moves: an existing tag at another target is a ref_conflict naming it. Needs write.",
+        annotations(
+            title = "Create tag",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn graft_tag(
+        &self,
+        Parameters(args): Parameters<TagArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(respond(async {
+            let cx = self.call_context(&ctx)?;
+            self.tag(&cx, args).await
         })
         .await)
     }

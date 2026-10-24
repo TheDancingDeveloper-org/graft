@@ -77,6 +77,8 @@ pub(crate) enum Command {
     Workspace(WorkspaceArgs),
     /// Create or list lines
     Line(LineArgs),
+    /// Create or list immutable tags
+    Tag(TagArgs),
     /// List, squash, reorder, split or drop the drafts between the base and the head
     Stack(StackArgs),
     /// Move the base to the line tip (the server rebases a stack; conflicts are written into the files)
@@ -353,6 +355,37 @@ pub(crate) enum LineAction {
         #[arg(long, value_name = "PREFIX")]
         prefix: Option<String>,
         /// Lines per page
+        #[arg(long, default_value_t = PAGE_DEFAULT)]
+        limit: u32,
+        /// Resume token from a previous page
+        #[arg(long, value_name = "TOKEN")]
+        cursor: Option<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct TagArgs {
+    /// What to do
+    #[command(subcommand)]
+    pub(crate) action: TagAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum TagAction {
+    /// Tag a changeset as `tags/<name>`; a tag never moves and is never re-created
+    Create {
+        /// The tag's name (`tags/` is added when missing)
+        name: String,
+        /// What to tag: a changeset id or ref
+        #[arg(long, value_name = "REV", default_value = DEFAULT_LINE)]
+        at: String,
+    },
+    /// List the tags, in name order
+    List {
+        /// Only tags whose name (after `tags/`) starts with this
+        #[arg(long, value_name = "PREFIX")]
+        prefix: Option<String>,
+        /// Refs per page
         #[arg(long, default_value_t = PAGE_DEFAULT)]
         limit: u32,
         /// Resume token from a previous page

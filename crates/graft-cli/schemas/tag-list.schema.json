@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft tag list --json",
+  "type": "object",
+  "required": [
+    "tags",
+    "next"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "target",
+          "version",
+          "kind"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "pattern": "^[a-z][0-9a-f]{64}$",
+            "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "kind": {
+            "const": "tag"
+          }
+        }
+      }
+    },
+    "next": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}
