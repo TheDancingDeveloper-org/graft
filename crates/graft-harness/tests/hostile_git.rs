@@ -589,7 +589,6 @@ fn signed_commits_and_extra_headers_round_trip() {
 /// Lightweight and annotated tags on commits, a signed annotated tag, and a
 /// tag of a tag. The annotated tag objects must come back with their shas.
 #[test]
-#[ignore = "WI-2357: export writes tags as lightweight refs to the commit"]
 fn annotated_and_signed_tag_objects_round_trip() {
     let mut git = Git::init("tags");
     git.write("a", b"a\n");

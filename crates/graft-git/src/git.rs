@@ -19,6 +19,7 @@ pub(crate) enum Kind {
     Blob,
     Tree,
     Commit,
+    Tag,
 }
 
 impl Kind {
@@ -27,8 +28,15 @@ impl Kind {
             Kind::Blob => gix::objs::Kind::Blob,
             Kind::Tree => gix::objs::Kind::Tree,
             Kind::Commit => gix::objs::Kind::Commit,
+            Kind::Tag => gix::objs::Kind::Tag,
         }
     }
+}
+
+/// The object a raw tag object names, from its first (`object`) line.
+pub(crate) fn tag_target(data: &[u8]) -> Option<GitSha> {
+    let line = data.strip_prefix(b"object ")?.get(..40)?;
+    GitSha::from_hex(std::str::from_utf8(line).ok()?)
 }
 
 /// `sha1("<kind> <len>\0" ‖ data)`.
@@ -365,6 +373,32 @@ impl Repo {
         let id = r.peel_to_id().map_err(read_err)?.detach();
         let header = self.inner.find_header(id).map_err(read_err)?;
         Ok((header.kind() == gix::objs::Kind::Commit).then(|| to_sha(id)))
+    }
+
+    /// The tag objects `name` peels through to reach its target, outermost
+    /// first: empty for a lightweight ref. Stops at the first object that is
+    /// not a tag, or at a tag whose `object` line does not parse.
+    pub(crate) fn tag_chain(&self, name: &str) -> Result<Vec<Vec<u8>>, GitError> {
+        let Some(r) = self.inner.try_find_reference(name).map_err(read_err)? else {
+            return Ok(Vec::new());
+        };
+        let Some(mut id) = r.target().try_id().map(|id| id.to_owned()) else {
+            return Ok(Vec::new());
+        };
+        let mut chain = Vec::new();
+        loop {
+            let header = self.inner.find_header(id).map_err(read_err)?;
+            if header.kind() != gix::objs::Kind::Tag {
+                return Ok(chain);
+            }
+            let data = self.read(to_sha(id), Kind::Tag)?;
+            let next = tag_target(&data);
+            chain.push(data);
+            match next {
+                Some(sha) => id = gix::ObjectId::from_bytes_or_panic(&sha.0),
+                None => return Ok(chain),
+            }
+        }
     }
 
     /// Every ref under `prefix` (for example `refs/tags/`), sorted by name.
