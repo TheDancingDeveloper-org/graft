@@ -425,14 +425,9 @@ fn capped<M: MetaStore>(f: &Fixture<M>) {
     let main = tip(&r, "main");
     let got = merge(&r, "develop", "main");
     match got {
-        Err(ApiError::MergeConflict {
-            paths,
-            onto,
-            base,
-            source,
-        }) => {
-            assert_eq!(paths.len(), 1);
-            assert_eq!((onto, base, source), (main, m0, d2));
+        Err(ApiError::MergeConflict(m)) => {
+            assert_eq!(m.paths.len(), 1);
+            assert_eq!((m.onto, m.base, m.source), (main, m0, d2));
         }
         other => panic!("expected a merge conflict: {other:?}"),
     }

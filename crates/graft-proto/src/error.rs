@@ -18,6 +18,20 @@ pub struct ConflictPath {
     pub theirs: Option<ObjectId>,
 }
 
+/// A `LineMerge` conflict (D29): the ids a client needs to write conflict
+/// markers in one fetch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeConflict {
+    /// The conflicts.
+    pub paths: Vec<ConflictPath>,
+    /// The target line's tip the merge was made onto.
+    pub onto: ChangesetId,
+    /// The merge base.
+    pub base: ChangesetId,
+    /// The source changeset merged.
+    pub source: ChangesetId,
+}
+
 /// Every error an API operation can return.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -70,18 +84,9 @@ pub enum ApiError {
         /// The changeset it was rebased onto.
         onto: ChangesetId,
     },
-    /// A `LineMerge` found conflicting paths (D29). Carries the ids a
-    /// client needs to write conflict markers in one fetch.
-    MergeConflict {
-        /// The conflicts.
-        paths: Vec<ConflictPath>,
-        /// The target line's tip the merge was made onto.
-        onto: ChangesetId,
-        /// The merge base.
-        base: ChangesetId,
-        /// The source changeset merged.
-        source: ChangesetId,
-    },
+    /// A `LineMerge` found conflicting paths (D29). Boxed, so the error
+    /// stays as small as the other variants.
+    MergeConflict(Box<MergeConflict>),
     /// Land ran out of attempts under contention; retryable.
     Contended {
         /// The line.
@@ -179,7 +184,7 @@ impl ApiError {
             | ApiError::IncompatibleProtocol { .. } => Code::FailedPrecondition,
             ApiError::RefConflict { .. }
             | ApiError::Conflict { .. }
-            | ApiError::MergeConflict { .. }
+            | ApiError::MergeConflict(_)
             | ApiError::Contended { .. } => Code::Aborted,
             ApiError::PermissionDenied { .. } => Code::PermissionDenied,
             ApiError::LimitExceeded { .. } => Code::ResourceExhausted,
@@ -224,15 +229,12 @@ impl fmt::Display for ApiError {
             ApiError::Conflict { paths, onto } => {
                 write!(f, "{} paths conflict onto {onto}", paths.len())
             }
-            ApiError::MergeConflict {
-                paths,
-                onto,
-                source,
-                ..
-            } => write!(
+            ApiError::MergeConflict(m) => write!(
                 f,
-                "{} paths conflict merging {source} onto {onto}",
-                paths.len()
+                "{} paths conflict merging {} onto {}",
+                m.paths.len(),
+                m.source,
+                m.onto
             ),
             ApiError::Contended { line, .. } => write!(f, "line {line} is contended"),
             ApiError::Rejected { policy, detail } => write!(f, "rejected by {policy}: {detail}"),

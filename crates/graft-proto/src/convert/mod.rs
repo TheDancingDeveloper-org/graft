@@ -13,7 +13,7 @@ use graft_model::{
     Timestamp, TreeId,
 };
 
-use crate::error::{ApiError, ConflictPath};
+use crate::error::{ApiError, ConflictPath, MergeConflict};
 use crate::frame::Frame;
 use crate::pb;
 use crate::types::*;
@@ -1796,16 +1796,11 @@ impl From<ApiError> for pb::ApiError {
                 ApiError::IncompatibleProtocol { server } => {
                     E::IncompatibleProtocol(w::IncompatibleProtocol { server })
                 }
-                ApiError::MergeConflict {
-                    paths,
-                    onto,
-                    base,
-                    source,
-                } => E::MergeConflict(w::MergeConflict {
-                    paths: paths.into_iter().map(Into::into).collect(),
-                    onto: cb(onto),
-                    base: cb(base),
-                    source: cb(source),
+                ApiError::MergeConflict(m) => E::MergeConflict(w::MergeConflict {
+                    paths: m.paths.into_iter().map(Into::into).collect(),
+                    onto: cb(m.onto),
+                    base: cb(m.base),
+                    source: cb(m.source),
                 }),
             }),
         }
@@ -1877,7 +1872,7 @@ impl TryFrom<pb::ApiError> for ApiError {
             },
             E::Unauthenticated(_) => ApiError::Unauthenticated,
             E::IncompatibleProtocol(e) => ApiError::IncompatibleProtocol { server: e.server },
-            E::MergeConflict(e) => ApiError::MergeConflict {
+            E::MergeConflict(e) => ApiError::MergeConflict(Box::new(MergeConflict {
                 paths: e
                     .paths
                     .into_iter()
@@ -1886,7 +1881,7 @@ impl TryFrom<pb::ApiError> for ApiError {
                 onto: cid(e.onto, "onto")?,
                 base: cid(e.base, "base")?,
                 source: cid(e.source, "source")?,
-            },
+            })),
         })
     }
 }

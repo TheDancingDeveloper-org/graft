@@ -733,12 +733,14 @@ fn distinct_lines<'a>(a: &'a [Point], b: &'a [Point]) -> Option<(&'a Point, &'a 
 /// (§8.9), so the client can write markers in one fetch.
 fn merge_conflict(e: ApiError, base: ChangesetId, source: ChangesetId) -> ApiError {
     match e {
-        ApiError::Conflict { paths, onto } => ApiError::MergeConflict {
-            paths,
-            onto,
-            base,
-            source,
-        },
+        ApiError::Conflict { paths, onto } => {
+            ApiError::MergeConflict(Box::new(graft_proto::error::MergeConflict {
+                paths,
+                onto,
+                base,
+                source,
+            }))
+        }
         e => e,
     }
 }

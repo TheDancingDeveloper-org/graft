@@ -116,7 +116,7 @@ impl std::error::Error for Failure {}
 /// The exit code and kind for a typed API error.
 pub(crate) fn api_exit(e: &ApiError) -> (Exit, &'static str) {
     match e {
-        ApiError::Conflict { .. } | ApiError::MergeConflict { .. } => (Exit::Conflict, "conflict"),
+        ApiError::Conflict { .. } | ApiError::MergeConflict(_) => (Exit::Conflict, "conflict"),
         ApiError::RefConflict { .. } => (Exit::Conflict, "ref_conflict"),
         ApiError::Contended { .. } => (Exit::Contended, "contended"),
         ApiError::Rejected { .. } => (Exit::Rejected, "rejected"),
@@ -159,14 +159,9 @@ impl From<ApiError> for Failure {
         };
         match e {
             ApiError::Conflict { paths, onto } => conflicted(failure, &paths, onto),
-            ApiError::MergeConflict {
-                paths,
-                onto,
-                base,
-                source,
-            } => conflicted(failure, &paths, onto)
-                .with_detail("base", base.to_string().into())
-                .with_detail("source", source.to_string().into()),
+            ApiError::MergeConflict(m) => conflicted(failure, &m.paths, m.onto)
+                .with_detail("base", m.base.to_string().into())
+                .with_detail("source", m.source.to_string().into()),
             _ => failure,
         }
     }

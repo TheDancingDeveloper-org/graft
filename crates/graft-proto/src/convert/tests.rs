@@ -255,12 +255,11 @@ fn api_error() -> impl Strategy<Value = ApiError> {
             cid(),
             cid()
         )
-            .prop_map(|(paths, onto, base, source)| ApiError::MergeConflict {
-                paths,
-                onto,
-                base,
-                source,
-            }),
+            .prop_map(
+                |(paths, onto, base, source)| ApiError::MergeConflict(Box::new(
+                    graft_proto_merge_conflict(paths, onto, base, source)
+                ))
+            ),
     ]
 }
 
@@ -1038,4 +1037,23 @@ fn line_merge_types_round_trip() {
         (prop::collection::vec(point, 0..3), otext())
             .prop_map(|(merges, next)| LineMergePage { merges, next }),
     );
+}
+
+fn graft_proto_merge_conflict(
+    paths: Vec<ConflictPath>,
+    onto: ChangesetId,
+    base: ChangesetId,
+    source: ChangesetId,
+) -> crate::error::MergeConflict {
+    crate::error::MergeConflict {
+        paths,
+        onto,
+        base,
+        source,
+    }
+}
+
+#[test]
+fn the_merge_conflict_variant_does_not_grow_api_error() {
+    assert!(std::mem::size_of::<ApiError>() <= 64);
 }
