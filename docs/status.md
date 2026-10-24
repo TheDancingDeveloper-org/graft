@@ -95,8 +95,9 @@ Creating a line now writes one fork row, not a copy of its history (#107).
 
 ### Read paths against the kill criterion (WI-2341)
 
-The kill criterion asks for read paths at least 2x faster than git. On
-graft-dev (p50 ms, graft / git) after WI-2341:
+The phase-1 kill criterion asks for read paths (`log`, `status`, `sync`)
+that are not slower than git; 2x faster than git is a later-phase target
+(operator decision, 2026-10-24). On graft-dev (p50 ms, graft / git) after WI-2341:
 
 | | 1k | 10k |
 | --- | ---: | ---: |
