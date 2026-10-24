@@ -51,8 +51,133 @@
               }
             }
           }
+        },
+        "preflight": {
+          "$ref": "#/$defs/preflight"
         }
       }
+    }
+  },
+  "$defs": {
+    "preflight": {
+      "description": "The pre-land check (design \u00a78.8, D27). `checked` is false when --no-check (or no stack) skipped it.",
+      "type": "object",
+      "required": [
+        "checked"
+      ],
+      "properties": {
+        "checked": {
+          "type": "boolean"
+        },
+        "tip": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$"
+        },
+        "stop": {
+          "type": "boolean"
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "conflicts_truncated": {
+          "type": "boolean"
+        },
+        "merges_cleanly": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "both_changed_truncated": {
+          "type": "boolean"
+        },
+        "drafts": {
+          "type": "object",
+          "required": [
+            "checked",
+            "skipped",
+            "overlaps",
+            "truncated"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "checked": {
+              "type": "boolean"
+            },
+            "skipped": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overlaps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "workspace",
+                  "owner",
+                  "session",
+                  "work_item",
+                  "draft_age_ms",
+                  "lease_until_ms",
+                  "paths",
+                  "paths_truncated"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "workspace": {
+                    "type": "string"
+                  },
+                  "owner": {
+                    "type": "string"
+                  },
+                  "session": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "work_item": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "draft_age_ms": {
+                    "type": "integer"
+                  },
+                  "lease_until_ms": {
+                    "type": "integer"
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "paths_truncated": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          }
+        },
+        "preview_skipped": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

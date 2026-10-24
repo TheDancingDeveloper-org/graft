@@ -16,6 +16,22 @@ json:
   "line": "main",
   "outcome": "landed",
   "pr_url": null,
+  "preflight": {
+    "both_changed_truncated": false,
+    "checked": true,
+    "conflicts": [],
+    "conflicts_truncated": false,
+    "drafts": {
+      "checked": true,
+      "overlaps": [],
+      "skipped": null,
+      "truncated": false
+    },
+    "merges_cleanly": [],
+    "preview_skipped": null,
+    "stop": false,
+    "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+  },
   "rebased": false,
   "recovered": null
 }
@@ -34,6 +50,22 @@ json:
   "line": "main",
   "outcome": "landed",
   "pr_url": null,
+  "preflight": {
+    "both_changed_truncated": false,
+    "checked": true,
+    "conflicts": [],
+    "conflicts_truncated": false,
+    "drafts": {
+      "checked": true,
+      "overlaps": [],
+      "skipped": null,
+      "truncated": false
+    },
+    "merges_cleanly": [],
+    "preview_skipped": null,
+    "stop": false,
+    "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+  },
   "rebased": true,
   "recovered": null
 }
@@ -58,7 +90,23 @@ json:
     ],
     "kind": "conflict",
     "message": "1 paths conflict onto ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
-    "onto": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08"
+    "onto": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
+    "preflight": {
+      "both_changed_truncated": false,
+      "checked": true,
+      "conflicts": [],
+      "conflicts_truncated": false,
+      "drafts": {
+        "checked": true,
+        "overlaps": [],
+        "skipped": null,
+        "truncated": false
+      },
+      "merges_cleanly": [],
+      "preview_skipped": null,
+      "stop": false,
+      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+    }
   }
 }
 
@@ -98,7 +146,23 @@ json:
 {
   "error": {
     "kind": "contended",
-    "message": "line main is contended"
+    "message": "line main is contended",
+    "preflight": {
+      "both_changed_truncated": false,
+      "checked": true,
+      "conflicts": [],
+      "conflicts_truncated": false,
+      "drafts": {
+        "checked": true,
+        "overlaps": [],
+        "skipped": null,
+        "truncated": false
+      },
+      "merges_cleanly": [],
+      "preview_skipped": null,
+      "stop": false,
+      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+    }
   }
 }
 
@@ -135,6 +199,7 @@ json:
 == permission denied: no land scope (land )
 exit 6
 stdout:
+pre-land: draft overlap not checked (needs the repo:demo:drafts scope)
 
 stderr:
 graft: permission denied: needs repo:demo:land:main
@@ -174,6 +239,22 @@ json:
 {
   "error": {
     "kind": "unavailable",
-    "message": "unavailable; retry after 0 ms"
+    "message": "unavailable; retry after 0 ms",
+    "preflight": {
+      "both_changed_truncated": false,
+      "checked": true,
+      "conflicts": [],
+      "conflicts_truncated": false,
+      "drafts": {
+        "checked": true,
+        "overlaps": [],
+        "skipped": null,
+        "truncated": false
+      },
+      "merges_cleanly": [],
+      "preview_skipped": null,
+      "stop": false,
+      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+    }
   }
 }

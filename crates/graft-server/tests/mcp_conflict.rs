@@ -82,8 +82,17 @@ async fn play(name: &str, case: Case) -> Outcome {
     assert_eq!(landed_a["outcome"], "landed");
     let onto = landed_a["landed"].as_str().unwrap().to_owned();
 
-    // B's land conflicts, with ids only.
-    let conflict_error = b.err("graft_land", json!({"repo": "r", "workspace": "wb"}));
+    // The pre-land check (D27) stops B's land before it is sent.
+    let stopped = b.err("graft_land", json!({"repo": "r", "workspace": "wb"}));
+    assert_eq!(stopped["kind"], "conflict", "{stopped}");
+    assert_eq!(stopped["paths"], json!([case.path]));
+    assert_eq!(stopped["preflight"]["stop"], true, "{stopped}");
+
+    // Sent without the check, B's land conflicts on the server, with ids only.
+    let conflict_error = b.err(
+        "graft_land",
+        json!({"repo": "r", "workspace": "wb", "check": false}),
+    );
     assert_eq!(conflict_error["kind"], "conflict", "{conflict_error}");
     assert_eq!(conflict_error["paths"], json!([case.path]));
     assert_eq!(conflict_error["onto"], onto.as_str());

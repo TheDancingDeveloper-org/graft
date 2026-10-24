@@ -412,6 +412,9 @@ pub(crate) struct LandArgs {
     /// How the server's rebase treats a file both sides changed: `line` merges text files line by line (D16), `file` refuses any file changed on both sides
     #[arg(long, value_enum, value_name = "MODE", default_value_t = LandMerge::Line)]
     pub(crate) merge: LandMerge,
+    /// Skip the pre-land check (the dry-run rebase that stops a land on a real conflict, and the draft-overlap report)
+    #[arg(long)]
+    pub(crate) no_check: bool,
 }
 
 /// How `graft land` merges a file both sides changed.

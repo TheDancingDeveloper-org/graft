@@ -21,12 +21,21 @@
 //! is text (decision D16); only overlapping edits conflict. `--merge file`
 //! asks for the stricter rebase, where any file changed on both sides
 //! conflicts.
+//!
+//! Before it sends `Land`, the pre-land check (§8.8, decision D27) reads a
+//! dry-run rebase of the stack onto the tip and the draft overlap on its
+//! paths. A real conflict exits 3 with the paths and sends nothing (with
+//! `--sync` the land goes ahead, so the conflicts are written into the
+//! files); files that merge cleanly and other workspaces' drafts are only
+//! reported. `--no-check` skips it. It builds and tests nothing, and the
+//! server's land still decides. JSON output carries it under `preflight`.
 
 use std::time::Duration;
 
 use graft_client::fetch::FetchOptions;
 use graft_client::workcopy::{DEFAULT_CACHE_BYTES, LandOptions, LandOutcome};
 use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat};
+use graft_mcp::preflight::{self, PreflightRequest};
 use graft_proto::types::MergeMode;
 use serde_json::json;
 
@@ -37,19 +46,48 @@ use crate::render::{print_json, short};
 
 /// Lands the working copy's stack.
 pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
+    let merge = match args.merge {
+        LandMerge::Line => MergeMode::Line,
+        LandMerge::File => MergeMode::File,
+    };
     let opts = LandOptions {
         squash: args.squash,
         sync: args.sync,
         wait: args.wait.map(Duration::from_secs),
-        merge: match args.merge {
-            LandMerge::Line => MergeMode::Line,
-            LandMerge::File => MergeMode::File,
-        },
+        merge,
         ..LandOptions::default()
     };
     runtime()?.block_on(async {
         let mut s = begin(g).await?;
         s.note_recovery();
+        let state = s.wc.state();
+        let preflight = match (args.no_check, state.head) {
+            (true, _) | (_, None) => preflight::skipped_json(),
+            (false, Some(head)) => {
+                let req = PreflightRequest {
+                    repo: s.conn.repo.clone(),
+                    line: state.line.clone(),
+                    base: state.base,
+                    head,
+                    merge,
+                };
+                let found = preflight::preflight(&s.conn.remote, &s.cx, &req).await?;
+                let value = found.json();
+                if !g.json {
+                    for line in found.lines() {
+                        outln!("{line}");
+                    }
+                }
+                if let Some(conflict) = found.conflict.clone().filter(|_| !args.sync) {
+                    return Err(Failure::from(conflict)
+                        .with_detail("preflight", value)
+                        .with_note(
+                            "nothing was sent: the pre-land check found a real conflict; run `graft sync` (or `graft land --sync`) to write it into the files, or `--no-check` to send the land anyway",
+                        ));
+                }
+                value
+            }
+        };
         let cache = s.wc.open_cache(DEFAULT_CACHE_BYTES)?;
         let ws = s.workspace_ref();
         let out = with_heartbeat(
@@ -77,7 +115,7 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
                 "unavailable" => "retryable: land is idempotent, so run `graft land` again",
                 _ => return failure,
             };
-            failure.with_note(note)
+            failure.with_note(note).with_detail("preflight", preflight.clone())
         })?;
         let line = s.wc.state().line.clone();
         match out {
@@ -95,6 +133,7 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
                         "changed": update.changed,
                         "pr_url": null,
                         "recovered": s.recovered_json(),
+                        "preflight": preflight,
                     }));
                 }
                 if rebased {
@@ -120,6 +159,7 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
                         "changed": null,
                         "pr_url": pr_url,
                         "recovered": s.recovered_json(),
+                        "preflight": preflight,
                     }));
                 }
                 outln!("queued for {line}: {pr_url}");

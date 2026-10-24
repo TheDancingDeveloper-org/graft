@@ -8,6 +8,22 @@ expression: value
   "line": "main",
   "outcome": "queued",
   "pr_url": "https://github.example/o/demo/pull/1",
+  "preflight": {
+    "both_changed_truncated": false,
+    "checked": true,
+    "conflicts": [],
+    "conflicts_truncated": false,
+    "drafts": {
+      "checked": false,
+      "overlaps": [],
+      "skipped": "the server does not answer it",
+      "truncated": false
+    },
+    "merges_cleanly": [],
+    "preview_skipped": null,
+    "stop": false,
+    "tip": "ceb9d51a431efa31e031494ec857b6e71b3fc89b7df21172c5365879f263cec50"
+  },
   "rebased": null,
   "recovered": null
 }
