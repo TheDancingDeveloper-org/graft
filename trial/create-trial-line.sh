@@ -1,30 +1,31 @@
 #!/usr/bin/env bash
-# Create the integration line `trial-1` of the followed repository
+# Create the integration line `$GRAFT_TRIAL_LINE` (default `trial-1`) of the followed repository
 # `rusttorrent` on graft-dev, forked at the current tip of rustTorrent main
 # (decision D21). The mirror keeps following main; nothing is exported.
 #
 #   trial/create-trial-line.sh
 #
 # graft has no "create line" command, so this uses the mirror's own path:
-# `graft-mirror import … --line refs/heads/main=trial-1` of a fresh clone of
+# `graft-mirror import … --line refs/heads/main=<line>` of a fresh clone of
 # upstream main. Ids are derived from content, so the import reproduces the
 # followed history exactly and only the new ref is set. Runs on the VM through
 # `tailscale ssh sprooty@graft-dev`. A one-hour admin token lives in a
 # root-owned temp dir used by one throwaway container of the stack's image,
 # then deleted. Nothing secret is printed or put in argv.
 #
-# Idempotent: if `trial-1` already exists it is left alone, never moved, so a
+# Idempotent: if the line already exists it is left alone, never moved, so a
 # re-run cannot rewind the line. The line's land policy (`direct`, decision
 # D22) comes from deploy/server.toml, not from this script.
 #
 #   GRAFT_TRIAL_HOST      ssh target (default sprooty@graft-dev)
+#   GRAFT_TRIAL_LINE      line to create (default trial-1)
 #   GRAFT_TRIAL_UPSTREAM  git URL to fork from (default rustTorrent on GitHub)
 set -euo pipefail
 
 host=${GRAFT_TRIAL_HOST:-sprooty@graft-dev}
 upstream=${GRAFT_TRIAL_UPSTREAM:-https://github.com/TheDancingDeveloper-org/rustTorrent.git}
 repo=rusttorrent
-line=trial-1
+line=${GRAFT_TRIAL_LINE:-trial-1}
 
 [[ $upstream =~ ^https://[A-Za-z0-9./_-]+$ ]] || { echo "create-trial-line: bad upstream URL" >&2; exit 2; }
 command -v tailscale >/dev/null || { echo "create-trial-line: tailscale is required" >&2; exit 1; }

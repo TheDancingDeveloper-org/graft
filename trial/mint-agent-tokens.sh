@@ -5,19 +5,20 @@
 #   trial/mint-agent-tokens.sh [--session ses_…] [--work-item WI-…] [--ttl SECS] N
 #
 # Each token is kind agent, scopes repo:rusttorrent:read, :write and
-# :land:trial-1 (never main), valid for one day by default. Minting runs on the VM through
+# :land:<line> (never main), valid for one day by default. Minting runs on the VM through
 # `tailscale ssh sprooty@graft-dev`; the token travels back on the ssh stdout
 # straight into the file. It is never printed, never in argv, never in a
 # variable. Re-running replaces the files with fresh tokens.
 #
 #   GRAFT_TRIAL_HOST    ssh target (default sprooty@graft-dev)
+#   GRAFT_TRIAL_LINE    line the tokens may land on (default trial-1)
 #   GRAFT_TRIAL_DIR     token directory (default ~/.config/graft)
 set -euo pipefail
 
 host=${GRAFT_TRIAL_HOST:-sprooty@graft-dev}
 dir=${GRAFT_TRIAL_DIR:-$HOME/.config/graft}
 repo=rusttorrent
-line=trial-1
+line=${GRAFT_TRIAL_LINE:-trial-1}
 ttl=86400
 session=
 work_item=

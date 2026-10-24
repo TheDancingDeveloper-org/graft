@@ -1,0 +1,1 @@
+- trial: `create-trial-line.sh`, `mint-agent-tokens.sh` and the agent guide take the line from `GRAFT_TRIAL_LINE` (default `trial-1`), for trial 2.

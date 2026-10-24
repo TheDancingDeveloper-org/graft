@@ -3,7 +3,7 @@
 **This overrides the repository `AGENTS.md` git workflow for the trial.**
 Deliver through graft only. No `git push`. No GitHub PRs. No branches. Do not
 create `g<phase>-…` or `wi-…` branches, do not run `git commit`, and do not
-open or wait for a PR. Your change reaches the trial line `trial-1` only through `graft land`. You
+open or wait for a PR. Your change reaches the trial line `$LINE` only through `graft land`. You
 cannot land on `main`. `graft-mirror pr-batch` exports the line as one GitHub
 PR with one commit per land (D26); oversight reviews it and merges it with
 `land-pr` (D28).
@@ -15,6 +15,7 @@ it, never put it in a command's arguments, never copy it into the checkout.
 
 ```sh
 export GRAFT_ENDPOINT=http://graft-dev:17888
+LINE=${GRAFT_TRIAL_LINE:?the trial line from your brief}
 g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from your brief
 ```
 
@@ -24,13 +25,13 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
 
 1. **Clone** into `Active/rt-trial-N` (the N from your brief), and work only there:
    ```sh
-   g clone rusttorrent Active/rt-trial-N --line trial-1 && cd Active/rt-trial-N
+   g clone rusttorrent Active/rt-trial-N --line "$LINE" && cd Active/rt-trial-N
    ```
    A working copy is also your workspace. `g workspace` shows it, and
    `g workspace renew` extends its lease if you are idle for long.
 2. **Edit** the files with your normal tools. `g status` lists your changes;
    `g diff` shows them.
-3. **Check** before you commit. `trial-1` lands directly (decision D22): no
+3. **Check** before you commit. `$LINE` lands directly (decision D22): no
    check runs when you land, and GitHub CI runs only on the batch PR, so a
    broken land breaks the whole batch. Run rustTorrent CI's Rust job
    yourself, without the Tauri crate `rtbit-desktop` and with only
@@ -59,7 +60,7 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
    Landing is immediate: there is no attestation to wait for. `g land` first
    runs the pre-land check (D27): a dry-run rebase that stops the land on a
    real conflict before anything is sent; `--no-check` skips it. Exit 0
-   means your change is on `trial-1`.
+   means your change is on `$LINE`.
 
 ## Conflicts (exit 3 from `g sync` or `g land`)
 
@@ -82,10 +83,10 @@ conflicts written into the files:
 
 | Exit | Meaning | What to do |
 | --- | --- | --- |
-| 0 | landed (`landed <id> on trial-1`) | done |
+| 0 | landed (`landed <id> on $LINE`) | done |
 | 3 | conflict, or `dirty` | resolve as above, then commit and land |
 | 4 | contended (another land won the race) | run `g land` again; `--wait 120` retries longer |
-| 5 | rejected by the line policy | not expected: `trial-1` is `direct`. Report blocked with the message. Do not attest checks yourself |
+| 5 | rejected by the line policy | not expected: `$LINE` is `direct`. Report blocked with the message. Do not attest checks yourself |
 | 6 | not authorized (token expired or missing scope) | stop and report blocked |
 | 7 | unavailable / transport error | retry `g land` (it is idempotent); after 3 tries report blocked |
 | 1, 2 | other failure / usage error | read the message; fix the command or report blocked |
