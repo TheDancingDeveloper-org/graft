@@ -487,8 +487,10 @@ harness reports on. They don't gate phase 2.
 
 **Kill or rethink (any one):**
 
-- Agents' read paths on graft are not at least 2× faster than the git
-  equivalents they replace, end to end.
+- Agents' read paths on graft (`log`, `status`, `sync`) are slower than the
+  git equivalents they replace, end to end. This is the phase-1 bar
+  (operator decision, 2026-10-24); 2× faster than git is a later-phase
+  target.
 - Agents do not use it unprompted after a week, according to the session
   logs.
 - Operating it costs more than half a day a week of operator or oversight
