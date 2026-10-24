@@ -215,7 +215,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 
     /// Whether a workspace's lease has ended.
     pub(crate) fn lapsed(&self, ws: &WorkspaceRecord) -> bool {
-        ws.lease_until_ms < self.clock.now().ms
+        let now = self.clock.now().ms;
+        if planted!(self.planted, LeaseBoundary) {
+            return ws.lease_until_ms <= now;
+        }
+        ws.lease_until_ms < now
     }
 
     pub(crate) async fn load_workspace(

@@ -221,7 +221,7 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
         let batch = self.c.batch();
         let mut after = None;
         loop {
-            let now = self.c.now();
+            let now = self.c.lease_now();
             let page = self
                 .meta()
                 .lapsed_workspaces(self.repo, now, after.clone(), batch)
@@ -362,9 +362,13 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
 
     async fn collect(&mut self) -> StoreResult<()> {
         let batch = self.c.batch();
+        #[cfg(feature = "planted-bugs")]
+        if planted!(self.c.planted, IgnoreLandHolder) {
+            self.collect_land_held().await?;
+        }
         let mut after = None;
         loop {
-            let now = self.c.now();
+            let now = self.c.lease_now();
             let page = self
                 .meta()
                 .expired_records(self.repo, now, after, batch)
@@ -392,9 +396,40 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
         }
     }
 
+    /// The planted `IgnoreLandHolder` bug: collects every unpinned land
+    /// candidate, whether or not its land-attempt lease has ended.
+    #[cfg(feature = "planted-bugs")]
+    async fn collect_land_held(&mut self) -> StoreResult<()> {
+        let batch = self.c.batch();
+        let mut held = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .meta()
+                .list_records(self.repo, RecordState::Draft, after, batch)
+                .await?;
+            let Some((last, _)) = page.last() else {
+                break;
+            };
+            after = Some(*last);
+            held.extend(
+                page.into_iter()
+                    .filter(|(_, r)| r.holder.as_deref().is_some_and(|h| h.starts_with("land:")))
+                    .map(|(id, _)| id),
+            );
+        }
+        for id in held {
+            if !self.spend() {
+                break;
+            }
+            self.collect_one(id).await?;
+        }
+        Ok(())
+    }
+
     /// Whether `id` is expired with no pins, as the index would say.
     async fn collectable(&self, id: ChangesetId) -> StoreResult<bool> {
-        let now = self.c.now();
+        let now = self.c.lease_now();
         Ok(self
             .meta()
             .protection(self.repo, id)
@@ -419,8 +454,16 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
             let Some(protection) = self.meta().protection(repo, id).await? else {
                 return Ok(Vec::new());
             };
-            let now = self.c.now();
-            if protection.pins > 0 || !protection.expires_at_ms.is_some_and(|e| e <= now) {
+            let now = self.c.lease_now();
+            let land_held = planted!(self.c.planted, IgnoreLandHolder)
+                && record.state == RecordState::Draft
+                && record
+                    .holder
+                    .as_deref()
+                    .is_some_and(|h| h.starts_with("land:"));
+            if protection.pins > 0
+                || !(land_held || protection.expires_at_ms.is_some_and(|e| e <= now))
+            {
                 return Ok(Vec::new());
             }
             let holder = id.to_string();
@@ -544,7 +587,7 @@ impl<M: MetaStore, O: ObjectStore, S: Shape> Pass<'_, M, O, S> {
         let batch = self.c.batch();
         let mut after = None;
         loop {
-            let now = self.c.now();
+            let now = self.c.lease_now();
             let page = self
                 .meta()
                 .expired_rows(self.repo, now, after.clone(), batch)

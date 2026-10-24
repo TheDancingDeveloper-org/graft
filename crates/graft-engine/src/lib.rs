@@ -43,6 +43,20 @@ use graft_proto::error::ApiResult;
 use graft_proto::types::*;
 use graft_store::{MAX_PAGE, MetaStore, ObjectStore};
 
+/// Whether a planted bug is on; `false` without the `planted-bugs` feature.
+#[cfg(feature = "planted-bugs")]
+macro_rules! planted {
+    ($bugs:expr, $bug:ident) => {
+        $bugs.is_planted(graft_gc::planted::PlantedBug::$bug)
+    };
+}
+#[cfg(not(feature = "planted-bugs"))]
+macro_rules! planted {
+    ($bugs:expr, $bug:ident) => {
+        false
+    };
+}
+
 mod access;
 mod diff;
 mod drafts;
@@ -66,6 +80,8 @@ mod write;
 
 pub use diff::MAX_CONTEXT;
 pub use gc::GcSettings;
+#[cfg(feature = "planted-bugs")]
+pub use graft_gc::planted::{PlantedBug, PlantedBugs};
 pub use land::{
     ATTESTATION, LAND_RESULT, MAX_ATTEST_URL, MAX_CHECK_NAME, REBASED_HOPS, Sleeper, ThreadSleeper,
 };
@@ -197,6 +213,8 @@ pub struct Engine<M, O> {
     hooks: Arc<dyn LandHooks>,
     sleeper: Arc<dyn Sleeper>,
     gc: gc::GcSettings,
+    #[cfg(feature = "planted-bugs")]
+    planted: graft_gc::planted::PlantedBugs,
 }
 
 impl<M, O> Engine<M, O>
@@ -216,12 +234,22 @@ where
             hooks: Arc::new(policy::NoHooks),
             sleeper: Arc::new(ThreadSleeper),
             gc: gc::GcSettings::default(),
+            #[cfg(feature = "planted-bugs")]
+            planted: graft_gc::planted::PlantedBugs::default(),
         }
     }
 
     /// Installs how `Gc` and [`Engine::gc_sweep`] run the collector.
     pub fn with_gc(mut self, gc: gc::GcSettings) -> Self {
         self.gc = gc;
+        self
+    }
+
+    /// Shares the planted bugs `bugs` with this engine and the collectors
+    /// it runs (test only).
+    #[cfg(feature = "planted-bugs")]
+    pub fn with_planted_bugs(mut self, bugs: graft_gc::planted::PlantedBugs) -> Self {
+        self.planted = bugs;
         self
     }
 
