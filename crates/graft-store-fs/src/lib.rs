@@ -36,6 +36,13 @@ const TMP_SUFFIX: &str = ".tmp";
 /// The lock file in the root.
 const LOCK_FILE: &str = ".lock";
 
+/// In LRU mode, the counters as the last owner left them, so that opening
+/// need not walk every object (see [`FsObjectStore::open`]).
+const USAGE_FILE: &str = ".usage";
+
+/// The first line of [`USAGE_FILE`].
+const USAGE_HEADER: &str = "graft-cache-usage 1";
+
 /// Hex characters in an object's file name (the first two name its shard).
 const NAME_HEX: usize = 62;
 
@@ -85,6 +92,16 @@ impl FsObjectStore {
     /// count what is stored. In LRU mode it also evicts down to the bound,
     /// oldest modification time first.
     ///
+    /// In LRU mode the walk is put off while it is not needed: the store
+    /// keeps its counters in `<root>/.usage` when it is dropped, and an
+    /// open that finds them under the bound trusts them and walks nothing,
+    /// so opening a cache costs the same however much it holds. The walk
+    /// happens when a put first takes the store over its bound (eviction
+    /// needs every object's age). The first change a store makes removes
+    /// the file, so an owner that dies without dropping the store leaves
+    /// none, and the next open walks (and removes stray temp files) as
+    /// before.
+    ///
     /// Reads are verified (see [`FsObjectStore::verify_reads`]).
     pub fn open(root: impl Into<PathBuf>, mode: FsMode) -> StoreResult<Self> {
         let root = root.into();
@@ -93,23 +110,25 @@ impl FsObjectStore {
 
         let mut objects = 0u64;
         let mut bytes = 0u64;
-        let mut found = Vec::new();
         let mut durable_dirs = HashSet::new();
-        scan(&root, &mut durable_dirs, |key, size, modified| {
-            objects += 1;
-            bytes += size;
-            if matches!(mode, FsMode::Lru { .. }) {
-                found.push((modified, key, size));
-            }
-        })?;
-
         let lru = match mode {
-            FsMode::Authoritative => None,
+            FsMode::Authoritative => {
+                scan(&root, &mut durable_dirs, true, |_, size, _| {
+                    objects += 1;
+                    bytes += size;
+                })?;
+                None
+            }
             FsMode::Lru { max_bytes } => {
-                found.sort();
                 let mut lru = Lru::new(max_bytes);
-                for (_, key, size) in found {
-                    lru.insert(key, size);
+                match read_usage(&root) {
+                    Some((o, b)) if b <= max_bytes => {
+                        (objects, bytes) = (o, b);
+                        lru.usage_on_disk = true;
+                    }
+                    _ => {
+                        (objects, bytes) = lru.load(&root, &mut durable_dirs, true)?;
+                    }
                 }
                 Some(Mutex::new(lru))
             }
@@ -132,6 +151,23 @@ impl FsObjectStore {
             store.evict(&mut lru, 0)?;
         }
         Ok(store)
+    }
+
+    /// Before a change in LRU mode: removes the saved counters, which the
+    /// change will make stale (see [`FsObjectStore::open`]). Call with the
+    /// LRU lock held.
+    fn invalidate_usage(&self, lru: &mut Lru) -> StoreResult<()> {
+        if !lru.usage_on_disk {
+            return Ok(());
+        }
+        let path = self.root.join(USAGE_FILE);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(io_error("remove", &path, e)),
+        }
+        lru.usage_on_disk = false;
+        Ok(())
     }
 
     /// Sets whether `get` verifies each frame against its id (the default).
@@ -204,6 +240,9 @@ impl FsObjectStore {
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => return Err(io_error("stat", &target, e)),
         }
+        if let Some(mut lru) = self.lock_lru() {
+            self.invalidate_usage(&mut lru)?;
+        }
         self.ensure_dir(&dir)?;
 
         let seq = self.next_tmp.fetch_add(1, Ordering::Relaxed);
@@ -220,6 +259,11 @@ impl FsObjectStore {
                     self.objects.fetch_add(1, Ordering::Relaxed);
                     self.bytes.fetch_add(size, Ordering::Relaxed);
                     if let Some(lru) = lru.as_deref_mut() {
+                        if !lru.loaded && self.bytes.load(Ordering::Relaxed) > lru.max_bytes {
+                            // Eviction needs every object's age: walk now.
+                            // The walk counts this object too, as the newest.
+                            self.load_lru(lru)?;
+                        }
                         lru.insert((repo, id), size);
                         self.evict(lru, 1)?;
                     }
@@ -294,6 +338,7 @@ impl FsObjectStore {
                 if let Some(mut lru) = self.lock_lru() {
                     // Removed behind our back: stop counting it.
                     if let Some(size) = lru.remove((repo, id)) {
+                        self.invalidate_usage(&mut lru)?;
                         self.forget(size);
                     }
                 }
@@ -344,6 +389,9 @@ impl FsObjectStore {
     fn delete_sync(&self, repo: RepoId, id: ObjectId) -> StoreResult<()> {
         let path = self.object_path(repo, id);
         let mut lru = self.lock_lru();
+        if let Some(lru) = lru.as_deref_mut() {
+            self.invalidate_usage(lru)?;
+        }
         let tracked = lru.as_deref_mut().and_then(|lru| lru.remove((repo, id)));
         let size = match fs::symlink_metadata(&path) {
             Ok(meta) => meta.len(),
@@ -382,9 +430,29 @@ impl FsObjectStore {
         self.bytes.fetch_sub(size, Ordering::Relaxed);
     }
 
+    /// Walks the store into `lru` (see [`Lru::load`]) and takes its counts.
+    /// Call with the LRU lock held.
+    fn load_lru(&self, lru: &mut Lru) -> StoreResult<()> {
+        let mut durable_dirs = self
+            .durable_dirs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Not at open, so a temp file may be another put's, in flight.
+        let (objects, bytes) = lru.load(&self.root, &mut durable_dirs, false)?;
+        self.objects.store(objects, Ordering::Relaxed);
+        self.bytes.store(bytes, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Removes least-recently-used objects until the bound holds or only
     /// `keep` (the newest) objects are left. Call with the LRU lock held.
     fn evict(&self, lru: &mut Lru, keep: usize) -> StoreResult<()> {
+        if self.bytes.load(Ordering::Relaxed) > lru.max_bytes {
+            if !lru.loaded {
+                self.load_lru(lru)?;
+            }
+            self.invalidate_usage(lru)?;
+        }
         while self.bytes.load(Ordering::Relaxed) > lru.max_bytes && lru.len() > keep {
             let Some((key, size)) = lru.pop_oldest() else {
                 break;
@@ -439,6 +507,31 @@ impl FsObjectStore {
     }
 }
 
+impl Drop for FsObjectStore {
+    /// In LRU mode, saves the counters for the next open (best effort: a
+    /// store without the file walks on open).
+    fn drop(&mut self) {
+        let Some(lru) = self.lru.as_mut() else {
+            return;
+        };
+        let lru = lru.get_mut().unwrap_or_else(PoisonError::into_inner);
+        if lru.usage_on_disk {
+            return;
+        }
+        let text = format!(
+            "{USAGE_HEADER}\n{} {}\n",
+            self.objects.load(Ordering::Relaxed),
+            self.bytes.load(Ordering::Relaxed)
+        );
+        let path = self.root.join(USAGE_FILE);
+        let tmp = self.root.join(format!("{USAGE_FILE}{TMP_SUFFIX}"));
+        let _ = fs::remove_file(&tmp);
+        if write_new(&tmp, text.as_bytes(), false).is_err() || fs::rename(&tmp, &path).is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+}
+
 impl ObjectStore for FsObjectStore {
     async fn put(&self, repo: RepoId, id: ObjectId, frame: Vec<u8>) -> StoreResult<()> {
         self.put_sync(repo, id, &frame)
@@ -487,6 +580,12 @@ impl From<io::Error> for ReadFail {
 #[derive(Debug)]
 struct Lru {
     max_bytes: u64,
+    /// Whether the store has been walked into `entries`. Until it is, the
+    /// counters come from [`USAGE_FILE`] and `entries` holds only what this
+    /// process stored.
+    loaded: bool,
+    /// Whether [`USAGE_FILE`] holds the current counters.
+    usage_on_disk: bool,
     clock: u64,
     /// Each object's size and last use.
     entries: HashMap<Key, (u64, u64)>,
@@ -498,10 +597,39 @@ impl Lru {
     fn new(max_bytes: u64) -> Self {
         Self {
             max_bytes,
+            loaded: false,
+            usage_on_disk: false,
             clock: 0,
             entries: HashMap::new(),
             order: BTreeMap::new(),
         }
+    }
+
+    /// Walks the store at `root` (removing stray temp files with
+    /// `clean_tmp`), replacing the
+    /// recency order with one by modification time, oldest first, and
+    /// returns the object and byte counts.
+    fn load(
+        &mut self,
+        root: &Path,
+        durable_dirs: &mut HashSet<PathBuf>,
+        clean_tmp: bool,
+    ) -> StoreResult<(u64, u64)> {
+        let (mut objects, mut bytes) = (0u64, 0u64);
+        let mut found = Vec::new();
+        scan(root, durable_dirs, clean_tmp, |key, size, modified| {
+            objects += 1;
+            bytes += size;
+            found.push((modified, key, size));
+        })?;
+        found.sort();
+        self.entries.clear();
+        self.order.clear();
+        for (_, key, size) in found {
+            self.insert(key, size);
+        }
+        self.loaded = true;
+        Ok((objects, bytes))
     }
 
     fn len(&self) -> usize {
@@ -536,11 +664,13 @@ impl Lru {
     }
 }
 
-/// Walks every shard directory: removes stray temp files and reports each
-/// object file with its size and modification time.
+/// Walks every shard directory: removes stray temp files (with
+/// `clean_tmp`; skips them without) and reports each object file with its
+/// size and modification time.
 fn scan(
     root: &Path,
     durable_dirs: &mut HashSet<PathBuf>,
+    clean_tmp: bool,
     mut each: impl FnMut(Key, u64, SystemTime),
 ) -> StoreResult<()> {
     for repo_entry in read_dir(root)? {
@@ -574,6 +704,9 @@ fn scan(
                 };
                 let path = file_entry.path();
                 if name.ends_with(TMP_SUFFIX) {
+                    if !clean_tmp {
+                        continue;
+                    }
                     match fs::remove_file(&path) {
                         Ok(()) => {}
                         Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -587,7 +720,13 @@ fn scan(
                 let Ok(id) = ObjectId::from_hex(&format!("{shard}{name}")) else {
                     continue;
                 };
-                let meta = fs::symlink_metadata(&path).map_err(|e| io_error("stat", &path, e))?;
+                let meta = match fs::symlink_metadata(&path) {
+                    Ok(meta) => meta,
+                    // Deleted since the listing (a walk after open runs
+                    // beside other calls).
+                    Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                    Err(e) => return Err(io_error("stat", &path, e)),
+                };
                 if !meta.is_file() {
                     continue;
                 }
@@ -597,6 +736,20 @@ fn scan(
         }
     }
     Ok(())
+}
+
+/// The counters in `<root>/.usage`, if it holds a well-formed pair.
+fn read_usage(root: &Path) -> Option<(u64, u64)> {
+    let text = fs::read_to_string(root.join(USAGE_FILE)).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != USAGE_HEADER {
+        return None;
+    }
+    let (objects, bytes) = lines.next()?.split_once(' ')?;
+    if lines.next().is_some() {
+        return None;
+    }
+    Some((objects.parse().ok()?, bytes.parse().ok()?))
 }
 
 fn read_dir(dir: &Path) -> StoreResult<Vec<fs::DirEntry>> {

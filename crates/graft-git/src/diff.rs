@@ -153,6 +153,10 @@ pub(crate) fn check_paths(repo: &mut Repo, dirs: &[DirDiff]) -> Result<Vec<Offen
             if e.kind().is_none() {
                 out.push((full.clone(), "unsupported-mode".to_owned()));
             }
+            if e.name.contains(&b'/') {
+                out.push((full, "slash-in-name".to_owned()));
+                continue;
+            }
             match RepoPath::from_bytes(&full) {
                 Err(err) => out.push((full, err.reason().to_owned())),
                 Ok(path) => {
