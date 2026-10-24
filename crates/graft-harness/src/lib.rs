@@ -23,6 +23,7 @@
 pub mod check;
 pub mod exec;
 pub mod faulty;
+pub mod merge;
 pub mod probe;
 pub mod rng;
 pub mod scenario;

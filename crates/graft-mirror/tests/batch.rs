@@ -304,6 +304,7 @@ impl World {
             allow_lossy: Vec::new(),
             batch: 256,
             interval: POLL_INTERVAL,
+            tags: None,
         };
         let mut config = BatchConfig::new(LINE, base, follow);
         edit(&mut config);
@@ -656,6 +657,7 @@ async fn the_base_line_cannot_be_batched() {
         allow_lossy: Vec::new(),
         batch: 256,
         interval: POLL_INTERVAL,
+        tags: None,
     };
     let refused = Batcher::new(
         &w.api,

@@ -25,3 +25,7 @@ serde_json.workspace = true
 [dev-dependencies]
 graft-engine = { workspace = true, features = ["planted-bugs"] }
 graft-gc = { workspace = true, features = ["planted-bugs"] }
+# Hostile git repositories (WI-2347): the git CLI builds them, and graft-mirror
+# import plus graft-git export carry them round.
+graft-git.workspace = true
+graft-mirror = { path = "../graft-mirror" }

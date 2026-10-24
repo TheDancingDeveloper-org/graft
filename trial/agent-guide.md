@@ -4,7 +4,9 @@
 Deliver through graft only. No `git push`. No GitHub PRs. No branches. Do not
 create `g<phase>-…` or `wi-…` branches, do not run `git commit`, and do not
 open or wait for a PR. Your change reaches the trial line `trial-1` only through `graft land`. You
-cannot land on `main`; the operator merges the finished batch on GitHub.
+cannot land on `main`. `graft-mirror pr-batch` exports the line as one GitHub
+PR with one commit per land (D26); oversight reviews it and merges it with
+`land-pr` (D28).
 
 Your token is `~/.config/graft/trial-N.token` (N is in your brief). Never print
 it, never put it in a command's arguments, never copy it into the checkout.
@@ -45,13 +47,19 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
    `--workspace --exclude rtbit-desktop`), but run the full commands once
    before you land.
 4. **Commit** a draft: `g commit -m "<message>" --author-kind agent --meta vogt.work_item=WI-<n>`.
+   With `VOGT_SESSION_ID` and `VOGT_WORK_ITEM` set (Vogt sets both), the
+   draft records your session and work item and the author kind defaults to
+   `agent` (WI-2337); the batch PR's commit for your land carries them as
+   `Graft-Session` and `Graft-Work-Item` trailers.
    More edits? Commit again (a stack of drafts), or `g commit --amend`.
    `g stack` lists the drafts; `g stack squash` makes them one.
 5. **Sync** to pick up what others landed: `g sync`. Exit 0 means you are on
    the line tip (your stack is rebased). Exit 3 means conflicts, see below.
 6. **Land**: `g land` (add `--squash` to land the stack as one changeset).
-   Landing is immediate: there is no attestation to wait for. Exit 0 means
-   your change is on `trial-1`.
+   Landing is immediate: there is no attestation to wait for. `g land` first
+   runs the pre-land check (D27): a dry-run rebase that stops the land on a
+   real conflict before anything is sent; `--no-check` skips it. Exit 0
+   means your change is on `trial-1`.
 
 ## Conflicts (exit 3 from `g sync` or `g land`)
 
