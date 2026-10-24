@@ -578,3 +578,23 @@ fn oversize_blobs_stop_the_import_before_any_write() {
     );
     assert!(map.is_empty(), "nothing imported");
 }
+
+#[test]
+fn one_oversize_blob_at_two_paths_reports_both() {
+    let mut git = Git::init("big-twice");
+    let big = git.blob(&vec![7u8; (graft_git::import::MAX_BLOB_BYTES + 1) as usize]);
+    let root1 = git.raw_tree(&[("100644", b"one", &big)]);
+    let c1 = git.commit_tree(&root1, &[], "big");
+    let root2 = git.raw_tree(&[("100644", b"one", &big), ("100644", b"two", &big)]);
+    let c2 = git.commit_tree(&root2, &[&c1], "big again");
+    git.set_ref("refs/heads/main", &c2);
+    let api = FakeApi::new();
+    let map = MemoryMirrorMap::new();
+    let err = run(&api, &map, &config(&git, &["main"])).unwrap_err();
+    let GitError::BadPaths(list) = err else {
+        panic!("expected BadPaths, got {err:?}");
+    };
+    let got: Vec<&str> = list.iter().map(|b| b.path.as_str()).collect();
+    assert_eq!(got, vec!["one", "two"]);
+    assert!(map.is_empty(), "nothing imported");
+}

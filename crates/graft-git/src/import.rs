@@ -364,7 +364,7 @@ where
     fn precheck(&mut self, order: &[GitSha], misshapen: Vec<GitSha>) -> Result<(), GitError> {
         let mut bad: BTreeMap<(Vec<u8>, String), GitSha> = BTreeMap::new();
         let skip: HashSet<GitSha> = misshapen.iter().copied().collect();
-        let mut sized: HashSet<GitSha> = HashSet::new();
+        let mut sizes: HashMap<GitSha, u64> = HashMap::new();
         let mut unrepresentable: Vec<Unrepresentable> = misshapen
             .into_iter()
             .map(|commit| Unrepresentable {
@@ -387,10 +387,18 @@ where
                 let changes = git_changes(&mut self.repo, &dirs)?;
                 for c in &changes {
                     let Some((kind, blob)) = c.new else { continue };
-                    if kind == EntryKind::Submodule || !sized.insert(blob) {
+                    if kind == EntryKind::Submodule {
                         continue;
                     }
-                    if self.repo.size(blob)? > MAX_BLOB_BYTES {
+                    let size = match sizes.get(&blob) {
+                        Some(n) => *n,
+                        None => {
+                            let n = self.repo.size(blob)?;
+                            sizes.insert(blob, n);
+                            n
+                        }
+                    };
+                    if size > MAX_BLOB_BYTES {
                         let path = c.path.as_str().as_bytes().to_vec();
                         bad.entry((path, "blob-bytes".to_owned())).or_insert(sha);
                     }
