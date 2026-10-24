@@ -81,7 +81,7 @@ pub(crate) fn run(g: &Global, args: &CommitArgs) -> Result<(), Failure> {
 }
 
 /// The author: `--author`, else the default identity (`GRAFT_AUTHOR_NAME`
-/// and `GRAFT_AUTHOR_EMAIL`, else the user name). The
+/// and `GRAFT_AUTHOR_EMAIL`, else the user name with no email). The
 /// kind is `--author-kind`, else `GRAFT_AUTHOR_KIND`, else `agent` in a Vogt
 /// session, else `human`.
 fn author(args: &CommitArgs) -> Result<Author, Failure> {

@@ -327,6 +327,17 @@ impl World {
     /// Lands one changeset writing `files` on the integration line, with
     /// the session and work item an agent's token stamps.
     async fn land(&self, files: &[(&str, &str)], message: &str, n: i64) -> ChangesetId {
+        self.land_by(files, message, n, "tess@example.com").await
+    }
+
+    /// [`World::land`] with the author's `email`.
+    async fn land_by(
+        &self,
+        files: &[(&str, &str)],
+        message: &str,
+        n: i64,
+        email: &str,
+    ) -> ChangesetId {
         let tip = self.tip(LINE).await;
         let mut changes = Vec::new();
         let mut inline = Vec::new();
@@ -351,7 +362,7 @@ impl World {
                     changes,
                     author: Author {
                         name: "Tess".to_owned(),
-                        email: "tess@example.com".to_owned(),
+                        email: email.to_owned(),
                         kind: AuthorKind::Agent,
                     },
                     authored_at: Timestamp {
@@ -1183,6 +1194,19 @@ async fn a_batch_of_three_lands_is_three_commits_and_a_rebase_merge_maps_back() 
         assert_ne!(c.merged, Some(c.sha), "a rebase-merge makes new commits");
     }
     assert_eq!([mapped[0].land, mapped[1].land, mapped[2].land], [a, b, c]);
+}
+
+#[tokio::test]
+async fn a_land_with_no_author_email_is_authored_by_the_mirror() {
+    let w = World::new().await;
+    w.start().await;
+    w.land_by(&[("a.txt", "a1\n")], "add a", 1, "").await;
+    opened(w.batcher().run().await.unwrap().outcome);
+    let head = support::branch(&w.upstream, "graft/batch-1").unwrap();
+    let who = git(&w.upstream, &["log", "-1", "--format=%an <%ae>", &head]);
+    assert_eq!(who, "graft <graft@graft.invalid>", "never Name <unknown>");
+    let message = git(&w.upstream, &["log", "-1", "--format=%B", &head]);
+    assert!(message.contains("Graft-Session: ses_1"), "{message}");
 }
 
 #[tokio::test]

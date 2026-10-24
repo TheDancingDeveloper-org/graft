@@ -426,9 +426,9 @@ fn the_environment_alone_sets_the_session_work_item_and_author() {
                 .env("VOGT_WORK_ITEM", "WI-7")
                 .args(["--json", "commit", "-m", "add c"]);
         } else {
+            // `--author` needs an email; the default has none (WI-2412).
+            cmd.env("GRAFT_AUTHOR_NAME", "graft-test");
             cmd.args(["--json", "commit", "-m", "add c"]).args([
-                "--author",
-                "graft-test <graft-test@localhost>",
                 "--author-kind",
                 "agent",
                 "--meta",

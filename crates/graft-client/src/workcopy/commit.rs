@@ -30,8 +30,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use graft_model::{
-    Author, AuthorKind, BlobId, Change, ChangesetId, EntryKind, Metadata, ObjectId, ObjectKind,
-    RepoPath, Timestamp,
+    Author, AuthorKind, BlobId, Change, Changeset, ChangesetId, EntryKind, Metadata, ObjectId,
+    ObjectKind, RepoPath, Timestamp,
 };
 use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::types::{
@@ -217,10 +217,24 @@ impl WorkingCopy {
             if wc.is_empty() {
                 return Err(Error::NothingToCommit);
             }
-            let message = match (&opts.message, &conflicts) {
-                (Some(m), _) => m.clone(),
-                (None, Some(c)) => self.message_of(api, cx, c.head).await?,
-                (None, None) => return Err(Error::State("a commit needs a message".to_owned())),
+            // Resolving a conflicting sync replaces the stack's head: keep
+            // its message (unless given) and its tool metadata, such as
+            // `vogt.session`, so attribution survives the sync (WI-2414).
+            let (message, metadata) = match &conflicts {
+                Some(c) => {
+                    let old = self.changeset_of(api, cx, c.head).await?;
+                    let mut metadata: Metadata = old
+                        .metadata
+                        .into_iter()
+                        .filter(|(k, _)| !k.starts_with(RESERVED_METADATA))
+                        .collect();
+                    metadata.extend(opts.metadata.clone());
+                    (opts.message.clone().unwrap_or(old.message), metadata)
+                }
+                None => match &opts.message {
+                    Some(m) => (m.clone(), opts.metadata.clone()),
+                    None => return Err(Error::State("a commit needs a message".to_owned())),
+                },
             };
             let changes = wc
                 .iter()
@@ -233,13 +247,7 @@ impl WorkingCopy {
                     None => Change::Delete { path: path.clone() },
                 })
                 .collect();
-            (
-                vec![self.snapshot()],
-                changes,
-                message,
-                opts.metadata.clone(),
-                None,
-            )
+            (vec![self.snapshot()], changes, message, metadata, None)
         };
         if changes.len() > limits.max_changes {
             return Err(over_budget("max_changes", limits.max_changes as u64));
@@ -687,13 +695,13 @@ impl WorkingCopy {
         self.drop_pending()
     }
 
-    /// The message of changeset `id`.
-    async fn message_of<A: RepoApi>(
+    /// Changeset `id`.
+    async fn changeset_of<A: RepoApi>(
         &self,
         api: &A,
         cx: &CallContext,
         id: ChangesetId,
-    ) -> Result<String> {
+    ) -> Result<Changeset> {
         let got = api
             .get_changesets(
                 cx,
@@ -707,7 +715,6 @@ impl WorkingCopy {
             .into_iter()
             .map(|v| v.changeset)
             .find(|c| c.id() == id)
-            .map(|c| c.message)
             .ok_or_else(|| {
                 ApiError::NotFound {
                     what: format!("changeset {id}"),
