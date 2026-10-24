@@ -237,6 +237,7 @@ async fn land(server: &Server, token: &str, head: ChangesetId) -> Result<Landed,
             squash: false,
             merge: MergeMode::File,
             deadline_ms: None,
+            merged_from: None,
         }))
         .await
         .map_err(api)?

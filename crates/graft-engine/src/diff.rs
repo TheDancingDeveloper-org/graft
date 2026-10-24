@@ -171,7 +171,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .page
             .token
             .as_deref()
-            .map(|t| RepoPath::new(t).map_err(|e| errors::path(t, e)))
+            .map(|t| RepoPath::new(t).map_err(|_| errors::invalid(None, "page-token")))
             .transpose()?;
         let trees = Trees::new(&*self.objects, repo);
 

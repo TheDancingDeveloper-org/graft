@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use graft_client::Sparse;
 use graft_client::fetch::FetchOptions;
-use graft_client::workcopy::{self, WcConfig};
+use graft_client::workcopy::{self, WcConfig, WcInfo};
 use serde_json::json;
 
 use crate::cli::{CloneArgs, Global};
@@ -41,7 +41,7 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
 
     runtime()?.block_on(async {
         let cx = call_context();
-        let conn = connect(&g, None).await?;
+        let conn = connect(&g, None::<&WcInfo>).await?;
         let at = match &args.at {
             Some(rev) => Some(conn.resolve(&cx, rev).await?),
             None => None,

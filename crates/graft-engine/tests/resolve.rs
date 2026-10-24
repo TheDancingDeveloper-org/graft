@@ -135,6 +135,7 @@ impl<'f, M: MetaStore> T<'f, M> {
                 squash: false,
                 merge: MergeMode::Line,
                 deadline_ms: None,
+                merged_from: None,
             },
         ))? {
             Landed::Landed { landed, .. } => Ok(landed),

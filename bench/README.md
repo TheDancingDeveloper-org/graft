@@ -124,6 +124,18 @@ Useful options:
 | `--no-import` | | skip the `graft-mirror import` step and its repository |
 | `--label` | the output dir name | title of the summary |
 
+### Batch delivery (`--batch`, WI-2352)
+
+`python3 -m graftbench --batch [--batch-agents 5] [--batch-rounds 2]` runs
+the batch scenario on a local server: agents land at once on an integration
+line (pre-land check on), `graft-mirror pr-batch` exports one commit per land
+to a local bare repository behind a fake GitHub API, one planted land breaks
+the build (`compileall`), `pr-batch --exclude` drops it, and a simulated
+rebase-merge lands the batch. It reports authorship per commit, `git bisect`
+and `git blame` on the export, good lands held by the bad one, drop and
+recut time, and land to `main` p50/p90. `graftbench.batchlive` is the live
+counterpart against graft-dev and GitHub (docs/trials/2026-10-24-batch-delivery.md).
+
 ### Against a running server
 
 ```sh
@@ -212,6 +224,24 @@ A refused `graft land` can name fewer paths than the `land --sync` that
 follows marks as conflicted: the summary counts those refusals
 ("named fewer paths").
 
+## Branching strategies (WI-2362)
+
+```sh
+python3 -m graftbench.branching --out results/<dir>     # seed 2362
+```
+
+Trunk-based, git flow and release-branches-only histories, generated from
+`--seed`, replayed through graft and git on a local server and a bare
+repository, and checked against a model: every line and tag tree must equal
+the model and each other. It reports commands, round trips, conflicts,
+refused lands and line-merged paths, and for each merge or cherry-pick
+between lines the conflict blocks and round trips on each side. graft has no
+merge or cherry-pick command, so it carries work across with `graft diff`,
+`graft cat`, a local three-way merge, `commit` and `land`, in two variants
+(`tracked` remembers the last carried point; `mergebase` asks
+`graft api merge_base`). Tags are `tags/<name>` lines. See
+`docs/trials/2026-10-24-branching-strategies.md`.
+
 ## Tests
 
 ```sh
@@ -235,6 +265,7 @@ conflict rule and the merge3 regions behave as the scenarios assume.
 | `graftbench/conc.py` | the concurrent-writer scenarios and the tip poller |
 | `graftbench/copies.py` | the many-working-copies scenario (`--many-copies`) |
 | `graftbench/livea.py` | the live-awareness script, scheduler, policies and oracle |
+| `graftbench/branching.py` | the branching-strategy scenarios (`python3 -m graftbench.branching`) |
 | `graftbench/mcp.py` | a minimal MCP client for `/mcp` |
 | `graftbench/report.py` | machine info and the Markdown summary |
 | `results/` | committed example runs |

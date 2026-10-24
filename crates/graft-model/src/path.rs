@@ -46,7 +46,8 @@ impl RepoPath {
     /// Checks the portability rules on every component: no Windows-reserved
     /// device name (`CON`, `aux.rs`, `com1.txt`, ...), no character Windows
     /// forbids (`<>:"\|?*` and control characters), and no trailing `.` or
-    /// space. Case clashes are checked per directory by
+    /// space, and no name for git's metadata directory
+    /// ([`is_git_metadata_name`]). Case clashes are checked per directory by
     /// [`crate::tree_ops::apply_changes_with`].
     pub fn check_portable(&self) -> Result<(), PathError> {
         self.components().try_for_each(check_component_portable)
@@ -140,6 +141,9 @@ const WINDOWS_RESERVED: &[&str] = &[
 
 /// Checks one component against the portability rules.
 pub fn check_component_portable(c: &str) -> Result<(), PathError> {
+    if is_git_metadata_name(c) {
+        return Err(PathError::NotPortable(Portability::GitMetadata));
+    }
     let stem = c.split('.').next().unwrap_or(c).trim_end_matches(' ');
     if WINDOWS_RESERVED.contains(&stem.to_lowercase().as_str()) {
         return Err(PathError::NotPortable(Portability::ReservedName));
@@ -153,6 +157,34 @@ pub fn check_component_portable(c: &str) -> Result<(), PathError> {
         return Err(PathError::NotPortable(Portability::TrailingDotOrSpace));
     }
     Ok(())
+}
+
+/// Code points HFS+ ignores when it compares names (git's `is_hfs_dotgit`).
+fn hfs_ignorable(ch: char) -> bool {
+    matches!(ch,
+        '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}' | '\u{feff}')
+}
+
+/// Whether a component names git's metadata directory on some filesystem,
+/// following git's `verify_path`: `.git` in any case, `.git` with code points
+/// HFS+ ignores, and the NTFS forms (the short name `git~1`, and either name
+/// followed by trailing dots or spaces, an alternate data stream `:...` or a
+/// `\`). Checking such a name out can overwrite repository metadata
+/// (CVE-2014-9390).
+pub fn is_git_metadata_name(c: &str) -> bool {
+    let hfs: String = c.chars().filter(|&ch| !hfs_ignorable(ch)).collect();
+    if hfs.eq_ignore_ascii_case(".git") {
+        return true;
+    }
+    let lower = c.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix(".git")
+        .or_else(|| lower.strip_prefix("git~1"))
+    else {
+        return false;
+    };
+    let rest = rest.trim_start_matches(['.', ' ']);
+    rest.is_empty() || rest.starts_with(':') || rest.starts_with('\\')
 }
 
 /// The case-folded form two names clash on.
@@ -220,6 +252,8 @@ pub enum Portability {
     TrailingDotOrSpace,
     /// Differs only in case from another name in the same directory.
     CaseClash,
+    /// Names git's metadata directory (`.git`, `.GIT`, `git~1`, ...).
+    GitMetadata,
 }
 
 impl Portability {
@@ -230,6 +264,7 @@ impl Portability {
             Portability::ReservedChar => "reserved-char",
             Portability::TrailingDotOrSpace => "trailing-dot-or-space",
             Portability::CaseClash => "case-clash",
+            Portability::GitMetadata => "git-metadata",
         }
     }
 }

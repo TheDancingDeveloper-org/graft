@@ -8,7 +8,9 @@ use serde_json::json;
 
 use crate::cli::{DiffArgs, Global};
 use crate::cmd::status::{change_json, word};
-use crate::conn::{call_context, connect, repo_path, require_working_copy, runtime, working_copy};
+use crate::conn::{
+    call_context, connect, repo_path, require_working_copy, runtime, working_copy_info,
+};
 use crate::error::Failure;
 use crate::render::{diff, kind_name, print_json, short};
 
@@ -57,7 +59,7 @@ fn changeset_diff(g: &Global, args: &DiffArgs, from: &str, to: &str) -> Result<(
         .map(|p| repo_path(p))
         .collect::<Result<Vec<_>, _>>()?;
     runtime()?.block_on(async {
-        let wc = working_copy()?;
+        let wc = working_copy_info()?;
         let conn = connect(g, wc.as_ref()).await?;
         let cx = call_context();
         let from = conn.resolve(&cx, from).await?;

@@ -11,7 +11,7 @@ use graft_proto::types::Attest;
 use serde_json::json;
 
 use crate::cli::{AttestArgs, Global};
-use crate::conn::{call_context, connect, runtime, working_copy};
+use crate::conn::{call_context, connect, runtime, working_copy_info};
 use crate::error::Failure;
 use crate::render::{print_json, short};
 
@@ -19,7 +19,7 @@ use crate::render::{print_json, short};
 pub(crate) fn run(g: &Global, args: &AttestArgs) -> Result<(), Failure> {
     let passed = args.pass;
     runtime()?.block_on(async {
-        let wc = working_copy()?;
+        let wc = working_copy_info()?;
         let conn = connect(g, wc.as_ref()).await?;
         let cx = call_context();
         let changeset = conn.resolve(&cx, &args.rev).await?;

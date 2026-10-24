@@ -61,12 +61,18 @@ impl<M: MetaStore, O: ObjectStore> Index<M, O> {
 
     /// A stored changeset's content.
     pub(crate) async fn load(&self, repo: RepoId, id: ChangesetId) -> StoreResult<Changeset> {
+        if let Some(cs) = self.changesets.get(repo, id) {
+            return Ok(cs);
+        }
         let (content, _) = self
             .meta
             .changeset(repo, id)
             .await?
             .ok_or_else(|| StoreError::Invalid(format!("no changeset {id}")))?;
-        Changeset::decode(&content).map_err(|e| StoreError::Corrupt(format!("changeset {id}: {e}")))
+        let cs = Changeset::decode(&content)
+            .map_err(|e| StoreError::Corrupt(format!("changeset {id}: {e}")))?;
+        self.changesets.insert(repo, id, &cs);
+        Ok(cs)
     }
 
     /// `K`'s value for a stored changeset: read it, or walk back to the

@@ -93,6 +93,26 @@ so neither it nor the 56 s end-to-end figure is comparable with fast-import's
 1 s, which runs locally with no server. The rest is SQLite commits (WI-2323).
 Creating a line now writes one fork row, not a copy of its history (#107).
 
+### Read paths against the kill criterion (WI-2341)
+
+The kill criterion asks for read paths at least 2x faster than git. On
+graft-dev (p50 ms, graft / git) after WI-2341:
+
+| | 1k | 10k |
+| --- | ---: | ---: |
+| log -50 | 3.0 / 1.8 (was 5.1) | 3.0 / 1.8 (was 7.6) |
+| status | 3.9 / 3.1 | 13.2 / 7.1 |
+| sync, 5 behind | 6.3 / 22.2 (was 9.9) | 74.9 / 27.1 (was 46.3, re-run pending) |
+| log --path, 50 | | 2.9 / 9.1 |
+| clone, sparse | 6.3 / 83.6 | 70.4 / 585.7 |
+
+log no longer grows with the slice. It is still about 1.6x git: process
+start plus a gRPC connect and one RPC is the floor for a fresh process. A
+warm node daemon is used when its socket exists. status is a per-file
+lstat floor plus index parsing, about 2x git at 10k. sync at 1k is now
+3.5x faster than git, but the 10k run needs repeating: see
+`changes/WI-2341.md`. Its floor is two fsynced state files.
+
 Still to measure: 10k and 100k commits on the quiet VM (WI-2304).
 
 ## Open (phase 1)

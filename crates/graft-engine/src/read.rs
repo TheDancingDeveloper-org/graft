@@ -125,12 +125,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let token = req.page.token.as_deref();
         if req.recursive {
             let after = token
-                .map(|t| RepoPath::new(t).map_err(|e| errors::path(t, e)))
+                .map(|t| RepoPath::new(t).map_err(|_| errors::invalid(None, "page-token")))
                 .transpose()?;
             list_recursive(&trees, dir, req.path, after, limit).await
         } else {
             if let Some(t) = token {
-                check_component(t).map_err(|e| errors::path(t, e))?;
+                check_component(t).map_err(|_| errors::invalid(None, "page-token"))?;
             }
             let tree = trees.tree(dir).await.map_err(errors::source)?;
             let mut entries = Vec::new();

@@ -359,6 +359,7 @@ Each repository has one append-only journal with strictly increasing **LSNs**:
 ChangesetCreated { id, state, workspace? }   RefMoved { name, old, new, version, actor }
 WorkspaceOpened/Renewed/Closed { name }      LandAttempt { draft, ref, outcome }
 Collected { ids, objects, bytes }            AdminAction { what, actor }
+LineMerged { src, dst, src_changeset, src_pos, dst_pos }   (§8.9)
 ```
 
 - An entry is written in the same metadata transaction as the change it
@@ -617,7 +618,9 @@ frame = magic "GRF1" ‖ u8 kind ‖ u8 codec (0 = raw, 1 = gzip) ‖ u64 uncomp
   `workspaces(repo, name, owner, session, base, head, lease_until)`,
   `derived(repo, kind, ver, key, value)`, `line_pos(repo, line, changeset, pos)`,
   `line_paths(repo, line, path, pos)`, `line_forks(repo, line, parent, pos)`
-  (schema version 5, one row per forked line), `holders(repo, object, holder)`,
+  (schema version 5, one row per forked line),
+  `line_merges(repo, dst, dst_pos, src, src_changeset, src_pos)` (schema
+  version 6, one row per merge landing, §8.9), `holders(repo, object, holder)`,
   `uploads(repo, object, owner, expires)`, `doomed(repo, object, since, deleting)`,
   `lands(repo, draft, ref, landed, at)`, `tombstones(repo, id, at, reason)`.
 - Capacity: one writer handles thousands of small transactions a second on
@@ -1309,6 +1312,103 @@ shape. The MCP `land` tool runs the same checks.
   what it did not see.
 - **Cost.** One upstream diff page, one dry-run rebase over the both-changed
   files, one overlap page: O(the change), never the history.
+
+### 8.9 Merges between lines
+
+([D29](decisions.md#d29-merge-points-between-lines)) A merge brings one
+line's work into another, such as git flow's release → main or a hotfix back
+into develop. History stays first-parent: a merge lands as an ordinary
+one-parent changeset on the target line. What makes it a merge is a **merge
+point**, recorded beside the line index, which `MergeBase` reads.
+
+**Storage.** `line_merges(repo, dst, dst_pos, src, src_changeset, src_pos)`
+(SQLite schema version 6), one row per merge landing, keyed by
+`(repo, dst, dst_pos)` with an index on `(repo, dst, src, dst_pos)`. The
+latest row for a `(src, dst)` pair is that pair's merge point. Rows are
+append-only; a line position is never re-landed, so a row is never wrong. The
+changeset also carries `graft.merged-from = <src>@<src_changeset>` in its
+metadata, for readers and export, but nothing on the hot path reads it.
+
+**Containment.** A line `L` *contains* a point `(M, p)` when one of these
+holds, with at most `H` hops (default 8) and `R` row reads (default 64) per
+query:
+
+1. `M = L` and `p <= tip(L)`.
+2. `L` has a fork row `(M', q)` (D23) and `M'` contains `(M, p)` at position
+   `q`.
+3. `L` has a merge row from `M'` at `src_pos = s`, and `M'` contains `(M, p)`
+   at position `s`.
+4. `(M, p)` is itself a merge landing from `S` at `s`, and `L` contains both
+   `(M, p - 1)` and `(S, s)`. Its content is exactly those two, so a line
+   that holds both holds it.
+
+Each rule reads only indexed rows "at or below a position", newest first.
+
+**`MergeBase`.** For two changesets on lines, `MergeBase` first tries the
+merge points: walking `dst`'s merge rows newest first (rule 3 and 4 limited to
+the budget), it returns `dst`'s changeset at the highest position that `src`
+contains. If none is found inside the budget, it falls back to the existing
+ancestry walk (§7.2), which is what it does today. The answer says which it
+used (`via: merge_point | fork | ancestry`), so a capped search is visible.
+
+**`LineMerge`.** `LineMerge { src, dst, src_at?, merge: line, deadline,
+message? }`:
+
+```text
+check scopes: read on src, land:<dst>, write on every changed path
+s  ← src_at or ResolveRef(src); require s on src's line index (pos sp)
+loop until deadline or attempt budget (as Land, §8.1):
+    tip  ← ResolveRef(dst)
+    base ← MergeBase(s, tip)                       # merge point first
+    if base == s or s contained by dst: return UpToDate
+    cand ← three-way tree merge of (base → s) onto tip, line merge per D16
+        on Conflict: journal LandAttempt(conflict); return Conflict{paths, base, tip, s}
+    cand: parents [tip], metadata graft.merged-from, graft.merged-paths
+    txn: CAS(dst, expected = tip, new = cand) + line index rows + record
+         + line_merges row (dst, pos(cand), src, s, sp)
+         + journal RefMoved + LineMerged { src, dst, src_changeset, src_pos, dst_pos }
+    on RefConflict: back off and loop
+return Contended{ dst, tip }
+```
+
+- Only `dst` moves, by CAS; `src` is only read (§4.6). The merge row and its
+  journal entry are in the same transaction as the ref move (§4.8), so a
+  merge point can never exist without its landing, or the reverse.
+- If `src` moves during the merge, the row records the `s` that was merged,
+  which is exactly what the target contains.
+- Idempotent on `(s, dst, tip)`: a retry after a lost reply returns the same
+  `Landed` (§7.9).
+
+**Conflicts.** A `Conflict` carries `base`, `tip` and `s` (ids, no
+contents), so the client can write conflict markers in one fetch. The client
+resolves in a workspace on `dst` and lands with
+`Land { ..., merged_from: { line: src, changeset: s } }`. The land checks that
+`s` is on `src`'s line index and writes the same `line_merges` row and
+`LineMerged` entry in its CAS transaction. A clean merge is 1 round trip; a
+conflicted one is 3 (merge, fetch, land).
+
+**Surfaces.**
+
+- CLI: `graft line merge <src> [--into <dst>] [--at <changeset>] [-m MSG]`.
+  `--into` defaults to the working copy's line. Exits as `land` (§8.2):
+  0 landed or up to date, 3 conflict (with `--sync`, markers are written),
+  4 contended. `graft land --merged-from <src>@<id>` lands a resolution.
+- MCP: `graft_merge { src, into?, at?, message? }`, same result shape.
+- `graft log` shows `merged <src>@<id>` on a merge landing;
+  `graft line merges <dst> [--from <src>]` lists a line's merge points,
+  paginated.
+
+**Blame and export.** Blame follows first parents, so lines brought in by a
+merge are attributed to the merge landing, as with a squash; the
+`graft.merged-from` metadata lets a reader follow them to the source line.
+Export (§11.2) writes a one-parent git commit with a
+`Graft-Merged-From: <src>@<changeset>` trailer. No git merge commits are made.
+
+**Bounds and cost.** A merge costs one bounded `MergeBase` (at most `H` hops
+and `R` indexed reads), one tree merge over the paths that differ from
+`base` (id-pruned, O(the change)), and one CAS. Nothing scans the journal,
+the history, or a line's changesets. `line merges` is paginated (limit 100,
+max 1,000).
 
 ## 9. Client and working copy
 
