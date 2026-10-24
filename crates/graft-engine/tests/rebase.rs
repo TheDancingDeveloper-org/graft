@@ -125,6 +125,15 @@ impl<'f, M: MetaStore> R<'f, M> {
         ))
     }
 
+    /// A changeset's pins and expiry.
+    fn protection(&self, id: ChangesetId) -> Protection {
+        let meta = self.repo.e().stores().0;
+        let repo = block_on(meta.repo("r")).expect("repo").expect("exists");
+        block_on(meta.protection(repo, id))
+            .expect("protection")
+            .expect("stored")
+    }
+
     /// The number of stored object frames.
     fn frames(&self) -> usize {
         self.repo.f.objects.frames.lock().expect("frames").len()
@@ -655,6 +664,9 @@ fn a_dry_run_writes_nothing<M: MetaStore>(f: &Fixture<M>) {
 
     // Line merge makes a new blob and a new changeset; the dry run stores
     // neither, and no record or journal entry.
+    let pins_c = r.protection(c);
+    let pins_onto = r.protection(onto);
+    let record_c = r.view(c);
     let dry = r.rebase_line(c, onto, true).expect("dry run");
     assert_ne!(dry, c);
     assert_eq!(r.repo.journal(), journal);
@@ -669,19 +681,10 @@ fn a_dry_run_writes_nothing<M: MetaStore>(f: &Fixture<M>) {
     .expect("get changesets");
     assert_eq!(got.missing, vec![dry]);
 
-    // A read scope is enough for a dry run, as it writes nothing.
-    let reader = cx(&["repo:r:read"]);
-    let read = block_on(r.repo.e().rebase(
-        &reader,
-        Rebase {
-            repo: "r".to_owned(),
-            changeset: c,
-            onto,
-            merge: MergeMode::Line,
-            dry_run: true,
-        },
-    ));
-    assert_eq!(read, Ok(dry));
+    // Pins and records are as they were.
+    assert_eq!(r.protection(c), pins_c);
+    assert_eq!(r.protection(onto), pins_onto);
+    assert_eq!(r.view(c), record_c);
 
     // The real rebase makes the id the dry run returned.
     let real = r.rebase_line(c, onto, false).expect("rebase");
@@ -691,6 +694,37 @@ fn a_dry_run_writes_nothing<M: MetaStore>(f: &Fixture<M>) {
         r.snapshot(real),
         snap(&[("a", b"one\n2\nthree\n"), ("b", b"2")])
     );
+}
+
+fn a_dry_run_checks_path_scopes<M: MetaStore>(f: &Fixture<M>) {
+    let r = R::new(f, &[("a", b"1"), ("doc/b", b"1")]);
+    let c = r.commit(r.root, &[("a", b"ours"), ("doc/b", b"2")], &[]);
+    let onto = r.land(&[("a", b"theirs")], &[]);
+    let journal = r.repo.journal();
+    let frames = r.frames();
+    // As a real rebase: a token that may not write `a` learns nothing of
+    // it, conflict or not.
+    for scopes in [&["repo:r:write:doc"][..], &["repo:r:read"][..]] {
+        let caller = cx(scopes);
+        for dry_run in [true, false] {
+            let got = block_on(r.repo.e().rebase(
+                &caller,
+                Rebase {
+                    repo: "r".to_owned(),
+                    changeset: c,
+                    onto,
+                    merge: MergeMode::Line,
+                    dry_run,
+                },
+            ));
+            assert!(
+                matches!(got, Err(ApiError::PermissionDenied { .. })),
+                "{scopes:?} dry_run={dry_run}: {got:?}"
+            );
+        }
+    }
+    assert_eq!(r.repo.journal(), journal);
+    assert_eq!(r.frames(), frames);
 }
 
 fn a_dry_run_reports_the_same_conflicts<M: MetaStore>(f: &Fixture<M>) {
@@ -727,6 +761,7 @@ fn a_dry_run_reports_the_same_conflicts<M: MetaStore>(f: &Fixture<M>) {
 
 on_both_stores!(
     a_dry_run_writes_nothing,
+    a_dry_run_checks_path_scopes,
     a_dry_run_reports_the_same_conflicts,
     disjoint_changes_apply_on_the_target,
     onto_the_unchanged_base_is_a_no_op,
