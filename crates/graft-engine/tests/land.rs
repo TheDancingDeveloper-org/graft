@@ -31,11 +31,13 @@ fn config() -> EngineConfig {
             prefix: p("deploy"),
             checks: vec!["ci/deploy".to_owned()],
             human_review: true,
+            merge: None,
         },
         PathRule {
             prefix: p("docs"),
             checks: vec!["ci/docs".to_owned()],
             human_review: false,
+            merge: None,
         },
     ];
     let mut rel = LineConfig::direct("rel");

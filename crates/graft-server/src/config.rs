@@ -440,7 +440,10 @@ name = "release"
 policy = "queued"
 checks = ["ci/build"]
 authority = "git-primary"
-path_rules = [{ prefix = "deploy", checks = ["ci/deploy"], human_review = true }]
+path_rules = [
+  { prefix = "deploy", checks = ["ci/deploy"], human_review = true },
+  { prefix = "web/src/generated", merge = "none" },
+]
 post_land = { checks = ["ci/build"], auto_revert = true }
 
 [default_line]
@@ -465,8 +468,13 @@ checks = ["ci/test"]
         let release = &e.lines[1];
         assert!(matches!(release.policy, LandPolicy::Queued { .. }));
         assert_eq!(release.authority, Authority::GitPrimary);
-        assert_eq!(release.path_rules.len(), 1);
+        assert_eq!(release.path_rules.len(), 2);
         assert!(release.path_rules[0].human_review);
+        assert_eq!(release.path_rules[0].merge, None);
+        assert_eq!(
+            release.path_rules[1].merge,
+            Some(graft_engine::policy::PathMerge::None)
+        );
         assert!(release.post_land.as_ref().unwrap().auto_revert);
         assert!(matches!(e.default_line.policy, LandPolicy::Attested { .. }));
     }
@@ -551,6 +559,7 @@ post_land = { checks = ["ci/build", "ci/test"], auto_revert = true }
             "[[lines]]\nname = \"a\"\npolicy = \"attested\"\nchecks = [\"\"]",
             "[[lines]]\nname = \"a\"\npath_rules = [{ prefix = \"x\" }]",
             "[[lines]]\nname = \"a\"\npath_rules = [{ prefix = \"/x\", human_review = true }]",
+            "[[lines]]\nname = \"a\"\npath_rules = [{ prefix = \"x\", merge = \"union\" }]",
             "[[lines]]\nname = \"a\"\npost_land = { auto_revert = true }",
             "[default_line]\npolicy = \"attested\"",
         ];

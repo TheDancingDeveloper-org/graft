@@ -72,7 +72,25 @@ pub struct PathRule {
     pub checks: Vec<String>,
     /// Whether a person must attest [`HUMAN_REVIEW`] on the stack head.
     pub human_review: bool,
+    /// How a rebase merges a path under the rule, when the rule says. The
+    /// rule with the longest prefix that says wins.
+    pub merge: Option<PathMerge>,
 }
+
+/// How a rebase merges a path both sides changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathMerge {
+    /// Three-way line merge (decision D16).
+    Line,
+    /// No merge: any concurrent change is a conflict, so the client
+    /// regenerates the file. For lockfiles and generated files, whose
+    /// clean line merge can still be wrong.
+    None,
+}
+
+/// File names that are [`PathMerge::None`] at any depth unless a path rule
+/// says otherwise: lockfiles, which are derived rather than written.
+pub const NO_MERGE_NAMES: &[&str] = &["Cargo.lock", "package-lock.json"];
 
 /// Post-land testing of a line (decision D6): CI runs on each line move
 /// (the `RefMoved` journal entry, or the mirror's push), and a failing
@@ -129,6 +147,24 @@ impl LineConfig {
                 checks,
                 auto_revert: true,
             }),
+        }
+    }
+
+    /// How a rebase merges `path`: the [`PathRule::merge`] of the rule with
+    /// the longest matching prefix that sets one, else
+    /// [`PathMerge::None`] for a name in [`NO_MERGE_NAMES`], else
+    /// [`PathMerge::Line`].
+    pub fn path_merge(&self, path: &RepoPath) -> PathMerge {
+        let ruled = self
+            .path_rules
+            .iter()
+            .filter(|r| path.starts_with(&r.prefix))
+            .filter_map(|r| Some((r.prefix.as_str().len(), r.merge?)))
+            .max_by_key(|(len, _)| *len);
+        match ruled {
+            Some((_, merge)) => merge,
+            None if NO_MERGE_NAMES.contains(&path.name()) => PathMerge::None,
+            None => PathMerge::Line,
         }
     }
 
@@ -265,16 +301,19 @@ mod tests {
                 prefix: p("deploy"),
                 checks: vec!["ci/deploy".to_owned(), "ci/lint".to_owned()],
                 human_review: true,
+                merge: None,
             },
             PathRule {
                 prefix: p("deploy/k8s"),
                 checks: vec!["ci/lint".to_owned()],
                 human_review: false,
+                merge: None,
             },
             PathRule {
                 prefix: p("docs"),
                 checks: vec!["ci/docs".to_owned()],
                 human_review: false,
+                merge: None,
             },
         ];
         assert_eq!(line.rule_checks([&p("src/a.rs")]), (Vec::new(), false));
@@ -297,5 +336,34 @@ mod tests {
         assert!(post.auto_revert);
         assert_eq!(post.checks, ["ci/build", "ci/test"]);
         assert_eq!(LineConfig::direct("dev").policy, LandPolicy::Direct);
+    }
+
+    #[test]
+    fn path_merge_defaults_and_rules() {
+        let mut line = LineConfig::direct("main");
+        assert_eq!(line.path_merge(&p("src/a.rs")), PathMerge::Line);
+        assert_eq!(line.path_merge(&p("Cargo.lock")), PathMerge::None);
+        assert_eq!(
+            line.path_merge(&p("web/package-lock.json")),
+            PathMerge::None
+        );
+        assert_eq!(line.path_merge(&p("Cargo.lock.md")), PathMerge::Line);
+        let rule = |prefix: &str, merge| PathRule {
+            prefix: p(prefix),
+            checks: Vec::new(),
+            human_review: false,
+            merge,
+        };
+        line.path_rules = vec![
+            rule("gen", Some(PathMerge::None)),
+            rule("gen/keep", Some(PathMerge::Line)),
+            rule("gen/keep/x", None),
+            rule("vendor/Cargo.lock", Some(PathMerge::Line)),
+        ];
+        assert_eq!(line.path_merge(&p("gen/api.ts")), PathMerge::None);
+        assert_eq!(line.path_merge(&p("gen/keep/x/a.rs")), PathMerge::Line);
+        assert_eq!(line.path_merge(&p("generated.rs")), PathMerge::Line);
+        assert_eq!(line.path_merge(&p("vendor/Cargo.lock")), PathMerge::Line);
+        assert_eq!(line.path_merge(&p("gen/Cargo.lock")), PathMerge::None);
     }
 }

@@ -108,7 +108,13 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         } else {
             let id = inverse.id();
             let plan = self
-                .plan(repo, &[(id, inverse)], req.onto, MergeMode::Line)
+                .plan(
+                    repo,
+                    &[(id, inverse)],
+                    req.onto,
+                    MergeMode::Line,
+                    &self.config.default_line,
+                )
                 .await?;
             let Some(mut cs) = plan.new.first().cloned() else {
                 // Every change is already undone on the target.

@@ -14,7 +14,7 @@
 //! Per-repository configs can come later.
 
 use graft_engine::EngineConfig;
-use graft_engine::policy::{Authority, LandPolicy, LineConfig, PathRule, PostLand};
+use graft_engine::policy::{Authority, LandPolicy, LineConfig, PathMerge, PathRule, PostLand};
 use graft_model::RepoPath;
 use serde::Deserialize;
 
@@ -51,6 +51,18 @@ pub(crate) struct PathRuleSpec {
     pub(crate) checks: Vec<String>,
     #[serde(default)]
     pub(crate) human_review: bool,
+    #[serde(default)]
+    pub(crate) merge: Option<MergeSpec>,
+}
+
+/// How a rebase merges paths under a rule (`merge = "line" | "none"`).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum MergeSpec {
+    /// Three-way line merge.
+    Line,
+    /// Any concurrent change is a conflict; the client regenerates.
+    None,
 }
 
 /// A `post_land` table.
@@ -138,8 +150,8 @@ impl LineSpec {
             RepoPath::new(&rule.prefix)
                 .map_err(|e| format!("{rule_what}: prefix {:?}: {e}", rule.prefix))?;
             check_names(&rule_what, &rule.checks)?;
-            if rule.checks.is_empty() && !rule.human_review {
-                return Err(format!("{rule_what}: needs checks or human_review"));
+            if rule.checks.is_empty() && !rule.human_review && rule.merge.is_none() {
+                return Err(format!("{rule_what}: needs checks, human_review or merge"));
             }
         }
         if let Some(post) = &self.post_land {
@@ -177,6 +189,10 @@ impl LineSpec {
                     prefix: RepoPath::new(&r.prefix).expect("checked prefix"),
                     checks: r.checks.clone(),
                     human_review: r.human_review,
+                    merge: r.merge.map(|m| match m {
+                        MergeSpec::Line => PathMerge::Line,
+                        MergeSpec::None => PathMerge::None,
+                    }),
                 })
                 .collect(),
             post_land: self.post_land.as_ref().map(|p| PostLand {

@@ -768,7 +768,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let (candidate, steps, merged_paths) = if bottom == tip {
             (req.head, Vec::new(), Vec::new())
         } else {
-            let plan = match self.plan(repo, stack, tip, req.merge).await {
+            let plan = match self.plan(repo, stack, tip, req.merge, config).await {
                 Ok(plan) => plan,
                 Err(ApiError::Conflict { paths, .. }) => {
                     let txn = MetaTxn {

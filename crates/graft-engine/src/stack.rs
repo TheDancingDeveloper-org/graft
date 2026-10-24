@@ -42,6 +42,7 @@ use graft_store::{MetaStore, ObjectStore, RecordState, RepoId, TxnOutcome, Write
 
 use crate::access::{Need, require, require_changes};
 use crate::objects::Upload;
+use crate::policy::LineConfig;
 use crate::source::{Trees, model_root};
 use crate::workspace::{
     CAS_RETRIES, check_name, contended, guarded, held_by, holder, set_draft_paths, transition,
@@ -127,10 +128,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         above: &[(ChangesetId, Changeset)],
         onto: ChangesetId,
         onto_root: TreeId,
+        line: &LineConfig,
         edit: &mut Edit,
     ) -> Result<(), ApiError> {
         let plan = self
-            .plan_onto(repo, above, onto, onto_root, MergeMode::Line)
+            .plan_onto(repo, above, onto, onto_root, MergeMode::Line, line)
             .await?;
         let mut below = onto;
         for step in &plan.steps {
@@ -152,6 +154,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         base: ChangesetId,
         drafts: &[(ChangesetId, Changeset)],
         op: &StackOp,
+        line: &LineConfig,
     ) -> Result<Edit, ApiError> {
         let mut edit = Edit {
             new: Vec::new(),
@@ -179,7 +182,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     return Err(stack_rule("stack-order"));
                 }
                 let base_root = self.root_of(repo, base).await?;
-                self.rebase_above(repo, &reordered, base, base_root, &mut edit)
+                self.rebase_above(repo, &reordered, base, base_root, line, &mut edit)
                     .await?;
             }
             StackOp::Squash(ids) => {
@@ -236,7 +239,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     (id, top.root)
                 };
                 edit.head = onto;
-                self.rebase_above(repo, &drafts[j + 1..], onto, onto_root, &mut edit)
+                self.rebase_above(repo, &drafts[j + 1..], onto, onto_root, line, &mut edit)
                     .await?;
             }
             StackOp::Split { draft, groups } => {
@@ -289,7 +292,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 }
                 edit.fate(*draft, prev);
                 edit.head = prev;
-                self.rebase_above(repo, &drafts[i + 1..], prev, prev_root, &mut edit)
+                self.rebase_above(repo, &drafts[i + 1..], prev, prev_root, line, &mut edit)
                     .await?;
             }
             StackOp::Drop(id) => {
@@ -298,7 +301,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 edit.fates.push((*id, Fate::Dropped));
                 let (below, below_root) = self.root_below(repo, base, drafts, i).await?;
                 edit.head = below;
-                self.rebase_above(repo, &drafts[i + 1..], below, below_root, &mut edit)
+                self.rebase_above(repo, &drafts[i + 1..], below, below_root, line, &mut edit)
                     .await?;
             }
             _ => return Err(stack_rule("stack-op")),
@@ -330,7 +333,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 records.insert(id, record);
                 drafts.push((id, cs));
             }
-            let edit = self.edit(repo, ws.base, &drafts, &op).await?;
+            let edit = self
+                .edit(repo, ws.base, &drafts, &op, &self.line_config(&ws.line))
+                .await?;
             for (cs, _) in &edit.new {
                 require_changes(cx, &wref.repo, &cs.changes)?;
             }
