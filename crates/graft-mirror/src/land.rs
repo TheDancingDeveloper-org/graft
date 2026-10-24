@@ -54,6 +54,7 @@ impl<A: RepoApi> Lander for NativeLand<'_, A> {
             squash: false,
             merge: MergeMode::File,
             deadline_ms: None,
+            merged_from: None,
         };
         match self.api.land(cx, req).await? {
             Landed::Landed { landed, .. } => Ok(landed),

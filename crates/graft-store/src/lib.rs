@@ -15,8 +15,8 @@ pub mod conformance;
 pub mod memory;
 
 pub use meta::{
-    ChangesetRecord, DoomMark, Lsn, MetaStore, MetaTxn, Precondition, Protection, RecordState,
-    RefKind, RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
+    ChangesetRecord, DoomMark, LineMergeRow, Lsn, MetaStore, MetaTxn, Precondition, Protection,
+    RecordState, RefKind, RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
 };
 pub use object::{ObjectStore, StoreStats};
 

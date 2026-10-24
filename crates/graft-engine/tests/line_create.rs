@@ -97,6 +97,7 @@ fn create_then_list_then_land_on_the_new_line<M: MetaStore>(f: &Fixture<M>) {
             squash: false,
             merge: MergeMode::File,
             deadline_ms: None,
+            merged_from: None,
         },
     ));
     match landed {

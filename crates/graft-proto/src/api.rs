@@ -113,6 +113,21 @@ pub trait RepoApi: Send + Sync {
         cx: &CallContext,
         req: Pair,
     ) -> impl Future<Output = ApiResult<Option<ChangesetId>>> + Send;
+    /// `MergeBase` with how it was found (D29): merge points first, then
+    /// the ancestry walk. The default answers from `merge_base`, via
+    /// ancestry.
+    fn merge_base_via(
+        &self,
+        cx: &CallContext,
+        req: Pair,
+    ) -> impl Future<Output = ApiResult<MergeBaseResult>> + Send {
+        async move {
+            Ok(MergeBaseResult {
+                base: self.merge_base(cx, req).await?,
+                via: MergeBaseVia::Ancestry,
+            })
+        }
+    }
     /// Diff two snapshots.
     fn diff(
         &self,
@@ -139,6 +154,35 @@ pub trait RepoApi: Send + Sync {
     ) -> impl Future<Output = ApiResult<ChangesetId>> + Send;
     /// Land a stack on a line.
     fn land(&self, cx: &CallContext, req: Land) -> impl Future<Output = ApiResult<Landed>> + Send;
+    /// Merge one line into another (D29, `docs/design.md` §8.9).
+    /// Implementations that cannot merge lines keep the default, which
+    /// answers `Unavailable`.
+    fn line_merge(
+        &self,
+        cx: &CallContext,
+        req: LineMerge,
+    ) -> impl Future<Output = ApiResult<LineMergeOutcome>> + Send {
+        let _ = (cx, req);
+        async {
+            Err(crate::ApiError::Unavailable {
+                retry_after_ms: 60_000,
+            })
+        }
+    }
+    /// A line's merge points, newest first (D29). The default answers
+    /// `Unavailable`.
+    fn line_merges(
+        &self,
+        cx: &CallContext,
+        req: LineMerges,
+    ) -> impl Future<Output = ApiResult<LineMergePage>> + Send {
+        let _ = (cx, req);
+        async {
+            Err(crate::ApiError::Unavailable {
+                retry_after_ms: 60_000,
+            })
+        }
+    }
     /// Record a check result.
     fn attest(&self, cx: &CallContext, req: Attest) -> impl Future<Output = ApiResult<()>> + Send;
     /// Read the journal (long-poll page).

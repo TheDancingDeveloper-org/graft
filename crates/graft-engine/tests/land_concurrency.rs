@@ -26,6 +26,7 @@ fn land_req(head: ChangesetId, merge: MergeMode) -> Land {
         squash: false,
         merge,
         deadline_ms: None,
+        merged_from: None,
     }
 }
 
