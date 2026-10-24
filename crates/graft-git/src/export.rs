@@ -202,15 +202,49 @@ fn join(dir: &str, name: &str) -> String {
     }
 }
 
-fn is_under(dir: &Option<graft_model::RepoPath>, path: &str) -> bool {
-    match dir {
-        None => path.is_empty(),
-        Some(d) => {
-            path.is_empty()
-                || d.as_str() == path
-                || (d.as_str().starts_with(path) && d.as_str().as_bytes()[path.len()] == b'/')
+/// Writes every tree that the recorded `raw` tree at `path` references and
+/// the parent does not already hold: each changed subdirectory is rebuilt
+/// (with its own nested records) and must come out as the sha `raw` names.
+/// A referenced tree that is neither rebuilt nor the parent's is an error,
+/// never a silently missing object.
+fn put_subtrees<S: GitSource>(
+    node: &Node,
+    path: &str,
+    base: Option<GitSha>,
+    raw: &[u8],
+    src: &mut S,
+    learn: &mut Learn,
+) -> Result<(), GitError> {
+    let here = || if path.is_empty() { "/" } else { path };
+    let entries = parse_tree(raw).map_err(|e| GitError::Read(format!("{}: {e}", here())))?;
+    let base_entries = match base {
+        Some(sha) => {
+            parse_tree(&src.raw_tree(sha)?).map_err(|e| GitError::Read(format!("{sha}: {e}")))?
+        }
+        None => Vec::new(),
+    };
+    for e in entries.iter().filter(|e| e.is_tree()) {
+        let child_base = base_entries
+            .iter()
+            .find(|b| b.name == e.name && b.is_tree())
+            .map(|b| b.sha);
+        let name = String::from_utf8_lossy(&e.name);
+        let built = match node.children.get(name.as_ref()) {
+            Some(child) if child.is_dir() => {
+                build(child, &join(path, &name), child_base, src, learn)?.0
+            }
+            _ => child_base,
+        };
+        if built != Some(e.sha) {
+            return Err(GitError::Read(format!(
+                "recorded tree at {:?} names subtree {name:?} as {}, which the export cannot \
+                 rebuild",
+                here(),
+                e.sha
+            )));
         }
     }
+    Ok(())
 }
 
 /// Rebuilds the directory at `path` from its parent-side tree `base`.
@@ -226,6 +260,7 @@ fn build<S: GitSource>(
     let is_root = path.is_empty();
     if let Some(raw) = &node.raw {
         if let Some(raw) = raw {
+            put_subtrees(node, path, base, raw, src, learn)?;
             src.put_tree(raw)?;
         }
         return Ok((raw.as_deref().map(tree_sha), true));
@@ -296,7 +331,6 @@ fn build<S: GitSource>(
                     Some(sha) => Some(src.raw_tree(sha)?),
                     None => None,
                 };
-                learn.out.retain(|r| !is_under(&r.dir, path));
                 let dir = (!is_root)
                     .then(|| graft_model::RepoPath::new(path))
                     .transpose()
@@ -338,6 +372,8 @@ mod tests {
     struct Mem {
         trees: HashMap<GitSha, Vec<u8>>,
         blobs: HashMap<BlobId, GitSha>,
+        /// The trees the export wrote.
+        put: Vec<GitSha>,
     }
 
     impl Mem {
@@ -377,6 +413,11 @@ mod tests {
                 .get(&id)
                 .copied()
                 .ok_or_else(|| GitError::Read("no blob".into()))
+        }
+
+        fn put_tree(&mut self, raw: &[u8]) -> Result<(), GitError> {
+            self.put.push(tree_sha(raw));
+            Ok(())
         }
     }
 
@@ -494,5 +535,77 @@ mod tests {
             export_tree(&mut m, Some(parent), &changes, &raw).unwrap(),
             child
         );
+    }
+
+    /// Every tree reachable from `root` was written by the export or was
+    /// already in `held`.
+    fn assert_complete(m: &Mem, root: GitSha, held: &[GitSha]) {
+        let mut stack = vec![root];
+        while let Some(sha) = stack.pop() {
+            assert!(
+                m.put.contains(&sha) || held.contains(&sha),
+                "tree {sha} was never written"
+            );
+            for e in parse_tree(&m.trees[&sha]).unwrap() {
+                if e.is_tree() {
+                    stack.push(e.sha);
+                }
+            }
+        }
+    }
+
+    // WI-2356: a recorded raw tree used to return before its subtrees were
+    // built, so the export named trees it never wrote.
+    #[test]
+    fn raw_trees_write_their_subtrees() {
+        let mut m = Mem::default();
+        let (leaf_id, leaf) = m.blob(b"leaf");
+        let (plain_id, plain) = m.blob(b"plain");
+        let dir = m.tree(&[("100644", "leaf", leaf)]);
+        let child = m.tree(&[("040000", "dir", dir), ("100644", "plain", plain)]);
+        let changes = vec![
+            put("dir/leaf", EntryKind::File, leaf_id),
+            put("plain", EntryKind::File, plain_id),
+        ];
+        let actual = vec![(String::new(), Some(child)), ("dir".to_owned(), Some(dir))];
+        let raw = learn_raw_trees(&mut m, None, &changes, &actual).unwrap();
+        m.put.clear();
+        assert_eq!(export_tree(&mut m, None, &changes, &raw).unwrap(), child);
+        assert_complete(&m, child, &[]);
+    }
+
+    // WI-2356: learning dropped a subdirectory's record when its parent got
+    // one, so a mode-only change below a zero-padded parent was lost.
+    #[test]
+    fn nested_raw_trees_survive_a_raw_parent() {
+        let mut m = Mem::default();
+        let (_, x) = m.blob(b"x");
+        let d_old = m.tree(&[("100644", "f", x)]);
+        let parent = m.tree(&[("40000", "d", d_old)]);
+        let d_new = m.tree(&[("100664", "f", x)]);
+        let child = m.tree(&[("040000", "d", d_new)]);
+        let actual = vec![(String::new(), Some(child)), ("d".to_owned(), Some(d_new))];
+        let raw = learn_raw_trees(&mut m, Some(parent), &[], &actual).unwrap();
+        assert_eq!(raw.len(), 2, "both records are kept: {raw:?}");
+        m.put.clear();
+        assert_eq!(export_tree(&mut m, Some(parent), &[], &raw).unwrap(), child);
+        assert_complete(&m, child, &[parent, d_old]);
+    }
+
+    #[test]
+    fn a_raw_tree_naming_an_unbuildable_subtree_is_refused() {
+        let mut m = Mem::default();
+        let (_, x) = m.blob(b"x");
+        let stray = m.tree(&[("100644", "f", x)]);
+        let raw = encode_tree(&[RawEntry {
+            mode: b"040000".to_vec(),
+            name: b"d".to_vec(),
+            sha: stray,
+        }]);
+        let record = RawTree {
+            dir: None,
+            tree: Some(raw),
+        };
+        assert!(export_tree(&mut m, None, &[], &[record]).is_err());
     }
 }
