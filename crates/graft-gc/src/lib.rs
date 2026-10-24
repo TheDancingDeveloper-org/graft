@@ -21,10 +21,26 @@
 //! scan is an index range over what is collectable now, and the cost of
 //! collecting a record follows its own changes.
 
+/// Whether a planted bug is on; `false` without the `planted-bugs` feature.
+#[cfg(feature = "planted-bugs")]
+macro_rules! planted {
+    ($bugs:expr, $bug:ident) => {
+        $bugs.is_planted($crate::planted::PlantedBug::$bug)
+    };
+}
+#[cfg(not(feature = "planted-bugs"))]
+macro_rules! planted {
+    ($bugs:expr, $bug:ident) => {
+        false
+    };
+}
+
 mod ancestry;
 mod journal;
 mod lease;
 mod plan;
+#[cfg(feature = "planted-bugs")]
+pub mod planted;
 mod sweep;
 
 use std::fmt;
@@ -331,6 +347,8 @@ pub struct Collector<M, O> {
     clock: Arc<dyn Clock>,
     pace: Arc<dyn Pace>,
     leases: SweepLeases,
+    #[cfg(feature = "planted-bugs")]
+    planted: planted::PlantedBugs,
 }
 
 impl<M, O> fmt::Debug for Collector<M, O> {
@@ -353,6 +371,8 @@ impl<M: MetaStore, O: ObjectStore> Collector<M, O> {
             clock: Arc::new(SystemClock),
             pace: Arc::new(ThreadPace),
             leases: SweepLeases::new(),
+            #[cfg(feature = "planted-bugs")]
+            planted: planted::PlantedBugs::default(),
         }
     }
 
@@ -375,6 +395,13 @@ impl<M: MetaStore, O: ObjectStore> Collector<M, O> {
         self
     }
 
+    /// The same collector sharing the planted bugs `bugs` (test only).
+    #[cfg(feature = "planted-bugs")]
+    pub fn with_planted_bugs(mut self, bugs: planted::PlantedBugs) -> Self {
+        self.planted = bugs;
+        self
+    }
+
     /// The configuration.
     pub fn config(&self) -> &GcConfig {
         &self.config
@@ -392,6 +419,15 @@ impl<M: MetaStore, O: ObjectStore> Collector<M, O> {
 
     fn now(&self) -> i64 {
         self.clock.now().ms
+    }
+
+    /// The time the sweep compares lease and expiry ends against.
+    fn lease_now(&self) -> i64 {
+        let now = self.now();
+        if planted!(self.planted, LeaseBoundary) {
+            return now.saturating_add(1);
+        }
+        now
     }
 
     /// What a sweep at `now_ms` would collect, doom and reclaim. It reads

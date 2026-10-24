@@ -94,14 +94,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     fn collector(&self) -> Collector<Arc<M>, Arc<O>> {
-        Collector::new(
+        let collector = Collector::new(
             self.meta.clone(),
             self.objects.clone(),
             self.gc.config.clone(),
         )
         .with_clock(self.clock.clone())
         .with_pace(self.gc.pace.clone())
-        .with_leases(self.gc.leases.clone())
+        .with_leases(self.gc.leases.clone());
+        #[cfg(feature = "planted-bugs")]
+        let collector = collector.with_planted_bugs(self.planted.clone());
+        collector
     }
 
     fn gc_shape(&self) -> GcShape<'_, M, O> {

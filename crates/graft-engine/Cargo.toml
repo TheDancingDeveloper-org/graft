@@ -11,6 +11,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only hooks for the adversarial harness; never in a release build.
+planted-bugs = ["graft-gc/planted-bugs"]
+
 [dependencies]
 graft-auth.workspace = true
 graft-gc.workspace = true

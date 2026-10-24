@@ -655,6 +655,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             pinned,
             mut writes,
             revive,
+            #[cfg(feature = "planted-bugs")]
+            deferred,
         } = match built {
             Built::New(new) => *new,
             Built::Exists {
@@ -686,6 +688,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             });
             match self.meta.commit(repo, txn).await.map_err(errors::store)? {
                 TxnOutcome::Committed(lsns) => {
+                    #[cfg(feature = "planted-bugs")]
+                    put_concurrently(&*self.objects, repo, deferred.iter().collect()).await?;
                     return Ok(Created {
                         id,
                         root,
@@ -843,12 +847,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             let frame = Frame::encode(ObjectKind::Tree, &tree.encode());
             (tree_id.0, frame.to_bytes())
         }));
+        // The planted `MetadataBeforeObjects` bug puts a land candidate's
+        // own objects only after its metadata commits.
+        let defer = lease.is_some() && planted!(self.planted, MetadataBeforeObjects);
         // Ones this request already put and synced (`written`) are skipped.
-        let unwritten = own
-            .iter()
-            .filter(|(o, _)| !written.is_some_and(|w| w.contains(o)))
-            .collect();
-        put_concurrently(&*self.objects, repo, unwritten).await?;
+        if !defer {
+            let unwritten = own
+                .iter()
+                .filter(|(o, _)| !written.is_some_and(|w| w.contains(o)))
+                .collect();
+            put_concurrently(&*self.objects, repo, unwritten).await?;
+        }
 
         // Claim what it references, then check every frame is there: one
         // deleted since the checks above is put again, or reported missing
@@ -878,9 +887,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         if !missing.is_empty() {
             return Err(ApiError::MissingObjects { ids: missing });
         }
-        let again: Vec<&(ObjectId, Vec<u8>)> =
-            own.iter().filter(|(o, _)| !present.contains(o)).collect();
-        put_concurrently(&*self.objects, repo, again).await?;
+        if !defer {
+            let again: Vec<&(ObjectId, Vec<u8>)> =
+                own.iter().filter(|(o, _)| !present.contains(o)).collect();
+            put_concurrently(&*self.objects, repo, again).await?;
+        }
 
         let object_holder = id.to_string();
         let now = self.clock.now().ms;
@@ -929,6 +940,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             pinned,
             writes,
             revive,
+            #[cfg(feature = "planted-bugs")]
+            deferred: if defer { own } else { Vec::new() },
         })))
     }
 }
@@ -977,6 +990,9 @@ struct New {
     pinned: Vec<ChangesetId>,
     writes: Vec<Write>,
     revive: bool,
+    /// Objects the planted `MetadataBeforeObjects` bug puts after the commit.
+    #[cfg(feature = "planted-bugs")]
+    deferred: Vec<(ObjectId, Vec<u8>)>,
 }
 
 /// The most changesets one import run commits together (the SQLite

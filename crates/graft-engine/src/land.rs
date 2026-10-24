@@ -441,6 +441,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         head: ChangesetId,
         line: &str,
     ) -> Result<Option<Landed>, ApiError> {
+        if planted!(self.planted, SkipIdempotency) {
+            return Ok(None);
+        }
         let Some(landed) = self
             .meta
             .land(repo, head, line)
