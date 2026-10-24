@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 use graft_client::fetch::{CACHE_REPO, FetchOptions, fetch_slice, resolve_root};
 use graft_client::workcopy::{
@@ -496,10 +496,12 @@ async fn fifty_same_size_edits_within_a_second_are_all_detected() {
 
     // 50 back-to-back edits, each the same size, in place (same inode), with
     // the mtime put back as a coarse-timestamp filesystem would leave it.
-    let start = Instant::now();
+    // The pinned mtime stands in for "within one second", so the outcome
+    // does not depend on how fast this loop runs on a loaded host.
     for (i, path) in files.keys().enumerate() {
         let file = dest.path().join(path);
-        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let before = std::fs::symlink_metadata(&file).unwrap();
+        let mtime = before.modified().unwrap();
         std::fs::write(&file, vec![b'A' + (i % 26) as u8; 64]).unwrap();
         std::fs::File::options()
             .write(true)
@@ -507,8 +509,10 @@ async fn fifty_same_size_edits_within_a_second_are_all_detected() {
             .unwrap()
             .set_modified(mtime)
             .unwrap();
+        let after = std::fs::symlink_metadata(&file).unwrap();
+        assert_eq!(after.modified().unwrap(), mtime, "{path}: mtime moved");
+        assert_eq!(after.len(), before.len(), "{path}: size changed");
     }
-    assert!(start.elapsed() < Duration::from_secs(1));
     let modified = |wc: &WorkingCopy| {
         wc.status()
             .unwrap()
