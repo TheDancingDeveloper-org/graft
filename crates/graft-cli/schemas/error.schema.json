@@ -26,6 +26,16 @@
           "type": "string",
           "pattern": "^[a-z][0-9a-f]{64}$"
         },
+        "base": {
+          "description": "A line merge conflict (D29): the merge base.",
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$"
+        },
+        "source": {
+          "description": "A line merge conflict (D29): the source changeset merged.",
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$"
+        },
         "conflicts": {
           "description": "Conflicts: the paths, and how a sync wrote each (null when nothing was written).",
           "type": "array",

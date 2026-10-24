@@ -26,8 +26,8 @@ pub use workcopy::{
 pub use write::{
     COMMIT_MAX_BYTES, COMMIT_MAX_FILES, COMMIT_MESSAGE_MAX_BYTES, CONFLICT_MARKERS_MAX_BYTES,
     CommitArgs, ConflictsArgs, Encoding, FileChange, FileKind, FileOp, LEASE_MAX_MS, LEASE_MIN_MS,
-    LandArgs, LineCreateArgs, MergeArg, PickArgs, ResolveArgs, RevertArgs, SyncArgs, TagArgs,
-    WorkspaceAction, WorkspaceArgs,
+    LandArgs, LineCreateArgs, MergeArg, MergeArgs, PickArgs, ResolveArgs, RevertArgs, SyncArgs,
+    TagArgs, WorkspaceAction, WorkspaceArgs,
 };
 
 /// A tool's identity and hints.
@@ -126,6 +126,11 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "graft_line_create",
         description: "Fork a new line at a changeset; never overwrites.",
+        read_only: false,
+    },
+    ToolSpec {
+        name: "graft_merge",
+        description: "Merge one line into another, recording a merge point.",
         read_only: false,
     },
     ToolSpec {

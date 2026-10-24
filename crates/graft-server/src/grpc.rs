@@ -637,6 +637,36 @@ impl pb::repo_service_server::RepoService for Services {
         )
     }
 
+    async fn line_merge(
+        &self,
+        request: Request<pb::LineMergeRequest>,
+    ) -> Result<Response<pb::LineMergeOutcome>, Status> {
+        unary!(
+            self,
+            request,
+            "LineMerge",
+            true,
+            LineMerge,
+            |e, cx, req| e.line_merge(&cx, req).await,
+            pb::LineMergeOutcome::from
+        )
+    }
+
+    async fn line_merges(
+        &self,
+        request: Request<pb::LineMergesRequest>,
+    ) -> Result<Response<pb::LineMergePage>, Status> {
+        unary!(
+            self,
+            request,
+            "LineMerges",
+            false,
+            LineMerges,
+            |e, cx, req| e.line_merges(&cx, req).await,
+            pb::LineMergePage::from
+        )
+    }
+
     async fn stat(&self, request: Request<pb::PathAt>) -> Result<Response<pb::EntryView>, Status> {
         unary!(
             self,

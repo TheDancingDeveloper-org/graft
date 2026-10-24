@@ -182,6 +182,15 @@ pub(crate) fn api_error_value(e: &ApiError) -> Value {
                     .collect::<Vec<_>>(),
             })
         }
+        ApiError::MergeConflict(m) => {
+            let mut value = api_error_value(&ApiError::Conflict {
+                paths: m.paths.clone(),
+                onto: m.onto,
+            });
+            value["base"] = json!(m.base.to_string());
+            value["source"] = json!(m.source.to_string());
+            value
+        }
         ApiError::Contended { line, tip } => {
             json!({"kind": "contended", "line": line, "tip": tip.to_string()})
         }

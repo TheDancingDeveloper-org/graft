@@ -55,6 +55,9 @@ pub(crate) const MERGED_FROM: &str = "graft.merged-from";
 /// Merge rows read per step of a search.
 const ROWS_PER_READ: u32 = 8;
 
+/// Lines read per changeset when choosing the lines `MergeBase` compares.
+const HOLDERS: u32 = 4;
+
 /// The source of a merge landing, checked: `changeset` is at `pos` on
 /// `line`'s line index.
 #[derive(Clone, Debug)]
@@ -227,8 +230,14 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .line_pos(repo, line, p.id)
             .await
             .map_err(errors::store)?;
-        if pos.is_some_and(|q| q <= bound) {
-            return Ok(true);
+        match pos {
+            Some(q) if q <= bound => return Ok(true),
+            // On the line above the bound: landed after the bound on the
+            // line's own first-parent chain, so nothing at or below the
+            // bound brought it. Saves the merge rows below for a search
+            // that cannot succeed.
+            Some(_) => return Ok(false),
+            None => {}
         }
         if depth >= s.hops {
             s.capped = true;
@@ -271,13 +280,20 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             }
         }
 
-        // Rule 3: a merge into `line` at or below `bound` brought it.
-        if s.read() {
+        // Rule 3: a merge into `line` at or below `bound` brought it. The
+        // rows are paged within the read budget, so an older merge is not
+        // missed silently: running out of reads marks the search capped.
+        let mut below = Some(bound);
+        while let Some(at) = below {
+            if !s.read() {
+                break;
+            }
             let rows = self
                 .meta
-                .line_merges(repo, line, None, bound, ROWS_PER_READ)
+                .line_merges(repo, line, None, at, ROWS_PER_READ)
                 .await
                 .map_err(errors::store)?;
+            below = next_page(&rows);
             for row in rows {
                 if self
                     .contains(repo, s, &row.src, row.src_pos, p, depth + 1)
@@ -325,16 +341,23 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let mut best: Option<Candidate> = None;
 
         // The target's merges, newest first: the landing itself when the
-        // source holds it (rule 4), else what it merged.
-        if s.read() {
+        // source holds it (rule 4), else what it merged. Paged within the
+        // read budget.
+        let mut below = Some(dst.pos);
+        'rows: while let Some(at) = below {
+            if !s.read() {
+                break;
+            }
             let rows = self
                 .meta
-                .line_merges(repo, &dst.line, None, dst.pos, ROWS_PER_READ)
+                .line_merges(repo, &dst.line, None, at, ROWS_PER_READ)
                 .await
                 .map_err(errors::store)?;
+            below = next_page(&rows);
             for row in rows {
                 if s.reads == 0 {
-                    break;
+                    s.capped = true;
+                    break 'rows;
                 }
                 if let Some(id) = self.at_pos(repo, dst.id, dst.pos, row.dst_pos).await? {
                     let landing = Point {
@@ -347,7 +370,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         .await?
                     {
                         better(&mut best, ((row.dst_pos, 1), id, MergeBaseVia::MergePoint));
-                        break;
+                        break 'rows;
                     }
                 }
                 let merged = Point {
@@ -363,7 +386,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         &mut best,
                         ((row.dst_pos, 0), merged.id, MergeBaseVia::MergePoint),
                     );
-                    break;
+                    break 'rows;
                 }
             }
         }
@@ -412,6 +435,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         {
             better(&mut best, ((q, 1), id, MergeBaseVia::Fork));
         }
+        // A capped search may have missed a higher candidate: its best so
+        // far is not the answer, and the caller falls back to the ancestry
+        // walk instead.
+        if s.capped {
+            return Ok(None);
+        }
         Ok(best.map(|(_, id, via)| (id, via)))
     }
 
@@ -440,17 +469,18 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         })
     }
 
-    /// The point of `id` on a line that indexes it, if any.
-    async fn point_of(&self, repo: RepoId, id: ChangesetId) -> Result<Option<Point>, ApiError> {
+    /// The points of `id` on the lines that index it, in line order, up
+    /// to [`HOLDERS`].
+    async fn points_of(&self, repo: RepoId, id: ChangesetId) -> Result<Vec<Point>, ApiError> {
         let held = self
             .meta
-            .line_holders(repo, id, 1)
+            .line_holders(repo, id, HOLDERS)
             .await
             .map_err(errors::store)?;
         Ok(held
             .into_iter()
-            .next()
-            .map(|(line, pos)| Point { line, pos, id }))
+            .map(|(line, pos)| Point { line, pos, id })
+            .collect())
     }
 
     pub(crate) async fn do_merge_base_via(
@@ -462,12 +492,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let repo = self.repo_id(&req.repo).await?;
         self.changeset(repo, req.a).await?;
         self.changeset(repo, req.b).await?;
-        if let (Some(a), Some(b)) = (
-            self.point_of(repo, req.a).await?,
-            self.point_of(repo, req.b).await?,
-        ) && a.line != b.line
-        {
-            return self.line_merge_base(repo, &a, &b).await;
+        let a = self.points_of(repo, req.a).await?;
+        let b = self.points_of(repo, req.b).await?;
+        if let Some((a, b)) = distinct_lines(&a, &b) {
+            return self.line_merge_base(repo, a, b).await;
         }
         let base = self.do_merge_base(cx, req).await?;
         Ok(MergeBaseResult {
@@ -565,6 +593,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         };
         let change_id = change.id();
         let config = self.line_config(&req.dst);
+        let as_merge_conflict = |e| merge_conflict(e, base, s);
         let plan = self
             .plan(
                 repo,
@@ -573,7 +602,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 req.merge,
                 &config,
             )
-            .await?;
+            .await
+            .map_err(as_merge_conflict)?;
         let (cs, uploads) = match plan.new.last() {
             Some(cs) => {
                 let uploads = plan.uploads(cs);
@@ -604,7 +634,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     }),
                 },
             )
-            .await?;
+            .await
+            .map_err(as_merge_conflict)?;
         match landed {
             Landed::Landed {
                 landed,
@@ -622,6 +653,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     line_version,
                     pos,
                     merged_paths: paths,
+                    base,
+                    via: found.via,
                 })
             }
             _ => Err(errors::invalid(None, "merge-queued")),
@@ -679,6 +712,36 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             _ => None,
         };
         Ok(LineMergePage { merges, next })
+    }
+}
+
+/// The next page bound after a full page of merge rows, newest first.
+fn next_page(rows: &[graft_store::LineMergeRow]) -> Option<u64> {
+    match rows.last() {
+        Some(last) if rows.len() == ROWS_PER_READ as usize => last.dst_pos.checked_sub(1),
+        _ => None,
+    }
+}
+
+/// The first pair, in line order, of points on two different lines.
+fn distinct_lines<'a>(a: &'a [Point], b: &'a [Point]) -> Option<(&'a Point, &'a Point)> {
+    a.iter()
+        .find_map(|a| b.iter().find(|b| b.line != a.line).map(|b| (a, b)))
+}
+
+/// A merge's conflict carries the base and the source as well as the tip
+/// (§8.9), so the client can write markers in one fetch.
+fn merge_conflict(e: ApiError, base: ChangesetId, source: ChangesetId) -> ApiError {
+    match e {
+        ApiError::Conflict { paths, onto } => {
+            ApiError::MergeConflict(Box::new(graft_proto::error::MergeConflict {
+                paths,
+                onto,
+                base,
+                source,
+            }))
+        }
+        e => e,
     }
 }
 
