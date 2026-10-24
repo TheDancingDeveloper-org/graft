@@ -150,6 +150,7 @@ fn land_req(head: ChangesetId, line: &str) -> Land {
         squash: false,
         merge: MergeMode::Line,
         deadline_ms: None,
+        merged_from: None,
     }
 }
 
@@ -1106,8 +1107,8 @@ fn every_answer_is_bounded_and_cursors_are_not_echoed() {
         Err(e) if limit(&e) => {}
         other => failures.push(format!("overlap over MAX_OVERLAP_PATHS: {other:?}")),
     }
-    // Bad cursors on the lists that don't parse them as paths; the other
-    // two are `a_bad_cursor_is_never_echoed`.
+    // Bad cursors on the other lists; `list_tree` and `diff` are
+    // `a_bad_cursor_is_never_echoed`.
     failures.extend(hostile_cursors(
         &site,
         &token,
@@ -1228,11 +1229,11 @@ fn hostile_cursors(site: &Site, token: &str, only: &[&str]) -> Vec<String> {
     out
 }
 
-/// WI-2367: `list_tree` and `diff` parse the cursor as a path and quote it
-/// in `InvalidPath`, so a secret pasted as a cursor comes back in the error
-/// (rule 8). Un-ignore when WI-2367 lands.
+/// WI-2367: `list_tree` and `diff` once quoted a bad cursor in
+/// `InvalidPath`, so a secret pasted as a cursor came back in the error
+/// (rule 8). Now they refuse it as `InvalidChange { rule: "page-token" }`
+/// without quoting it.
 #[test]
-#[ignore = "WI-2367: list_tree and diff echo a bad cursor"]
 fn a_bad_cursor_is_never_echoed() {
     let site = Site::new();
     let key = SigningKey::from_seed(&[7; 32]);
@@ -1240,7 +1241,39 @@ fn a_bad_cursor_is_never_echoed() {
         .expect("mint")
         .expose()
         .to_owned();
-    report(&hostile_cursors(&site, &token, &["list_tree", "diff"]));
+    let mut failures = hostile_cursors(&site, &token, &["list_tree", "diff"]);
+    let a = admin();
+    let tree = block_on(site.api.list_tree(
+        &a,
+        ListTree {
+            repo: REPO.to_owned(),
+            at: site.tip,
+            path: None,
+            recursive: true,
+            page: page(2, Some(&token)),
+        },
+    ))
+    .map(drop);
+    let diff = block_on(site.api.diff(
+        &a,
+        Diff {
+            repo: REPO.to_owned(),
+            from: site.tip,
+            to: site.draft,
+            paths: vec![],
+            patch: None,
+            page: page(2, Some(&token)),
+        },
+    ))
+    .map(drop);
+    for (what, r) in [("list_tree", tree), ("diff", diff)] {
+        match r {
+            Err(ApiError::InvalidChange { path, rule })
+                if path.is_empty() && rule == "page-token" => {}
+            other => failures.push(format!("{what} with a token cursor: {other:?}")),
+        }
+    }
+    report(&failures);
 }
 
 fn claims(subject: &str, exp: i64, jti: &str) -> Claims {
