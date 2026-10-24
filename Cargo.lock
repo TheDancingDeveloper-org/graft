@@ -1958,6 +1958,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "graft-harness"
+version = "0.0.0"
+dependencies = [
+ "graft-engine",
+ "graft-gc",
+ "graft-model",
+ "graft-proto",
+ "graft-store",
+ "graft-testkit",
+ "serde_json",
+]
+
+[[package]]
 name = "graft-index"
 version = "0.0.0"
 dependencies = [
