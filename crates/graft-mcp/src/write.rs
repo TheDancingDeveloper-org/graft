@@ -17,9 +17,9 @@ use graft_proto::{
     ApiError, CallContext, Frame, PrincipalKind,
     api::{RepoApi, WorkspaceApi},
     types::{
-        ConflictReason, ConflictSide, ConflictView, CreateChangeset, CreateLine, GetConflicts,
-        Land, Landed, MergeMode, OpenWorkspace, Page, PathResolution, Rebase, Resolution,
-        ResolvedContent, Revert, SetHead, WorkspaceRef, WorkspaceView,
+        ConflictReason, ConflictSide, ConflictView, CreateChangeset, CreateLine, DraftState,
+        GetChangesets, GetConflicts, Land, Landed, MergeMode, OpenWorkspace, Page, PathResolution,
+        Rebase, Resolution, ResolvedContent, Revert, SetHead, WorkspaceRef, WorkspaceView,
     },
 };
 use rmcp::{
@@ -294,11 +294,11 @@ pub struct PickArgs {
     pub repo: String,
     /// The landed changeset to re-apply (an id or a ref name).
     pub changeset: String,
-    /// Where to apply it (an id or a ref name). Defaults to the workspace
-    /// head, or its base when it has no drafts. Not allowed with
-    /// `workspace`, whose head the new draft goes on.
+    /// Where to apply it (an id or a ref name). Give this or `workspace`,
+    /// not both.
     pub onto: Option<String>,
-    /// The workspace whose head the new draft becomes (compare-and-swap).
+    /// The workspace whose head the new draft becomes (compare-and-swap):
+    /// it goes on the workspace head, or its base when it has no drafts.
     pub workspace: Option<String>,
     /// `line` (default): three-way line merge for text files. `file`: any
     /// path changed on both sides conflicts.
@@ -314,6 +314,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         }
         let merge = merge_mode(args.merge);
         let changeset = self.resolve(cx, &args.repo, &args.changeset).await?;
+        self.check_landed(cx, &args.repo, changeset).await?;
         let (onto, held) = match (&args.onto, &args.workspace) {
             (Some(_), Some(_)) => return Err(invalid("give `onto` or `workspace`, not both")),
             (Some(rev), None) => (self.resolve(cx, &args.repo, rev).await?, None),
@@ -358,6 +359,46 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             "changed": fresh,
             "workspace": args.workspace.as_deref().map(|w| clip(w, FIELD_MAX_BYTES).0),
         }))
+    }
+
+    /// Refuses a pick of a changeset that is not landed, or is a root:
+    /// `Rebase` of a draft would copy the drafts below it too.
+    async fn check_landed(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+        changeset: ChangesetId,
+    ) -> Result<(), ToolError> {
+        let got = self
+            .api
+            .get_changesets(
+                cx,
+                GetChangesets {
+                    repo: repo.to_owned(),
+                    ids: vec![changeset],
+                },
+            )
+            .await
+            .map_err(ToolError::Api)?;
+        if got.collected.contains(&changeset) {
+            return Err(ToolError::Api(ApiError::Collected { id: changeset }));
+        }
+        let view = got
+            .found
+            .into_iter()
+            .find(|v| v.changeset.id() == changeset)
+            .ok_or_else(|| {
+                ToolError::Api(ApiError::NotFound {
+                    what: format!("changeset {changeset}"),
+                })
+            })?;
+        if view.state != DraftState::Landed {
+            return Err(invalid("only a landed changeset can be picked"));
+        }
+        if view.changeset.first_parent().is_none() {
+            return Err(invalid("a root changeset has nothing to pick"));
+        }
+        Ok(())
     }
 
     async fn conflicts(

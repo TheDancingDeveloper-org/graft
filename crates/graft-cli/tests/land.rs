@@ -501,10 +501,11 @@ fn pick_reapplies_a_landed_changeset_and_writes_its_conflicts() {
     // Picking a draft is refused: it would move the drafts below it.
     fs::write(app.join("docs/guide.md"), "draft\n").unwrap();
     let draft = json_run(&app, &["commit", "-m", "draft"]);
-    wc_cmd(&app)
+    let a = wc_cmd(&app)
         .args(["--json", "pick", draft["id"].as_str().unwrap()])
         .assert()
-        .failure();
+        .code(1);
+    assert_eq!(error_of(&a)["kind"], json!("state"));
     json_run(&app, &["land"]);
 
     // A line that changed the file since: 3, with the conflict in the file.

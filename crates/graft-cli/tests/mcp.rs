@@ -352,6 +352,35 @@ fn pick_re_applies_a_landed_changeset() {
     assert!(error, "{conflict}");
     assert_eq!(conflict["kind"], "conflict", "{conflict}");
 
+    // A draft is refused, and nothing moves: no new changeset on any line.
+    std::fs::write(app.join("docs.md"), "draft\n").unwrap();
+    graft(&app)
+        .env("GRAFT_AUTHOR_NAME", "Test Author")
+        .env("GRAFT_AUTHOR_EMAIL", "author@example.com")
+        .args(["commit", "-m", "draft"])
+        .assert()
+        .success();
+    let cli_status = || {
+        let out = graft(&app).args(["--json", "status"]).assert().success();
+        json_out(out.get_output())
+    };
+    let status = cli_status();
+    let draft = status["head"].clone();
+    assert!(draft.is_string(), "{status}");
+    let tip = rt.block_on(repo.tip());
+    let (refused, error) = mcp.call(
+        "graft_pick",
+        json!({"repo": REPO, "changeset": draft, "onto": root}),
+    );
+    assert!(error, "{refused}");
+    assert_eq!(refused["kind"], "invalid_argument", "{refused}");
+    assert_eq!(rt.block_on(repo.tip()), tip);
+    assert_eq!(
+        cli_status()["head"],
+        draft,
+        "the workspace head did not move"
+    );
+
     let (both, error) = mcp.call(
         "graft_pick",
         json!({"repo": REPO, "changeset": lib, "onto": root, "workspace": "w"}),
