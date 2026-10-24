@@ -1270,7 +1270,7 @@ retried and passing is counted in `graft_post_land_flakes_total{check}`.
 1. **Conflict preview**, the same read as `graft status --upstream`
    (WI-2309): the files the stack and the line tip both changed since the
    stack's base. For each such file the client asks the server for a
-   dry-run line merge (`Rebase` with nothing moved) under the land's
+   dry-run line merge (`Rebase { dry_run: true }`) under the land's
    `--merge` mode. A file that merges cleanly is reported and does not
    stop the land. A file that does not (a **real conflict**) stops it:
    `graft land` exits 3 with the paths, as a conflicted land does, and
@@ -1286,6 +1286,12 @@ retried and passing is counted in `graft_post_land_flakes_total{check}`.
 `preflight`, so any client (the CLI, MCP, an API caller) reads the same
 shape. The MCP `land` tool runs the same checks.
 
+- **Dry run writes nothing.** A plain `Rebase` creates the rebased
+  changesets and pins their parents (§8.6), so a preview on every land would
+  leave orphans behind. `Rebase { dry_run: true }` runs the same line merge
+  and returns only the per-path result (merged, conflicted, with conflict
+  paths); it writes no changeset, object, pin or journal entry, and needs
+  only `read`.
 - **Advisory, not a gate.** The server's land stays the authority: the tip
   can move between the check and the CAS, and a conflict then comes back
   from `Land` as before. No server state is added and no land policy
@@ -1556,8 +1562,12 @@ ck:  tree      = export(replayed snapshot k); at k = last, = export(integration 
   leave the line as it is.
 
 **Implementation steps (WI-2349 follow-ups, for §8.7, §8.8 and this section).** Each is one plan item on
-disjoint crates:
+disjoint crates, after step 0:
 
+0. Interface PR (`graft-proto`, types and signatures only): a `dry_run`
+   flag on `Rebase` and its result shape, plus the D25 types
+   (`GetLandChecks`, `LandReverted`, line `checks` config). Bodies stubbed;
+   lands before steps 2 and 7.
 1. WI-2293: the attester's journal read survives a failed `GetWorkspace`
    (`graft-attester`).
 2. Checked lines: `checks`, `required`, `retries` in line config; the
@@ -1576,9 +1586,8 @@ disjoint crates:
 6. CLI identity (fit assessment gap 5, its own item, `graft-cli`): needed
    for D26's authors, and lands before step 5 ships.
 7. The pre-land check in `graft land` and the MCP `land` tool
-   (`graft-cli`, `graft-mcp`; §8.8, D27). The dry-run rebase uses the
-   existing `Rebase` RPC; if it cannot run without moving a ref, an
-   interface PR adds a `dry_run` flag in `graft-proto` first.
+   (`graft-cli`, `graft-mcp`; §8.8, D27), with the engine body of
+   `Rebase { dry_run }` (`graft-engine`, from step 0).
 8. graft-dev: switch the trial integration line to `checks = "post-land"`,
    run the attester profile, and measure on the bench harness: bad-land
    detection time, revert time, and batches cut per day.

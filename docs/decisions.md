@@ -728,6 +728,10 @@ path" still holds.
   stop the land.
 - **Draft overlap** is reported, never a stop. It needs the
   `repo:<r>:drafts` scope (D24) and is skipped without it.
+- **Dry run.** The preview uses `Rebase { dry_run: true }`, a new flag
+  (an interface PR in `graft-proto`) that runs the line merge and writes
+  nothing: no changeset, pin or journal entry. A plain `Rebase` would leave
+  a changeset and pins behind on every land.
 - **Advisory.** The server's land is still the authority. A tip that moves
   after the check is caught by `Land` as before. No server state and no
   policy change.
