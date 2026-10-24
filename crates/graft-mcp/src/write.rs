@@ -18,8 +18,9 @@ use graft_proto::{
     api::{RepoApi, WorkspaceApi},
     types::{
         ConflictReason, ConflictSide, ConflictView, CreateChangeset, CreateLine, GetConflicts,
-        Land, Landed, MergeMode, OpenWorkspace, Page, PathResolution, RefKind, Resolution,
-        ResolvedContent, Revert, UpdateRef, WorkspaceRef, WorkspaceView,
+        Land, Landed, LineMerge, LineMergeOutcome, MergeBaseVia, MergeMode, MergedFrom,
+        OpenWorkspace, Page, PathResolution, RefKind, Resolution, ResolvedContent, Revert,
+        UpdateRef, WorkspaceRef, WorkspaceView,
     },
 };
 use rmcp::{
@@ -188,6 +189,30 @@ pub struct LandArgs {
     /// it, and the draft-overlap read, which is only reported. It runs no
     /// build or test, and the land still decides.
     pub check: Option<bool>,
+    /// Lands the resolution of a conflicted `graft_merge` (D29), as
+    /// `<line>@<rev>`: the land records a merge point from that source
+    /// changeset, which must be on the source line.
+    pub merged_from: Option<String>,
+}
+
+/// Arguments of `graft_merge`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MergeArgs {
+    /// Repository name.
+    pub repo: String,
+    /// The source line, only read.
+    pub src: String,
+    /// The target line (default `main`); only it moves.
+    pub into: Option<String>,
+    /// The source changeset to merge: an id or a ref on `src` (default:
+    /// its tip).
+    pub at: Option<String>,
+    /// Message of the merge landing.
+    pub message: Option<String>,
+    /// `line` (default) or `file`, as for `graft_land`.
+    #[schemars(extend("default" = "line"))]
+    pub merge: Option<MergeArg>,
 }
 
 /// Arguments of `graft_line_create`.
@@ -527,6 +552,97 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         }))
     }
 
+    async fn merge(&self, cx: &CallContext, args: MergeArgs) -> Result<CallToolResult, ToolError> {
+        check_name("repo", &args.repo)?;
+        check_name("src", &args.src)?;
+        let dst = args.into.unwrap_or_else(|| "main".to_owned());
+        check_name("into", &dst)?;
+        let src_at = match &args.at {
+            Some(rev) => {
+                check_name("at", rev)?;
+                Some(self.resolve(cx, &args.repo, rev).await?)
+            }
+            None => None,
+        };
+        if args
+            .message
+            .as_ref()
+            .is_some_and(|m| m.len() > COMMIT_MESSAGE_MAX_BYTES)
+        {
+            return Err(invalid("message is too long"));
+        }
+        let out = self
+            .api
+            .line_merge(
+                cx,
+                LineMerge {
+                    repo: args.repo,
+                    src: args.src.clone(),
+                    dst: dst.clone(),
+                    src_at,
+                    merge: merge_mode(args.merge),
+                    deadline_ms: None,
+                    message: args.message,
+                },
+            )
+            .await
+            .map_err(ToolError::Api)?;
+        let value = match out {
+            LineMergeOutcome::Merged {
+                landed,
+                line_version,
+                pos,
+                merged_paths,
+                base,
+                via,
+            } => json!({
+                "outcome": "merged",
+                "src": args.src,
+                "into": dst,
+                "landed": landed.to_string(),
+                "line_version": line_version,
+                "pos": pos,
+                "base": base.to_string(),
+                "via": match via {
+                    MergeBaseVia::MergePoint => "merge_point",
+                    MergeBaseVia::Fork => "fork",
+                    _ => "ancestry",
+                },
+                "merged_paths": merged_paths.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+            }),
+            LineMergeOutcome::UpToDate { tip } => json!({
+                "outcome": "up_to_date",
+                "src": args.src,
+                "into": dst,
+                "tip": tip.to_string(),
+            }),
+            _ => return Err(invalid("unknown merge outcome")),
+        };
+        bounded(value)
+    }
+
+    /// Parses and resolves a `merged_from` of `<line>@<rev>`.
+    async fn merged_from(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+        text: Option<&str>,
+    ) -> Result<Option<MergedFrom>, ToolError> {
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        let (line, rev) = text
+            .rsplit_once('@')
+            .filter(|(l, r)| !l.is_empty() && !r.is_empty())
+            .ok_or_else(|| invalid("merged_from takes <line>@<rev>"))?;
+        check_name("merged_from", line)?;
+        check_name("merged_from", rev)?;
+        Ok(Some(MergedFrom {
+            line: line.to_owned(),
+            changeset: self.resolve(cx, repo, rev).await?,
+        }))
+    }
+
     async fn tag(&self, cx: &CallContext, args: TagArgs) -> Result<CallToolResult, ToolError> {
         check_name("repo", &args.repo)?;
         check_name("name", &args.name)?;
@@ -652,8 +768,12 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         cx: &CallContext,
         args: LandArgs,
     ) -> Result<CallToolResult, ToolError> {
+        let merged_from = self
+            .merged_from(cx, &args.repo, args.merged_from.as_deref())
+            .await?;
         if let Some(wc) = &self.working_copy {
             let req = WorkingCopyLand {
+                merged_from: merged_from.clone(),
                 repo: args.repo.clone(),
                 workspace: args.workspace.clone(),
                 head: args.head.clone(),
@@ -680,7 +800,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             squash: args.squash.unwrap_or(false),
             merge: merge_mode(args.merge),
             deadline_ms: None,
-            merged_from: None,
+            merged_from,
         };
         let landed = self.api.land(cx, req).await.map_err(ToolError::Api)?;
         let base = json!({"head": head.to_string(), "line": line});
@@ -974,6 +1094,29 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         Ok(respond(async {
             let cx = self.call_context(&ctx)?;
             self.line_create(&cx, args).await
+        })
+        .await)
+    }
+
+    #[tool(
+        name = "graft_merge",
+        description = "Merge line `src` into line `into` (default main), D29. Only `into` moves, by compare-and-swap, and a merge point is recorded so the next merge starts from it. Answers merged (with the base and `via`: merge_point, fork, or ancestry when the bounded search fell back) or up_to_date. A conflict carries the tip (`onto`), `base` and `source` ids: resolve in a workspace on `into` and graft_land with merged_from `<src>@<source>`. Needs read on src and land on into.",
+        annotations(
+            title = "Merge line",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn graft_merge(
+        &self,
+        Parameters(args): Parameters<MergeArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(respond(async {
+            let cx = self.call_context(&ctx)?;
+            self.merge(&cx, args).await
         })
         .await)
     }

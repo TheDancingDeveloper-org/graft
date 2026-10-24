@@ -210,6 +210,16 @@ impl RepoApi for McpApi {
             .land(&c, req)
             .await)
     }
+    async fn line_merge(&self, cx: &CallContext, req: LineMerge) -> ApiResult<LineMergeOutcome> {
+        via!(self, "LineMerge", req.repo, cx, true, |e, c| e
+            .line_merge(&c, req)
+            .await)
+    }
+    async fn line_merges(&self, cx: &CallContext, req: LineMerges) -> ApiResult<LineMergePage> {
+        via!(self, "LineMerges", req.repo, cx, false, |e, c| e
+            .line_merges(&c, req)
+            .await)
+    }
     async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
         via!(self, "Attest", req.repo, cx, true, |e, c| e
             .attest(&c, req)

@@ -500,7 +500,7 @@ pub struct LineMerge {
     pub message: Option<String>,
 }
 
-/// `LineMerge` success. The failures are `Conflict` (carrying `base`,
+/// `LineMerge` success. The failures are `MergeConflict` (carrying `base`,
 /// `tip` and the source changeset), `Contended` and `Rejected` in
 /// [`crate::ApiError`], as for `Land`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -516,6 +516,11 @@ pub enum LineMergeOutcome {
         pos: u64,
         /// Paths resolved by line merge.
         merged_paths: Vec<RepoPath>,
+        /// The merge base the merge was computed from.
+        base: ChangesetId,
+        /// How the merge base was found; `Ancestry` when the bounded
+        /// merge point search fell back to the ancestry walk.
+        via: MergeBaseVia,
     },
     /// `dst` already contains the source changeset; nothing moved.
     UpToDate {

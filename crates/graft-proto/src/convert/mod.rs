@@ -1220,6 +1220,165 @@ impl TryFrom<pb::Landed> for Landed {
     }
 }
 
+fn merge_base_via(v: MergeBaseVia) -> i32 {
+    (match v {
+        MergeBaseVia::MergePoint => pb::MergeBaseVia::MergePoint,
+        MergeBaseVia::Fork => pb::MergeBaseVia::Fork,
+        MergeBaseVia::Ancestry => pb::MergeBaseVia::Ancestry,
+    }) as i32
+}
+
+/// An unset `via` is the default, `Ancestry`.
+fn merge_base_via_from(v: i32) -> R<MergeBaseVia> {
+    match pb::MergeBaseVia::try_from(v) {
+        Ok(pb::MergeBaseVia::Unspecified | pb::MergeBaseVia::Ancestry) => {
+            Ok(MergeBaseVia::Ancestry)
+        }
+        Ok(pb::MergeBaseVia::MergePoint) => Ok(MergeBaseVia::MergePoint),
+        Ok(pb::MergeBaseVia::Fork) => Ok(MergeBaseVia::Fork),
+        Err(_) => Err(bad("via", "unknown merge base via")),
+    }
+}
+
+impl From<LineMerge> for pb::LineMergeRequest {
+    fn from(r: LineMerge) -> Self {
+        pb::LineMergeRequest {
+            repo: r.repo,
+            src: r.src,
+            dst: r.dst,
+            src_at: r.src_at.map(cb),
+            merge: merge_mode(r.merge),
+            deadline_ms: r.deadline_ms,
+            message: r.message,
+        }
+    }
+}
+
+impl TryFrom<pb::LineMergeRequest> for LineMerge {
+    type Error = WireError;
+    fn try_from(r: pb::LineMergeRequest) -> R<Self> {
+        Ok(LineMerge {
+            repo: r.repo,
+            src: r.src,
+            dst: r.dst,
+            src_at: opt_cid(r.src_at, "src_at")?,
+            merge: merge_mode_from(r.merge)?,
+            deadline_ms: r.deadline_ms,
+            message: r.message,
+        })
+    }
+}
+
+impl From<LineMergeOutcome> for pb::LineMergeOutcome {
+    fn from(r: LineMergeOutcome) -> Self {
+        use pb::line_merge_outcome::{Merged, Outcome, UpToDate};
+        pb::LineMergeOutcome {
+            outcome: Some(match r {
+                LineMergeOutcome::Merged {
+                    landed,
+                    line_version,
+                    pos,
+                    merged_paths,
+                    base,
+                    via,
+                } => Outcome::Merged(Merged {
+                    landed: cb(landed),
+                    line_version,
+                    pos,
+                    merged_paths: ps(merged_paths),
+                    via: merge_base_via(via),
+                    base: cb(base),
+                }),
+                LineMergeOutcome::UpToDate { tip } => Outcome::UpToDate(UpToDate { tip: cb(tip) }),
+            }),
+        }
+    }
+}
+
+impl TryFrom<pb::LineMergeOutcome> for LineMergeOutcome {
+    type Error = WireError;
+    fn try_from(r: pb::LineMergeOutcome) -> R<Self> {
+        use pb::line_merge_outcome::Outcome;
+        Ok(match req(r.outcome, "outcome")? {
+            Outcome::Merged(m) => LineMergeOutcome::Merged {
+                landed: cid(m.landed, "landed")?,
+                line_version: m.line_version,
+                pos: m.pos,
+                merged_paths: paths(m.merged_paths, "merged_paths")?,
+                base: cid(m.base, "base")?,
+                via: merge_base_via_from(m.via)?,
+            },
+            Outcome::UpToDate(u) => LineMergeOutcome::UpToDate {
+                tip: cid(u.tip, "tip")?,
+            },
+        })
+    }
+}
+
+impl From<LineMerges> for pb::LineMergesRequest {
+    fn from(r: LineMerges) -> Self {
+        pb::LineMergesRequest {
+            repo: r.repo,
+            dst: r.dst,
+            src: r.src,
+            page: Some(r.page.into()),
+        }
+    }
+}
+
+impl TryFrom<pb::LineMergesRequest> for LineMerges {
+    type Error = WireError;
+    fn try_from(r: pb::LineMergesRequest) -> R<Self> {
+        Ok(LineMerges {
+            repo: r.repo,
+            dst: r.dst,
+            src: r.src,
+            page: page_from(r.page),
+        })
+    }
+}
+
+impl From<LineMergePage> for pb::LineMergePage {
+    fn from(r: LineMergePage) -> Self {
+        pb::LineMergePage {
+            merges: r
+                .merges
+                .into_iter()
+                .map(|m| pb::LineMergePoint {
+                    src: m.src,
+                    src_changeset: cb(m.src_changeset),
+                    src_pos: m.src_pos,
+                    dst_changeset: cb(m.dst_changeset),
+                    dst_pos: m.dst_pos,
+                })
+                .collect(),
+            next: r.next,
+        }
+    }
+}
+
+impl TryFrom<pb::LineMergePage> for LineMergePage {
+    type Error = WireError;
+    fn try_from(r: pb::LineMergePage) -> R<Self> {
+        Ok(LineMergePage {
+            merges: r
+                .merges
+                .into_iter()
+                .map(|m| -> R<LineMergePoint> {
+                    Ok(LineMergePoint {
+                        src: m.src,
+                        src_changeset: cid(m.src_changeset, "src_changeset")?,
+                        src_pos: m.src_pos,
+                        dst_changeset: cid(m.dst_changeset, "dst_changeset")?,
+                        dst_pos: m.dst_pos,
+                    })
+                })
+                .collect::<R<_>>()?,
+            next: r.next,
+        })
+    }
+}
+
 impl From<Attest> for pb::AttestRequest {
     fn from(r: Attest) -> Self {
         pb::AttestRequest {
@@ -1637,6 +1796,17 @@ impl From<ApiError> for pb::ApiError {
                 ApiError::IncompatibleProtocol { server } => {
                     E::IncompatibleProtocol(w::IncompatibleProtocol { server })
                 }
+                ApiError::MergeConflict {
+                    paths,
+                    onto,
+                    base,
+                    source,
+                } => E::MergeConflict(w::MergeConflict {
+                    paths: paths.into_iter().map(Into::into).collect(),
+                    onto: cb(onto),
+                    base: cb(base),
+                    source: cb(source),
+                }),
             }),
         }
     }
@@ -1707,6 +1877,16 @@ impl TryFrom<pb::ApiError> for ApiError {
             },
             E::Unauthenticated(_) => ApiError::Unauthenticated,
             E::IncompatibleProtocol(e) => ApiError::IncompatibleProtocol { server: e.server },
+            E::MergeConflict(e) => ApiError::MergeConflict {
+                paths: e
+                    .paths
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<R<_>>()?,
+                onto: cid(e.onto, "onto")?,
+                base: cid(e.base, "base")?,
+                source: cid(e.source, "source")?,
+            },
         })
     }
 }

@@ -587,6 +587,24 @@ impl<A: ObjectApi + RepoApi + 'static> RepoService for Svc<A> {
         })
     }
 
+    async fn line_merge(
+        &self,
+        req: Request<pb::LineMergeRequest>,
+    ) -> Result<Response<pb::LineMergeOutcome>, Status> {
+        unary!(self, req, "LineMerge", LineMerge, line_merge, |r| {
+            pb::LineMergeOutcome::from(r)
+        })
+    }
+
+    async fn line_merges(
+        &self,
+        req: Request<pb::LineMergesRequest>,
+    ) -> Result<Response<pb::LineMergePage>, Status> {
+        unary!(self, req, "LineMerges", LineMerges, line_merges, |r| {
+            pb::LineMergePage::from(r)
+        })
+    }
+
     async fn stat(&self, req: Request<pb::PathAt>) -> Result<Response<pb::EntryView>, Status> {
         unary!(self, req, "Stat", PathAt, stat, |r| pb::EntryView::from(r))
     }

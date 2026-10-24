@@ -29,7 +29,8 @@ use std::time::Duration;
 use graft_model::{Change, ChangesetId};
 use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::types::{
-    Land, Landed, MergeMode, OpenWorkspace, ResolveRef, SetHead, WorkspaceRef, WorkspaceView,
+    Land, Landed, MergeMode, MergedFrom, OpenWorkspace, ResolveRef, SetHead, WorkspaceRef,
+    WorkspaceView,
 };
 use graft_proto::{ApiError, CallContext};
 use graft_store::ObjectStore;
@@ -91,7 +92,7 @@ pub struct SyncOutcome {
 }
 
 /// How `land` waits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LandOptions {
     /// Land the stack as one changeset.
     pub squash: bool,
@@ -114,6 +115,9 @@ pub struct LandOptions {
     /// default is a three-way line merge for text files (decision D16);
     /// [`MergeMode::File`] refuses any path changed on both sides.
     pub merge: MergeMode,
+    /// Lands a merge resolution (D29): the land records a merge point from
+    /// this source line and changeset.
+    pub merged_from: Option<MergedFrom>,
 }
 
 impl Default for LandOptions {
@@ -127,6 +131,7 @@ impl Default for LandOptions {
             max_poll: Duration::from_secs(15),
             lease_ms: crate::workspace::DEFAULT_LEASE_MS,
             merge: MergeMode::Line,
+            merged_from: None,
         }
     }
 }
@@ -682,7 +687,7 @@ impl WorkingCopy {
             squash: opts.squash,
             merge: opts.merge,
             deadline_ms: None,
-            merged_from: None,
+            merged_from: opts.merged_from.clone(),
         };
         let (landed, rebased) = loop {
             let until = match api.land(cx, req.clone()).await {

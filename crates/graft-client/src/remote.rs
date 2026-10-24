@@ -448,6 +448,22 @@ impl RepoApi for Remote {
         RefView::try_from(r).map_err(wire_error)
     }
 
+    async fn line_merge(&self, cx: &CallContext, req: LineMerge) -> ApiResult<LineMergeOutcome> {
+        let r = unary!(self, cx, repo, line_merge, pb::LineMergeRequest::from(req));
+        LineMergeOutcome::try_from(r).map_err(wire_error)
+    }
+
+    async fn line_merges(&self, cx: &CallContext, req: LineMerges) -> ApiResult<LineMergePage> {
+        let r = unary!(
+            self,
+            cx,
+            repo,
+            line_merges,
+            pb::LineMergesRequest::from(req)
+        );
+        LineMergePage::try_from(r).map_err(wire_error)
+    }
+
     async fn stat(&self, cx: &CallContext, req: PathAt) -> ApiResult<EntryView> {
         let r = unary!(self, cx, repo, stat, pb::PathAt::from(req));
         EntryView::try_from(r).map_err(wire_error)

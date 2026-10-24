@@ -29,6 +29,10 @@
 //! files); files that merge cleanly and other workspaces' drafts are only
 //! reported. `--no-check` skips it. It builds and tests nothing, and the
 //! server's land still decides. JSON output carries it under `preflight`.
+//!
+//! `--merged-from <line>@<rev>` lands the resolution of a conflicted
+//! `graft line merge` (D29): the land records a merge point from that
+//! source changeset, which must be on the source line.
 
 use std::time::Duration;
 
@@ -36,7 +40,7 @@ use graft_client::fetch::FetchOptions;
 use graft_client::workcopy::{DEFAULT_CACHE_BYTES, LandOptions, LandOutcome};
 use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat};
 use graft_mcp::preflight::{self, PreflightRequest};
-use graft_proto::types::MergeMode;
+use graft_proto::types::{MergeMode, MergedFrom};
 use serde_json::json;
 
 use crate::cli::{Global, LandArgs, LandMerge};
@@ -50,7 +54,7 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
         LandMerge::Line => MergeMode::Line,
         LandMerge::File => MergeMode::File,
     };
-    let opts = LandOptions {
+    let mut opts = LandOptions {
         squash: args.squash,
         sync: args.sync,
         wait: args.wait.map(Duration::from_secs),
@@ -60,6 +64,16 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
     runtime()?.block_on(async {
         let mut s = begin(g).await?;
         s.note_recovery();
+        if let Some(text) = &args.merged_from {
+            let (line, rev) = text
+                .rsplit_once('@')
+                .filter(|(l, r)| !l.is_empty() && !r.is_empty())
+                .ok_or_else(|| Failure::usage("--merged-from takes <line>@<rev>"))?;
+            opts.merged_from = Some(MergedFrom {
+                line: line.to_owned(),
+                changeset: s.conn.resolve(&s.cx, rev).await?,
+            });
+        }
         let state = s.wc.state();
         let preflight = match (args.no_check, state.head) {
             (true, _) | (_, None) => preflight::skipped_json(),

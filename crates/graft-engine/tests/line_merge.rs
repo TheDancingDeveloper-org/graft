@@ -21,6 +21,9 @@ on_both_stores!(
     release_into_main_finds_the_earlier_release_through_develop,
     a_third_line_merged_into_the_source_is_followed,
     the_merge_point_is_written_with_its_journal_entry,
+    an_older_merge_below_a_full_page_of_rows_is_found,
+    line_merges_pages_newest_first,
+    a_merge_result_says_how_its_base_was_found,
 );
 
 const START: &str = "1\n2\n3\n4\n5\n";
@@ -325,6 +328,90 @@ fn the_merge_point_is_written_with_its_journal_entry<M: MetaStore>(f: &Fixture<M
     assert_eq!(point[0].src_changeset, develop);
 }
 
+/// develop takes the hotfix, then nine merges from feature: more rows than
+/// one read returns. Rule 3 pages down to the hotfix row, so develop's
+/// merge into main still starts from main's hotfix merge.
+fn an_older_merge_below_a_full_page_of_rows_is_found<M: MetaStore>(f: &Fixture<M>) {
+    let (r, m0) = start(f);
+    create(&r, "hotfix", m0);
+    land_text(&r, "hotfix", &with(START, 1, "1h"));
+    let main_merge = merged(&r, "hotfix", "main");
+    merged(&r, "hotfix", "develop");
+    create(&r, "feature", tip(&r, "develop"));
+    for i in 0..9 {
+        let now = text(&r, tip(&r, "feature"));
+        land_text(&r, "feature", &with(&now, 4, &format!("4f{i}")));
+        merged(&r, "feature", "develop");
+    }
+    assert_eq!(points(&r, "develop").len(), 10);
+    let develop = text(&r, tip(&r, "develop"));
+    let d1 = land_text(&r, "develop", &with(&develop, 3, "3d"));
+
+    let found = base(&r, d1, tip(&r, "main"));
+    assert_eq!(found.via, MergeBaseVia::MergePoint);
+    assert_eq!(found.base, Some(main_merge));
+}
+
+fn line_merges_pages_newest_first<M: MetaStore>(f: &Fixture<M>) {
+    let (r, _) = start(f);
+    let mut sources = Vec::new();
+    for i in 0..3 {
+        sources.push(land_text(&r, "develop", &with(START, 1, &format!("1d{i}"))));
+        merged(&r, "develop", "main");
+    }
+    sources.reverse();
+    let mut seen = Vec::new();
+    let mut token = None;
+    loop {
+        let page = block_on(r.e().line_merges(
+            &r.cx,
+            LineMerges {
+                repo: r.name.clone(),
+                dst: "main".to_owned(),
+                src: Some("develop".to_owned()),
+                page: Page { limit: 2, token },
+            },
+        ))
+        .expect("line merges");
+        assert!(page.merges.len() <= 2);
+        seen.extend(page.merges.into_iter().map(|p| p.src_changeset));
+        token = page.next;
+        if token.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, sources);
+
+    // A source filter that matches nothing is an empty page.
+    let none = block_on(r.e().line_merges(
+        &r.cx,
+        LineMerges {
+            repo: r.name.clone(),
+            dst: "main".to_owned(),
+            src: Some("release".to_owned()),
+            page: Page::default(),
+        },
+    ))
+    .expect("line merges");
+    assert_eq!(none, LineMergePage::default());
+}
+
+fn a_merge_result_says_how_its_base_was_found<M: MetaStore>(f: &Fixture<M>) {
+    let (r, m0) = start(f);
+    land_text(&r, "develop", &with(START, 1, "1d1"));
+    match merge(&r, "develop", "main") {
+        Ok(LineMergeOutcome::Merged { base, via, .. }) => {
+            assert_eq!((base, via), (m0, MergeBaseVia::Fork));
+        }
+        other => panic!("{other:?}"),
+    }
+    land_text(&r, "develop", &with(START, 1, "1d2"));
+    match merge(&r, "develop", "main") {
+        Ok(LineMergeOutcome::Merged { via, .. }) => assert_eq!(via, MergeBaseVia::MergePoint),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// A search over its budget answers through the ancestry walk, says so,
 /// and a merge from there meets the conflict the merge point avoids. No
 /// row or journal entry is written for it.
@@ -335,8 +422,20 @@ fn capped<M: MetaStore>(f: &Fixture<M>) {
     assert_eq!(found.via, MergeBaseVia::Ancestry);
     assert_eq!(found.base, Some(m0));
     let entries = r.journal().len();
+    let main = tip(&r, "main");
     let got = merge(&r, "develop", "main");
-    assert!(matches!(got, Err(ApiError::Conflict { .. })), "{got:?}");
+    match got {
+        Err(ApiError::MergeConflict {
+            paths,
+            onto,
+            base,
+            source,
+        }) => {
+            assert_eq!(paths.len(), 1);
+            assert_eq!((onto, base, source), (main, m0, d2));
+        }
+        other => panic!("expected a merge conflict: {other:?}"),
+    }
     assert_eq!(points(&r, "main").len(), 1);
     assert!(r.journal()[entries..].iter().all(|e| e.kind != LINE_MERGED));
 }

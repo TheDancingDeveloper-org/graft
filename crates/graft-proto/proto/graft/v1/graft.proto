@@ -366,6 +366,62 @@ message MergedFrom {
   bytes changeset = 2;
 }
 
+// Merges line `src` into line `dst` (D29, design.md §8.9).
+message LineMergeRequest {
+  string repo = 1;
+  string src = 2;
+  string dst = 3;
+  optional bytes src_at = 4;
+  MergeMode merge = 5;
+  optional uint64 deadline_ms = 6;
+  optional string message = 7;
+}
+
+enum MergeBaseVia {
+  MERGE_BASE_VIA_UNSPECIFIED = 0;
+  MERGE_BASE_VIA_MERGE_POINT = 1;
+  MERGE_BASE_VIA_FORK = 2;
+  MERGE_BASE_VIA_ANCESTRY = 3;
+}
+
+message LineMergeOutcome {
+  message Merged {
+    bytes landed = 1;
+    uint64 line_version = 2;
+    uint64 pos = 3;
+    repeated string merged_paths = 4;
+    MergeBaseVia via = 5;
+    bytes base = 6;
+  }
+  message UpToDate {
+    bytes tip = 1;
+  }
+  oneof outcome {
+    Merged merged = 1;
+    UpToDate up_to_date = 2;
+  }
+}
+
+message LineMergesRequest {
+  string repo = 1;
+  string dst = 2;
+  optional string src = 3;
+  Page page = 4;
+}
+
+message LineMergePoint {
+  string src = 1;
+  bytes src_changeset = 2;
+  uint64 src_pos = 3;
+  bytes dst_changeset = 4;
+  uint64 dst_pos = 5;
+}
+
+message LineMergePage {
+  repeated LineMergePoint merges = 1;
+  optional string next = 2;
+}
+
 message Landed {
   message OnLine {
     bytes landed = 1;
@@ -679,6 +735,14 @@ message ApiError {
   message Unavailable { uint64 retry_after_ms = 1; }
   message Unauthenticated {}
   message IncompatibleProtocol { string server = 1; }
+  // A LineMerge conflict (D29): `onto` is the target tip, `base` the merge
+  // base, `source` the source changeset merged.
+  message MergeConflict {
+    repeated ConflictPath paths = 1;
+    bytes onto = 2;
+    bytes base = 3;
+    bytes source = 4;
+  }
   oneof error {
     NotFound not_found = 1;
     Collected collected = 2;
@@ -698,6 +762,7 @@ message ApiError {
     Unavailable unavailable = 16;
     Unauthenticated unauthenticated = 17;
     IncompatibleProtocol incompatible_protocol = 18;
+    MergeConflict merge_conflict = 19;
   }
 }
 
@@ -732,6 +797,8 @@ service RepoService {
   rpc Attest(AttestRequest) returns (Empty);
   rpc Watch(WatchRequest) returns (stream JournalPage);
   rpc CreateLine(CreateLineRequest) returns (RefView);
+  rpc LineMerge(LineMergeRequest) returns (LineMergeOutcome);
+  rpc LineMerges(LineMergesRequest) returns (LineMergePage);
 }
 
 service WorkspaceService {

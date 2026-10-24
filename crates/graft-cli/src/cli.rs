@@ -349,6 +349,37 @@ pub(crate) enum LineAction {
         #[arg(long, value_name = "REV")]
         from: String,
     },
+    /// Merge another line into a line (D29); only the target moves
+    Merge {
+        /// The source line, only read
+        src: String,
+        /// The target line (default: the working copy's line)
+        #[arg(long, value_name = "LINE")]
+        into: Option<String>,
+        /// The source changeset to merge: an id or ref on the source line (default: its tip)
+        #[arg(long, value_name = "REV")]
+        at: Option<String>,
+        /// Message of the merge landing
+        #[arg(short, long, value_name = "MSG")]
+        message: Option<String>,
+        /// How a file both sides changed is merged: `line` (D16) or `file`
+        #[arg(long, value_enum, value_name = "MODE", default_value_t = LandMerge::Line)]
+        merge: LandMerge,
+    },
+    /// List a line's merge points, newest first
+    Merges {
+        /// The target line (default: the working copy's line)
+        dst: Option<String>,
+        /// Only merges from this line
+        #[arg(long, value_name = "LINE")]
+        from: Option<String>,
+        /// Merge points per page
+        #[arg(long, default_value_t = PAGE_DEFAULT)]
+        limit: u32,
+        /// Resume token from a previous page
+        #[arg(long, value_name = "TOKEN")]
+        cursor: Option<String>,
+    },
     /// List the lines, in name order
     List {
         /// Only lines whose name starts with this
@@ -448,6 +479,9 @@ pub(crate) struct LandArgs {
     /// Skip the pre-land check (the dry-run rebase that stops a land on a real conflict, and the draft-overlap report)
     #[arg(long)]
     pub(crate) no_check: bool,
+    /// Land a merge resolution (D29): record a merge point from `<line>@<rev>`
+    #[arg(long, value_name = "LINE@REV")]
+    pub(crate) merged_from: Option<String>,
 }
 
 /// How `graft land` merges a file both sides changed.

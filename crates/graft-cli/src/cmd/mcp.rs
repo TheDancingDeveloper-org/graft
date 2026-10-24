@@ -301,6 +301,7 @@ impl WorkingCopyTools for Served {
             let opts = LandOptions {
                 squash: req.squash,
                 merge: req.merge,
+                merged_from: req.merged_from.clone(),
                 ..LandOptions::default()
             };
             let ws = self.workspace_ref(&wc);

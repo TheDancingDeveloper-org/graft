@@ -9,7 +9,9 @@ use std::io;
 
 use graft_client::Error as ClientError;
 use graft_client::workcopy::Conflicts;
+use graft_model::ChangesetId;
 use graft_proto::ApiError;
+use graft_proto::error::ConflictPath;
 use serde_json::{Map, Value, json};
 
 use crate::Exit;
@@ -114,7 +116,7 @@ impl std::error::Error for Failure {}
 /// The exit code and kind for a typed API error.
 pub(crate) fn api_exit(e: &ApiError) -> (Exit, &'static str) {
     match e {
-        ApiError::Conflict { .. } => (Exit::Conflict, "conflict"),
+        ApiError::Conflict { .. } | ApiError::MergeConflict { .. } => (Exit::Conflict, "conflict"),
         ApiError::RefConflict { .. } => (Exit::Conflict, "ref_conflict"),
         ApiError::Contended { .. } => (Exit::Contended, "contended"),
         ApiError::Rejected { .. } => (Exit::Rejected, "rejected"),
@@ -140,22 +142,31 @@ impl From<ApiError> for Failure {
     fn from(e: ApiError) -> Self {
         let (exit, kind) = api_exit(&e);
         let failure = Failure::new(exit, kind, e.to_string());
-        match e {
-            ApiError::Conflict { paths, onto } => {
-                let mut failure = failure
-                    .with_detail("onto", onto.to_string().into())
-                    .with_detail(
-                        "conflicts",
-                        paths
-                            .iter()
-                            .map(|p| json!({"path": p.path, "mode": null}))
-                            .collect(),
-                    );
-                for p in &paths {
-                    failure = failure.with_note(format!("conflict {}", p.path));
-                }
-                failure
+        let conflicted = |failure: Failure, paths: &[ConflictPath], onto: ChangesetId| {
+            let mut failure = failure
+                .with_detail("onto", onto.to_string().into())
+                .with_detail(
+                    "conflicts",
+                    paths
+                        .iter()
+                        .map(|p| json!({"path": p.path, "mode": null}))
+                        .collect(),
+                );
+            for p in paths {
+                failure = failure.with_note(format!("conflict {}", p.path));
             }
+            failure
+        };
+        match e {
+            ApiError::Conflict { paths, onto } => conflicted(failure, &paths, onto),
+            ApiError::MergeConflict {
+                paths,
+                onto,
+                base,
+                source,
+            } => conflicted(failure, &paths, onto)
+                .with_detail("base", base.to_string().into())
+                .with_detail("source", source.to_string().into()),
             _ => failure,
         }
     }
