@@ -14,6 +14,7 @@ pub(crate) mod log;
 pub(crate) mod ls;
 pub(crate) mod lsp;
 pub(crate) mod mcp;
+pub(crate) mod pick;
 pub(crate) mod revert;
 pub(crate) mod show;
 pub(crate) mod sparse;

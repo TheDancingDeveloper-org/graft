@@ -90,12 +90,7 @@ pub(crate) const OPS: &[Op] = &[
     op("merge_base", "RepoApi", Surface::Command("api"), true),
     op("diff", "RepoApi", Surface::Command("diff"), true),
     op("blame", "RepoApi", Surface::Command("blame"), true),
-    op(
-        "rebase",
-        "RepoApi",
-        Surface::Excluded("the server rebases inside sync and land"),
-        false,
-    ),
+    op("rebase", "RepoApi", Surface::Command("pick"), false),
     op("revert", "RepoApi", Surface::Command("revert"), false),
     op("land", "RepoApi", Surface::Command("land"), false),
     op("attest", "RepoApi", Surface::Command("attest"), false),

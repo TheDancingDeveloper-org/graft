@@ -224,6 +224,41 @@ impl WorkingCopy {
             .ok_or_else(|| Error::State("the conflicts were not written".to_owned()))
     }
 
+    /// `pick` after the server refused to rebase `changeset` onto `onto`,
+    /// the snapshot the working copy holds: writes the changeset's own
+    /// changes (from `parent`) on top of the files. The working copy stays
+    /// where it is, and must be clean, so nothing of the author's is
+    /// overwritten. The commit that resolves the conflicts is the pick.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn pick_conflicting<A, S>(
+        &mut self,
+        api: &A,
+        cache: &S,
+        cx: &CallContext,
+        onto: ChangesetId,
+        parent: ChangesetId,
+        changeset: ChangesetId,
+        opts: &FetchOptions,
+    ) -> Result<Conflicts>
+    where
+        A: ObjectApi + RepoApi,
+        S: ObjectStore,
+    {
+        let dirty: Vec<RepoPath> = self.status()?.iter().map(|s| s.path().clone()).collect();
+        if !dirty.is_empty() {
+            return Err(Error::Dirty(dirty));
+        }
+        let record = Conflicts {
+            onto,
+            base: parent,
+            head: changeset,
+            files: Vec::new(),
+            applied: false,
+        };
+        self.save_conflicts(&record)?;
+        self.write_conflicts(api, cache, cx, record, opts).await
+    }
+
     /// The stack's net changes, refusing any outside the slice.
     async fn ours<A: RepoApi>(
         &self,

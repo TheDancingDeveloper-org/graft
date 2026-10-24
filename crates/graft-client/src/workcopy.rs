@@ -52,7 +52,7 @@ mod upstream;
 
 pub use commit::{CommitLimits, CommitOptions, Committed, UploadStats};
 pub use conflict::{ConflictFile, ConflictMode, Conflicts, sidecar_path};
-pub use rewrite::{Reverted, Rewritten};
+pub use rewrite::{Picked, Reverted, Rewritten};
 pub use session::{Begun, LandOptions, LandOutcome, Moved, Recovered, SyncOutcome};
 pub use upstream::{MAX_OWN_PATHS, Outcome, Overlap, Upstream, UpstreamChange, predict};
 
