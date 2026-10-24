@@ -598,11 +598,29 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 .and_then(|mut s| s.execute(params![repo, line, parent, pos]))
                 .map_err(sql_err)?;
             }
-            Write::PutLineMerge { .. } => {
-                // The line_merges table arrives with schema version 6 (WI-2368).
-                return Err(StoreError::Backend(
-                    "line merges are not implemented by this store yet".into(),
-                ));
+            Write::PutLineMerge {
+                dst,
+                dst_pos,
+                src,
+                src_changeset,
+                src_pos,
+            } => {
+                let (dst_pos, src_pos) = (int(dst_pos)?, int(src_pos)?);
+                conn.prepare_cached(
+                    "INSERT INTO line_merges (repo, dst, dst_pos, src, src_changeset, src_pos)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .and_then(|mut s| {
+                    s.execute(params![
+                        repo,
+                        dst,
+                        dst_pos,
+                        src,
+                        &src_changeset.0.0[..],
+                        src_pos
+                    ])
+                })
+                .map_err(sql_err)?;
             }
             Write::PutLinePath {
                 line,

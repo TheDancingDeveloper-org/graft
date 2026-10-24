@@ -563,6 +563,15 @@ pub trait MetaStore: Send + Sync {
             Ok(out)
         }
     }
+    /// A line's fork row (D23): its parent line and fork position, or
+    /// `None` for a line that did not fork. One indexed read.
+    fn line_fork(
+        &self,
+        _repo: RepoId,
+        _line: &str,
+    ) -> impl Future<Output = StoreResult<Option<(String, u64)>>> + Send {
+        async { Err(unsupported("line_fork")) }
+    }
     /// A line's merge points (D29), newest first: rows of `dst` at
     /// positions at or below `at_or_below`, only those from `src` when it
     /// is given, up to `limit`. An indexed read, never a scan of the line.
@@ -749,7 +758,6 @@ pub trait MetaStore: Send + Sync {
     }
 }
 
-/// The error a store answers for an optional index it does not have yet.
 /// One merge point row (D29, `docs/design.md` §8.9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineMergeRow {
@@ -765,6 +773,7 @@ pub struct LineMergeRow {
     pub src_pos: u64,
 }
 
+/// The error a store answers for an optional index it does not have yet.
 fn unsupported(what: &str) -> StoreError {
     StoreError::Backend(format!("{what} is not implemented by this store"))
 }
@@ -884,6 +893,13 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<(u64, ChangesetId)>>> + Send {
         (**self).scan_line_path(repo, line, path, before, limit)
+    }
+    fn line_fork(
+        &self,
+        repo: RepoId,
+        line: &str,
+    ) -> impl Future<Output = StoreResult<Option<(String, u64)>>> + Send {
+        (**self).line_fork(repo, line)
     }
     fn line_merges(
         &self,

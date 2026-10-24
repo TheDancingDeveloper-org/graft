@@ -64,6 +64,7 @@ use graft_store::{
 
 use crate::access::{Need, require, require_changes};
 use crate::journal::{self, LandOutcome};
+use crate::merge::MergeSource;
 use crate::policy::{
     Authority, Candidate, HUMAN_REVIEW, HookFuture, LandPolicy, LandedEvent, LineConfig,
     RevertRequest, Verdict,
@@ -683,6 +684,13 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 ),
             ));
         }
+        let source = match &req.merged_from {
+            Some(from) => Some(
+                self.merge_source(cx, repo, &req.repo, &req.line, from)
+                    .await?,
+            ),
+            None => None,
+        };
         let (head_cs, head_record) = self.changeset(repo, req.head).await?;
         if head_record.state == RecordState::Landed {
             return Err(errors::invalid(None, "draft-landed"));
@@ -717,7 +725,16 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 stack = self.chain(repo, req.head, line.target).await?;
             }
             let outcome = self
-                .attempt(cx, repo, &req, &config, &line, &stack, attempt)
+                .attempt(
+                    cx,
+                    repo,
+                    &req,
+                    &config,
+                    &line,
+                    &stack,
+                    attempt,
+                    source.as_ref(),
+                )
                 .await?;
             match outcome {
                 Attempt::Done(landed) => return Ok(landed),
@@ -758,6 +775,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         line: &RefRecord,
         stack: &[(ChangesetId, Changeset)],
         attempt: u32,
+        source: Option<&MergeSource>,
     ) -> Result<Attempt, ApiError> {
         let tip = line.target;
         let bottom = stack
@@ -908,6 +926,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 result.version,
                 &cx.principal.subject,
             ));
+            // A merge landing records its merge point with the move (D29).
+            if let Some(src) = source {
+                txn.writes.extend(src.writes(&req.line, result.pos));
+            }
         }
         txn.writes.push(journal::land_attempt(
             req.head,

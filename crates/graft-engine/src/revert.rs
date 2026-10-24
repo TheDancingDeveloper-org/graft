@@ -32,7 +32,7 @@ use crate::{Engine, errors};
 pub const REVERTS: &str = "graft.reverts";
 
 /// The author a revert records for its caller.
-fn caller(cx: &CallContext) -> Author {
+pub(crate) fn caller(cx: &CallContext) -> Author {
     Author {
         name: cx.principal.subject.clone(),
         email: String::new(),
