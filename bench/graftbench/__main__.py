@@ -12,7 +12,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import bench, copies, livea, report
+from . import batch, bench, copies, livea, report
 from .proc import StepError
 from .site import LocalSite, RemoteSite
 from .tools import Git, Graft, Mirror
@@ -55,6 +55,9 @@ def parse_args(argv):
     p.add_argument("--la-writers", type=int, default=4, help="live awareness: writers (default 4)")
     p.add_argument("--la-steps", type=int, default=6, help="live awareness: steps per writer (default 6)")
     p.add_argument("--racing", action="store_true", help="live awareness: also run each graft policy with real threads (correctness only)")
+    p.add_argument("--batch", action="store_true", help="instead of the full bench: the batch delivery scenario (WI-2352)")
+    p.add_argument("--batch-agents", type=int, default=5, help="batch: concurrent agents (default 5)")
+    p.add_argument("--batch-rounds", type=int, default=2, help="batch: lands per agent (default 2)")
     a = p.parse_args(argv)
     a.scales = [int(x) for x in a.scales.split(",") if x]
     a.many_copies = [int(x) for x in a.many_copies.split(",") if x] if a.many_copies else None
@@ -81,6 +84,8 @@ def main(argv=None) -> int:
     def log(msg: str) -> None:
         print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
 
+    if a.batch:
+        return run_batch(a, out, work, log)
     if a.many_copies:
         repos = {s: (f"{a.repo_prefix}-{s}-copies", None) for s in a.scales}
     else:
@@ -148,6 +153,21 @@ def main(argv=None) -> int:
         _write(out, doc, time.perf_counter() - t0)
         if not a.keep and not a.work:
             shutil.rmtree(work, ignore_errors=True)
+    log(f"results: {out / 'results.json'} and {out / 'summary.md'}")
+    return rc
+
+
+def run_batch(a, out: Path, work: Path, log) -> int:
+    try:
+        r = batch.run_mode(a.graft_bin, a.server_bin, a.mirror_bin, work, log, a.batch_agents, a.batch_rounds)
+        rc = 0 if r["ok"] else 1
+    except StepError as e:
+        r, rc = {"error": str(e)}, 2
+    finally:
+        if not a.keep and not a.work:
+            shutil.rmtree(work, ignore_errors=True)
+    (out / "results.json").write_text(json.dumps({"label": a.label or out.name, "batch": r}, indent=2) + "\n")
+    (out / "summary.md").write_text("\n".join(batch.markdown(r)))
     log(f"results: {out / 'results.json'} and {out / 'summary.md'}")
     return rc
 

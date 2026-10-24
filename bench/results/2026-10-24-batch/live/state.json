@@ -1,0 +1,283 @@
+{
+  "fork": "c2f81b99c6400daaca9359fb7dcc66e0f04698e7137fc70b220727e3f247bd6e6",
+  "lands": [
+    {
+      "agent": 3,
+      "id": "c4a275c1b24dca82a3eeb54c3f8b6ee9bad8ba30fca0ee3b6b25550cb95d3f117",
+      "path": "trial/agent-guide.md",
+      "message": "trial guide: Vogt session and work item reach the batch commit (WI-2337)",
+      "session": "ses_wi2352live3",
+      "work_item": "WI-2352",
+      "name": "graft trial agent 3",
+      "email": "trial-agent-3@graft.invalid",
+      "landed_at": 1792819551.230185,
+      "land_s": 0.095,
+      "tries": 1,
+      "syncs": 0,
+      "preflight": {
+        "both_changed_truncated": false,
+        "checked": true,
+        "conflicts": [],
+        "conflicts_truncated": false,
+        "drafts": {
+          "checked": false,
+          "overlaps": [],
+          "skipped": "needs the repo:graft-wi2352:drafts scope",
+          "truncated": false
+        },
+        "merges_cleanly": [],
+        "preview_skipped": null,
+        "stop": false,
+        "tip": "c2f81b99c6400daaca9359fb7dcc66e0f04698e7137fc70b220727e3f247bd6e6"
+      }
+    },
+    {
+      "agent": 5,
+      "id": "ca6b439eafa20003aa39b53eaf0f864a15a1e818bcfb2f6d6ee07de7d86e19f31",
+      "path": "trial/DROP-ME.md",
+      "message": "trial: planted bad land, to be dropped (WI-2352)",
+      "session": "ses_wi2352live5",
+      "work_item": "WI-2352",
+      "name": "graft trial agent 5",
+      "email": "trial-agent-5@graft.invalid",
+      "landed_at": 1792819551.2774925,
+      "land_s": 0.142,
+      "tries": 1,
+      "syncs": 0,
+      "preflight": {
+        "both_changed_truncated": false,
+        "checked": true,
+        "conflicts": [],
+        "conflicts_truncated": false,
+        "drafts": {
+          "checked": false,
+          "overlaps": [],
+          "skipped": "needs the repo:graft-wi2352:drafts scope",
+          "truncated": false
+        },
+        "merges_cleanly": [],
+        "preview_skipped": null,
+        "stop": false,
+        "tip": "c2f81b99c6400daaca9359fb7dcc66e0f04698e7137fc70b220727e3f247bd6e6"
+      }
+    },
+    {
+      "agent": 1,
+      "id": "c5dea103749ec0ffc119315ef3c586a96defff52dc0632bb7d5941cd4a04648e7",
+      "path": "trial/agent-guide.md",
+      "message": "trial guide: batch PRs are reviewed and merged by land-pr (D28)",
+      "session": "ses_wi2352live1",
+      "work_item": "WI-2352",
+      "name": "graft trial agent 1",
+      "email": "trial-agent-1@graft.invalid",
+      "landed_at": 1792819551.3381472,
+      "land_s": 0.203,
+      "tries": 1,
+      "syncs": 0,
+      "preflight": {
+        "both_changed_truncated": false,
+        "checked": true,
+        "conflicts": [],
+        "conflicts_truncated": false,
+        "drafts": {
+          "checked": false,
+          "overlaps": [],
+          "skipped": "needs the repo:graft-wi2352:drafts scope",
+          "truncated": false
+        },
+        "merges_cleanly": [],
+        "preview_skipped": null,
+        "stop": false,
+        "tip": "c2f81b99c6400daaca9359fb7dcc66e0f04698e7137fc70b220727e3f247bd6e6"
+      }
+    },
+    {
+      "agent": 4,
+      "id": "c95390e5ac9f36ae33508b8c5fd86d9d623f159e1e1f21403fd4dbf91a089fec7",
+      "path": "trial/README.md",
+      "message": "trial: add a README listing the trial scripts",
+      "session": "ses_wi2352live4",
+      "work_item": "WI-2352",
+      "name": "graft trial agent 4",
+      "email": "trial-agent-4@graft.invalid",
+      "landed_at": 1792819551.4045794,
+      "land_s": 0.269,
+      "tries": 1,
+      "syncs": 0,
+      "preflight": {
+        "both_changed_truncated": false,
+        "checked": true,
+        "conflicts": [],
+        "conflicts_truncated": false,
+        "drafts": {
+          "checked": false,
+          "overlaps": [],
+          "skipped": "needs the repo:graft-wi2352:drafts scope",
+          "truncated": false
+        },
+        "merges_cleanly": [],
+        "preview_skipped": null,
+        "stop": false,
+        "tip": "c2f81b99c6400daaca9359fb7dcc66e0f04698e7137fc70b220727e3f247bd6e6"
+      }
+    },
+    {
+      "agent": 2,
+      "id": "cfe4455d3ee1e28dfea61d578884a5041f47a5d1c88d6eec5f0e52d736b389ab1",
+      "path": "trial/agent-guide.md",
+      "message": "trial guide: graft land runs the pre-land check (D27)",
+      "session": "ses_wi2352live2",
+      "work_item": "WI-2352",
+      "name": "graft trial agent 2",
+      "email": "trial-agent-2@graft.invalid",
+      "landed_at": 1792819551.4519286,
+      "land_s": 0.316,
+      "tries": 1,
+      "syncs": 0,
+      "preflight": {
+        "both_changed_truncated": false,
+        "checked": true,
+        "conflicts": [],
+        "conflicts_truncated": false,
+        "drafts": {
+          "checked": false,
+          "overlaps": [],
+          "skipped": "needs the repo:graft-wi2352:drafts scope",
+          "truncated": false
+        },
+        "merges_cleanly": [],
+        "preview_skipped": null,
+        "stop": false,
+        "tip": "c2f81b99c6400daaca9359fb7dcc66e0f04698e7137fc70b220727e3f247bd6e6"
+      }
+    }
+  ],
+  "cut": {
+    "at": null,
+    "pr_created_at": 1792819564.0,
+    "secs": null,
+    "rc": 0,
+    "out": "batch 1 (open): 5 land(s), graft/batch-1 on main at 6c16a69d8a2c0c0486884aec1cb6875822a9304f\n  PR:     https://github.com/TheDancingDeveloper-org/graft/pull/142\n  detail: waiting for the operator to merge",
+    "pr": "https://github.com/TheDancingDeveloper-org/graft/pull/142",
+    "batch": 1,
+    "note": "pr-batch output lost to a harness error; recorded from --track and the PR created time",
+    "branch": "graft/batch-1",
+    "base": "6c16a69d8a2c0c0486884aec1cb6875822a9304f",
+    "head": "dc158f0dd264c4718c925a31777db664e5df0fed",
+    "commits": [
+      {
+        "sha": "91dddccc50bcecebb0e0b55da021d031ddc027b0",
+        "subject": "trial guide: Vogt session and work item reach the batch commit (WI-2337)",
+        "changeset": "c4a275c1b24dca82a3eeb54c3f8b6ee9bad8ba30fca0ee3b6b25550cb95d3f117",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      },
+      {
+        "sha": "03ccd243c4eaee26a06ba520d84ea9ddf415f8f5",
+        "subject": "trial: planted bad land, to be dropped (WI-2352)",
+        "changeset": "ca6b439eafa20003aa39b53eaf0f864a15a1e818bcfb2f6d6ee07de7d86e19f31",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      },
+      {
+        "sha": "6206c9bd9558184bdd2539741c816b371efe2c21",
+        "subject": "trial guide: batch PRs are reviewed and merged by land-pr (D28)",
+        "changeset": "c5dea103749ec0ffc119315ef3c586a96defff52dc0632bb7d5941cd4a04648e7",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      },
+      {
+        "sha": "5f1f88ea9fab3585eb539bf22e7ec5e3b0c97901",
+        "subject": "trial: add a README listing the trial scripts",
+        "changeset": "c95390e5ac9f36ae33508b8c5fd86d9d623f159e1e1f21403fd4dbf91a089fec7",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      },
+      {
+        "sha": "dc158f0dd264c4718c925a31777db664e5df0fed",
+        "subject": "trial guide: graft land runs the pre-land check (D27)",
+        "changeset": "cfe4455d3ee1e28dfea61d578884a5041f47a5d1c88d6eec5f0e52d736b389ab1",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      }
+    ]
+  },
+  "drop": {
+    "at": 1792819609.5047388,
+    "secs": 8.012,
+    "rc": 0,
+    "out": "batch 1 (rejected): 5 land(s), graft/batch-1 on main at 6c16a69d8a2c0c0486884aec1cb6875822a9304f\n  PR:     https://github.com/TheDancingDeveloper-org/graft/pull/142\n  detail: superseded: land `ca6b439eafa20` dropped from line batch-2352 (reverted); recut as a new batch\nline batch-2352: dropped ca6b439eafa20003aa39b53eaf0f864a15a1e818bcfb2f6d6ee07de7d86e19f31 (reverted by c1b04fd177f1fe3a7e64821aafa8afc711527efabd7a15a0328731f63860ba511)\nbatch 2 (open): 6 land(s), graft/batch-2 on main at 6c16a69d8a2c0c0486884aec1cb6875822a9304f\n  PR:     https://github.com/TheDancingDeveloper-org/graft/pull/143\n  detail: waiting for the operator to merge",
+    "err": "",
+    "pr": "https://github.com/TheDancingDeveloper-org/graft/pull/143",
+    "batch": 2,
+    "branch": "graft/batch-2",
+    "base": "6c16a69d8a2c0c0486884aec1cb6875822a9304f",
+    "head": "4846c3d051cfe6bbc08a1b0b2751b7700db24328",
+    "commits": [
+      {
+        "sha": "5db37df328b322b7910fa2eff73fa83c838336f7",
+        "subject": "trial guide: Vogt session and work item reach the batch commit (WI-2337)",
+        "changeset": "c4a275c1b24dca82a3eeb54c3f8b6ee9bad8ba30fca0ee3b6b25550cb95d3f117",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      },
+      {
+        "sha": "7ad3aee0311d6d956ad6ca59b768af49fb69eff1",
+        "subject": "trial: planted bad land, to be dropped (WI-2352)",
+        "changeset": "ca6b439eafa20003aa39b53eaf0f864a15a1e818bcfb2f6d6ee07de7d86e19f31",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      },
+      {
+        "sha": "05d7faab09c7b40913896caade3459adead214ee",
+        "subject": "trial guide: batch PRs are reviewed and merged by land-pr (D28)",
+        "changeset": "c5dea103749ec0ffc119315ef3c586a96defff52dc0632bb7d5941cd4a04648e7",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      },
+      {
+        "sha": "65088c9f717e14c93736b905b60cb8fd5887949a",
+        "subject": "trial: add a README listing the trial scripts",
+        "changeset": "c95390e5ac9f36ae33508b8c5fd86d9d623f159e1e1f21403fd4dbf91a089fec7",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      },
+      {
+        "sha": "c3154a9616abb10a1cd577b15f4da4966ced1288",
+        "subject": "trial guide: graft land runs the pre-land check (D27)",
+        "changeset": "cfe4455d3ee1e28dfea61d578884a5041f47a5d1c88d6eec5f0e52d736b389ab1",
+        "author_ok": true,
+        "session_ok": true,
+        "work_item_ok": true,
+        "is_land": true
+      },
+      {
+        "sha": "4846c3d051cfe6bbc08a1b0b2751b7700db24328",
+        "subject": "Revert \"trial: planted bad land, to be dropped (WI-2352)\"",
+        "changeset": "c1b04fd177f1fe3a7e64821aafa8afc711527efabd7a15a0328731f63860ba511",
+        "author_ok": false,
+        "session_ok": false,
+        "work_item_ok": false,
+        "is_land": false
+      }
+    ]
+  }
+}
