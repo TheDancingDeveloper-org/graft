@@ -1963,6 +1963,8 @@ version = "0.0.0"
 dependencies = [
  "graft-engine",
  "graft-gc",
+ "graft-git",
+ "graft-mirror",
  "graft-model",
  "graft-proto",
  "graft-store",
