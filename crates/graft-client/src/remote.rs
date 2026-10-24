@@ -665,4 +665,19 @@ impl WorkspaceApi for Remote {
         let r = unary!(self, cx, workspaces, resolve, pb::ResolveRequest::from(req));
         Resolved::try_from(r).map_err(wire_error)
     }
+
+    async fn overlapping_drafts(
+        &self,
+        cx: &CallContext,
+        req: OverlappingDrafts,
+    ) -> ApiResult<DraftOverlap> {
+        let r = unary!(
+            self,
+            cx,
+            workspaces,
+            overlapping_drafts,
+            pb::OverlappingDraftsRequest::from(req)
+        );
+        DraftOverlap::try_from(r).map_err(wire_error)
+    }
 }

@@ -52,6 +52,10 @@ pub(crate) enum Command {
     /// how far the line tip is ahead of the base, which files changed there,
     /// and whether the files you changed (uncommitted edits and the stack)
     /// would merge onto the tip or conflict, with the conflicting lines.
+    ///
+    /// With --drafts it asks which other agents' live workspaces have open
+    /// drafts on the files you changed (or on PATHS), before anyone lands.
+    /// That needs the repo:<r>:drafts scope.
     Status(StatusArgs),
     /// Diff the working copy, or two changesets
     Diff(DiffArgs),
@@ -140,6 +144,13 @@ pub(crate) struct StatusArgs {
     /// With --upstream: resume token for the line's changed files
     #[arg(long, value_name = "TOKEN", requires = "upstream")]
     pub(crate) cursor: Option<String>,
+    /// Also list other live workspaces with open drafts on your changed
+    /// files (read-only; contacts the server)
+    #[arg(long)]
+    pub(crate) drafts: bool,
+    /// With --drafts: ask about these files or directories instead
+    #[arg(value_name = "PATHS", requires = "drafts")]
+    pub(crate) paths: Vec<String>,
 }
 
 #[derive(Debug, Args)]

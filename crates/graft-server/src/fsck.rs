@@ -5,15 +5,24 @@
 //! transaction that stores it, so the journal lists every changeset. For
 //! each one fsck decodes the stored content, checks its id and parents, and
 //! walks its snapshot, reading each tree and blob once. Refs must point at
-//! stored changesets. This is the one operation that reads a whole
+//! stored changesets. Each workspace's draft path rows must match the paths
+//! its stack (`base..head`) changes (`docs/notes/draft-overlap.md` §3).
+//! This is the one operation that reads a whole
 //! repository; it is an offline admin check, never a request path.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use graft_engine::journal::CHANGESET_CREATED;
-use graft_model::{Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind, Tree, TreeId};
+use graft_model::{
+    Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Tree, TreeId,
+};
 use graft_proto::Frame;
-use graft_store::{MAX_PAGE, MetaStore, ObjectStore, RecordState, RepoId, StoreError};
+use graft_store::{
+    MAX_PAGE, MetaStore, ObjectStore, RecordState, RepoId, StoreError, WorkspaceRecord,
+};
+
+/// The deepest stack fsck walks before calling it broken.
+const MAX_STACK_WALK: usize = 100_000;
 
 /// Problems kept in the report; the count goes on past this.
 const MAX_REPORTED: usize = 1000;
@@ -27,6 +36,7 @@ pub(crate) struct Report {
     pub(crate) blobs: u64,
     pub(crate) bytes: u64,
     pub(crate) refs: u64,
+    pub(crate) workspaces: u64,
     pub(crate) problems: u64,
     pub(crate) details: Vec<String>,
 }
@@ -97,6 +107,24 @@ pub(crate) async fn fsck<M: MetaStore, O: ObjectStore>(
             ));
         }
     }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let mut after = String::new();
+    loop {
+        let page = meta
+            .list_all_workspaces(repo, &after, MAX_PAGE)
+            .await
+            .map_err(store)?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after = last.name.clone();
+        for ws in &page {
+            walk.report.workspaces += 1;
+            walk.draft_paths(ws, now_ms).await?;
+        }
+    }
     Ok(walk.report)
 }
 
@@ -157,6 +185,82 @@ impl<M: MetaStore, O: ObjectStore> Walk<'_, M, O> {
             }
         }
         self.snapshot(id, cs.root).await
+    }
+
+    /// Checks `ws`'s draft path rows against the union of the paths its
+    /// stack changes. A row outside the union is always wrong. A missing
+    /// row is wrong only while the workspace is live with a draft head:
+    /// GC's lapsing pass clears the rows of an expired one first.
+    async fn draft_paths(&mut self, ws: &WorkspaceRecord, now_ms: i64) -> Result<(), String> {
+        let name = &ws.name;
+        let mut rows = BTreeSet::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .meta
+                .workspace_draft_paths(self.repo, name, after.clone(), MAX_PAGE)
+                .await
+                .map_err(store)?;
+            let full = page.len() as u64 >= u64::from(MAX_PAGE);
+            after = page.last().cloned();
+            rows.extend(page);
+            if !full {
+                break;
+            }
+        }
+        let mut union: BTreeSet<RepoPath> = BTreeSet::new();
+        let mut head_is_draft = false;
+        let mut at = ws.head;
+        let mut depth = 0;
+        while let Some(id) = at {
+            if id == ws.base {
+                break;
+            }
+            depth += 1;
+            if depth > MAX_STACK_WALK {
+                self.report.problem(format!(
+                    "workspace {name}: stack deeper than {MAX_STACK_WALK}"
+                ));
+                return Ok(());
+            }
+            let Some((content, record)) =
+                self.meta.changeset(self.repo, id).await.map_err(store)?
+            else {
+                self.report.problem(format!(
+                    "workspace {name}: stack changeset {id} is not stored"
+                ));
+                return Ok(());
+            };
+            if Some(id) == ws.head {
+                head_is_draft = record.state == RecordState::Draft
+                    && record.holder.as_deref() == Some(name.as_str());
+            }
+            let Ok(cs) = Changeset::decode(&content) else {
+                // Reported by the changeset walk.
+                return Ok(());
+            };
+            union.extend(cs.changes.iter().map(|c| c.path().clone()));
+            at = cs.first_parent();
+        }
+        if at.is_none() && ws.head.is_some() {
+            self.report.problem(format!(
+                "workspace {name}: head does not descend from its base"
+            ));
+            return Ok(());
+        }
+        for path in rows.difference(&union) {
+            self.report.problem(format!(
+                "workspace {name}: draft path row {path} is not in its stack"
+            ));
+        }
+        if head_is_draft && ws.lease_until_ms >= now_ms {
+            for path in union.difference(&rows) {
+                self.report.problem(format!(
+                    "workspace {name}: stack path {path} has no draft path row"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Walks a snapshot depth first, each object once per repository.

@@ -324,6 +324,17 @@ impl WorkspaceApi for McpApi {
             }
         )
     }
+    async fn overlapping_drafts(
+        &self,
+        cx: &CallContext,
+        req: OverlappingDrafts,
+    ) -> ApiResult<DraftOverlap> {
+        // Other principals' workspaces, so no ownership check: the engine
+        // requires the `repo:<r>:drafts` scope instead.
+        via!(self, "OverlappingDrafts", req.repo, cx, false, |e, c| e
+            .overlapping_drafts(&c, req)
+            .await)
+    }
     async fn resolve(&self, cx: &CallContext, req: Resolve) -> ApiResult<Resolved> {
         via!(self, "Resolve", req.workspace.repo, cx, true, |e, c| {
             own_workspace(&e, &c, &req.workspace).await?;

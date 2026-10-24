@@ -3,15 +3,178 @@
 //! (`docs/design.md` §8.2: the base, head and state are always visible).
 //! Stat-based and local, so it never contacts the server, unless
 //! `--upstream` asks it to compare with the line tip (WI-2309): that reads
-//! from the server and writes nothing, here or there.
+//! from the server and writes nothing, here or there. `--drafts` asks the
+//! server which other live workspaces have open drafts on the same paths
+//! (WI-2310, decision D24); it reads only, too.
 
-use graft_client::workcopy::{FileStatus, Outcome, Upstream};
+use std::collections::{BTreeMap, BTreeSet};
+
+use graft_client::Remote;
+use graft_client::workcopy::{FileStatus, Outcome, Upstream, WorkingCopy};
+use graft_model::RepoPath;
+use graft_proto::api::{RepoApi, WorkspaceApi};
+use graft_proto::context::CallContext;
+use graft_proto::types::{
+    Diff, DraftWorkspace, MAX_OVERLAP_PAGE, MAX_OVERLAP_PATHS, OverlappingDrafts, Page,
+};
 use serde_json::{Value, json};
 
 use crate::cli::{Global, StatusArgs};
 use crate::conn::{call_context, connect, require_working_copy, runtime};
 use crate::error::Failure;
 use crate::render::{print_json, short};
+
+/// The most of the stack's changed paths asked about.
+const MAX_DRAFT_PATHS: usize = 1024;
+/// The most overlap hits gathered before the answer is cut.
+const MAX_DRAFT_HITS: usize = 2000;
+
+/// One other workspace with drafts on some of the paths asked about.
+struct DraftOverlapRow {
+    workspace: DraftWorkspace,
+    paths: BTreeSet<RepoPath>,
+}
+
+/// What `--drafts` found.
+struct Drafts {
+    rows: Vec<DraftOverlapRow>,
+    /// Paths asked about.
+    asked: usize,
+    /// Whether a bound cut the paths asked about or the hits gathered.
+    truncated: bool,
+}
+
+impl Drafts {
+    fn json(&self) -> Value {
+        json!({
+            "asked": self.asked,
+            "overlaps": self.rows.iter().map(|r| {
+                let w = &r.workspace;
+                json!({
+                    "workspace": w.workspace,
+                    "owner": w.owner,
+                    "session": w.session,
+                    "work_item": w.work_item,
+                    "draft_age_ms": w.draft_age_ms,
+                    "lease_until_ms": w.lease_until_ms,
+                    "paths": r.paths.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
+            "truncated": self.truncated,
+        })
+    }
+}
+
+/// The paths `--drafts` asks about: the arguments, else the uncommitted
+/// changes plus the paths the stack (`base..head`) changes, bounded.
+async fn draft_paths(
+    remote: &Remote,
+    cx: &CallContext,
+    repo: &str,
+    wc: &WorkingCopy,
+    changes: &[FileStatus],
+    args: &StatusArgs,
+) -> Result<(Vec<RepoPath>, bool), Failure> {
+    if !args.paths.is_empty() {
+        let paths = args
+            .paths
+            .iter()
+            .map(|p| {
+                RepoPath::new(p.trim_end_matches('/'))
+                    .map_err(|e| Failure::usage(format!("path `{p}`: {e:?}")))
+            })
+            .collect::<Result<_, _>>()?;
+        return Ok((paths, false));
+    }
+    let mut paths: BTreeSet<RepoPath> = changes.iter().map(|c| c.path().clone()).collect();
+    let state = wc.state();
+    let mut truncated = false;
+    if let Some(head) = state.head {
+        let mut token = None;
+        loop {
+            let req = Diff {
+                repo: repo.to_owned(),
+                from: state.base,
+                to: head,
+                paths: Vec::new(),
+                patch: None,
+                page: Page { limit: 500, token },
+            };
+            let page = remote.diff(cx, req).await?;
+            paths.extend(page.files.into_iter().map(|f| f.change.path().clone()));
+            token = page.next;
+            if paths.len() >= MAX_DRAFT_PATHS {
+                truncated = true;
+                break;
+            }
+            if token.is_none() {
+                break;
+            }
+        }
+    }
+    let mut paths: Vec<RepoPath> = paths.into_iter().collect();
+    if paths.len() > MAX_DRAFT_PATHS {
+        paths.truncate(MAX_DRAFT_PATHS);
+        truncated = true;
+    }
+    Ok((paths, truncated))
+}
+
+/// Asks `OverlappingDrafts` about `paths`, 64 at a time, paging each batch
+/// to its end, and groups the hits by workspace.
+async fn drafts(
+    remote: &Remote,
+    cx: &CallContext,
+    repo: &str,
+    line: &str,
+    paths: Vec<RepoPath>,
+    mut truncated: bool,
+) -> Result<Drafts, Failure> {
+    let asked = paths.len();
+    let mut rows: BTreeMap<String, DraftOverlapRow> = BTreeMap::new();
+    let mut hits = 0;
+    'batches: for batch in paths.chunks(MAX_OVERLAP_PATHS) {
+        let mut token = None;
+        loop {
+            let req = OverlappingDrafts {
+                repo: repo.to_owned(),
+                line: line.to_owned(),
+                paths: batch.to_vec(),
+                include_own: false,
+                page: Page {
+                    limit: MAX_OVERLAP_PAGE,
+                    token,
+                },
+            };
+            let page = remote.overlapping_drafts(cx, req).await?;
+            for w in page.workspaces {
+                rows.entry(w.workspace.clone()).or_insert(DraftOverlapRow {
+                    workspace: w,
+                    paths: BTreeSet::new(),
+                });
+            }
+            for h in page.hits {
+                hits += 1;
+                if let Some(row) = rows.get_mut(&h.workspace) {
+                    row.paths.insert(h.path);
+                }
+            }
+            token = page.next;
+            if hits >= MAX_DRAFT_HITS {
+                truncated |= token.is_some();
+                break 'batches;
+            }
+            if token.is_none() {
+                break;
+            }
+        }
+    }
+    Ok(Drafts {
+        rows: rows.into_values().collect(),
+        asked,
+        truncated,
+    })
+}
 
 /// The status word for a change in JSON and in text.
 pub(crate) fn word(change: &FileStatus) -> &'static str {
@@ -69,21 +232,30 @@ pub(crate) fn run(g: &Global, args: &StatusArgs) -> Result<(), Failure> {
     let wc = require_working_copy()?;
     let changes = wc.status()?;
     let conflicts = wc.conflicts()?.map(|c| c.files).unwrap_or_default();
-    let upstream = if args.upstream {
-        Some(runtime()?.block_on(async {
+    let (upstream, drafts) = if args.upstream || args.drafts {
+        runtime()?.block_on(async {
             let conn = connect(g, Some(&wc)).await?;
-            let up = wc
-                .upstream(
-                    &conn.remote,
-                    &call_context(),
-                    args.limit,
-                    args.cursor.clone(),
+            let cx = call_context();
+            let up = if args.upstream {
+                Some(
+                    wc.upstream(&conn.remote, &cx, args.limit, args.cursor.clone())
+                        .await?,
                 )
-                .await?;
-            Ok::<_, Failure>(up)
-        })?)
+            } else {
+                None
+            };
+            let found = if args.drafts {
+                let (paths, cut) =
+                    draft_paths(&conn.remote, &cx, &conn.repo, &wc, &changes, args).await?;
+                let line = wc.state().line.clone();
+                Some(drafts(&conn.remote, &cx, &conn.repo, &line, paths, cut).await?)
+            } else {
+                None
+            };
+            Ok::<_, Failure>((up, found))
+        })?
     } else {
-        None
+        (None, None)
     };
     let state = wc.state();
     if g.json {
@@ -101,6 +273,9 @@ pub(crate) fn run(g: &Global, args: &StatusArgs) -> Result<(), Failure> {
         });
         if let Some(up) = &upstream {
             value["upstream"] = upstream_json(up, wc.config().workspace.as_deref());
+        }
+        if let Some(d) = &drafts {
+            value["drafts"] = d.json();
         }
         return print_json(&value);
     }
@@ -124,6 +299,40 @@ pub(crate) fn run(g: &Global, args: &StatusArgs) -> Result<(), Failure> {
     }
     if let Some(up) = &upstream {
         print_upstream(up)?;
+    }
+    if let Some(d) = &drafts {
+        print_drafts(d)?;
+    }
+    Ok(())
+}
+
+fn print_drafts(d: &Drafts) -> Result<(), Failure> {
+    if d.asked == 0 {
+        outln!("drafts: nothing changed to ask about (name PATHS)");
+        return Ok(());
+    }
+    if d.rows.is_empty() {
+        outln!("drafts: no other live workspace has drafts on these paths");
+    }
+    for r in &d.rows {
+        let w = &r.workspace;
+        let who = match (&w.work_item, &w.session) {
+            (Some(item), _) => format!(" ({item})"),
+            (None, Some(session)) => format!(" ({session})"),
+            (None, None) => String::new(),
+        };
+        outln!(
+            "drafts: {} by {}{who}, {}s old:",
+            w.workspace,
+            w.owner,
+            w.draft_age_ms / 1000
+        );
+        for p in &r.paths {
+            outln!("  {p}");
+        }
+    }
+    if d.truncated {
+        outln!("(drafts cut at the limit)");
     }
     Ok(())
 }

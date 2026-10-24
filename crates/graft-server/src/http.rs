@@ -18,8 +18,9 @@
 //! | `GET /v1/repos/{repo}/journal?from_lsn=&limit=` | `Watch` (one page) |
 //! | `GET /v1/repos/{repo}/log?from=&until=&path=&limit=&page_token=` | `Log` |
 //! | `GET /v1/repos/{repo}/blame/{at}?path=` | `Blame` |
+//! | `GET /v1/repos/{repo}/drafts/overlap?line=&path=&include_own=&limit=&page_token=` | `OverlappingDrafts` |
 //!
-//! `log` pages by `page_token`: pass the previous answer's `next`.
+//! `log` and `drafts/overlap` page by `page_token`: pass the previous answer's `next`.
 
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use graft_model::{AuthorKind, Change, ChangesetId, EntryKind, ObjectId, RepoPath, Timestamp};
 use graft_proto::types::*;
-use graft_proto::{ApiError, RepoApi as _};
+use graft_proto::{ApiError, RepoApi as _, WorkspaceApi as _};
 use serde_json::{Value, json};
 
 use crate::app::{App, CallError, Caller, error_name};
@@ -57,6 +58,7 @@ pub(crate) fn facade_router(app: Arc<App>) -> Router {
         .route("/v1/repos/{repo}/journal", get(journal))
         .route("/v1/repos/{repo}/log", get(log))
         .route("/v1/repos/{repo}/blame/{at}", get(blame))
+        .route("/v1/repos/{repo}/drafts/overlap", get(draft_overlap))
         .with_state(app)
 }
 
@@ -565,6 +567,53 @@ async fn log(
         "changesets": history.changesets.iter().map(summary_json).collect::<Vec<_>>(),
         "next": history.next,
     }))
+}
+
+async fn draft_overlap(
+    State(app): State<Arc<App>>,
+    Path(repo): Path<String>,
+    headers: HeaderMap,
+    RawQuery(q): RawQuery,
+) -> Answer {
+    let cx = cx(&app, &headers, "OverlappingDrafts")?;
+    let q = Query::parse(q)?;
+    let line = q.get("line").ok_or_else(|| bad("line", "required"))?;
+    let req = OverlappingDrafts {
+        repo: repo.clone(),
+        line: line.to_owned(),
+        paths: q.paths()?,
+        include_own: q.flag("include_own")?,
+        page: q.page()?,
+    };
+    let overlap = app
+        .call(
+            "OverlappingDrafts",
+            &repo,
+            cx,
+            false,
+            move |e, cx| async move { e.overlapping_drafts(&cx, req).await },
+        )
+        .await?;
+    ok(draft_overlap_json(&overlap))
+}
+
+/// An overlap page as JSON: paths, workspace names and metadata only.
+pub(crate) fn draft_overlap_json(o: &DraftOverlap) -> Value {
+    json!({
+        "hits": o.hits.iter().map(|h| json!({
+            "path": h.path.as_str(),
+            "workspace": h.workspace,
+        })).collect::<Vec<_>>(),
+        "workspaces": o.workspaces.iter().map(|w| json!({
+            "workspace": w.workspace,
+            "owner": w.owner,
+            "session": w.session,
+            "work_item": w.work_item,
+            "draft_age_ms": w.draft_age_ms,
+            "lease_until_ms": w.lease_until_ms,
+        })).collect::<Vec<_>>(),
+        "next": o.next,
+    })
 }
 
 async fn blame(
