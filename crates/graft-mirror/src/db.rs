@@ -84,7 +84,15 @@ CREATE TABLE IF NOT EXISTS batch_lines (
     line TEXT PRIMARY KEY,
     synced BLOB NOT NULL,
     sync_from BLOB NOT NULL,
-    start BLOB NOT NULL
+    start BLOB NOT NULL,
+    start_base BLOB
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS batch_drops (
+    line TEXT NOT NULL,
+    land BLOB NOT NULL,
+    revert BLOB NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (line, land)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pr_imports (
     number INTEGER PRIMARY KEY,
@@ -184,6 +192,7 @@ impl MirrorDb {
         conn.pragma_update(None, "synchronous", "FULL")
             .map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
+        add_start_base(&conn)?;
         Ok(MirrorDb {
             conn: Mutex::new(conn),
             path: path.to_owned(),
@@ -518,26 +527,69 @@ impl MirrorDb {
         let row = self
             .conn()
             .query_row(
-                "SELECT synced, sync_from, start FROM batch_lines WHERE line = ?1",
+                "SELECT synced, sync_from, start, start_base FROM batch_lines WHERE line = ?1",
                 params![line],
                 |r| {
                     Ok((
                         r.get::<_, Vec<u8>>(0)?,
                         r.get::<_, Vec<u8>>(1)?,
                         r.get::<_, Vec<u8>>(2)?,
+                        r.get::<_, Option<Vec<u8>>>(3)?,
                     ))
                 },
             )
             .optional()
             .map_err(db_err)?;
-        row.map(|(synced, sync_from, start)| {
+        row.map(|(synced, sync_from, start, start_base)| {
+            let synced = id_col(synced).map(ChangesetId)?;
             Ok(BatchLine {
-                synced: id_col(synced).map(ChangesetId)?,
+                synced,
                 sync_from: id_col(sync_from).map(ChangesetId)?,
                 start: id_col(start).map(ChangesetId)?,
+                // A row from before the column: the base it last absorbed.
+                start_base: match start_base {
+                    Some(b) => id_col(b).map(ChangesetId)?,
+                    None => synced,
+                },
             })
         })
         .transpose()
+    }
+
+    /// Records that `land` was dropped from `line`'s batches by `revert`,
+    /// and why.
+    pub fn put_batch_drop(
+        &self,
+        line: &str,
+        land: ChangesetId,
+        revert: ChangesetId,
+        reason: &str,
+    ) -> Result<(), GitError> {
+        self.conn()
+            .execute(
+                "INSERT INTO batch_drops (line, land, revert, reason) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (line, land) DO UPDATE SET revert = ?3, reason = ?4",
+                params![line, &land.0.0[..], &revert.0.0[..], reason],
+            )
+            .map(drop)
+            .map_err(db_err)
+    }
+
+    /// Why `land` was dropped from `line`'s batches, if the mirror dropped
+    /// it. One keyed read.
+    pub fn batch_drop_reason(
+        &self,
+        line: &str,
+        land: ChangesetId,
+    ) -> Result<Option<String>, GitError> {
+        self.conn()
+            .query_row(
+                "SELECT reason FROM batch_drops WHERE line = ?1 AND land = ?2",
+                params![line, &land.0.0[..]],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db_err)
     }
 
     /// Replaces batch mode's record of `line`.
@@ -774,17 +826,33 @@ impl MirrorMap for MirrorDb {
 
 fn put_batch_line(conn: &Connection, line: &str, state: &BatchLine) -> Result<(), GitError> {
     conn.execute(
-        "INSERT INTO batch_lines (line, synced, sync_from, start) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (line) DO UPDATE SET synced = ?2, sync_from = ?3, start = ?4",
+        "INSERT INTO batch_lines (line, synced, sync_from, start, start_base)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (line) DO UPDATE SET synced = ?2, sync_from = ?3, start = ?4,
+             start_base = ?5",
         params![
             line,
             &state.synced.0.0[..],
             &state.sync_from.0.0[..],
             &state.start.0.0[..],
+            &state.start_base.0.0[..],
         ],
     )
     .map(drop)
     .map_err(db_err)
+}
+
+/// Adds `batch_lines.start_base` to a DB made before it (WI-2340).
+fn add_start_base(conn: &Connection) -> Result<(), GitError> {
+    let has = conn
+        .prepare("SELECT 1 FROM pragma_table_info('batch_lines') WHERE name = 'start_base'")
+        .and_then(|mut q| q.exists([]))
+        .map_err(db_err)?;
+    if !has {
+        conn.execute_batch("ALTER TABLE batch_lines ADD COLUMN start_base BLOB")
+            .map_err(db_err)?;
+    }
+    Ok(())
 }
 
 fn write_batch(conn: &Connection, rec: &BatchRecord) -> Result<(), GitError> {

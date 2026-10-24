@@ -34,13 +34,28 @@
 //!    [`MAX_PR_BODY`] and names the commit message for the rest. Both end
 //!    with `Graft-Batch` trailers. The mirror never merges or queues it.
 //!
+//! Dropping a land (WI-2340): `--exclude <changeset>` (or `--drop-failed`,
+//! for lands with a failed attestation) lands a `Revert` of it on the
+//! integration line, as any land is, so the lands after it stay. An open
+//! batch is then superseded: its PR is closed with a comment and the next
+//! batch is cut from the same start, carrying the land and its revert and
+//! naming the drop and its reason in the PR body. A dropped land and its
+//! revert are never split across batches.
+//!
+//! Cutting (WI-2340): [`BatchConfig::max_lands`] caps the lands one batch
+//! takes, oldest first; the rest wait for the next batch. The cut point is a
+//! line position, and the batch is exported against the base the line held
+//! there (the newest sync at or before it, else the base at the batch
+//! start). [`BatchConfig::max_age_ms`] holds a batch back until its oldest
+//! land (by author time) is that old or it has `max_lands` lands.
+//!
 //! Costs follow the change: the sync reads one diff and one rebase; the land
 //! list is a first-parent `Log` from the tip back to the batch start, capped
 //! at [`MAX_LANDS`]; attestations come from a bounded read of the journal's
 //! `Attested` entries from the oldest land in the batch, capped at
 //! [`MAX_ATTEST_PAGES`] pages and marked as truncated beyond that.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use graft_git::GitSha;
 use graft_git::export::{Committer, commit_object};
@@ -50,7 +65,7 @@ use graft_model::{Author, AuthorKind, Change, ChangesetId, Metadata, Timestamp};
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::types::{
     ChangesetView, CreateChangeset, Diff, GetChangesets, Log, MergeMode, Page, Pair, Rebase,
-    RefKind, Watch,
+    RefKind, Revert, Watch,
 };
 use graft_proto::{ApiError, CallContext};
 use serde::Deserialize;
@@ -71,6 +86,16 @@ pub const BATCH: &str = "batch";
 /// The metadata key on a sync changeset, naming the base tip it absorbed.
 /// The land list skips changesets that carry it.
 pub const SYNC_KEY: &str = "mirror.batch-sync";
+
+/// The metadata key graft's `Revert` puts on a revert, naming the changeset
+/// it inverts (graft-engine's `revert::REVERTS`).
+pub const REVERTS_KEY: &str = "graft.reverts";
+
+/// The reason recorded for an `--exclude` given none.
+pub const DEFAULT_DROP_REASON: &str = "excluded by the operator";
+
+/// Dropped lands the PR body names; more are counted.
+pub const MAX_DROPS_LISTED: usize = 50;
 
 /// The prefix of a batch branch: `graft/batch-<n>`.
 pub const BRANCH_PREFIX: &str = "graft/batch-";
@@ -205,6 +230,9 @@ pub struct BatchLine {
     pub sync_from: ChangesetId,
     /// The next batch counts lands after this changeset.
     pub start: ChangesetId,
+    /// The base line changeset whose snapshot the line held at `start`: a
+    /// batch cut before the line's newest sync is exported against it.
+    pub start_base: ChangesetId,
 }
 
 /// What batch mode works on.
@@ -221,6 +249,17 @@ pub struct BatchConfig {
     pub follow: FollowConfig,
     /// The identity of the squashed commit and of sync changesets.
     pub committer: Committer,
+    /// Lands to drop from the line's batches: each is reverted on the line.
+    pub exclude: Vec<ChangesetId>,
+    /// Also drop every land in the next batch with a failed attestation.
+    pub drop_failed: bool,
+    /// Why the lands are dropped (named in the PR body).
+    pub drop_reason: Option<String>,
+    /// The most lands one batch takes; newer lands wait for the next one.
+    pub max_lands: Option<usize>,
+    /// Hold a batch until its oldest land is this old (ms, by author time),
+    /// unless it already has `max_lands` lands.
+    pub max_age_ms: Option<i64>,
 }
 
 impl BatchConfig {
@@ -233,6 +272,11 @@ impl BatchConfig {
             base,
             follow,
             committer: default_committer(),
+            exclude: Vec::new(),
+            drop_failed: false,
+            drop_reason: None,
+            max_lands: None,
+            max_age_ms: None,
         }
     }
 }
@@ -257,6 +301,14 @@ pub enum BatchOutcome {
     },
     /// Follow stopped the base line (described); nothing was exported.
     BaseStopped(String),
+    /// The pending lands are fewer than `max_lands` and younger than
+    /// `max_age_ms`; no batch yet.
+    NotDue {
+        /// Lands waiting.
+        lands: usize,
+        /// The oldest one's author time (ms).
+        oldest_ms: i64,
+    },
 }
 
 /// A run's outcome, with what it settled and synced on the way.
@@ -266,6 +318,8 @@ pub struct BatchRun {
     pub settled: Option<BatchRecord>,
     /// The sync changeset the integration line moved to, if it synced.
     pub synced: Option<ChangesetId>,
+    /// Lands this run dropped, each with the revert it landed.
+    pub dropped: Vec<(ChangesetId, ChangesetId)>,
     /// What happened.
     pub outcome: BatchOutcome,
 }
@@ -287,6 +341,17 @@ struct LandLine {
     subject: String,
     /// Each check's latest result, by name.
     checks: BTreeMap<String, bool>,
+    /// Author time (ms).
+    authored_ms: i64,
+    /// The changeset this land reverts, when it is a revert.
+    reverts: Option<ChangesetId>,
+}
+
+/// A land dropped from a batch: it and its revert are both in the batch.
+struct Dropped {
+    land: ChangesetId,
+    revert: ChangesetId,
+    reason: String,
 }
 
 /// Exported native changesets of the integration line are dated by the
@@ -387,20 +452,36 @@ where
         let mut run = BatchRun {
             settled: None,
             synced: None,
+            dropped: Vec::new(),
             outcome: BatchOutcome::NothingToExport,
         };
         if let Some(stopped) = self.follow().await? {
             run.outcome = BatchOutcome::BaseStopped(stopped);
             return Ok(run);
         }
+        let mut open = None;
         if let Some(mut rec) = self.db.last_batch(&self.config.line)?
             && !rec.state.is_terminal()
         {
             self.advance(&mut rec).await?;
-            if !rec.state.is_terminal() {
+            if rec.state.is_terminal() {
+                run.settled = Some(rec);
+            } else {
+                open = Some(rec);
+            }
+        }
+        if (!self.config.exclude.is_empty() || self.config.drop_failed)
+            && let Err(conflict) = self.drop_lands(&mut run.dropped).await?
+        {
+            run.outcome = conflict;
+            return Ok(run);
+        }
+        if let Some(mut rec) = open {
+            if run.dropped.is_empty() {
                 run.outcome = BatchOutcome::Waiting(rec);
                 return Ok(run);
             }
+            self.supersede(&mut rec, &run.dropped).await?;
             run.settled = Some(rec);
         }
         let base_tip = self.tip(&self.config.base.line.clone()).await?;
@@ -420,10 +501,13 @@ where
                 }
             }
         }
-        if let Some(rec) = self.plan(&state, tip, base_tip).await? {
-            let mut rec = rec;
-            self.advance(&mut rec).await?;
-            run.outcome = BatchOutcome::Opened(rec);
+        match self.plan(&state, tip, base_tip).await? {
+            Ok(Some(mut rec)) => {
+                self.advance(&mut rec).await?;
+                run.outcome = BatchOutcome::Opened(rec);
+            }
+            Ok(None) => {}
+            Err(outcome) => run.outcome = outcome,
         }
         Ok(run)
     }
@@ -553,6 +637,7 @@ where
             synced: fork,
             sync_from: fork,
             start: fork,
+            start_base: fork,
         };
         self.db.set_batch_line(&self.config.line, &state)?;
         tracing::info!(
@@ -842,34 +927,20 @@ where
         Ok((out, true))
     }
 
-    /// Builds and records the next batch: the land list, the squashed commit
-    /// in the local mirror, then the record. `None` when the line holds
-    /// nothing the base lacks.
-    async fn plan(
+    /// The lands among `ids` (newest first), sync changesets left out, with
+    /// each one's latest check results; `true` when the attestation read
+    /// stopped at its cap.
+    async fn describe(
         &mut self,
-        state: &BatchLine,
-        tip: ChangesetId,
-        base_tip: ChangesetId,
-    ) -> Result<Option<BatchRecord>, MirrorError> {
-        let tip_view = self.view(tip).await?;
-        let base_view = self.view(base_tip).await?;
-        if tip_view.changeset.root == base_view.changeset.root {
-            return Ok(None);
-        }
-        let base_sha = self.db.sha_of(base_tip)?.ok_or_else(|| {
-            config_err(format!(
-                "base tip {base_tip} has no git commit: follow {} first",
-                self.config.base.branch
-            ))
-        })?;
-        let (ids, capped) = self.lands(tip, state.start).await?;
-        let views = self.views(&ids).await?;
+        ids: &[ChangesetId],
+        views: &HashMap<ChangesetId, ChangesetView>,
+    ) -> Result<(Vec<LandLine>, bool), MirrorError> {
         let mut lands = Vec::new();
         // Each attested id (a land, or the draft it was rebased from) and
         // the land it counts for.
         let mut wanted = HashMap::new();
         let mut from_lsn = u64::MAX;
-        for id in &ids {
+        for id in ids {
             let Some(v) = views.get(id) else { continue };
             let cs = &v.changeset;
             if is_sync(&cs.metadata) {
@@ -900,10 +971,15 @@ where
                     false,
                 ),
                 checks: BTreeMap::new(),
+                authored_ms: cs.authored_at.ms,
+                reverts: cs
+                    .metadata
+                    .get(REVERTS_KEY)
+                    .and_then(|r| ChangesetId::parse(r).ok()),
             });
         }
         if lands.is_empty() {
-            return Ok(None);
+            return Ok((lands, false));
         }
         // Drafts rebased at landing were attested before the land existed:
         // read from the oldest of them too.
@@ -919,6 +995,235 @@ where
         for land in &mut lands {
             if let Some(c) = checks.get(&land.id) {
                 land.checks = c.clone();
+            }
+        }
+        Ok((lands, truncated))
+    }
+
+    /// Reverts each land to drop (named, or failing a check) on the
+    /// integration line, newest first, each a compare-and-swap move of the
+    /// line, and records why. A land already reverted on the line is
+    /// skipped. `Ok(Err(_))` on a revert that conflicts with later lands;
+    /// the reverts before it stay.
+    async fn drop_lands(
+        &mut self,
+        dropped: &mut Vec<(ChangesetId, ChangesetId)>,
+    ) -> Result<Result<(), BatchOutcome>, MirrorError> {
+        let base_tip = self.tip(&self.config.base.line.clone()).await?;
+        let mut tip = self.tip(&self.config.line.clone()).await?;
+        let state = self.line_state(tip, base_tip).await?;
+        let (ids, _) = self.lands(tip, state.start).await?;
+        let views = self.views(&ids).await?;
+        let (lands, _) = self.describe(&ids, &views).await?;
+        let reverted: HashSet<ChangesetId> = lands.iter().filter_map(|l| l.reverts).collect();
+        let named = clean_text(
+            self.config
+                .drop_reason
+                .as_deref()
+                .unwrap_or(DEFAULT_DROP_REASON),
+            FIELD_CHARS,
+            false,
+        );
+        let mut targets: Vec<(ChangesetId, String)> = Vec::new();
+        for id in self.config.exclude.clone() {
+            if !lands.iter().any(|l| l.id == id) {
+                return Err(config_err(format!(
+                    "{id} is not a land in line {}'s next batch",
+                    self.config.line
+                )));
+            }
+            if !reverted.contains(&id) && !targets.iter().any(|(t, _)| *t == id) {
+                targets.push((id, named.clone()));
+            }
+        }
+        if self.config.drop_failed {
+            for l in &lands {
+                let failed: Vec<&str> = l
+                    .checks
+                    .iter()
+                    .filter(|(_, ok)| !**ok)
+                    .map(|(c, _)| c.as_str())
+                    .take(MAX_CHECKS)
+                    .collect();
+                if failed.is_empty()
+                    || reverted.contains(&l.id)
+                    || targets.iter().any(|(t, _)| *t == l.id)
+                {
+                    continue;
+                }
+                let why = format!("failed {}", failed.join(", "));
+                targets.push((l.id, clean_text(&why, FIELD_CHARS, false)));
+            }
+        }
+        // Newest first, as the land list is.
+        let order: HashMap<ChangesetId, usize> =
+            ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        targets.sort_by_key(|(id, _)| order.get(id).copied().unwrap_or(usize::MAX));
+        for (land, reason) in targets {
+            let cx = self.call("revert");
+            let revert = match self
+                .api
+                .revert(
+                    &cx,
+                    Revert {
+                        repo: self.config.repo.clone(),
+                        changeset: land,
+                        onto: tip,
+                        workspace: None,
+                    },
+                )
+                .await
+            {
+                Ok(id) => id,
+                Err(ApiError::Conflict { paths, onto }) => {
+                    let paths: Vec<String> = paths
+                        .into_iter()
+                        .map(|p| clean_text(&p.path, 300, false))
+                        .collect();
+                    tracing::warn!(
+                        repo = %self.config.repo, line = %self.config.line, land = %land,
+                        conflicts = paths.len(),
+                        "mirror batch: the land does not revert cleanly on the line; not dropped"
+                    );
+                    return Ok(Err(BatchOutcome::Conflict { onto, paths }));
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let cx = self.call("update-ref");
+            let repo = self.config.repo.clone();
+            let line = self.config.line.clone();
+            match move_ref(
+                self.api,
+                &cx,
+                &repo,
+                &line,
+                Some(tip),
+                revert,
+                RefKind::Line,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(ApiError::RefConflict { .. }) => {
+                    return Err(config_err(format!(
+                        "line {line} moved while dropping {land}; run pr-batch again"
+                    )));
+                }
+                Err(e) => return Err(e.into()),
+            }
+            self.db.put_batch_drop(&line, land, revert, &reason)?;
+            tracing::info!(
+                repo = %repo, line = %line, land = %land, revert = %revert,
+                "mirror batch: land dropped (reverted on the line)"
+            );
+            dropped.push((land, revert));
+            tip = revert;
+        }
+        Ok(Ok(()))
+    }
+
+    /// Closes an open batch whose lands changed under it (a land dropped),
+    /// with a comment saying so, and rejects it: the next batch is cut from
+    /// the same start.
+    async fn supersede(
+        &mut self,
+        rec: &mut BatchRecord,
+        dropped: &[(ChangesetId, ChangesetId)],
+    ) -> Result<(), MirrorError> {
+        let names: Vec<String> = dropped
+            .iter()
+            .take(MAX_DROPS_LISTED)
+            .map(|(l, _)| format!("`{}`", short(*l)))
+            .collect();
+        let detail = format!(
+            "superseded: land{} {}{} dropped from line {} (reverted); recut as a new batch",
+            if dropped.len() == 1 { "" } else { "s" },
+            names.join(", "),
+            if dropped.len() > MAX_DROPS_LISTED {
+                format!(" and {} more", dropped.len() - MAX_DROPS_LISTED)
+            } else {
+                String::new()
+            },
+            clean_text(&rec.line, FIELD_CHARS, false)
+        );
+        if let Some(number) = rec.pr_number {
+            self.forge.close_pr(number, &detail).await?;
+        }
+        self.reject(rec, detail)
+    }
+
+    /// Builds and records the next batch: the land list, the cut, the
+    /// squashed commit in the local mirror, then the record. `Ok(None)` when
+    /// the line holds nothing the base lacks, `Err(NotDue)` when the batch
+    /// is held for size or age.
+    async fn plan(
+        &mut self,
+        state: &BatchLine,
+        tip: ChangesetId,
+        base_tip: ChangesetId,
+    ) -> Result<Result<Option<BatchRecord>, BatchOutcome>, MirrorError> {
+        let tip_view = self.view(tip).await?;
+        let base_view = self.view(base_tip).await?;
+        if tip_view.changeset.root == base_view.changeset.root {
+            return Ok(Ok(None));
+        }
+        let (ids, capped) = self.lands(tip, state.start).await?;
+        let views = self.views(&ids).await?;
+        let (mut lands, truncated) = self.describe(&ids, &views).await?;
+        if lands.is_empty() {
+            return Ok(Ok(None));
+        }
+        if let Some(age) = self.config.max_age_ms {
+            let oldest_ms = lands.iter().map(|l| l.authored_ms).min().unwrap_or(0);
+            let full = self.config.max_lands.is_some_and(|m| lands.len() >= m);
+            if !full && (self.clock)().saturating_sub(oldest_ms) < age {
+                return Ok(Err(BatchOutcome::NotDue {
+                    lands: lands.len(),
+                    oldest_ms,
+                }));
+            }
+        }
+        let (cut, base, held) = match self.config.max_lands {
+            Some(max) if !capped && lands.len() > max.max(1) => {
+                let keep = keep_with_reverts(&lands, max.max(1));
+                let held = lands.len() - keep;
+                lands.drain(..held);
+                let cut = lands[0].id;
+                // The base the line held at the cut: the newest sync at or
+                // before it, else the base at the batch start.
+                let pos = ids.iter().position(|i| *i == cut).unwrap_or(0);
+                let base = ids[pos..]
+                    .iter()
+                    .filter_map(|i| views.get(i))
+                    .find_map(|v| v.changeset.metadata.get(SYNC_KEY))
+                    .and_then(|b| ChangesetId::parse(b).ok())
+                    .unwrap_or(state.start_base);
+                (cut, base, held)
+            }
+            _ => (tip, base_tip, 0),
+        };
+        let base_sha = self.db.sha_of(base)?.ok_or_else(|| {
+            config_err(format!(
+                "base {base} has no git commit: follow {} first",
+                self.config.base.branch
+            ))
+        })?;
+        let in_batch: HashMap<ChangesetId, ChangesetId> = lands
+            .iter()
+            .filter_map(|l| l.reverts.map(|r| (r, l.id)))
+            .collect();
+        let mut drops = Vec::new();
+        for l in lands.iter().rev() {
+            if let Some(revert) = in_batch.get(&l.id) {
+                let reason = match self.db.batch_drop_reason(&self.config.line, l.id)? {
+                    Some(r) => clean_text(&r, FIELD_CHARS, false),
+                    None => "reverted on the line".to_owned(),
+                };
+                drops.push(Dropped {
+                    land: l.id,
+                    revert: *revert,
+                    reason,
+                });
             }
         }
 
@@ -940,12 +1245,15 @@ where
                 number,
                 line: self.config.line.clone(),
                 branch: self.config.base.branch.clone(),
-                base: base_tip,
+                base,
                 base_sha,
                 start: state.start,
-                tip,
+                tip: cut,
                 capped,
                 truncated,
+                drops,
+                held,
+                max_lands: self.config.max_lands.unwrap_or(0),
             },
             &lands,
         );
@@ -965,7 +1273,7 @@ where
                 &stamp,
                 self.mirror.dir(),
             )?;
-            let tip_sha = exporter.export_changeset(tip).await?;
+            let tip_sha = exporter.export_changeset(cut).await?;
             self.mirror.commit_tree(tip_sha).await?
         };
         let ident = format!(
@@ -988,10 +1296,10 @@ where
             number,
             line: self.config.line.clone(),
             base_branch: self.config.base.branch.clone(),
-            base: base_tip,
+            base,
             base_sha,
             start: state.start,
-            tip,
+            tip: cut,
             lands: lands.len() as u64,
             created_ms,
             branch,
@@ -1013,9 +1321,9 @@ where
         }
         tracing::info!(
             repo = %self.config.repo, line = %self.config.line, batch = number,
-            lands = rec.lands, squash = %squash_sha, "mirror batch planned"
+            lands = rec.lands, held, squash = %squash_sha, "mirror batch planned"
         );
-        Ok(Some(rec))
+        Ok(Ok(Some(rec)))
     }
 
     /// Runs whichever step the batch is at, until it waits on the operator
@@ -1122,15 +1430,22 @@ where
             rec.detail = format!("merged as {merge} (graft {merged})");
             // The merge commit's snapshot is the batch tip's (plus whatever
             // GitHub's main gained meanwhile), so the next sync diffs from
-            // the tip and the next batch counts lands after it.
+            // the tip and the next batch counts lands after it. A batch cut
+            // before the line's newest sync leaves the sync point: the line
+            // past the cut already holds a newer base.
             let state = self
                 .db
                 .batch_line(&rec.line)?
                 .ok_or_else(|| config_err(format!("line {} has no batch record", rec.line)))?;
             let next = BatchLine {
                 synced: state.synced,
-                sync_from: rec.tip,
+                sync_from: if rec.base == state.synced {
+                    rec.tip
+                } else {
+                    state.sync_from
+                },
                 start: rec.tip,
+                start_base: rec.base,
             };
             self.db.settle_batch(rec, &rec.line, &next)?;
             tracing::info!(
@@ -1178,6 +1493,30 @@ struct BatchHeader {
     capped: bool,
     /// The attestation read stopped at its cap.
     truncated: bool,
+    /// Lands dropped from the batch (each reverted in it), oldest first.
+    drops: Vec<Dropped>,
+    /// Newer lands left for the next batch by the cut.
+    held: usize,
+    /// The cut's land cap (0 when none).
+    max_lands: usize,
+}
+
+/// How many of `lands` (newest first) a batch capped at `max` takes, oldest
+/// first: `max`, or more so no dropped land is split from its revert.
+fn keep_with_reverts(lands: &[LandLine], max: usize) -> usize {
+    let mut keep = max.min(lands.len());
+    loop {
+        let first_kept = lands.len() - keep;
+        let kept: HashSet<ChangesetId> = lands[first_kept..].iter().map(|l| l.id).collect();
+        // The oldest revert, among the held lands, of a land in the batch.
+        let Some(i) = lands[..first_kept]
+            .iter()
+            .rposition(|l| l.reverts.is_some_and(|r| kept.contains(&r)))
+        else {
+            return keep;
+        };
+        keep = lands.len() - i;
+    }
 }
 
 /// One table row for a land. Every cell is bounded, so a row is too.
@@ -1243,6 +1582,40 @@ fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
         head.push_str(
             "- Attestations: the journal read stopped at its cap; the list may be incomplete\n",
         );
+    }
+    if h.held > 0 {
+        head.push_str(&format!(
+            "- Cut at {} lands: {} newer {} for the next batch\n",
+            h.max_lands,
+            h.held,
+            if h.held == 1 {
+                "land waits"
+            } else {
+                "lands wait"
+            }
+        ));
+    }
+    if !h.drops.is_empty() {
+        head.push_str(&format!(
+            "- Dropped: {} land{}, each reverted on the line (both are in this batch, so \
+             they cancel out)\n",
+            h.drops.len(),
+            if h.drops.len() == 1 { "" } else { "s" }
+        ));
+        for d in h.drops.iter().take(MAX_DROPS_LISTED) {
+            head.push_str(&format!(
+                "  - `{}` reverted by `{}`: {}\n",
+                short(d.land),
+                short(d.revert),
+                clean_text(&d.reason, FIELD_CHARS, false).replace('|', "\\|")
+            ));
+        }
+        if h.drops.len() > MAX_DROPS_LISTED {
+            head.push_str(&format!(
+                "  - and {} more\n",
+                h.drops.len() - MAX_DROPS_LISTED
+            ));
+        }
     }
     head.push_str("\n| Changeset | Author | Session | Work item | Attestations | Subject |\n");
     head.push_str("| --- | --- | --- | --- | --- | --- |\n");
@@ -1323,6 +1696,9 @@ mod tests {
             tip: id,
             capped,
             truncated: false,
+            drops: Vec::new(),
+            held: 0,
+            max_lands: 0,
         }
     }
 
@@ -1341,6 +1717,8 @@ mod tests {
             work_item: Some(text("WI-1")),
             subject: text("subject "),
             checks,
+            authored_ms: n as i64,
+            reverts: None,
         }
     }
 

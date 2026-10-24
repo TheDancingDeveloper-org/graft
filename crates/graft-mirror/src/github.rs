@@ -131,6 +131,12 @@ pub trait Forge: Send + Sync {
     ) -> impl Future<Output = Result<Vec<CheckRun>, ForgeError>> + Send;
     /// A token valid now, for authenticating a git push over HTTPS.
     fn token(&self) -> impl Future<Output = Result<SecretToken, ForgeError>> + Send;
+    /// Comments `comment` on PR `number`, then closes it unmerged.
+    fn close_pr(
+        &self,
+        number: u64,
+        comment: &str,
+    ) -> impl Future<Output = Result<(), ForgeError>> + Send;
 }
 
 /// An open PR as the PR import reads it (`docs/design.md` §11.3, mode B).
@@ -543,6 +549,10 @@ fn pull_from(v: Value) -> Result<Pull, ForgeError> {
 impl<C: CredentialProvider> Forge for HttpForge<C> {
     async fn token(&self) -> Result<SecretToken, ForgeError> {
         self.credentials.token().await
+    }
+
+    async fn close_pr(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        PullSource::close_pull(self, number, comment).await
     }
 
     async fn find_pull(&self, branch: &str) -> Result<Option<Pull>, ForgeError> {
