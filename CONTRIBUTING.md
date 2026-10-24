@@ -34,6 +34,11 @@ graft follows trunk-based development, with a merge queue.
 | `clippy` | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
 | `test` | `cargo nextest run --workspace --all-features`, plus doctests |
 
+A pull request or merge-queue group whose diff touches only `docs/**`,
+`changes/**`, `bench/results/**` or `*.md` files skips the Rust steps of
+these jobs (and of `bench-smoke`); the checks still run and report success
+(`.github/scripts/docs-only.sh`).
+
 Pushes to `main` don't re-run CI, because the queue already ran it. Expensive
 suites (the crash suite, the pilot harness, fuzzing) run nightly or in the
 merge queue, never as required PR checks.
