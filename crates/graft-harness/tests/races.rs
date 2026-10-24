@@ -6,14 +6,37 @@ use graft_harness::faulty::FaultRates;
 use graft_harness::scenario::{Plan, Shape};
 use graft_harness::shrink::{explain, replay_command, replay_seed, run_and_check, shrink};
 
-fn assert_passes(seed: u64, shape: &Shape) -> graft_harness::Report {
+fn interleaving_shape() -> Shape {
+    Shape {
+        rates: FaultRates::delays(),
+        events: 0,
+        ..Shape::default()
+    }
+}
+
+fn wide_shape() -> Shape {
+    Shape {
+        clients: 8,
+        intents: 5,
+        events: 30,
+        ..Shape::default()
+    }
+}
+
+/// `replay_test` is the test that replays `shape` from a seed.
+fn assert_passes(seed: u64, shape: &Shape, replay_test: &str) -> graft_harness::Report {
     let plan = Plan::generate(seed, shape);
     let (report, _) = run_and_check(&plan, None);
     if !report.passed() {
         let shrunk = shrink(&plan, &|| None, 150);
         panic!(
             "{}",
-            explain(seed, &replay_command("races", "replay", seed), &[], &shrunk)
+            explain(
+                seed,
+                &replay_command("races", replay_test, seed),
+                &[],
+                &shrunk
+            )
         );
     }
     report
@@ -22,13 +45,9 @@ fn assert_passes(seed: u64, shape: &Shape) -> graft_harness::Report {
 /// Clients racing with delays only: everything lands or conflicts cleanly.
 #[test]
 fn interleaving_only() {
-    let shape = Shape {
-        rates: FaultRates::delays(),
-        events: 0,
-        ..Shape::default()
-    };
+    let shape = interleaving_shape();
     for seed in 1..=10 {
-        let r = assert_passes(seed, &shape);
+        let r = assert_passes(seed, &shape, "replay_interleaving");
         assert_eq!(r.gave_up, 0, "seed {seed}: {r:?}");
         assert_eq!(r.landed_intents, 16, "seed {seed}: {r:?}");
     }
@@ -41,7 +60,7 @@ fn hostile_fixed_seeds() {
     let shape = Shape::default();
     let mut totals = graft_harness::Report::default();
     for seed in 1..=120 {
-        let r = assert_passes(seed, &shape);
+        let r = assert_passes(seed, &shape, "replay");
         totals.acked += r.acked;
         totals.restarts += r.restarts;
         totals.faults += r.faults;
@@ -59,14 +78,9 @@ fn hostile_fixed_seeds() {
 /// More clients and intents, fewer seeds.
 #[test]
 fn hostile_wide() {
-    let shape = Shape {
-        clients: 8,
-        intents: 5,
-        events: 30,
-        ..Shape::default()
-    };
+    let shape = wide_shape();
     for seed in 1000..1010 {
-        assert_passes(seed, &shape);
+        assert_passes(seed, &shape, "replay_wide");
     }
 }
 
@@ -82,18 +96,35 @@ fn a_seed_replays_exactly() {
     }
 }
 
-/// Replays `GRAFT_HARNESS_SEED` (from a failure message); a no-op without it.
-#[test]
-fn replay() {
+/// Replays `GRAFT_HARNESS_SEED` at `shape`; a no-op without it.
+fn replay_at(shape: &Shape) {
     let Some(seed) = replay_seed() else {
         return;
     };
-    let plan = Plan::generate(seed, &Shape::default());
+    let plan = Plan::generate(seed, shape);
     let (report, history) = run_and_check(&plan, None);
     for op in &history {
         eprintln!("{op:?}");
     }
     assert!(report.passed(), "seed {seed}: {:#?}", report.failures);
+}
+
+/// Replays a `hostile_fixed_seeds` or `soak` seed (from a failure message).
+#[test]
+fn replay() {
+    replay_at(&Shape::default());
+}
+
+/// Replays an `interleaving_only` seed.
+#[test]
+fn replay_interleaving() {
+    replay_at(&interleaving_shape());
+}
+
+/// Replays a `hostile_wide` seed.
+#[test]
+fn replay_wide() {
+    replay_at(&wide_shape());
 }
 
 /// On-demand soak: `GRAFT_HARNESS_SOAK=<seeds>` runs that many seeds from
@@ -108,6 +139,6 @@ fn soak() {
     };
     let from = replay_seed().unwrap_or(1);
     for seed in from..from + n {
-        assert_passes(seed, &Shape::default());
+        assert_passes(seed, &Shape::default(), "replay");
     }
 }
