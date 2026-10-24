@@ -43,6 +43,8 @@ struct FakeGitHub {
     prs: Mutex<Vec<FakePr>>,
     enqueued: Mutex<Vec<String>>,
     comments: Mutex<Vec<(u64, String)>>,
+    /// PR numbers GitHub is merging (queued or auto-merge).
+    merging: Mutex<Vec<u64>>,
 }
 
 impl FakeGitHub {
@@ -52,6 +54,7 @@ impl FakeGitHub {
             prs: Mutex::new(Vec::new()),
             enqueued: Mutex::new(Vec::new()),
             comments: Mutex::new(Vec::new()),
+            merging: Mutex::new(Vec::new()),
         }
     }
 
@@ -144,6 +147,11 @@ impl Forge for FakeGitHub {
 
     async fn check_runs(&self, _sha: &str) -> Result<Vec<CheckRun>, ForgeError> {
         Ok(Vec::new())
+    }
+
+    async fn merging(&self, node_id: &str) -> Result<bool, ForgeError> {
+        let merging = self.merging.lock().unwrap();
+        Ok(merging.iter().any(|n| format!("PR_{n}") == node_id))
     }
 
     async fn close_pr(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
@@ -680,22 +688,6 @@ async fn another_repos_db_is_reported_as_unmapped_not_graft_moved() {
     assert!(err.to_string().contains("another repo"), "{err}");
 }
 
-async fn fail(w: &World, changeset: ChangesetId, check: &str) {
-    w.api
-        .attest(
-            &attest_cx(),
-            Attest {
-                repo: REPO.to_owned(),
-                changeset,
-                check: check.to_owned(),
-                passed: false,
-                url: "https://ci.example/2".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
-}
-
 fn short(id: ChangesetId) -> String {
     id.to_string()[..13].to_owned()
 }
@@ -768,28 +760,6 @@ async fn an_excluded_land_is_reverted_and_the_open_batch_is_recut_without_it() {
         .run()
         .await;
     assert!(err.is_err());
-}
-
-#[tokio::test]
-async fn drop_failed_reverts_lands_with_a_failed_check() {
-    let w = World::new().await;
-    w.start().await;
-    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
-    let b = w.land(&[("b.txt", "b1\n")], "add b", 2).await;
-    fail(&w, b, "ci/test").await;
-    let run = w
-        .batcher_with(&w.db, |c| c.drop_failed = true)
-        .run()
-        .await
-        .unwrap();
-    assert_eq!(run.dropped.len(), 1);
-    assert_eq!(run.dropped[0].0, b);
-    let rec = opened(run.outcome);
-    let squash = support::branch(&w.upstream, "graft/batch-1").unwrap();
-    let main = support::branch(&w.upstream, "main").unwrap();
-    assert_eq!(w.changed(&main, &squash), ["a.txt"]);
-    assert_eq!(rec.lands, 3);
-    assert!(rec.body.contains("failed ci/test"), "{}", rec.body);
 }
 
 #[tokio::test]
@@ -895,4 +865,180 @@ async fn a_cut_never_splits_a_dropped_land_from_its_revert() {
     let squash = support::branch(&w.upstream, "graft/batch-1").unwrap();
     let main = support::branch(&w.upstream, "main").unwrap();
     assert_eq!(w.changed(&main, &squash), ["b.txt"]);
+}
+
+#[tokio::test]
+async fn a_drop_that_conflicts_part_way_still_supersedes_the_open_batch() {
+    let w = World::new().await;
+    w.start().await;
+    let b = w
+        .land(&[("shared.txt", "one\nB\nthree\n")], "edit shared", 1)
+        .await;
+    w.land(&[("shared.txt", "one\nC\nthree\n")], "edit shared again", 2)
+        .await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 3).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+
+    // Newest first: a reverts, then b conflicts with the edit after it.
+    let run = w
+        .batcher_with(&w.db, |c| c.exclude = vec![b, a])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(run.dropped.len(), 1);
+    assert_eq!(run.dropped[0].0, a);
+    assert!(matches!(run.outcome, BatchOutcome::Conflict { .. }));
+    let settled = run.settled.expect("the stale batch is superseded");
+    assert_eq!(
+        (settled.number, settled.state),
+        (first.number, BatchState::Rejected)
+    );
+    assert!(!w.github.prs()[0].open);
+
+    // The next run cuts a batch carrying a's revert.
+    let rec = opened(w.batcher().run().await.unwrap().outcome);
+    assert_eq!(rec.number, 2);
+    let squash = support::branch(&w.upstream, "graft/batch-2").unwrap();
+    let main = support::branch(&w.upstream, "main").unwrap();
+    assert_eq!(w.changed(&main, &squash), ["shared.txt"]);
+}
+
+#[tokio::test]
+async fn a_revert_left_by_an_interrupted_run_supersedes_the_open_batch() {
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    opened(w.batcher().run().await.unwrap().outcome);
+    // A run reverted a on the line, then died before closing the PR.
+    let tip = w.tip(LINE).await;
+    let revert = w
+        .api
+        .revert(
+            &cx(),
+            graft_proto::types::Revert {
+                repo: REPO.to_owned(),
+                changeset: a,
+                onto: tip.unwrap(),
+                workspace: None,
+            },
+        )
+        .await
+        .unwrap();
+    move_line(&w.api, LINE, tip, revert).await;
+
+    let run = w.batcher().run().await.unwrap();
+    assert!(run.dropped.is_empty());
+    assert_eq!(run.settled.unwrap().state, BatchState::Rejected);
+    let rec = opened(run.outcome);
+    let squash = support::branch(&w.upstream, &rec.branch).unwrap();
+    let main = support::branch(&w.upstream, "main").unwrap();
+    assert_eq!(w.changed(&main, &squash), ["b.txt"]);
+    assert!(rec.body.contains("reverted on the line"), "{}", rec.body);
+}
+
+#[tokio::test]
+async fn a_batch_github_is_merging_is_not_closed() {
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    w.github
+        .merging
+        .lock()
+        .unwrap()
+        .push(first.pr_number.unwrap());
+    let run = w
+        .batcher_with(&w.db, |c| c.exclude = vec![a])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(run.dropped.len(), 1, "the line still drops it");
+    match run.outcome {
+        BatchOutcome::Waiting(rec) => {
+            assert!(rec.detail.contains("merge queue"), "{}", rec.detail)
+        }
+        other => panic!("expected to wait, got {other:?}"),
+    }
+    assert!(w.github.prs()[0].open);
+    assert!(w.github.comments().is_empty());
+}
+
+#[tokio::test]
+async fn a_merged_cut_before_a_sync_does_not_reapply_its_lands() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    w.push_main(&[("m.txt", "m1\n")], "upstream");
+    // Held by age, the line syncs onto the moved main; then b lands and a
+    // one-land batch is cut before the sync.
+    let held = |c: &mut BatchConfig| c.max_age_ms = Some(i64::MAX);
+    let run = w.batcher_with(&w.db, held).run().await.unwrap();
+    assert!(run.synced.is_some());
+    w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    let rec = opened(
+        w.batcher_with(&w.db, |c| c.max_lands = Some(1))
+            .run()
+            .await
+            .unwrap()
+            .outcome,
+    );
+    assert_eq!(rec.lands, 1);
+    // The operator merges it, main moves on, and an agent edits the file
+    // the merged batch added: re-applying the batch would conflict on it.
+    w.github.squash_merge(rec.pr_number.unwrap());
+    git(&w.work, &["fetch", "-q", "origin"]);
+    git(&w.work, &["reset", "-q", "--hard", "origin/main"]);
+    w.push_main(&[("n.txt", "n1\n")], "after the merge");
+    w.land(&[("a.txt", "a2\n")], "more a", 3).await;
+
+    let run = w.batcher().run().await.unwrap();
+    assert_eq!(run.settled.unwrap().state, BatchState::Merged);
+    assert!(run.synced.is_some());
+    let rec = opened(run.outcome);
+    assert_eq!(rec.lands, 2, "b and the new a edit");
+    let squash = support::branch(&w.upstream, &rec.branch).unwrap();
+    let main = support::branch(&w.upstream, "main").unwrap();
+    assert_eq!(w.changed(&main, &squash), ["a.txt", "b.txt"]);
+    assert_eq!(w.show(&squash, "a.txt"), "a2");
+    assert!(w.files_at(&squash).contains(&"n.txt".to_owned()));
+}
+
+#[test]
+fn a_db_from_before_batch_cuts_opens_and_its_lines_are_not_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("old.sqlite");
+    let id = ChangesetId(graft_model::ObjectId([3; 32]));
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE batch_lines (
+                line TEXT PRIMARY KEY,
+                synced BLOB NOT NULL,
+                sync_from BLOB NOT NULL,
+                start BLOB NOT NULL
+            ) WITHOUT ROWID;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO batch_lines VALUES ('integration', ?1, ?1, ?1)",
+            [&id.0.0[..]],
+        )
+        .unwrap();
+    }
+    let db = MirrorDb::open(&path).unwrap();
+    let state = db.batch_line(LINE).unwrap().unwrap();
+    assert_eq!((state.synced, state.start), (id, id));
+    assert_eq!(state.start_base, None, "unknown, not guessed");
+    db.put_batch_drop(LINE, id, id, "why").unwrap();
+    assert_eq!(
+        db.batch_drop_reason(LINE, id).unwrap().as_deref(),
+        Some("why")
+    );
+    let mut next = state;
+    next.start_base = Some(id);
+    db.set_batch_line(LINE, &next).unwrap();
+    drop(db);
+    let db = MirrorDb::open(&path).unwrap();
+    assert_eq!(db.batch_line(LINE).unwrap().unwrap().start_base, Some(id));
 }

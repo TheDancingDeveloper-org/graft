@@ -42,7 +42,7 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
   reconcile --config <file> --line <l> (--land | --discard)
                                         resolve an export divergence by hand
   pr-batch <line> --base <branch> --config <file> [--track]
-           [--exclude <changeset>]... [--drop-failed] [--reason <text>]
+           [--exclude <changeset>]... [--reason <text>]
            [--max-lands <n>] [--max-age <seconds>]
                                         sync an integration line onto the
                                         followed base, export its net change
@@ -537,7 +537,6 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     let mut config = None;
     let mut track = false;
     let mut exclude = Vec::new();
-    let mut drop_failed = false;
     let mut reason = None;
     let mut max_lands = None;
     let mut max_age_ms = None;
@@ -559,7 +558,6 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
                         CmdError::Usage(format!("--exclude: not a changeset: {v}"))
                     })?);
             }
-            "--drop-failed" => drop_failed = true,
             "--reason" => reason = Some(value("--reason")?),
             "--max-lands" => {
                 let n: usize = value("--max-lands")?
@@ -573,7 +571,9 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
             "--max-age" => {
                 let secs: i64 = value("--max-age")?
                     .parse()
-                    .map_err(|_| CmdError::Usage("--max-age needs seconds".into()))?;
+                    .ok()
+                    .filter(|s| *s >= 0)
+                    .ok_or_else(|| CmdError::Usage("--max-age needs seconds".into()))?;
                 max_age_ms = Some(secs.saturating_mul(1000));
             }
             s if s.starts_with('-') => return Err(CmdError::Usage(format!("unknown flag {s}"))),
@@ -595,14 +595,13 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     }
     let api = Server::connect(&file.server, token(file.token_file.as_deref())?).await?;
     let db = MirrorDb::open(&file.db).map_err(MirrorError::from)?;
-    if track && (!exclude.is_empty() || drop_failed) {
+    if track && !exclude.is_empty() {
         return Err(CmdError::Usage(
-            "--track only reads; --exclude and --drop-failed change the line".into(),
+            "--track only reads; --exclude changes the line".into(),
         ));
     }
     let mut batch = BatchConfig::new(line, base, file.follow()?);
     batch.exclude = exclude;
-    batch.drop_failed = drop_failed;
     batch.drop_reason = reason;
     batch.max_lands = max_lands;
     batch.max_age_ms = max_age_ms;

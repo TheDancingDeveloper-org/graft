@@ -541,16 +541,12 @@ impl MirrorDb {
             .optional()
             .map_err(db_err)?;
         row.map(|(synced, sync_from, start, start_base)| {
-            let synced = id_col(synced).map(ChangesetId)?;
             Ok(BatchLine {
-                synced,
+                synced: id_col(synced).map(ChangesetId)?,
                 sync_from: id_col(sync_from).map(ChangesetId)?,
                 start: id_col(start).map(ChangesetId)?,
-                // A row from before the column: the base it last absorbed.
-                start_base: match start_base {
-                    Some(b) => id_col(b).map(ChangesetId)?,
-                    None => synced,
-                },
+                // A row from before the column: unknown, so no cut needs it.
+                start_base: start_base.map(id_col).transpose()?.map(ChangesetId),
             })
         })
         .transpose()
@@ -835,7 +831,7 @@ fn put_batch_line(conn: &Connection, line: &str, state: &BatchLine) -> Result<()
             &state.synced.0.0[..],
             &state.sync_from.0.0[..],
             &state.start.0.0[..],
-            &state.start_base.0.0[..],
+            state.start_base.as_ref().map(|b| &b.0.0[..]),
         ],
     )
     .map(drop)
