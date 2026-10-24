@@ -11,7 +11,7 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 | `image.env` | `GRAFT_IMAGE`, the image pinned by `@sha256` digest |
 | `server.toml` | graft-server config (`max_token_ttl_s = 2592000`, 30 days) |
 | `mirror.toml` | graft-mirror follows rustTorrent `main` into repo `rusttorrent` |
-| `mirror-fluent2.toml`, `mirror-vogt.toml` | graft-mirror-fluent2 and graft-mirror-vogt follow fluent2-egui and vogt `main` into repos `fluent2-egui` and `vogt` (trial 3) |
+| `mirror-fluent2.toml`, `mirror-vogt.toml` | graft-mirror-fluent2 and graft-mirror-vogt follow fluent2-egui `main` and vogt `rust-core` into repos `fluent2-egui` and `vogt` (trial 3) |
 | `up.sh` | idempotent deploy: bootstrap secrets, pull, config pre-flight, `up -d --wait`, readiness gate with rollback, health check |
 | `backup/` | backup script, systemd timer, `install.sh`, `restore-rehearsal.sh` (WI-2307) |
 | `monitoring/` | Prometheus alert rules and scrape config for the ops repo (WI-2307) |
@@ -73,11 +73,20 @@ graft-mirror follows one repository per process, so each followed GitHub
 repository is its own service, with its own config, token, volume and metrics
 port:
 
-| Service | Upstream (`main`) | graft repo | Config | Token | Volume | Port |
+| Service | Upstream branch → graft line | graft repo | Config | Token | Volume | Port |
 |---|---|---|---|---|---|---|
-| `graft-mirror` | rustTorrent | `rusttorrent` | `mirror.toml` | `mirror-token` | `graft-dev-mirror` | 17890 |
-| `graft-mirror-fluent2` | fluent2-egui | `fluent2-egui` | `mirror-fluent2.toml` | `mirror-token-fluent2` | `graft-dev-mirror-fluent2` | 17891 |
-| `graft-mirror-vogt` | vogt | `vogt` | `mirror-vogt.toml` | `mirror-token-vogt` | `graft-dev-mirror-vogt` | 17892 |
+| `graft-mirror` | rustTorrent `main` → `main` | `rusttorrent` | `mirror.toml` | `mirror-token` | `graft-dev-mirror` | 17890 |
+| `graft-mirror-fluent2` | fluent2-egui `main` → `main` | `fluent2-egui` | `mirror-fluent2.toml` | `mirror-token-fluent2` | `graft-dev-mirror-fluent2` | 17891 |
+| `graft-mirror-vogt` | vogt `rust-core` → `rust-core` | `vogt` | `mirror-vogt.toml` | `mirror-token-vogt` | `graft-dev-mirror-vogt` | 17892 |
+
+vogt follows `rust-core`, not `main` (operator decision): the Rust port
+(crate `engine/core`) lives there. The mirror fetches only the branch its
+config names, so the initial import is `rust-core`'s history, and the graft
+repository `vogt` has the line `rust-core` and no `main`. The line keeps the
+branch's name so that `graft-mirror pr-batch <line> --base rust-core` reads
+plainly: trial-3 batch PRs for vogt target `rust-core`. A trial line on vogt
+forks from `rust-core` (for `trial/create-trial-line.sh`, the import maps
+`refs/heads/rust-core`, not `main`).
 
 There is no separate import step. `up.sh` creates every repository
 (`admin repo create`, idempotent) and mints each mirror's token before it
