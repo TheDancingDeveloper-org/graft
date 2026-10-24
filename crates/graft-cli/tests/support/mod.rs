@@ -501,6 +501,9 @@ pub fn graft(cwd: &Path) -> Command {
     cmd.current_dir(cwd)
         .env_remove("GRAFT_ENDPOINT")
         .env_remove("GRAFT_TOKEN")
+        // Tests run inside Vogt sessions; keep their identity out.
+        .env_remove("VOGT_SESSION_ID")
+        .env_remove("VOGT_WORK_ITEM")
         .env("NO_COLOR", "1");
     cmd
 }

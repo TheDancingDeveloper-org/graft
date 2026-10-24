@@ -11,6 +11,7 @@ mod cli;
 mod cmd;
 mod conn;
 mod error;
+mod identity;
 mod render;
 
 use std::process::ExitCode;

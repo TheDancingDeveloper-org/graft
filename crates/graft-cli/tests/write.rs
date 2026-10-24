@@ -371,3 +371,40 @@ fn land_through_the_pr_bridge() {
     let a = run(&app, &["--json", "land"]).code(5);
     assert_eq!(error_kind(&a), json!("rejected"));
 }
+
+/// `VOGT_SESSION_ID` and `VOGT_WORK_ITEM` become the draft's `vogt.session`
+/// and `vogt.work_item` metadata: the draft id matches one committed with
+/// the same `--meta`, and differs from one committed without (WI-2350).
+#[test]
+fn vogt_session_and_work_item_reach_the_draft() {
+    let commit = |env: bool, meta: &[&str]| {
+        let s = serve();
+        let dir = scratch();
+        let app = clone_app(&s, dir.path());
+        fs::write(app.join("src/lib.rs"), "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+        let mut cmd = wc_cmd(&app);
+        if env {
+            cmd.env("VOGT_SESSION_ID", "ses_test")
+                .env("VOGT_WORK_ITEM", "WI-9");
+        }
+        let out = cmd
+            .args(["--json", "commit", "-m", "add c"])
+            .args(meta)
+            .assert()
+            .success();
+        json_out(out.get_output())["id"].clone()
+    };
+    let from_env = commit(true, &[]);
+    let from_meta = commit(
+        false,
+        &[
+            "--meta",
+            "vogt.session=ses_test",
+            "--meta",
+            "vogt.work_item=WI-9",
+        ],
+    );
+    let bare = commit(false, &[]);
+    assert_eq!(from_env, from_meta);
+    assert_ne!(from_env, bare);
+}

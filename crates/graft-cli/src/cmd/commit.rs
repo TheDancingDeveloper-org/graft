@@ -8,12 +8,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use graft_client::workcopy::{CommitLimits, CommitOptions};
 use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat};
-use graft_model::{Author, AuthorKind, Metadata, Timestamp};
+use graft_model::{Author, Metadata, Timestamp};
 use serde_json::json;
 
 use crate::cli::{CommitArgs, Global};
 use crate::conn::{begin, runtime};
 use crate::error::Failure;
+use crate::identity;
 use crate::render::{self, print_json, short};
 
 /// Commits the working copy's changes.
@@ -24,7 +25,8 @@ pub(crate) fn run(g: &Global, args: &CommitArgs) -> Result<(), Failure> {
         return Err(Failure::usage("a commit needs a message: pass -m"));
     }
     let author = author(args)?;
-    let metadata = metadata(&args.meta)?;
+    let mut metadata = metadata(&args.meta)?;
+    identity::add_vogt_metadata(&mut metadata);
     let opts = CommitOptions {
         message: args.message.clone(),
         author,
@@ -78,34 +80,23 @@ pub(crate) fn run(g: &Global, args: &CommitArgs) -> Result<(), Failure> {
     })
 }
 
-/// The author: `--author`, else `GRAFT_AUTHOR_NAME` and `GRAFT_AUTHOR_EMAIL`,
-/// else the user name.
+/// The author: `--author`, else the default identity (`GRAFT_AUTHOR_NAME`
+/// and `GRAFT_AUTHOR_EMAIL`, else the git author, else the user name). The
+/// kind is `--author-kind`, else `GRAFT_AUTHOR_KIND`, else `agent` in a Vogt
+/// session, else `human`.
 fn author(args: &CommitArgs) -> Result<Author, Failure> {
     let kind_text = args
         .author_kind
         .clone()
-        .or_else(|| env::var("GRAFT_AUTHOR_KIND").ok())
-        .unwrap_or_else(|| "human".to_owned());
-    let kind = match kind_text.as_str() {
-        "human" => AuthorKind::Human,
-        "agent" => AuthorKind::Agent,
-        "bot" => AuthorKind::Bot,
-        "ci" => AuthorKind::Ci,
-        other => {
-            return Err(Failure::usage(format!(
-                "unknown author kind {other:?}: use human, agent, bot or ci"
-            )));
-        }
-    };
+        .unwrap_or_else(|| identity::default_kind_text("human"));
+    let kind = identity::parse_kind(&kind_text).ok_or_else(|| {
+        Failure::usage(format!(
+            "unknown author kind {kind_text:?}: use human, agent, bot or ci"
+        ))
+    })?;
     let (name, email) = match &args.author {
         Some(text) => parse_author(text)?,
-        None => {
-            let user = env::var("USER").unwrap_or_else(|_| "graft".to_owned());
-            let name = env::var("GRAFT_AUTHOR_NAME").unwrap_or_else(|_| user.clone());
-            let email =
-                env::var("GRAFT_AUTHOR_EMAIL").unwrap_or_else(|_| format!("{user}@localhost"));
-            (name, email)
-        }
+        None => identity::default_name_email(),
     };
     Ok(Author { name, email, kind })
 }
