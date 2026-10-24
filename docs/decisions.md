@@ -91,7 +91,7 @@ Already decided by the operator (2026-10-22):
 | D25 | Post-land checks on the batch line | **Decided (phase 2):** each land on an integration line is checked after it lands and marked good or bad; a bad land is reverted and never batched. Direct lines unchanged. Starts only with the graft-primary authority switch; D22 stands until then | Phase 2 |
 | D26 | Commits in a batch PR | **Decided:** one commit per land, keeping author, session and work item; squash only as a fallback; no review state in graft. Revises D21 | — |
 | D27 | Pre-land check in `graft land` | **Decided:** conflict preview and draft-overlap check by default; a real conflict stops the land; `--no-check` skips | — |
-| D28 | Batch PR review and merge | **Decided:** oversight reviews the batch PR as a whole; `land-pr` merges it once GitHub's required checks pass; graft still never merges. Amends D21, D26 | — |
+| D28 | Batch PR review and merge | **Decided:** oversight reviews the batch PR as a whole; `land-pr` rebase-merges it past the squash queue (`--admin`) once GitHub's required checks pass; graft still never merges. Amends D21, D26 | — |
 
 ---
 
@@ -780,8 +780,17 @@ operator's merge is the approval"). The design is
 - **Blockers name the land**, by its commit (D26). They are fixed forward
   by a new land on the integration line or by dropping the land; an open
   batch is not rewritten.
-- **Merge shape.** `land-pr` merges with rebase-merge, keeping the per-land
-  commits of D26.
+- **Merge shape: batch PRs bypass the merge queue** (operator, 2026-10-24,
+  WI-2361). The queue squashes, which would collapse the per-land commits of
+  D26. So for a head named `graft/batch-<n>`, `land-pr` waits for the
+  required checks on the PR head, then runs
+  `gh pr merge --rebase --admin --match-head-commit <sha>` and asserts the PR
+  is MERGED. `pr-batch` keeps the `graft/batch-<n>` branch name, which is what
+  `land-pr` keys on.
+- **Ordinary PRs still squash through the queue.** Workers' feature and docs
+  PRs are unchanged: they land through the merge queue, and a worker whose
+  branch conflicts still runs `git merge origin/main` (never a rebase or
+  force-push).
 - **Checks are the forge's.** GitHub's required checks run on the PR as
   they do on any PR. graft runs no build, test or CI (D22 holds).
 - **PR body.** `pr-batch` ends the body with how the PR is merged.
