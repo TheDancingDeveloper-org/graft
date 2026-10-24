@@ -10,6 +10,7 @@ use graft_store::{MetaStore, MetaTxn, ObjectStore, RepoId, Write};
 
 use crate::access::{Need, require};
 use crate::protect::DELETE_WAIT_MS;
+use crate::write::put_concurrently;
 use crate::{Engine, errors};
 
 /// The holder an upload is recorded under until a changeset holds the
@@ -48,13 +49,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         repo: RepoId,
         uploads: Vec<Upload>,
     ) -> Result<(), ApiError> {
-        for u in uploads {
-            self.objects
-                .put(repo, u.id, u.bytes)
-                .await
-                .map_err(errors::store)?;
-        }
-        Ok(())
+        // Concurrently, so the syncs of one call overlap instead of
+        // queueing one behind another (WI-2330). Each put is still durable
+        // before this returns.
+        let frames: Vec<(ObjectId, Vec<u8>)> =
+            uploads.into_iter().map(|u| (u.id, u.bytes)).collect();
+        put_concurrently(&*self.objects, repo, frames.iter().collect()).await
     }
 
     pub(crate) async fn do_put_objects(

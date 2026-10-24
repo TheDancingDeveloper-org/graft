@@ -1017,7 +1017,7 @@ const MAX_PUT_THREADS: usize = 32;
 /// Object stores here do synchronous work inside their futures (the file
 /// system and memory stores, and SQLite's own writer thread), so each
 /// thread drives its puts with [`block_on`] and needs no runtime.
-async fn put_concurrently<O: ObjectStore>(
+pub(crate) async fn put_concurrently<O: ObjectStore>(
     objects: &O,
     repo: RepoId,
     frames: Vec<&(ObjectId, Vec<u8>)>,
