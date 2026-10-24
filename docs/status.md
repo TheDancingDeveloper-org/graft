@@ -1,7 +1,7 @@
 # graft status: what's delivered (2026-10-24)
 
-- **As of:** `main` at `3fe907b` after #170 (the 2026-10-23 run, #82 to
-  #119, and the 2026-10-24 run, #120 to #170), under operator decision
+- **As of:** `main` at `3fe907b`, through #170 (the 2026-10-23 and
+  2026-10-24 runs, #82 through #170), under operator decision
   [D22](decisions.md#d22-phase-1-is-a-git-alternative), with D26 to D29.
 - **Review:** Vogt WI-2297. Its children are the backlog below.
 - **Numbers:** bench WI-2294, scale 1,000, local server
@@ -134,10 +134,13 @@ Against the phase-1 bar, `log -50` (about 1.6x) and `status` at 10k
 
 ### Git flow (branching bench, seed 2362, after WI-2372)
 
-With merge points and `line merge --sync`, graft reports the same
-conflicts as git across trunk, release-branch and git flow runs, merges
-`release/1.1 → main` clean, and needs at most 3 round trips per merge
-or pick, against git's 7 to 22.
+Source: the WI-2372 hand-off (#168). With merge points and `line merge
+--sync`, graft reports the same conflicts as git (18 of 18 blocks) and
+merges `release/1.1 → main` clean. A clean merge takes 1 round trip and
+a conflicted merge 3; git takes 2 per merge. Picks still cost 7 round
+trips through the carry path in the tracked and merge-base variants.
+The committed `bench/results/2026-10-24-branching/summary.md` predates
+#168 and will be regenerated.
 
 ## Open (phase 1)
 
@@ -145,17 +148,12 @@ Vogt is the source of truth.
 
 | Item | What |
 | --- | --- |
-| WI-2341 | read-path re-run on graft-dev (the 10k `sync` figure); results pending |
-| WI-2400 | read-path parity: `log` and `status` not slower than git |
+| WI-2341 | read-path re-run on graft-dev (the 10k `sync` figure); blocked, results pending |
+| WI-2400 | read-path parity: `log`, `status` and `sync` not slower than git; blocked |
 | WI-2314 | CI `test` job OOM flake: quarantined (#91); lift the quarantine once `oom_kill` stays at 0 for a day after the Node B memory fix |
 | WI-2329 | review leftovers, p4 |
 
-Blocked on the operator:
-- WI-2307: the alerts patch (backups and runbook merged in #97).
-- WI-2317: tailnet SSH.
-
 Deferred:
-- WI-2240, estate token front for Vogt sessions (D10), p4.
 - WI-2366, embedded single-binary mode, a future phase (p4).
 - The 100k bench.
 
@@ -168,3 +166,7 @@ Closed as not planned:
 - WI-2213, the rustTorrent cutover (D21, D22).
 - WI-2193, the Komodo deployment, superseded by the VM.
 - WI-2369, export raw-tree cost (not a bug).
+- WI-2240, estate token front for Vogt sessions (D10).
+
+Done since the last baseline: WI-2307 (graft-dev backups and alerts),
+WI-2317 (tailnet SSH narrowed).

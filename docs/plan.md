@@ -1,6 +1,6 @@
 # graft build plan
 
-- **Status:** Draft 2 (2026-10-23, backlog updated 2026-10-24): re-phased by [D22](decisions.md#d22-phase-1-is-a-git-alternative).
+- **Status:** Draft 2 (2026-10-23; backlog updated 2026-10-24, through #170): re-phased by [D22](decisions.md#d22-phase-1-is-a-git-alternative).
   What is delivered is in [status.md](status.md).
 - **Design:** [design.md](design.md) · **Decisions:** [decisions.md](decisions.md)
 
@@ -31,7 +31,7 @@ and clone speed, history integrity.
 ### Phase 1 backlog
 
 The Vogt review WI-2297 holds this list; Vogt is the source of truth for its
-state. Delivered on 2026-10-23 (#82 to #111), all done:
+state. Delivered on 2026-10-23 (#82 through #111), all done:
 
 - WI-2296 `graft land` line-merges by default (#83, #84).
 - WI-2298 every line defaults to `direct` (#85).
@@ -52,13 +52,13 @@ state. Delivered on 2026-10-23 (#82 to #111), all done:
 - WI-2313 many working copies per host (#102).
 - WI-2315 `/mcp` owner-or-admin checks (#101).
 
-Delivered on 2026-10-23 and 2026-10-24 (#112 to #170), all done:
+Delivered on 2026-10-23 and 2026-10-24 (#112 through #170), all done:
 
 - WI-2310 draft overlap (#113, #115, #117); WI-2323 commit_run group commit
   (#118); WI-2329 review follow-ups (#119, leftovers p4); WI-2304 10k bench (#116).
 - WI-2330 concurrent import stores (#120).
 - WI-2336 fit assessment (#121); WI-2270 trial-1 write-up (#128).
-- WI-2349 D25 (phase 2), D26, D27 design (#122, #127), then step 0 `Rebase`
+- WI-2349 D25, D26, D27 design (#122); WI-2353 D25 is phase 2, D22 restored (#127). WI-2349 then step 0 `Rebase`
   `dry_run` (#125), step 5 per-land batch commits (#134), step 6 metadata
   matches the token (#131), step 7 pre-land check (#132), step 8a rollout (#140).
 - WI-2350 attribution on drafts and lands (#123).
@@ -87,14 +87,14 @@ What remains:
 
 | Item | What |
 | --- | --- |
-| WI-2341 | read-path bench re-run on graft-dev (10k `sync`); results pending |
+| WI-2341 | read-path bench re-run on graft-dev (10k `sync`); blocked, results pending |
 | WI-2400 | read-path parity: `log` and `status` not slower than git |
 | WI-2314 | CI OOM flake: quarantined (#91); remove the quarantine after a day with `oom_kill` at 0 |
-| WI-2307 | graft-dev alerts patch (blocked on the operator; backups #97 done) |
-| WI-2317 | tailnet SSH (blocked on the operator) |
 | WI-2329 | review leftovers (p4) |
-| WI-2240 | estate token front for Vogt sessions (D10): deferred (p4) |
 | WI-2366 | embedded single-binary mode: a future phase (p4) |
+
+Done: WI-2307 (graft-dev alerts), WI-2317 (tailnet SSH). Won't do: WI-2240
+(D10 token front).
 
 Phase 2, not started: D25 post-land checks on the batch line (design §8.7)
 and §11.4 steps 1 to 4.
