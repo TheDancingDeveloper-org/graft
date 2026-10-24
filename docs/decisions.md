@@ -46,7 +46,11 @@ Already decided by the operator (2026-10-22):
   post-land checks on the batch integration line only, revising D22; and
   batch PRs that carry one commit per land, revising D21. See
   [D25](#d25-post-land-checks-on-the-batch-line) and
-  [D26](#d26-one-commit-per-land-in-a-batch-pr).
+  [D26](#d26-one-commit-per-land-in-a-batch-pr). graft keeps no review state;
+  review stays on the GitHub batch PR.
+- **D27** (operator, 2026-10-24): `graft land` runs the conflict preview and
+  the draft-overlap check by default and stops on a real conflict. See
+  [D27](#d27-pre-land-check-in-graft-land).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -79,7 +83,8 @@ Already decided by the operator (2026-10-22):
 | D23 | Line fork points | **Decided:** a new line writes one fork row instead of copying its parent's line index; no data migration | — |
 | D24 | Draft overlap visibility | **Decided:** a `repo:<r>:drafts` scope, granted only by `admin`; paths and principals, never contents | — |
 | D25 | Post-land checks on the batch line | **Decided:** each land on an integration line is checked after it lands and marked good or bad; a bad land is reverted and never batched. Direct lines unchanged. Revises D22 | — |
-| D26 | Commits in a batch PR | **Decided:** one commit per land, keeping author, session and work item; squash only as a fallback. Revises D21 | — |
+| D26 | Commits in a batch PR | **Decided:** one commit per land, keeping author, session and work item; squash only as a fallback; no review state in graft. Revises D21 | — |
+| D27 | Pre-land check in `graft land` | **Decided:** conflict preview and draft-overlap check by default; a real conflict stops the land; `--no-check` skips | — |
 
 ---
 
@@ -683,6 +688,10 @@ design is [design.md §11.4](design.md#114-batch-pr-export).
   body and the commit say why.
 - **Bounds.** A batch carries at most 500 per-land commits; a line with more
   lands is cut into consecutive batches. The PR body keeps D21's caps.
+- **No review state in graft.** graft adds no review verb, approval or
+  review metadata. Review happens on the GitHub batch PR, commit by commit,
+  and the operator's merge is the approval. graft serves the diffs (the
+  read API) to whatever client does the reviewing.
 - **Identity.** It is only useful once lands carry identity: gap 5 of the
   fit assessment (the CLI passes `VOGT_SESSION_ID` and `VOGT_WORK_ITEM`) is
   a separate small item, and should land first.
@@ -695,6 +704,45 @@ Rejected:
 
 - One PR per land (the removed G2.6 bridge): CI and review per land again.
 - Squash only (D21 as written): one review and one blame entry per batch.
+- A review record in graft (a review verb or `review.url` metadata, fit
+  assessment gap 2). It duplicates what the PR already holds, and graft
+  would have to keep it in step with GitHub.
 - Exporting the integration line's history as is: its sync merge
   changesets would put graft's merges into GitHub's history and need a
   merge-commit merge.
+
+## D27. Pre-land check in `graft land`
+
+**Decided (operator, 2026-10-24): `graft land` runs the conflict preview
+(`status --upstream`) and the draft-overlap check (`status --drafts`) by
+default, and stops on a real conflict. `--no-check` skips them.** The design
+is [design.md §8.8](design.md#88-pre-land-check-in-graft-land).
+
+This is separate from D25: it runs in the client, before the land, on every
+line, and runs no build or test. D22's "no build, test or CI in the land
+path" still holds.
+
+- **Real conflict.** A file the stack and the line tip both changed that
+  line merge (D16), under the land's `--merge` mode, cannot merge. Files
+  that both sides changed but that merge cleanly are reported and don't
+  stop the land.
+- **Draft overlap** is reported, never a stop. It needs the
+  `repo:<r>:drafts` scope (D24) and is skipped without it.
+- **Advisory.** The server's land is still the authority. A tip that moves
+  after the check is caught by `Land` as before. No server state and no
+  policy change.
+- **Clients.** graft has no LLM interface. The check belongs to the client
+  surfaces (the CLI, the MCP `land` tool), and the same result is in the
+  JSON output, so every client gets the same behaviour.
+
+Why: the fit assessment (WI-2336, §4.2). Several clients often work on the
+same files. Today they find a conflict only when the land fails, and they
+see who else is on those paths only if they ask.
+
+Rejected:
+
+- Opt-in (`--check`). Clients that don't know to ask never get the warning.
+- A server-side gate. It adds state and a policy for something the CAS
+  already decides.
+- Stopping on draft overlap. An overlap is not a conflict, and the other
+  draft may never land.

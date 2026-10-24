@@ -1194,7 +1194,7 @@ pass. The commands live with the checker.
 
 ```mermaid
 sequenceDiagram
-  participant A as agent
+  participant A as client (CLI, MCP, API)
   participant S as graft server
   participant C as post-land checker (graft-attester)
   participant M as graft-mirror pr-batch
@@ -1261,6 +1261,40 @@ The `attested` and `queued` policies stay off.
 **Bounds.** The checker's queue is bounded and the journal is its backlog.
 A check's log is capped. `GetLandChecks` is paginated. A flaky check
 retried and passing is counted in `graft_post_land_flakes_total{check}`.
+
+### 8.8 Pre-land check in `graft land`
+
+[D27](decisions.md#d27-pre-land-check-in-graft-land): before it sends
+`Land`, `graft land` runs two read-only checks by default, on every line:
+
+1. **Conflict preview**, the same read as `graft status --upstream`
+   (WI-2309): the files the stack and the line tip both changed since the
+   stack's base. For each such file the client asks the server for a
+   dry-run line merge (`Rebase` with nothing moved) under the land's
+   `--merge` mode. A file that merges cleanly is reported and does not
+   stop the land. A file that does not (a **real conflict**) stops it:
+   `graft land` exits 3 with the paths, as a conflicted land does, and
+   sends nothing. `--sync` then writes the conflicts into the files as it
+   does today.
+2. **Draft overlap**, the same read as `graft status --drafts` (D24): the
+   other live workspaces with open drafts on the stack's paths. It is
+   reported (workspace, owner, session, work item, age) and never stops
+   the land. Without the `repo:<r>:drafts` scope it is skipped with a one-
+   line note.
+
+`--no-check` skips both. JSON output carries both results under
+`preflight`, so any client (the CLI, MCP, an API caller) reads the same
+shape. The MCP `land` tool runs the same checks.
+
+- **Advisory, not a gate.** The server's land stays the authority: the tip
+  can move between the check and the CAS, and a conflict then comes back
+  from `Land` as before. No server state is added and no land policy
+  changes.
+- **Bounded.** Both reads are paginated and capped (the `--upstream` and
+  `--drafts` limits); a capped read says so and does not stop the land on
+  what it did not see.
+- **Cost.** One upstream diff page, one dry-run rebase over the both-changed
+  files, one overlap page: O(the change), never the history.
 
 ## 9. Client and working copy
 
@@ -1465,7 +1499,7 @@ at once. That is how the mirror avoids split-brain.
 
 ### 11.4 Batch PR export
 
-Under [D21](decisions.md#d21-batch-pr-export) agents land on a graft
+Under [D21](decisions.md#d21-batch-pr-export) clients land on a graft
 integration line forked from the followed `main`, and `graft-mirror pr-batch
 <line> --base main` delivers it to GitHub as one PR at a time, which the
 operator merges. [D26](decisions.md#d26-one-commit-per-land-in-a-batch-pr)
@@ -1481,7 +1515,7 @@ B ── c1 ── c2 ── … ── ck        (k ≤ 500; sync changesets sk
 
 ck:  tree      = export(replayed snapshot k); at k = last, = export(integration tip)
      parent    = c(k-1), or B
-     author    = the land's author (name, email; kind agent or human), land time
+     author    = the land's author (name, email and kind, as the client recorded them), land time
      committer = the mirror identity, land time
      message   = the land's message, then:
        Graft-Changeset: <land id>
@@ -1510,6 +1544,9 @@ ck:  tree      = export(replayed snapshot k); at k = last, = export(integration 
 - **PR body.** As D21: the land table (now with each land's commit sha),
   the caps (60,000 characters, at most 8 checks per land) and the
   `Graft-Batch` trailers.
+- **Review.** graft keeps no review state: no review verb, approval or
+  review metadata. Review happens on the GitHub batch PR, per commit, and
+  the operator's merge is the approval.
 - **Cut.** A batch ends at the cut point of §8.7 step 6 on a checked line,
   at the tip otherwise, and at 500 lands at most; the rest wait for the next
   batch.
@@ -1518,7 +1555,7 @@ ck:  tree      = export(replayed snapshot k); at k = last, = export(integration 
   trailer. A squash-merge maps the batch tip as D21 does. Rejected batches
   leave the line as it is.
 
-**Implementation steps (WI-2349 follow-ups).** Each is one plan item on
+**Implementation steps (WI-2349 follow-ups, for §8.7, §8.8 and this section).** Each is one plan item on
 disjoint crates:
 
 1. WI-2293: the attester's journal read survives a failed `GetWorkspace`
@@ -1538,7 +1575,11 @@ disjoint crates:
    for the commit builder). Golden test for the chain's shas.
 6. CLI identity (fit assessment gap 5, its own item, `graft-cli`): needed
    for D26's authors, and lands before step 5 ships.
-7. graft-dev: switch the trial integration line to `checks = "post-land"`,
+7. The pre-land check in `graft land` and the MCP `land` tool
+   (`graft-cli`, `graft-mcp`; §8.8, D27). The dry-run rebase uses the
+   existing `Rebase` RPC; if it cannot run without moving a ref, an
+   interface PR adds a `dry_run` flag in `graft-proto` first.
+8. graft-dev: switch the trial integration line to `checks = "post-land"`,
    run the attester profile, and measure on the bench harness: bad-land
    detection time, revert time, and batches cut per day.
 
