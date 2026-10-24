@@ -946,7 +946,6 @@ fn raw_trees_over_subdirectories_export_every_object() {
 /// Names that check out over git's own metadata: `.git` in any case, its
 /// NTFS short name, and an HFS+-ignorable variant. And a `/` inside a name.
 #[test]
-#[ignore = "WI-2359: these import, or fail with an untyped Read error"]
 fn git_metadata_names_are_a_typed_refusal() {
     for name in [&b".git"[..], b".GIT", b"git~1", b".git\xe2\x80\x8c", b"a/b"] {
         let mut git = Git::init("git-name");

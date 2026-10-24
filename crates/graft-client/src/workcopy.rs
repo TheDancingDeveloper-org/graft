@@ -69,6 +69,16 @@ pub const DEFAULT_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// directory with another tool's checkout.
 pub const FOREIGN_METADATA: [&str; 4] = [".git", ".hg", ".jj", ".svn"];
 
+/// Whether `name` is one of [`FOREIGN_METADATA`] on some filesystem: matched
+/// case-insensitively, and for git also the NTFS and HFS+ variants
+/// ([`graft_model::path::is_git_metadata_name`]).
+pub fn is_foreign_metadata(name: &str) -> bool {
+    FOREIGN_METADATA
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(name))
+        || graft_model::path::is_git_metadata_name(name)
+}
+
 /// The ignore file written into `.graft/` and what it holds: a surrounding
 /// git checkout then ignores the whole directory with no rule of its own.
 const SELF_IGNORE: (&str, &str) = (".gitignore", "# graft working-copy state\n*\n");
@@ -1142,8 +1152,15 @@ fn parent_dir(root: &Path, path: &RepoPath, create: bool) -> Result<Option<PathB
 /// Writes one file (or symlink) and returns its stat. Refuses a path whose
 /// parent is not a real directory ([`parent_dir`]). The leaf itself is
 /// replaced, never followed: a rename or unlink acts on a symlink, not its
-/// target.
+/// target. Refuses a path through git's metadata directory.
 fn write_entry(root: &Path, path: &RepoPath, kind: EntryKind, data: &[u8]) -> Result<Stat> {
+    // Never write into another tool's metadata, whatever the server sent.
+    if path
+        .components()
+        .any(graft_model::path::is_git_metadata_name)
+    {
+        return Err(Error::UnsafePath(path.clone()));
+    }
     let parent = parent_dir(root, path, true)?.expect("created");
     let target = parent.join(path.name());
     match kind {
@@ -1228,7 +1245,7 @@ fn entry_path(prefix: Option<&RepoPath>, entry: &fs::DirEntry) -> Option<RepoPat
         return None;
     }
     match prefix {
-        None if FOREIGN_METADATA.contains(&name) => None,
+        None if is_foreign_metadata(name) => None,
         None => RepoPath::new(name).ok(),
         Some(p) => p.join(name).ok(),
     }
@@ -1415,6 +1432,28 @@ mod tests {
         let mut other = stat(999);
         other.ino = 8;
         assert!(needs_rehash(&stat(999), &other, index_written));
+    }
+
+    #[test]
+    fn writes_refuse_git_metadata_in_any_form() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            ".git/config",
+            ".GIT/hooks/x",
+            "a/git~1/config",
+            ".git\u{200c}/x",
+        ] {
+            let path = RepoPath::new(path).unwrap();
+            assert!(matches!(
+                write_entry(root.path(), &path, EntryKind::File, b"evil"),
+                Err(Error::UnsafePath(_))
+            ));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        for name in [".git", ".Git", ".HG", ".Jj", ".SVN", "git~1"] {
+            assert!(is_foreign_metadata(name), "{name}");
+        }
+        assert!(!is_foreign_metadata(".github"));
     }
 
     #[test]
