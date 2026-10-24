@@ -507,3 +507,39 @@ async fn tags_pushed_after_follow_starts_export_with_upstream_shas() {
     }
     assert_eq!(git(&dest, &["cat-file", "-t", "v1-outer"]), "tag");
 }
+
+/// A tag nested deeper than `TAG_CHAIN_MAX` is skipped and reported by name;
+/// the other tags of the poll still follow, and later polls stay quiet.
+#[tokio::test(flavor = "current_thread")]
+async fn a_too_deep_tag_chain_is_skipped_and_the_rest_follow() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let m = metrics();
+    let a = w.commit();
+    w.push();
+    git(&w.work, &["tag", "-a", "-m", "ok", "v1"]);
+    // v1 is one tag object deep, so the last `d` is exactly the maximum.
+    let mut prev = "v1".to_owned();
+    for i in 1..graft_mirror::git::TAG_CHAIN_MAX {
+        let name = format!("d{i}");
+        git(&w.work, &["tag", "-a", "-m", "nest", &name, &prev]);
+        prev = name;
+    }
+    git(&w.work, &["tag", "-a", "-m", "too deep", "deep", &prev]);
+    git(&w.work, &["push", "-q", "origin", "--tags"]);
+
+    let mut f = w.follower(&db, &m);
+    assert!(matches!(poll(&mut f).await, LineOutcome::Imported { .. }));
+    let tags = f.last_tags().clone();
+    assert_eq!(tags.too_deep, vec!["deep".to_owned()]);
+    let id_a = db.changeset_of(a).unwrap().unwrap();
+    assert!(tags.created.contains(&("v1".to_owned(), id_a)));
+    assert_eq!(tags.created.len(), graft_mirror::git::TAG_CHAIN_MAX);
+    let deep = current_ref(&w.api, &cx(), REPO, &tag_ref("deep"))
+        .await
+        .unwrap();
+    assert_eq!(deep, None, "the too-deep tag is not created");
+
+    assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
+    assert!(f.last_tags().too_deep.is_empty(), "reported once");
+}

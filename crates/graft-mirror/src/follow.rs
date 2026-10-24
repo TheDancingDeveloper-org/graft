@@ -99,6 +99,9 @@ pub struct TagReport {
     pub waiting: usize,
     /// Tags left for a later poll by the [`TAGS_PER_POLL`] bound.
     pub deferred: usize,
+    /// Tags nested deeper than [`crate::git::TAG_CHAIN_MAX`] tag objects:
+    /// skipped (not created in graft), reported once.
+    pub too_deep: Vec<String>,
 }
 
 /// A tag follow has finished with, by the upstream commit it saw.
@@ -371,7 +374,21 @@ where
         for (tag, id) in todo {
             let name = &tag.name;
             let objects = if tag.object != tag.commit {
-                self.mirror.tag_chain(tag.object).await?
+                match self.mirror.tag_chain(tag.object).await? {
+                    Some(objects) => objects,
+                    None => {
+                        // Skipped, not an error: one hostile tag must not
+                        // stop every other tag from following.
+                        tracing::warn!(
+                            repo = %repo, tag = %name,
+                            "upstream tag nests too many tag objects; skipped"
+                        );
+                        report.too_deep.push(name.clone());
+                        self.seen_tags
+                            .insert(name.clone(), SeenTag { sha: tag.commit });
+                        continue;
+                    }
+                }
             } else {
                 Vec::new()
             };

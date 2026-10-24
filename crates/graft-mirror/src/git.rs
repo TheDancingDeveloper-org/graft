@@ -306,20 +306,18 @@ impl Mirror {
 
     /// The raw tag objects from `object` down to the first non-tag, outermost
     /// first: empty when `object` is not a tag. At most [`TAG_CHAIN_MAX`]
-    /// deep (rule 7); a longer chain is an error.
-    pub async fn tag_chain(&self, object: GitSha) -> Result<Vec<Vec<u8>>, GitCliError> {
+    /// deep (rule 7); `None` for a longer chain.
+    pub async fn tag_chain(&self, object: GitSha) -> Result<Option<Vec<Vec<u8>>>, GitCliError> {
         let mut chain = Vec::new();
         let mut sha = object;
         loop {
             let hex = sha.to_hex();
             let kind = ok(Some(&self.dir), &["cat-file", "-t", &hex]).await?;
             if kind.trim_ascii() != b"tag" {
-                return Ok(chain);
+                return Ok(Some(chain));
             }
             if chain.len() == TAG_CHAIN_MAX {
-                return Err(GitCliError(format!(
-                    "tag chain longer than {TAG_CHAIN_MAX}"
-                )));
+                return Ok(None);
             }
             let data = ok(Some(&self.dir), &["cat-file", "tag", &hex]).await?;
             let next = data
@@ -330,7 +328,7 @@ impl Mirror {
             chain.push(data);
             match next {
                 Some(n) => sha = n,
-                None => return Ok(chain),
+                None => return Ok(Some(chain)),
             }
         }
     }
