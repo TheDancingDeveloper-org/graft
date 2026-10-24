@@ -442,3 +442,69 @@ fn the_environment_alone_sets_the_session_work_item_and_author() {
     };
     assert_eq!(commit(true), commit(false));
 }
+
+#[test]
+fn ignored_paths_stay_out_of_status_and_the_draft_but_tracked_files_do_not() {
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join(".gitignore"), "node_modules/\n/assets/\n").unwrap();
+    fs::write(app.join(".graftignore"), "target/\n").unwrap();
+    for f in [
+        "node_modules/pkg/index.js",
+        "web/node_modules/x/y.js",
+        "target/debug/app",
+        "assets/new.bin",
+    ] {
+        fs::create_dir_all(app.join(f).parent().unwrap()).unwrap();
+        fs::write(app.join(f), "built\n").unwrap();
+    }
+    // Tracked, under an ignored directory: still seen when modified.
+    fs::write(app.join("assets/logo.bin"), [1u8, 2, 3]).unwrap();
+    fs::write(app.join("src/new.rs"), "fn n() {}\n").unwrap();
+
+    let status = json_run(&app, &["status", "--ignored"]);
+    assert_valid("status", &status);
+    assert_eq!(
+        status["changes"],
+        json!([
+            {"path": ".gitignore", "status": "added"},
+            {"path": ".graftignore", "status": "added"},
+            {"path": "assets/logo.bin", "status": "modified"},
+            {"path": "src/new.rs", "status": "added"},
+        ])
+    );
+    assert_eq!(
+        status["ignored"],
+        json!({"entries": [
+            {"path": "assets", "dir": true},
+            {"path": "node_modules", "dir": true},
+            {"path": "target", "dir": true},
+            {"path": "web/node_modules", "dir": true},
+        ], "truncated": false})
+    );
+    let out = run(&app, &["status", "--ignored"]).success();
+    assert!(text(&out).contains("ignored   node_modules/\n"));
+    let plain = json_run(&app, &["status"]);
+    assert!(plain.get("ignored").is_none());
+
+    let draft = json_run(&app, &["commit", "-m", "with build output around"]);
+    let base = s.commits.third.to_string();
+    let head = draft["id"].as_str().unwrap().to_owned();
+    let diff = json_run(&app, &["diff", &base, &head]);
+    let paths: Vec<&str> = diff["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            ".gitignore",
+            ".graftignore",
+            "assets/logo.bin",
+            "src/new.rs"
+        ]
+    );
+}

@@ -152,6 +152,10 @@ pub(crate) struct StatusArgs {
     /// files (read-only; contacts the server)
     #[arg(long)]
     pub(crate) drafts: bool,
+    /// Also list the untracked entries that `.gitignore` and
+    /// `.graftignore` ignore (an ignored directory is one entry)
+    #[arg(long)]
+    pub(crate) ignored: bool,
     /// With --drafts: ask about these files or directories instead
     #[arg(value_name = "PATHS", requires = "drafts")]
     pub(crate) paths: Vec<String>,

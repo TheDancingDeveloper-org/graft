@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use graft_client::Remote;
-use graft_client::workcopy::{FileStatus, Outcome, Upstream, WorkingCopy};
+use graft_client::workcopy::{FileStatus, Ignored, Outcome, Upstream, WorkingCopy};
 use graft_model::RepoPath;
 use graft_proto::ApiError;
 use graft_proto::api::{RepoApi, WorkspaceApi};
@@ -25,6 +25,8 @@ use crate::conn::{call_context, connect, require_working_copy, runtime};
 use crate::error::Failure;
 use crate::render::{print_json, short};
 
+/// The most ignored entries `--ignored` lists before the answer is cut.
+const MAX_IGNORED: usize = 1000;
 /// The most of the stack's changed paths asked about.
 const MAX_DRAFT_PATHS: usize = 1024;
 /// The most overlap hits gathered before the answer is cut.
@@ -256,6 +258,14 @@ pub(crate) fn run(g: &Global, args: &StatusArgs) -> Result<(), Failure> {
     let wc = require_working_copy()?;
     let changes = wc.status()?;
     let conflicts = wc.conflicts()?.map(|c| c.files).unwrap_or_default();
+    let ignored = if args.ignored {
+        let mut list = wc.ignored()?;
+        let cut = list.len() > MAX_IGNORED;
+        list.truncate(MAX_IGNORED);
+        Some((list, cut))
+    } else {
+        None
+    };
     let (upstream, drafts) = if args.upstream || args.drafts {
         runtime()?.block_on(async {
             let conn = connect(g, Some(&wc)).await?;
@@ -306,6 +316,15 @@ pub(crate) fn run(g: &Global, args: &StatusArgs) -> Result<(), Failure> {
             })).collect::<Vec<_>>(),
             "unfinished": state.moving.is_some(),
         });
+        if let Some((list, cut)) = &ignored {
+            value["ignored"] = json!({
+                "entries": list.iter().map(|i| json!({
+                    "path": i.path.to_string(),
+                    "dir": i.dir,
+                })).collect::<Vec<_>>(),
+                "truncated": cut,
+            });
+        }
         if let Some(up) = &upstream {
             value["upstream"] = upstream_json(up, wc.config().workspace.as_deref());
         }
@@ -332,11 +351,25 @@ pub(crate) fn run(g: &Global, args: &StatusArgs) -> Result<(), Failure> {
     for f in &conflicts {
         outln!("conflict {:<8} {}", f.mode.name(), f.path);
     }
+    if let Some((list, cut)) = &ignored {
+        print_ignored(list, *cut)?;
+    }
     if let Some(up) = &upstream {
         print_upstream(up)?;
     }
     if let Some(d) = &drafts {
         print_drafts(d)?;
+    }
+    Ok(())
+}
+
+fn print_ignored(list: &[Ignored], cut: bool) -> Result<(), Failure> {
+    for i in list {
+        let slash = if i.dir { "/" } else { "" };
+        outln!("ignored   {}{slash}", i.path);
+    }
+    if cut {
+        outln!("(ignored cut at {MAX_IGNORED})");
     }
     Ok(())
 }
