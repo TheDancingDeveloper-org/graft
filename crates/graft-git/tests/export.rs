@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use common::{EMPTY_TREE, Git, TempDir, git_in, ls_tree_in, varied_repo};
 use graft_git::export::Committer;
-use graft_git::exporter::{ExportReport, Exporter, LandTimes, SESSION_KEY, WORK_ITEM_KEY};
+use graft_git::exporter::{
+    ExportReport, Exporter, LandTimes, MERGED_FROM_KEY, SESSION_KEY, WORK_ITEM_KEY,
+};
 use graft_git::fidelity::check_changeset;
 use graft_git::import::{ImportConfig, import};
 use graft_git::map::{MemoryMirrorMap, MirrorMap};
@@ -298,6 +300,9 @@ fn native_chain(api: &FakeApi, snapshots: &[BTreeMap<String, Vec<u8>>]) -> Vec<C
             metadata.insert(SESSION_KEY.into(), format!("ses_{i:04}"));
             metadata.insert(WORK_ITEM_KEY.into(), format!("WI-{i}"));
         }
+        if i == 4 {
+            metadata.insert(MERGED_FROM_KEY.into(), format!("develop@cs_{i:04}"));
+        }
         let changeset = Changeset {
             parents: ids.last().copied().into_iter().collect(),
             root,
@@ -428,6 +433,20 @@ fn native_history_exports_deterministically_and_checks_out() {
     assert!(body.contains("Graft-Session: ses_0003\n"));
     assert!(body.contains("Vogt-Work-Item: WI-3\n"));
     assert!(!body.contains("mirror.git-commit"), "D19: never exported");
+    assert!(
+        !body.contains("Graft-Merged-From"),
+        "only on a merge landing"
+    );
+
+    // A merge landing is a one-parent commit with a merged-from trailer.
+    let merge = map.sha_of(ids[4]).unwrap().unwrap().to_hex();
+    let raw = String::from_utf8(git_in(&one.0, &["cat-file", "commit", &merge])).unwrap();
+    assert_eq!(raw.matches("\nparent ").count(), 1, "one parent: {raw}");
+    let body = String::from_utf8(git_in(&one.0, &["log", "-1", "--format=%B", &merge])).unwrap();
+    assert!(
+        body.contains("\nGraft-Merged-From: develop@cs_0004\n"),
+        "{body}"
+    );
 }
 
 #[test]
@@ -522,7 +541,7 @@ fn metadata_git_cannot_hold_is_refused_and_nothing_is_recorded() {
         .changeset(native_chain(&genuine_api, &snapshots)[0])
         .unwrap();
     type Tamper = fn(&mut Changeset);
-    let cases: [(&str, Tamper, &str); 4] = [
+    let cases: [(&str, Tamper, &str); 5] = [
         (
             "author-name",
             |c| c.author.name = "Eve\nCommitter".into(),
@@ -543,6 +562,14 @@ fn metadata_git_cannot_hold_is_refused_and_nothing_is_recorded() {
             |c| {
                 c.metadata
                     .insert(SESSION_KEY.into(), "ses\nForged-Trailer: yes".into());
+            },
+            "trailer",
+        ),
+        (
+            "merged-from",
+            |c| {
+                c.metadata
+                    .insert(MERGED_FROM_KEY.into(), "dev@x\nForged: yes".into());
             },
             "trailer",
         ),
