@@ -9,7 +9,7 @@ use graft_proto::types::{Diff, GetChangesets, Page, PatchOptions};
 use serde_json::json;
 
 use crate::cli::{Global, ShowArgs};
-use crate::conn::{call_context, connect, runtime, working_copy};
+use crate::conn::{call_context, connect, runtime, working_copy_info};
 use crate::error::Failure;
 use crate::render::{changeset_view, file_diff, kind_name, print_json, state_name};
 
@@ -20,7 +20,7 @@ const PATCH_MAX_BYTES: u64 = 64 * 1024;
 /// Prints a changeset with its files and patches.
 pub(crate) fn run(g: &Global, args: &ShowArgs) -> Result<(), Failure> {
     runtime()?.block_on(async {
-        let wc = working_copy()?;
+        let wc = working_copy_info()?;
         let conn = connect(g, wc.as_ref()).await?;
         let cx = call_context();
         let id = conn.resolve(&cx, &args.rev).await?;

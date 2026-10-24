@@ -227,6 +227,33 @@ pub struct UpdateStats {
     pub changed: usize,
 }
 
+/// What a read that only names the repository and the base needs of a
+/// working copy: its configuration and state, without the index (whose
+/// size follows the slice, not the request). See [`WorkingCopy::open_info`].
+#[derive(Clone, Debug)]
+pub struct WcInfo {
+    root: PathBuf,
+    config: WcConfig,
+    state: WcState,
+}
+
+impl WcInfo {
+    /// The working copy root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// `.graft/config`.
+    pub fn config(&self) -> &WcConfig {
+        &self.config
+    }
+
+    /// `.graft/state`.
+    pub fn state(&self) -> &WcState {
+        &self.state
+    }
+}
+
 /// A working copy on disk.
 #[derive(Debug)]
 pub struct WorkingCopy {
@@ -305,14 +332,22 @@ impl WorkingCopy {
 
     /// Opens the working copy containing `path` (searching upwards).
     pub fn open(path: &Path) -> Result<Self> {
-        let mut at = Some(path);
-        while let Some(dir) = at {
-            if dir.join(GRAFT_DIR).is_dir() {
-                return Self::load(dir);
-            }
-            at = dir.parent();
-        }
-        Err(Error::State("not inside a working copy".to_owned()))
+        Self::load(&find_root(path)?)
+    }
+
+    /// The configuration and state of the working copy containing `path`
+    /// (searching upwards), without reading its index or slice: for reads
+    /// that only need the repository, the endpoint and the base.
+    pub fn open_info(path: &Path) -> Result<WcInfo> {
+        let root = find_root(path)?;
+        let dir = root.join(GRAFT_DIR);
+        let config = parse_config(&fs::read_to_string(dir.join(CONFIG_FILE))?)?;
+        let state = parse_state(&fs::read_to_string(dir.join(STATE_FILE))?)?;
+        Ok(WcInfo {
+            root,
+            config,
+            state,
+        })
     }
 
     fn load(root: &Path) -> Result<Self> {
@@ -1029,17 +1064,29 @@ fn hash_file(file: &Path, meta: &Metadata) -> io::Result<(EntryKind, BlobId)> {
 
 /// Directories under the root already checked to be real (not symlinks),
 /// so a status pass stats each directory once rather than once per file.
+/// The last one found real is kept apart too: paths come in sorted order,
+/// so most share the previous path's parent and need no lookup at all.
 #[derive(Default)]
-struct RealDirs(HashSet<RepoPath>);
+struct RealDirs {
+    real: HashSet<RepoPath>,
+    last: Option<RepoPath>,
+}
 
 impl RealDirs {
     /// Whether every parent of `path` under `root` exists and is a real
     /// directory.
     fn parent_is_real(&mut self, root: &Path, path: &RepoPath) -> io::Result<bool> {
+        let Some((parent_str, _)) = path.as_str().rsplit_once('/') else {
+            return Ok(true);
+        };
+        if self.last.as_ref().is_some_and(|l| l.as_str() == parent_str) {
+            return Ok(true);
+        }
         let Some(parent) = path.parent() else {
             return Ok(true);
         };
-        if self.0.contains(&parent) {
+        if self.real.contains(&parent) {
+            self.last = Some(parent);
             return Ok(true);
         }
         if !self.parent_is_real(root, &parent)? {
@@ -1047,7 +1094,8 @@ impl RealDirs {
         }
         match fs::symlink_metadata(root.join(parent.as_str())) {
             Ok(m) if m.file_type().is_dir() => {
-                self.0.insert(parent);
+                self.real.insert(parent.clone());
+                self.last = Some(parent);
                 Ok(true)
             }
             Ok(_) => Ok(false),
@@ -1258,38 +1306,65 @@ fn parse_state(text: &str) -> Result<WcState> {
     })
 }
 
+/// The nearest directory at or above `path` holding a `.graft` directory.
+fn find_root(path: &Path) -> Result<PathBuf> {
+    path.ancestors()
+        .find(|dir| dir.join(GRAFT_DIR).is_dir())
+        .map(Path::to_owned)
+        .ok_or_else(|| Error::State("not inside a working copy".to_owned()))
+}
+
 fn parse_index(text: &str) -> Result<Index> {
     let bad = || Error::State("malformed index".to_owned());
     let mut lines = text.lines();
     if lines.next() != Some(INDEX_HEADER) {
         return Err(Error::State("unknown index version".to_owned()));
     }
-    let mut entries = BTreeMap::new();
+    // The index is written sorted by path, so the entries are gathered in
+    // order and the map is built in bulk, without a search per entry.
+    let mut sorted: Vec<(RepoPath, IndexEntry)> = Vec::with_capacity(text.len() / 128);
     for line in lines {
-        let f: Vec<&str> = line.splitn(8, ' ').collect();
-        if f.len() != 8 {
-            return Err(bad());
+        let mut f = line.splitn(8, ' ');
+        let mut field = || f.next().ok_or_else(bad);
+        let kind = kind_from_name(field()?).ok_or_else(bad)?;
+        let id = BlobId(ObjectId::from_hex(field()?).map_err(|_| bad())?);
+        let size = field()?.parse::<u64>().map_err(|_| bad())?;
+        let mtime_ns = field()?.parse::<i64>().map_err(|_| bad())?;
+        let ctime_ns = field()?.parse::<i64>().map_err(|_| bad())?;
+        let ino = field()?.parse::<u64>().map_err(|_| bad())?;
+        let mode = field()?.parse().map_err(|_| bad())?;
+        let raw = field()?;
+        let path = if raw.contains('%') {
+            unescape(raw).and_then(|p| RepoPath::new(&p).ok())
+        } else {
+            RepoPath::new(raw).ok()
         }
-        let num = |s: &str| s.parse::<i64>().map_err(|_| bad());
-        let unum = |s: &str| s.parse::<u64>().map_err(|_| bad());
-        let path = unescape(f[7])
-            .and_then(|p| RepoPath::new(&p).ok())
-            .ok_or_else(bad)?;
-        entries.insert(
-            path,
-            IndexEntry {
-                kind: kind_from_name(f[0]).ok_or_else(bad)?,
-                id: BlobId(ObjectId::from_hex(f[1]).map_err(|_| bad())?),
-                stat: Stat {
-                    size: unum(f[2])?,
-                    mtime_ns: num(f[3])?,
-                    ctime_ns: num(f[4])?,
-                    ino: unum(f[5])?,
-                    mode: f[6].parse().map_err(|_| bad())?,
-                },
+        .ok_or_else(bad)?;
+        let entry = IndexEntry {
+            kind,
+            id,
+            stat: Stat {
+                size,
+                mtime_ns,
+                ctime_ns,
+                ino,
+                mode,
             },
-        );
+        };
+        sorted.push((path, entry));
     }
+    let in_order = sorted.windows(2).all(|w| w[0].0 < w[1].0);
+    let entries = if in_order {
+        BTreeMap::from_iter(sorted)
+    } else {
+        // Not written by this code: keep the last entry for a path, as
+        // inserting one by one did.
+        let mut map = BTreeMap::new();
+        for (path, entry) in sorted {
+            map.insert(path, entry);
+        }
+        map
+    };
     Ok(Index {
         entries,
         written_ns: 0,
@@ -1416,6 +1491,12 @@ mod tests {
         let opened = WorkingCopy::open(&dir.path().join("a b")).unwrap();
         assert_eq!(opened.config(), &config);
         assert_eq!(opened.state(), &state);
+        assert_eq!(opened.index(), wc.index());
+        let info = WorkingCopy::open_info(&dir.path().join("a b")).unwrap();
+        assert_eq!(
+            (info.root(), info.config(), info.state()),
+            (dir.path(), &config, &state)
+        );
         wc.state.moving = Some(Moving {
             base,
             head: None,

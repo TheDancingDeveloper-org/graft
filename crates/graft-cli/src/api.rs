@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli::{ApiArgs, Global, PAGE_DEFAULT};
-use crate::conn::{Conn, call_context, connect, repo_path, runtime, working_copy};
+use crate::conn::{Conn, call_context, connect, repo_path, runtime, working_copy_info};
 use crate::error::Failure;
 use crate::render;
 
@@ -238,7 +238,7 @@ pub(crate) fn run(g: &Global, args: &ApiArgs) -> Result<(), Failure> {
     }
     let input = read_input(args.input.as_deref())?;
     runtime()?.block_on(async {
-        let wc = working_copy()?;
+        let wc = working_copy_info()?;
         let conn = connect(g, wc.as_ref()).await?;
         let cx = call_context();
         let out = call(&conn, &cx, op.name, input).await?;

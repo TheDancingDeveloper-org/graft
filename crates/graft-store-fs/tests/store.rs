@@ -1,6 +1,7 @@
 //! Behaviour of the filesystem store beyond the conformance suite: read
 //! verification and fault injection, temp-file cleanup, the root lock,
-//! recounting at open, and the LRU bound (work item G1.5).
+//! recounting at open, the LRU bound (work item G1.5), and the saved LRU
+//! counters (WI-2341).
 
 #![cfg(unix)]
 
@@ -405,4 +406,114 @@ fn concurrent_puts_share_directory_syncs() {
         ids.len()
     );
     assert_eq!(stats(&store).objects, ids.len() as u64);
+}
+
+/// A cache reopened after a clean close trusts the counters it saved and
+/// walks nothing, so opening costs the same however much it holds
+/// (WI-2341); a change removes the saved counters until the close.
+#[test]
+fn lru_reopen_trusts_saved_counters_and_a_change_removes_them() {
+    let dir = TempDir::new("fs-lru-usage");
+    let usage = dir.path().join(".usage");
+    let mode = FsMode::Lru { max_bytes: 1 << 20 };
+    let mut ids = Vec::new();
+    {
+        let store = open(dir.path(), mode);
+        for seed in 0..10 {
+            let (id, frame) = blob(seed, 200);
+            block_on(store.put(REPO, id, frame)).expect("put");
+            ids.push(id);
+        }
+        assert!(!usage.exists(), "no saved counters while changed and open");
+    }
+    assert!(usage.exists(), "the close saved the counters");
+    let bytes = disk_bytes(dir.path()) - fs::metadata(&usage).expect("usage").len();
+
+    // A stray temp file survives the open: nothing was walked.
+    let (first, _) = blob(0, 200);
+    let stray = store_dir(dir.path(), REPO, first).join("partial.tmp");
+    fs::write(&stray, b"half a fra").expect("stray");
+    {
+        let store = open(dir.path(), mode);
+        assert!(stray.exists(), "the open walked the store");
+        let s = stats(&store);
+        assert_eq!((s.objects, s.bytes), (10, bytes));
+        for id in &ids {
+            assert!(block_on(store.get(REPO, *id)).expect("get").is_some());
+        }
+        assert!(usage.exists(), "reads keep the saved counters");
+        block_on(store.delete(REPO, ids[0])).expect("delete");
+        assert!(!usage.exists(), "a delete removes the saved counters");
+    }
+    fs::remove_file(&stray).expect("remove stray");
+    // The next open walks or trusts; either way the counts are exact.
+    let store = open(dir.path(), mode);
+    let s = stats(&store);
+    let on_disk = disk_bytes(dir.path()) - fs::metadata(&usage).map_or(0, |m| m.len());
+    assert_eq!((s.objects, s.bytes), (9, on_disk));
+}
+
+/// Saved counters that are torn or over the bound are not trusted: the
+/// open walks, removing stray temp files and recounting.
+#[test]
+fn lru_open_walks_when_saved_counters_are_unusable() {
+    let dir = TempDir::new("fs-lru-usage-bad");
+    let usage = dir.path().join(".usage");
+    {
+        let store = open(dir.path(), FsMode::Lru { max_bytes: 1 << 20 });
+        for seed in 0..5 {
+            let (id, frame) = blob(seed, 300);
+            block_on(store.put(REPO, id, frame)).expect("put");
+        }
+    }
+    let (first, _) = blob(0, 300);
+    let stray = store_dir(dir.path(), REPO, first).join("partial.tmp");
+    for text in ["graft-cache-usage 1\n5\n", "something else\n1 1\n"] {
+        fs::write(&usage, text).expect("usage");
+        fs::write(&stray, b"half").expect("stray");
+        let store = open(dir.path(), FsMode::Lru { max_bytes: 1 << 20 });
+        assert!(!stray.exists(), "a torn counter file makes the open walk");
+        assert_eq!(stats(&store).objects, 5);
+    }
+    // Counters over a smaller bound: walk and evict at open.
+    let store = open(dir.path(), FsMode::Lru { max_bytes: 700 });
+    let s = stats(&store);
+    assert!(s.bytes <= 700, "{} bytes after open", s.bytes);
+    assert!(s.objects < 5);
+}
+
+/// After a trusting open, the first put over the bound walks the store and
+/// evicts the oldest objects, as an open would have.
+#[test]
+fn lru_trusting_open_evicts_the_oldest_when_a_put_crosses_the_bound() {
+    let dir = TempDir::new("fs-lru-usage-evict");
+    let mode = FsMode::Lru { max_bytes: 4_000 };
+    let mut ids = Vec::new();
+    {
+        let store = open(dir.path(), mode);
+        for seed in 0..3 {
+            let (id, frame) = blob(seed, 1000);
+            block_on(store.put(REPO, id, frame)).expect("put");
+            ids.push(id);
+            // Distinct modification times, oldest first.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    let store = open(dir.path(), mode);
+    for seed in 3..6 {
+        let (id, frame) = blob(seed, 1000);
+        block_on(store.put(REPO, id, frame)).expect("put");
+        ids.push(id);
+    }
+    let s = stats(&store);
+    assert!(s.bytes <= 4_000, "{} bytes", s.bytes);
+    let present: Vec<bool> = ids
+        .iter()
+        .map(|id| block_on(store.get(REPO, *id)).expect("get").is_some())
+        .collect();
+    let kept = present.iter().filter(|p| **p).count();
+    assert!(kept >= 2, "{present:?}");
+    // The evicted are the oldest: everything kept is newer than anything gone.
+    let first_kept = present.iter().position(|p| *p).expect("one kept");
+    assert!(present[first_kept..].iter().all(|p| *p), "{present:?}");
 }

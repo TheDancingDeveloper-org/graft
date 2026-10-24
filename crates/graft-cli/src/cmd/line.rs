@@ -7,14 +7,14 @@ use graft_proto::types::{CreateLine, ListRefs, Page, RefKind};
 use serde_json::json;
 
 use crate::cli::{Global, LineAction, LineArgs};
-use crate::conn::{call_context, connect, runtime, working_copy};
+use crate::conn::{call_context, connect, runtime, working_copy_info};
 use crate::error::Failure;
 use crate::render::{print_json, ref_view, short};
 
 /// Runs a line action.
 pub(crate) fn run(g: &Global, args: &LineArgs) -> Result<(), Failure> {
     runtime()?.block_on(async {
-        let wc = working_copy()?;
+        let wc = working_copy_info()?;
         let conn = connect(g, wc.as_ref()).await?;
         let cx = call_context();
         match &args.action {
