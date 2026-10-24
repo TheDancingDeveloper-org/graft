@@ -79,7 +79,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use graft_git::GitSha;
 use graft_git::export::{Committer, commit_object};
-use graft_git::exporter::{Exporter, LandTimes, SESSION_KEY, WORK_ITEM_KEY};
+use graft_git::exporter::{Exporter, LandTimes, MERGED_FROM_KEY, SESSION_KEY, WORK_ITEM_KEY};
 use graft_git::map::{ImportedCommit, MirrorMap};
 use graft_model::{Author, AuthorKind, Change, ChangesetId, Metadata, Timestamp};
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
@@ -404,6 +404,8 @@ struct LandLine {
     /// The session and work item for commit trailers (`@` kept).
     trailer_session: Option<String>,
     trailer_work_item: Option<String>,
+    /// The `<src>@<changeset>` a merge landing merged (D29).
+    trailer_merged_from: Option<String>,
 }
 
 /// A land dropped from a batch: it and its revert are both in the batch.
@@ -1120,6 +1122,10 @@ where
                 trailer_work_item: cs
                     .metadata
                     .get(WORK_ITEM_KEY)
+                    .map(|v| clean_message(v, FIELD_CHARS, false)),
+                trailer_merged_from: cs
+                    .metadata
+                    .get(MERGED_FROM_KEY)
                     .map(|v| clean_message(v, FIELD_CHARS, false)),
             });
         }
@@ -2036,6 +2042,9 @@ fn land_message(number: u64, land: &LandLine) -> String {
     if let Some(w) = &land.trailer_work_item {
         m.push_str(&format!("Graft-Work-Item: {w}\n"));
     }
+    if let Some(f) = &land.trailer_merged_from {
+        m.push_str(&format!("Graft-Merged-From: {f}\n"));
+    }
     // No `Graft-Checks` trailer: phase 1 consumes no checks (D22). Check
     // results in commits are phase-2 surface (D25), which starts only with
     // the graft-primary authority switch.
@@ -2289,6 +2298,7 @@ mod tests {
             message: text("subject "),
             trailer_session: Some(text("ses_x")),
             trailer_work_item: Some(text("WI-1")),
+            trailer_merged_from: None,
         }
     }
 
@@ -2369,6 +2379,18 @@ mod tests {
             "phase 1 has no checks trailer"
         );
         assert_eq!(parse_commit(&raw), (vec![GitSha([1; 20])], Some(l.id)));
+        // A merge landing is still one parent, with a merged-from trailer.
+        let mut m = land(4, false);
+        m.trailer_merged_from = Some("develop@cs_1".to_owned());
+        let merged = land_commit(3, &m, GitSha([2; 20]), GitSha([1; 20]), &committer);
+        let merged_text = String::from_utf8(merged.clone()).unwrap();
+        assert!(
+            merged_text.ends_with(
+                "Graft-Work-Item: WI-1\nGraft-Merged-From: develop@cs_1\nGraft-Batch: 3\n"
+            ),
+            "{merged_text}"
+        );
+        assert_eq!(parse_commit(&merged), (vec![GitSha([1; 20])], Some(m.id)));
         // A squash-merge message naming two lands maps to none.
         let two = format!("{text}{CHANGESET_TRAILER} {}\n", land(5, false).id);
         assert_eq!(parse_commit(two.as_bytes()).1, None);
