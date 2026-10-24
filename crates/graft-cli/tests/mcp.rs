@@ -252,6 +252,50 @@ fn inside_a_working_copy_commit_and_land_move_the_line() {
 }
 
 #[test]
+fn status_lists_a_conflict_only_while_its_markers_remain() {
+    let s = serve();
+    let dir = scratch();
+    graft(dir.path())
+        .args(["--endpoint", &s.url, "clone", REPO, "app"])
+        .assert()
+        .success();
+    let app = dir.path().join("app");
+    std::fs::write(app.join("README.md"), "mine\n").unwrap();
+    graft(&app)
+        .args(["commit", "-m", "mine"])
+        .assert()
+        .success();
+    let files: std::collections::BTreeMap<String, Vec<u8>> = [
+        ("README.md", &b"theirs\n"[..]),
+        ("src/lib.rs", b"fn a() {}\nfn b() {}\n"),
+        ("assets/logo.bin", &[0xff, 0x00, 0x7f]),
+        ("docs/guide.md", b"read me\n"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v.to_vec()))
+    .collect();
+    s.rt.block_on(s.fixture.repo().commit("main", &files));
+    graft(&app).arg("sync").assert().code(3);
+
+    let mut mcp = Mcp::start(&app, &["--endpoint", &s.url], &[]);
+    let status = mcp.ok("graft_status", json!({"repo": REPO}));
+    assert_eq!(
+        status["conflicts"],
+        json!([{"path": "README.md", "mode": "markers"}]),
+        "{status}"
+    );
+
+    std::fs::write(app.join("README.md"), "both\n").unwrap();
+    let status = mcp.ok("graft_status", json!({"repo": REPO}));
+    assert_eq!(status["conflicts"], json!([]), "{status}");
+    assert_eq!(
+        status["changes"],
+        json!([{"path": "README.md", "status": "modified"}])
+    );
+    mcp.finish();
+}
+
+#[test]
 fn outside_a_working_copy_only_the_repository_tools_answer() {
     let s = serve();
     let dir = scratch();

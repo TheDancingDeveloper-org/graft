@@ -257,6 +257,88 @@ fn sync_with_a_conflicting_stack_exits_3_and_writes_the_conflicts() {
     );
 }
 
+/// The status's conflicts as `(path, mode)` and its changes as paths.
+fn status_conflicts(app: &Path) -> (Vec<(String, String)>, Vec<String>) {
+    let status = json_run(app, &["status"]);
+    assert_valid("status", &status);
+    let conflicts = status["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["path"].as_str().unwrap().to_owned(),
+                c["mode"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let changes = status["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap().to_owned())
+        .collect();
+    (conflicts, changes)
+}
+
+#[test]
+fn status_drops_a_marked_conflict_once_its_markers_are_gone() {
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join("README.md"), "mine\n").unwrap();
+    run(&app, &["commit", "-m", "mine"]).success();
+    s.rt.block_on(
+        s.fixture
+            .repo()
+            .commit("main", &main_files(&[("README.md", b"theirs\n")])),
+    );
+    run(&app, &["sync"]).code(3);
+    let (conflicts, _) = status_conflicts(&app);
+    assert_eq!(conflicts, [("README.md".to_owned(), "markers".to_owned())]);
+    let out = run(&app, &["status"]).success();
+    assert!(text(&out).contains("conflict markers  README.md"));
+
+    fs::write(app.join("README.md"), "both\n").unwrap();
+    let (conflicts, changes) = status_conflicts(&app);
+    assert!(conflicts.is_empty(), "{conflicts:?}");
+    assert_eq!(changes, ["README.md"]);
+    let out = run(&app, &["status"]).success();
+    assert!(!text(&out).contains("conflict"), "{}", text(&out));
+
+    run(&app, &["commit"]).success();
+    let status = json_run(&app, &["status"]);
+    assert_eq!(status["clean"], json!(true));
+    assert_eq!(status["conflicts"], json!([]));
+}
+
+#[test]
+fn status_drops_a_sidecar_conflict_once_the_sidecar_is_gone() {
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join("README.md"), "mine\n").unwrap();
+    run(&app, &["commit", "-m", "mine"]).success();
+    let mut files = main_files(&[]);
+    files.remove("README.md");
+    s.rt.block_on(s.fixture.repo().commit("main", &files));
+    run(&app, &["sync"]).code(3);
+    let sidecar = app.join("README.md.graft-conflict");
+    assert!(sidecar.exists());
+    let (conflicts, _) = status_conflicts(&app);
+    assert_eq!(conflicts, [("README.md".to_owned(), "sidecar".to_owned())]);
+
+    fs::remove_file(&sidecar).unwrap();
+    let (conflicts, changes) = status_conflicts(&app);
+    assert!(conflicts.is_empty(), "{conflicts:?}");
+    assert_eq!(changes, ["README.md"]);
+
+    run(&app, &["commit"]).success();
+    let status = json_run(&app, &["status"]);
+    assert_eq!(status["clean"], json!(true));
+    assert_eq!(status["conflicts"], json!([]));
+}
+
 #[test]
 fn land_on_a_direct_line() {
     let s = serve();

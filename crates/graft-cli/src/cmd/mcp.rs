@@ -180,11 +180,7 @@ impl WorkingCopyTools for Served {
             self.check_repo(repo)?;
             let wc = self.wc.lock().await;
             let changes = wc.status().map_err(local)?;
-            let conflicts = wc
-                .conflicts()
-                .map_err(client)?
-                .map(|c| c.files)
-                .unwrap_or_default();
+            let conflicts = wc.open_conflicts().map_err(client)?;
             let state = wc.state();
             Ok(json!({
                 "repo": self.repo,

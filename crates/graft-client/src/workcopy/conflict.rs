@@ -513,9 +513,17 @@ impl WorkingCopy {
         )
     }
 
-    /// Refuses a commit while a conflict is unresolved: a sidecar is still
-    /// there, or a marked file still has a marker line.
-    pub(crate) fn check_resolved(&self, record: &Conflicts) -> Result<()> {
+    /// The conflicts a sync left that are still open: a sidecar is still
+    /// there, or a marked file still has a marker line. A resolved file is
+    /// just a change. Status and commit share this rule.
+    pub fn open_conflicts(&self) -> Result<Vec<ConflictFile>> {
+        match self.load_conflicts()? {
+            Some(record) => self.still_open(&record),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn still_open(&self, record: &Conflicts) -> Result<Vec<ConflictFile>> {
         let mut open = Vec::new();
         for f in record.unresolved() {
             let unresolved = match f.mode {
@@ -524,13 +532,21 @@ impl WorkingCopy {
                 _ => has_markers(&self.root.join(f.path.as_str()))?,
             };
             if unresolved {
-                open.push(f.path.clone());
+                open.push(f.clone());
             }
         }
+        Ok(open)
+    }
+
+    /// Refuses a commit while a conflict is still open.
+    pub(crate) fn check_resolved(&self, record: &Conflicts) -> Result<()> {
+        let open = self.still_open(record)?;
         if open.is_empty() {
             Ok(())
         } else {
-            Err(Error::Unresolved(open))
+            Err(Error::Unresolved(
+                open.into_iter().map(|f| f.path).collect(),
+            ))
         }
     }
 }
