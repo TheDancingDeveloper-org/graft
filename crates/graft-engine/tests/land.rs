@@ -509,6 +509,7 @@ fn attestations_survive_a_file_level_rebase<M: MetaStore>((f, _): (Fixture<M>, A
             changeset: draft,
             onto: other,
             merge: MergeMode::File,
+            dry_run: false,
         },
     ))
     .expect("rebase");
@@ -721,6 +722,7 @@ fn queued_lines_land_attested_candidates<M: MetaStore>((f, hooks): (Fixture<M>, 
             changeset: two,
             onto: one,
             merge: MergeMode::File,
+            dry_run: false,
         },
     ))
     .expect("rebase");

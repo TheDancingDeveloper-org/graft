@@ -612,11 +612,15 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         // The target exists and is not collected.
         self.changeset(repo, req.onto).await?;
         let stack = self.chain(repo, req.changeset, req.onto).await?;
+        // A dry run is checked as a real one: its conflicts name paths.
         for (_, cs) in &stack {
             require_changes(cx, &req.repo, &cs.changes)?;
         }
         let plan = self.plan(repo, &stack, req.onto, req.merge).await?;
-        self.store_plan(repo, &plan).await?;
+        // A dry run returns the id the rebase would make; planning reads only.
+        if !req.dry_run {
+            self.store_plan(repo, &plan).await?;
+        }
         Ok(plan.head)
     }
 

@@ -1098,6 +1098,7 @@ impl From<Rebase> for pb::RebaseRequest {
             changeset: cb(r.changeset),
             onto: cb(r.onto),
             merge: merge_mode(r.merge),
+            dry_run: r.dry_run,
         }
     }
 }
@@ -1110,6 +1111,7 @@ impl TryFrom<pb::RebaseRequest> for Rebase {
             changeset: cid(r.changeset, "changeset")?,
             onto: cid(r.onto, "onto")?,
             merge: merge_mode_from(r.merge)?,
+            dry_run: r.dry_run,
         })
     }
 }

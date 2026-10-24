@@ -433,6 +433,9 @@ pub struct Rebase {
     pub onto: ChangesetId,
     /// Merge mode.
     pub merge: MergeMode,
+    /// Compute the result and its conflicts, but write nothing: no
+    /// changeset, object, pin or journal entry (D27).
+    pub dry_run: bool,
 }
 
 /// `Revert` request.

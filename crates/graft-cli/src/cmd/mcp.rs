@@ -35,6 +35,7 @@ use crate::cli::Global;
 use crate::cmd::status::{change_json, upstream_json};
 use crate::conn::{call_context, read_token, runtime, working_copy};
 use crate::error::Failure;
+use crate::identity;
 use crate::render;
 
 /// Paths listed in a status or commit result before it says `truncated`.
@@ -232,7 +233,11 @@ impl WorkingCopyTools for Served {
                     ms: req.authored_at_ms.unwrap_or_else(now_ms),
                     offset_min: 0,
                 },
-                metadata: Metadata::new(),
+                metadata: {
+                    let mut m = Metadata::new();
+                    identity::add_vogt_metadata(&mut m);
+                    m
+                },
                 amend: false,
                 limits: CommitLimits::default(),
             };
@@ -391,20 +396,12 @@ fn local(e: impl Into<Failure>) -> WorkingCopyError {
     }
 }
 
-/// The author of working-copy drafts: `GRAFT_AUTHOR_NAME`,
-/// `GRAFT_AUTHOR_EMAIL` and `GRAFT_AUTHOR_KIND` (default `agent`, since MCP
-/// clients are agents), else the user name.
+/// The author of working-copy drafts: the default identity, with kind
+/// `GRAFT_AUTHOR_KIND` (default `agent`, since MCP clients are agents).
 fn author() -> Author {
-    let user = std::env::var("USER").unwrap_or_else(|_| "graft".to_owned());
-    let name = std::env::var("GRAFT_AUTHOR_NAME").unwrap_or_else(|_| user.clone());
-    let email = std::env::var("GRAFT_AUTHOR_EMAIL").unwrap_or_else(|_| format!("{user}@localhost"));
-    let kind = match std::env::var("GRAFT_AUTHOR_KIND").as_deref() {
-        Ok("human") => AuthorKind::Human,
-        Ok("bot") => AuthorKind::Bot,
-        Ok("ci") => AuthorKind::Ci,
-        _ => AuthorKind::Agent,
-    };
-    Author { name, email, kind }
+    let kind =
+        identity::parse_kind(&identity::default_kind_text("agent")).unwrap_or(AuthorKind::Agent);
+    identity::default_author(kind)
 }
 
 fn now_ms() -> i64 {

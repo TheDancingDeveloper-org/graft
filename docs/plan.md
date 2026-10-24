@@ -15,7 +15,7 @@ phases are now set by D22:
 | Phase | Ships | State |
 | --- | --- | --- |
 | 1 | **A git alternative.** Correct storage and history; fast sparse clone and sync; workspaces; server-side rebase, line merge (D16) and lock-free CAS land; conflicts handed back to the client; CLI, MCP and LSP; git import and export; GitHub delivery as one squashed batch PR (D21). Lines default to `direct`; no build, test or CI runs in the land path | Built and in use (trial WI-2270). Backlog nearly done; what remains is below |
-| 2 | **CI checks.** `attested` and `queued` policies, the attester, the CI token exchange, post-land runners, auto-revert | Code exists (G3.1, G3.8, the trial attester), switched off. Not extended until the operator starts phase 2 |
+| 2 | **CI checks.** `attested` and `queued` policies, the attester, the CI token exchange, post-land runners, auto-revert | Code exists (G3.1, G3.8, the trial attester), switched off. Not extended until the operator starts phase 2. Phase 2 starts with the graft-primary authority switch; D25's post-land checks on the batch line (design §8.7) are its design |
 | (3) | Folded into phases 1 and 2: native landing ships in phase 1 on `direct` lines; its policy gate and CI attestations are phase 2 | — |
 | 4 | **Breadth:** per-line combiner, prefetch, symbol index, a second repository, the export drill (auto-revert moves to phase 2) | Outline, WI-2214 (p4) |
 | 5 | **Later:** regional tier, virtual checkouts, chunked blobs, code search, publish decision | — |

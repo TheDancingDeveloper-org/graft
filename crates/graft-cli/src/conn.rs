@@ -53,16 +53,22 @@ pub(crate) fn require_working_copy() -> Result<WorkingCopy, Failure> {
 }
 
 /// The call context for one request. Request ids are for logs and
-/// idempotency, so they only need to be unique per process.
+/// idempotency, so they only need to be unique per process. The session and
+/// work item come from `VOGT_SESSION_ID` and `VOGT_WORK_ITEM`.
 pub(crate) fn call_context() -> CallContext {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let session = crate::identity::session();
     CallContext {
         principal: Principal {
             subject: env::var("USER").unwrap_or_else(|_| "graft-cli".to_owned()),
-            kind: PrincipalKind::Human,
-            session: None,
-            work_item: None,
+            kind: if session.is_some() {
+                PrincipalKind::Agent
+            } else {
+                PrincipalKind::Human
+            },
+            session,
+            work_item: crate::identity::work_item(),
             scopes: Vec::new(),
         },
         request_id: graft_client::request_id("cli", n),
