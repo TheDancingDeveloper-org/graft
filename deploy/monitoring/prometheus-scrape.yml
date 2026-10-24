@@ -13,6 +13,14 @@
         labels:
           host: graft-dev
           service: graft-mirror
+      - targets: ['100.99.200.95:17891']
+        labels:
+          host: graft-dev
+          service: graft-mirror-fluent2
+      - targets: ['100.99.200.95:17892']
+        labels:
+          host: graft-dev
+          service: graft-mirror-vogt
 
 # 2. A target in the existing blackbox-services job (module http_2xx_insecure):
       - targets: ['http://100.99.200.95:17889/readyz']

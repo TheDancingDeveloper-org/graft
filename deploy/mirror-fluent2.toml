@@ -1,0 +1,21 @@
+# graft-mirror follow configuration for the graft-dev VM (trial 3, WI-2297).
+# Follows fluent2-egui's main branch into the graft repository `fluent2-egui`. One repo per
+# graft-mirror process, so this is its own service (graft-mirror-fluent2) with
+# its own volume. The first follow against the empty repository is the initial
+# import, as it was for `rusttorrent`. Nothing here is secret: the token comes
+# from /run/secrets/graft-mirror-token, mounted read-only from the host file
+# /etc/graft/mirror-token-fluent2 that up.sh mints (scope repo:fluent2-egui:admin).
+# No [github] section, so the mirror follows and imports but does not bridge.
+server = "http://graft-server:7878"
+repo = "fluent2-egui"
+upstream = "https://github.com/TheDancingDeveloper-org/fluent2-egui.git"
+mirror_dir = "/var/lib/graft/mirror/fluent2-egui.git"
+db = "/var/lib/graft/mirror/fluent2-egui.sqlite"
+token_file = "/run/secrets/graft-mirror-token"
+poll_interval_secs = 15
+metrics_addr = "0.0.0.0:9465"
+json_logs = true
+
+[[lines]]
+branch = "main"
+line = "main"

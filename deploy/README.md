@@ -11,6 +11,7 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 | `image.env` | `GRAFT_IMAGE`, the image pinned by `@sha256` digest |
 | `server.toml` | graft-server config (`max_token_ttl_s = 2592000`, 30 days) |
 | `mirror.toml` | graft-mirror follows rustTorrent `main` into repo `rusttorrent` |
+| `mirror-fluent2.toml`, `mirror-vogt.toml` | graft-mirror-fluent2 and graft-mirror-vogt follow fluent2-egui `main` and vogt `rust-core` into repos `fluent2-egui` and `vogt` (trial 3) |
 | `up.sh` | idempotent deploy: bootstrap secrets, pull, config pre-flight, `up -d --wait`, readiness gate with rollback, health check |
 | `backup/` | backup script, systemd timer, `install.sh`, `restore-rehearsal.sh` (WI-2307) |
 | `monitoring/` | Prometheus alert rules and scrape config for the ops repo (WI-2307) |
@@ -42,6 +43,8 @@ exists but is unreadable, `up.sh` stops rather than falling back to loopback.
 - `17888` graft-server: gRPC, the `/v1` JSON facade, `/healthz`, `/readyz`, `/metrics`
 - `17889` graft-server metrics listener: `/metrics`, `/healthz`, `/readyz`
 - `17890` graft-mirror `/metrics`
+- `17891` graft-mirror-fluent2 `/metrics`
+- `17892` graft-mirror-vogt `/metrics`
 
 ## Secrets
 
@@ -53,6 +56,7 @@ by uid 10001, mounted read-only:
 |---|---|---|
 | `/etc/graft/signing.key` | `/run/secrets/signing.key` | `up.sh`, first run (32 random bytes) |
 | `/etc/graft/mirror-token` | `/run/secrets/graft-mirror-token` | `up.sh`, minted by the running server |
+| `/etc/graft/mirror-token-fluent2`, `/etc/graft/mirror-token-vogt` | `/run/secrets/graft-mirror-token` in their own mirror | `up.sh`, the same way, each scoped `repo:<its repo>:admin` |
 | `/etc/graft/attester-token` | `/run/secrets/graft-attester-token` | `up.sh` with `GRAFT_ATTESTER=1`; owned by root, not uid 10001 (see below) |
 
 `up.sh` writes them from a throwaway root container of the pinned image, so
@@ -62,6 +66,49 @@ the container from starting rather than being created as a directory.
 The mirror token has the stack's maximum TTL (30 days, scope
 `repo:rusttorrent:admin`). `up.sh` re-mints it when it is older than 20 days
 (`GRAFT_TOKEN_RENEW_DAYS`), or on `GRAFT_REMINT=1`, and restarts the mirror.
+
+## Followed repositories (trial 3)
+
+graft-mirror follows one repository per process, so each followed GitHub
+repository is its own service, with its own config, token, volume and metrics
+port:
+
+| Service | Upstream branch → graft line | graft repo | Config | Token | Volume | Port |
+|---|---|---|---|---|---|---|
+| `graft-mirror` | rustTorrent `main` → `main` | `rusttorrent` | `mirror.toml` | `mirror-token` | `graft-dev-mirror` | 17890 |
+| `graft-mirror-fluent2` | fluent2-egui `main` → `main` | `fluent2-egui` | `mirror-fluent2.toml` | `mirror-token-fluent2` | `graft-dev-mirror-fluent2` | 17891 |
+| `graft-mirror-vogt` | vogt `rust-core` → `rust-core` | `vogt` | `mirror-vogt.toml` | `mirror-token-vogt` | `graft-dev-mirror-vogt` | 17892 |
+
+vogt follows `rust-core`, not `main` (operator decision): the Rust port
+(crate `engine/core`) lives there. The mirror fetches only the branch its
+config names, so the initial import is `rust-core`'s history, and the graft
+repository `vogt` has the line `rust-core` and no `main`. The line keeps the
+branch's name so that `graft-mirror pr-batch <line> --base rust-core` reads
+plainly: trial-3 batch PRs for vogt target `rust-core`. A trial line on vogt
+forks from `rust-core` (for `trial/create-trial-line.sh`, the import maps
+`refs/heads/rust-core`, not `main`).
+
+There is no separate import step. `up.sh` creates every repository
+(`admin repo create`, idempotent) and mints each mirror's token before it
+starts the mirrors, and a mirror's first `follow` against an empty repository
+is the initial import, as it was for `rusttorrent`. So the first deploy after
+a repository is added imports it, and a re-run changes nothing. `up.sh`
+pre-flights every mirror config, and waits up to `GRAFT_REFS_WAIT` seconds
+for each repository's first ref. Only `rusttorrent` fails the deploy at that
+deadline. A larger first import (vogt) that is still running gets a warning,
+and its mirror keeps going.
+
+To add another: write `mirror-<short>.toml`, add a service like
+`graft-mirror-vogt` to `compose.yml` (next free port, own volume, own token
+file), add the repository to `repos` and a line to `mirrors` in `up.sh`, and
+add a scrape target in `monitoring/prometheus-scrape.yml`.
+
+Check that a mirror has caught up (lag 0) on the VM:
+
+```sh
+for p in 17890 17891 17892; do curl -s "http://$(tailscale ip -4):$p/metrics" | grep '^graft_mirror_lag'; done
+docker logs --tail 20 graft-dev-mirror-vogt
+```
 
 ## Trial attester (WI-2276)
 
@@ -192,7 +239,7 @@ graft-server refused an unknown `[[lines]]` field and crash-looped). `up.sh`
 guards both sides of the swap:
 
 - **Pre-flight.** After pulling the pinned image and before touching the
-  running stack, it checks `server.toml` and `mirror.toml` with that image's
+  running stack, it checks `server.toml` and every mirror config with that image's
   own binaries, in throwaway containers with no network and no secrets.
   graft-server loads its config before dispatching, so
   `graft-server --config server.toml admin` exits 78 on a bad config and 64
@@ -220,10 +267,11 @@ deploy/up.sh
 ```
 
 On a fresh VM this bootstraps everything: the signing key, the server, the
-repositories `rusttorrent` and `graft-dev`, the mirror token and the mirror. It then checks
-`/healthz` and `GET /v1/repos/rusttorrent/refs` (authenticated with the mirror
-token, which goes to curl on stdin and is never printed), waiting up to
-`GRAFT_REFS_WAIT` seconds (default 600) for the first import.
+repositories `rusttorrent`, `graft-dev`, `fluent2-egui` and `vogt`, the mirror
+tokens and the mirrors. It then checks `/healthz` and
+`GET /v1/repos/<repo>/refs` for each followed repository (authenticated with
+that mirror's token, which goes to curl on stdin and is never printed),
+waiting up to `GRAFT_REFS_WAIT` seconds (default 600) for the first imports.
 
 The mirror maps git branch `main` to the graft line `main`, so the refs answer
 lists `{"kind":"line","name":"main",...}` (graft names, not `refs/heads/main`).

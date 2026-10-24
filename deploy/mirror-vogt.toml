@@ -1,0 +1,23 @@
+# graft-mirror follow configuration for the graft-dev VM (trial 3, WI-2297).
+# Follows vogt's rust-core branch (the Rust port, crate engine/core; operator
+# decision) into the graft repository `vogt`, line `rust-core`. Trial-3 batch
+# PRs for vogt target rust-core. One repo per
+# graft-mirror process, so this is its own service (graft-mirror-vogt) with
+# its own volume. The first follow against the empty repository is the initial
+# import, as it was for `rusttorrent`. Nothing here is secret: the token comes
+# from /run/secrets/graft-mirror-token, mounted read-only from the host file
+# /etc/graft/mirror-token-vogt that up.sh mints (scope repo:vogt:admin).
+# No [github] section, so the mirror follows and imports but does not bridge.
+server = "http://graft-server:7878"
+repo = "vogt"
+upstream = "https://github.com/TheDancingDeveloper-org/vogt.git"
+mirror_dir = "/var/lib/graft/mirror/vogt.git"
+db = "/var/lib/graft/mirror/vogt.sqlite"
+token_file = "/run/secrets/graft-mirror-token"
+poll_interval_secs = 15
+metrics_addr = "0.0.0.0:9465"
+json_logs = true
+
+[[lines]]
+branch = "rust-core"
+line = "rust-core"
