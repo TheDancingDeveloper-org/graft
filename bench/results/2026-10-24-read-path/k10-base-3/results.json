@@ -1,0 +1,551 @@
+{
+  "label": "k10-base-3",
+  "started": "2026-10-24T11:28:07+00:00",
+  "seed": 2294,
+  "writers": 2,
+  "rounds": 1,
+  "iterations": 9,
+  "server": "local",
+  "machine": {
+    "host": "graft-dev",
+    "os": "Linux 7.0.0-38-generic",
+    "cpu": "AMD Ryzen 7 7735HS with Radeon Graphics",
+    "cpus": 4,
+    "mem_gib": 7.7,
+    "python": "3.14.4",
+    "git": "git version 2.53.0",
+    "graft_version": "graft 0.0.0 (protocol 0.1)",
+    "graft_commit": "",
+    "graft_tree_dirty": false
+  },
+  "scales": [
+    {
+      "scale": 10000,
+      "seed": 2294,
+      "modules": 200,
+      "repo": "bench-10000",
+      "generate": {
+        "seconds": 6.223,
+        "stream_sha256": "9edbac0db919b739371f866d8ccdb9c5fbd213b27e43ce6795f7ddef4ed6ef37",
+        "ref_head": "e415aa2a1dceae4e28009a36a23f2f8702662174",
+        "commits": 10001,
+        "ops": 22872,
+        "kinds": {
+          "add_fn": 1393,
+          "add_module": 872,
+          "delete_module": 325,
+          "drop_small": 105,
+          "edit_fn": 3331,
+          "edit_tail": 1036,
+          "init": 1,
+          "large": 197,
+          "multi": 820,
+          "rename_module": 422,
+          "shared": 1310,
+          "small_many": 189
+        },
+        "final_files": 3264,
+        "final_bytes": 2656378,
+        "final_tree_sha256": "3f9da4bb17b0ee1b742a55957be33a9edf24da6f38ab43097653c7f0ac9b6cf1"
+      },
+      "graft_replay": {
+        "wall_s": 1220.565,
+        "commits_per_s": 8.19,
+        "commit": {
+          "n": 10000,
+          "p50_ms": 67.562,
+          "p95_ms": 123.872,
+          "p99_ms": 182.771,
+          "mean_ms": 77.758,
+          "max_ms": 345.993,
+          "total_s": 777.579
+        },
+        "land": {
+          "n": 10000,
+          "p50_ms": 37.192,
+          "p95_ms": 66.798,
+          "p99_ms": 99.998,
+          "mean_ms": 43.584,
+          "max_ms": 174.754,
+          "total_s": 435.841
+        },
+        "rebased": 0
+      },
+      "git_replay": {
+        "wall_s": 330.89,
+        "commits_per_s": 30.22,
+        "commit": {
+          "n": 10000,
+          "p50_ms": 14.393,
+          "p95_ms": 23.291,
+          "p99_ms": 37.014,
+          "mean_ms": 15.407,
+          "max_ms": 385.383,
+          "total_s": 154.066
+        },
+        "push": {
+          "n": 10000,
+          "p50_ms": 16.821,
+          "p95_ms": 21.659,
+          "p99_ms": 31.71,
+          "mean_ms": 17.233,
+          "max_ms": 138.777,
+          "total_s": 172.334
+        },
+        "repo_bytes": 24147199
+      },
+      "verify_replay": {
+        "git_replay_head_equals_fast_import_head": true,
+        "graft_tree_vs_model": {
+          "equal": true,
+          "files": 3264
+        },
+        "git_tree_vs_model": {
+          "equal": true,
+          "files": 3264
+        },
+        "graft_tree_vs_git_tree": {
+          "equal": true,
+          "files": 3264
+        },
+        "graft_log_length": 10001,
+        "graft_log_equals_landed_sequence": true,
+        "landed_unique": true
+      },
+      "ops": {
+        "sparse_prefix": "src/synthapp/action_7687",
+        "status_edits": 11,
+        "diff_range_changesets": 20,
+        "sync_behind": 5,
+        "hot_path": "src/synthapp/registry.py",
+        "clone_full": {
+          "graft": {
+            "n": 9,
+            "p50_ms": 468.366,
+            "p95_ms": 624.674,
+            "p99_ms": 692.563,
+            "mean_ms": 494.415,
+            "max_ms": 709.535,
+            "total_s": 4.45
+          },
+          "git": {
+            "n": 9,
+            "p50_ms": 1399.295,
+            "p95_ms": 1419.348,
+            "p99_ms": 1423.424,
+            "mean_ms": 1397.531,
+            "max_ms": 1424.444,
+            "total_s": 12.578
+          },
+          "graft_over_git_p50": 0.33
+        },
+        "clone_sparse": {
+          "graft": {
+            "n": 9,
+            "p50_ms": 68.642,
+            "p95_ms": 263.389,
+            "p99_ms": 365.235,
+            "mean_ms": 104.674,
+            "max_ms": 390.696,
+            "total_s": 0.942
+          },
+          "git": {
+            "n": 9,
+            "p50_ms": 600.914,
+            "p95_ms": 606.741,
+            "p99_ms": 608.513,
+            "mean_ms": 597.887,
+            "max_ms": 608.956,
+            "total_s": 5.381
+          },
+          "graft_over_git_p50": 0.11
+        },
+        "status": {
+          "graft": {
+            "n": 9,
+            "p50_ms": 14.129,
+            "p95_ms": 14.368,
+            "p99_ms": 14.376,
+            "mean_ms": 14.142,
+            "max_ms": 14.378,
+            "total_s": 0.127
+          },
+          "git": {
+            "n": 9,
+            "p50_ms": 6.738,
+            "p95_ms": 21.321,
+            "p99_ms": 28.744,
+            "mean_ms": 9.429,
+            "max_ms": 30.6,
+            "total_s": 0.085
+          },
+          "graft_over_git_p50": 2.1
+        },
+        "diff_worktree": {
+          "graft": {
+            "n": 9,
+            "p50_ms": 13.928,
+            "p95_ms": 14.857,
+            "p99_ms": 14.95,
+            "mean_ms": 13.975,
+            "max_ms": 14.974,
+            "total_s": 0.126
+          },
+          "git": {
+            "n": 9,
+            "p50_ms": 4.887,
+            "p95_ms": 5.498,
+            "p99_ms": 5.597,
+            "mean_ms": 4.888,
+            "max_ms": 5.622,
+            "total_s": 0.044
+          },
+          "graft_over_git_p50": 2.85
+        },
+        "diff_range": {
+          "graft": {
+            "n": 9,
+            "p50_ms": 11.498,
+            "p95_ms": 11.782,
+            "p99_ms": 11.785,
+            "mean_ms": 11.487,
+            "max_ms": 11.786,
+            "total_s": 0.103
+          },
+          "git": {
+            "n": 9,
+            "p50_ms": 6.83,
+            "p95_ms": 7.302,
+            "p99_ms": 7.452,
+            "mean_ms": 6.839,
+            "max_ms": 7.489,
+            "total_s": 0.062
+          },
+          "graft_over_git_p50": 1.68
+        },
+        "log": {
+          "graft": {
+            "n": 9,
+            "p50_ms": 8.156,
+            "p95_ms": 8.572,
+            "p99_ms": 8.702,
+            "mean_ms": 8.199,
+            "max_ms": 8.734,
+            "total_s": 0.074
+          },
+          "git": {
+            "n": 9,
+            "p50_ms": 1.855,
+            "p95_ms": 2.562,
+            "p99_ms": 2.648,
+            "mean_ms": 2.038,
+            "max_ms": 2.67,
+            "total_s": 0.018
+          },
+          "graft_over_git_p50": 4.4
+        },
+        "log_path": {
+          "graft": {
+            "n": 9,
+            "p50_ms": 7.825,
+            "p95_ms": 8.06,
+            "p99_ms": 8.093,
+            "mean_ms": 7.798,
+            "max_ms": 8.101,
+            "total_s": 0.07
+          },
+          "git": {
+            "n": 9,
+            "p50_ms": 8.751,
+            "p95_ms": 9.036,
+            "p99_ms": 9.095,
+            "mean_ms": 8.68,
+            "max_ms": 9.109,
+            "total_s": 0.078
+          },
+          "graft_over_git_p50": 0.89
+        },
+        "blame": {
+          "graft": {
+            "n": 9,
+            "p50_ms": 25.336,
+            "p95_ms": 84.51,
+            "p99_ms": 115.101,
+            "mean_ms": 36.027,
+            "max_ms": 122.749,
+            "total_s": 0.324
+          },
+          "git": {
+            "n": 9,
+            "p50_ms": 108.183,
+            "p95_ms": 110.841,
+            "p99_ms": 111.169,
+            "mean_ms": 108.848,
+            "max_ms": 111.251,
+            "total_s": 0.98
+          },
+          "graft_over_git_p50": 0.23
+        },
+        "sync": {
+          "graft": {
+            "n": 9,
+            "p50_ms": 75.477,
+            "p95_ms": 115.727,
+            "p99_ms": 128.926,
+            "mean_ms": 82.878,
+            "max_ms": 132.226,
+            "total_s": 0.746
+          },
+          "git": {
+            "n": 9,
+            "p50_ms": 28.887,
+            "p95_ms": 42.707,
+            "p99_ms": 48.599,
+            "mean_ms": 31.219,
+            "max_ms": 50.072,
+            "total_s": 0.281
+          },
+          "graft_over_git_p50": 2.61
+        }
+      },
+      "concurrent": {
+        "writers": 2,
+        "rounds": 1,
+        "graft": {
+          "clean": {
+            "lands": 2,
+            "landed": 2,
+            "failed": 0,
+            "errors": [],
+            "latency": {
+              "n": 2,
+              "p50_ms": 120.291,
+              "p95_ms": 144.999,
+              "p99_ms": 147.195,
+              "mean_ms": 120.291,
+              "max_ms": 147.744,
+              "total_s": 0.241
+            },
+            "wall_s": 0.148,
+            "throughput_lands_per_s": 13.502,
+            "attempts": 2,
+            "contended": 1,
+            "contention_rate": 0.5,
+            "conflicts_surfaced": 0,
+            "file_level_refusals": 0,
+            "conflict_surface": {
+              "n": 0
+            }
+          },
+          "merge3": {
+            "lands": 2,
+            "landed": 2,
+            "failed": 0,
+            "errors": [],
+            "latency": {
+              "n": 2,
+              "p50_ms": 119.596,
+              "p95_ms": 146.828,
+              "p99_ms": 149.248,
+              "mean_ms": 119.596,
+              "max_ms": 149.854,
+              "total_s": 0.239
+            },
+            "wall_s": 0.15,
+            "throughput_lands_per_s": 13.319,
+            "attempts": 2,
+            "contended": 1,
+            "contention_rate": 0.5,
+            "conflicts_surfaced": 0,
+            "file_level_refusals": 0,
+            "conflict_surface": {
+              "n": 0
+            }
+          },
+          "conflict": {
+            "lands": 2,
+            "landed": 2,
+            "failed": 0,
+            "errors": [],
+            "latency": {
+              "n": 2,
+              "p50_ms": 217.633,
+              "p95_ms": 348.527,
+              "p99_ms": 360.162,
+              "mean_ms": 217.633,
+              "max_ms": 363.071,
+              "total_s": 0.435
+            },
+            "wall_s": 0.363,
+            "throughput_lands_per_s": 5.503,
+            "attempts": 4,
+            "contended": 1,
+            "contention_rate": 0.5,
+            "conflicts_surfaced": 1,
+            "file_level_refusals": 1,
+            "conflict_surface": {
+              "n": 1,
+              "p50_ms": 194.225,
+              "p95_ms": 194.225,
+              "p99_ms": 194.225,
+              "mean_ms": 194.225,
+              "max_ms": 194.225,
+              "total_s": 0.194
+            }
+          }
+        },
+        "git": {
+          "clean": {
+            "lands": 2,
+            "landed": 2,
+            "failed": 0,
+            "errors": [],
+            "latency": {
+              "n": 2,
+              "p50_ms": 46.978,
+              "p95_ms": 71.79,
+              "p99_ms": 73.996,
+              "mean_ms": 46.978,
+              "max_ms": 74.547,
+              "total_s": 0.094
+            },
+            "wall_s": 0.075,
+            "throughput_lands_per_s": 26.748,
+            "attempts": 3,
+            "contended": 1,
+            "contention_rate": 0.5,
+            "conflicts_surfaced": 0,
+            "file_level_refusals": 0,
+            "conflict_surface": {
+              "n": 0
+            }
+          },
+          "merge3": {
+            "lands": 2,
+            "landed": 2,
+            "failed": 0,
+            "errors": [],
+            "latency": {
+              "n": 2,
+              "p50_ms": 42.704,
+              "p95_ms": 66.189,
+              "p99_ms": 68.277,
+              "mean_ms": 42.704,
+              "max_ms": 68.799,
+              "total_s": 0.085
+            },
+            "wall_s": 0.069,
+            "throughput_lands_per_s": 28.992,
+            "attempts": 3,
+            "contended": 1,
+            "contention_rate": 0.5,
+            "conflicts_surfaced": 0,
+            "file_level_refusals": 0,
+            "conflict_surface": {
+              "n": 0
+            }
+          },
+          "conflict": {
+            "lands": 2,
+            "landed": 2,
+            "failed": 0,
+            "errors": [],
+            "latency": {
+              "n": 2,
+              "p50_ms": 57.464,
+              "p95_ms": 93.91,
+              "p99_ms": 97.15,
+              "mean_ms": 57.464,
+              "max_ms": 97.96,
+              "total_s": 0.115
+            },
+            "wall_s": 0.098,
+            "throughput_lands_per_s": 20.38,
+            "attempts": 3,
+            "contended": 1,
+            "contention_rate": 0.5,
+            "conflicts_surfaced": 1,
+            "file_level_refusals": 0,
+            "conflict_surface": {
+              "n": 1,
+              "p50_ms": 55.328,
+              "p95_ms": 55.328,
+              "p99_ms": 55.328,
+              "mean_ms": 55.328,
+              "max_ms": 55.328,
+              "total_s": 0.055
+            }
+          }
+        }
+      },
+      "verify_final": {
+        "graft_vs_expected": {
+          "equal": true,
+          "files": 3267
+        },
+        "git_vs_expected": {
+          "equal": true,
+          "files": 3267
+        },
+        "graft_vs_git": {
+          "equal": true,
+          "files": 3267
+        },
+        "graft_log_length": 10053,
+        "lands_recorded": 10053,
+        "no_lost_or_duplicated_lands": true,
+        "replay_lands_in_order": true,
+        "tips_observed": 6,
+        "line_never_moved_backwards": true,
+        "blame": [
+          {
+            "path": "src/synthapp/registry.py",
+            "lines": 583,
+            "intact": true,
+            "agree_with_git": 583
+          },
+          {
+            "path": "CHANGELOG.md",
+            "lines": 326,
+            "intact": true,
+            "agree_with_git": 326
+          }
+        ]
+      },
+      "server": {
+        "start": {
+          "storage_bytes": 192744,
+          "cpu_s": 0.0,
+          "peak_rss_kib": 12408,
+          "rss_kib": 12408
+        },
+        "after_graft_replay": {
+          "storage_bytes": 138593984,
+          "cpu_s": 129.85,
+          "peak_rss_kib": 27800,
+          "rss_kib": 27136
+        },
+        "after_ops": {
+          "storage_bytes": 138792199,
+          "cpu_s": 132.73,
+          "peak_rss_kib": 38500,
+          "rss_kib": 36444
+        },
+        "after_concurrent": {
+          "storage_bytes": 138854519,
+          "cpu_s": 133.2,
+          "peak_rss_kib": 38500,
+          "rss_kib": 36832
+        },
+        "end": {
+          "storage_bytes": 138854519,
+          "cpu_s": 133.77,
+          "peak_rss_kib": 38500,
+          "rss_kib": 37408
+        }
+      },
+      "ok": true
+    }
+  ],
+  "elapsed_s": 1608.7
+}
