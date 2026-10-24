@@ -654,7 +654,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
     }
 
-    pub(crate) async fn do_land(&self, cx: &CallContext, req: Land) -> Result<Landed, ApiError> {
+    pub(crate) async fn do_land(
+        &self,
+        cx: &CallContext,
+        mut req: Land,
+    ) -> Result<Landed, ApiError> {
         check_ref_name(&req.line)?;
         require(cx, &req.repo, Need::Land(&req.line))?;
         let repo = self.repo_id(&req.repo).await?;
@@ -691,6 +695,20 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             ),
             None => None,
         };
+        // A merge resolution lands as its head stamped with what it merged
+        // (`graft.merged-from`, for readers and export). The stamp is
+        // deterministic, so a retry builds the same head and finds its
+        // earlier result.
+        if let Some(source) = &source {
+            let (cs, _) = self.changeset(repo, req.head).await?;
+            if let Some(stamped) = source.stamp(&cs) {
+                let id = stamped.id();
+                if let Some(done) = self.land_record(repo, id, &req.line).await? {
+                    return Ok(done);
+                }
+                req.head = self.insert_unheld(repo, stamped, Vec::new()).await?.id;
+            }
+        }
         let (head_cs, head_record) = self.changeset(repo, req.head).await?;
         if head_record.state == RecordState::Landed {
             return Err(errors::invalid(None, "draft-landed"));

@@ -36,6 +36,10 @@
           "type": "string",
           "pattern": "^[a-z][0-9a-f]{64}$"
         },
+        "merged_from": {
+          "description": "A line merge conflict written with `--sync` (D29): the `<line>@<changeset>` to land the resolution with, as `graft land --merged-from`.",
+          "type": "string"
+        },
         "conflicts": {
           "description": "Conflicts: the paths, and how a sync wrote each (null when nothing was written).",
           "type": "array",

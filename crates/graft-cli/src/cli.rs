@@ -367,6 +367,9 @@ pub(crate) enum LineAction {
         /// How a file both sides changed is merged: `line` (D16) or `file`
         #[arg(long, value_enum, value_name = "MODE", default_value_t = LandMerge::Line)]
         merge: LandMerge,
+        /// On a conflict, sync this working copy (on the target line) to the tip and write the merge into the files
+        #[arg(long)]
+        sync: bool,
     },
     /// List a line's merge points, newest first
     Merges {

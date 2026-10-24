@@ -18,6 +18,7 @@ use graft_proto::types::{DraftState, GetChangesets, MergeMode, Rebase, Revert, S
 use graft_proto::{ApiError, CallContext};
 use graft_store::ObjectStore;
 
+use super::conflict::Conflicts;
 use super::session::retryable_api;
 use super::{Moving, UpdateStats, WorkingCopy};
 use crate::fetch::FetchOptions;
@@ -162,6 +163,29 @@ impl WorkingCopy {
             id,
             update: moved.update,
         })
+    }
+
+    /// Writes a conflicted line merge (D29) into the files: the source's
+    /// changes since the merge base (`base..source`, as the server's
+    /// `MergeConflict` names them) go on top of the snapshot, with markers
+    /// or a sidecar where both sides changed ([`Error::Conflicted`]). The
+    /// working copy must be clean; sync it to the target's tip first. The
+    /// next `commit` is the resolution, landed with `merged_from`.
+    /// [`WorkingCopy::begin`] must have run first.
+    pub async fn merge_conflicting<A: ObjectApi + RepoApi, S: ObjectStore>(
+        &mut self,
+        api: &A,
+        cache: &S,
+        cx: &CallContext,
+        base: ChangesetId,
+        source: ChangesetId,
+        opts: &FetchOptions,
+    ) -> Result<Conflicts> {
+        self.check_settled()?;
+        self.workspace_name()?;
+        let onto = self.snapshot();
+        self.pick_conflicting(api, cache, cx, onto, base, source, opts)
+            .await
     }
 
     /// The first parent of `changeset`, which must be landed: `Rebase` of a

@@ -8,11 +8,20 @@
 //! merges, and moves only `dst` by compare-and-swap, recording a merge
 //! point. It exits as `land`: 0 merged or up to date, 3 conflict (the error
 //! carries the tip, the base and the source ids; resolve in a working copy
-//! on `dst` and `graft land --merged-from <src>@<id>`), 4 contended. When
+//! on `dst` and `graft land --merged-from <src>@<id>`), 4 contended. Run
+//! in a working copy on `dst` with `--sync`, a conflict moves the working
+//! copy to the tip and writes the merge into the files, markers and all, so
+//! a conflicted merge is three commands: `line merge --sync`, `commit`,
+//! `land --merged-from`. When
 //! the bounded merge point search was capped, the base came from the
 //! ancestry walk and the output says `via ancestry`. `merges [<dst>]` lists
 //! a line's merge points, newest first, paginated.
 
+use graft_client::fetch::FetchOptions;
+use graft_client::workcopy::DEFAULT_CACHE_BYTES;
+use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat};
+use graft_model::ChangesetId;
+use graft_proto::ApiError;
 use graft_proto::api::RepoApi;
 use graft_proto::types::{
     CreateLine, LineMerge, LineMergeOutcome, LineMerges, ListRefs, MergeBaseVia, MergeMode, Page,
@@ -21,7 +30,7 @@ use graft_proto::types::{
 use serde_json::json;
 
 use crate::cli::{DEFAULT_LINE, Global, LandMerge, LineAction, LineArgs};
-use crate::conn::{call_context, connect, runtime, working_copy_info};
+use crate::conn::{begin, call_context, connect, runtime, working_copy_info};
 use crate::error::Failure;
 use crate::render::{print_json, ref_view, short};
 
@@ -32,6 +41,49 @@ pub(crate) fn via_name(via: MergeBaseVia) -> &'static str {
         MergeBaseVia::Fork => "fork",
         _ => "ancestry",
     }
+}
+
+/// `line merge --sync` after a conflict: syncs the working copy to the
+/// target's tip and writes `base..source` into its files (§8.9). Always a
+/// failure: exit 3 with the files to resolve, then `graft commit` and
+/// `graft land --merged-from <src>@<source>`.
+async fn write_merge(
+    g: &Global,
+    src: &str,
+    base: ChangesetId,
+    source: ChangesetId,
+) -> Result<(), Failure> {
+    let mut s = begin(g).await?;
+    s.note_recovery();
+    let cache = s.wc.open_cache(DEFAULT_CACHE_BYTES)?;
+    let fetch = FetchOptions::default();
+    let ws = s.workspace_ref();
+    let written = with_heartbeat(
+        &s.conn.remote,
+        &s.cx,
+        ws,
+        DEFAULT_LEASE_MS,
+        HEARTBEAT_EVERY,
+        async {
+            s.wc.sync(&s.conn.remote, &cache, &s.cx, DEFAULT_LEASE_MS, &fetch)
+                .await?;
+            s.wc.merge_conflicting(&s.conn.remote, &cache, &s.cx, base, source, &fetch)
+                .await
+        },
+    )
+    .await;
+    let merged_from = format!("{src}@{source}");
+    let failure = match written {
+        Err(e) => Failure::from(e),
+        Ok(conflicts) => Failure::from(graft_client::Error::Conflicted(Box::new(conflicts))),
+    };
+    Err(failure
+        .with_detail("base", base.to_string().into())
+        .with_detail("source", source.to_string().into())
+        .with_detail("merged_from", merged_from.clone().into())
+        .with_note(format!(
+            "this is a merge: land the resolution with `graft land --merged-from {merged_from}`"
+        )))
 }
 
 /// Runs a line action.
@@ -52,8 +104,14 @@ pub(crate) fn run(g: &Global, args: &LineArgs) -> Result<(), Failure> {
                 at,
                 message,
                 merge,
+                sync,
             } => {
                 let dst = into.clone().unwrap_or_else(here);
+                if *sync && wc.as_ref().is_none_or(|wc| wc.state().line != dst) {
+                    return Err(Failure::usage(format!(
+                        "--sync writes the merge into a working copy on {dst}: run it there"
+                    )));
+                }
                 let src_at = match at {
                     Some(rev) => Some(conn.resolve(&cx, rev).await?),
                     None => None,
@@ -75,8 +133,14 @@ pub(crate) fn run(g: &Global, args: &LineArgs) -> Result<(), Failure> {
                             message: message.clone(),
                         },
                     )
-                    .await
-                    .map_err(|e| {
+                    .await;
+                let out = match out {
+                    Err(ApiError::MergeConflict(c)) if *sync => {
+                        return write_merge(g, src, c.base, c.source).await;
+                    }
+                    out => out,
+                };
+                let out = out.map_err(|e| {
                         let failure = Failure::from(e);
                         let note = match failure.kind() {
                             "conflict" => format!(
