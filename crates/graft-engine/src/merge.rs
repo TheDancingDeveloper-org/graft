@@ -352,7 +352,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             // On the line above the bound: landed after the bound on the
             // line's own first-parent chain, so nothing at or below the
             // bound brought it. Saves the merge rows below for a search
-            // that cannot succeed.
+            // that cannot succeed. This rests on two facts: a merge never
+            // puts its source changeset in the target's index (it lands a
+            // new changeset whose parent is the base), and an id sits on a
+            // line's first-parent chain at most once. So `p` at `q` cannot
+            // also have arrived at or below `bound` by a merge.
             Some(_) => return Ok(false),
             None => {}
         }

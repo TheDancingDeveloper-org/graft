@@ -36,6 +36,10 @@ pub const SESSION_KEY: &str = "vogt.session";
 /// Metadata key for the work item a changeset belongs to. Exported as a
 /// `Vogt-Work-Item` trailer.
 pub const WORK_ITEM_KEY: &str = "vogt.work_item";
+/// Metadata key a merge landing carries: `<src>@<changeset>`, the line and
+/// changeset it merged (D29). Exported as a `Graft-Merged-From` trailer on
+/// a one-parent commit; graft makes no git merge commits.
+pub const MERGED_FROM_KEY: &str = "graft.merged-from";
 
 /// When each changeset landed on its line. The committer date of a native
 /// export is this time, so the land record decides it and it is the same on
@@ -459,7 +463,7 @@ fn native_record(
 }
 
 /// The commit message: the changeset's message, then the trailers in a
-/// block of their own. Only these three keys are ever written. The
+/// block of their own. Only these four keys are ever written. The
 /// `mirror.git-commit` provenance key never is (decision D19).
 fn message(id: ChangesetId, changeset: &Changeset) -> Result<Vec<u8>, GitError> {
     check_text(&changeset.message, MESSAGE_BAD, "message", id)?;
@@ -471,6 +475,10 @@ fn message(id: ChangesetId, changeset: &Changeset) -> Result<Vec<u8>, GitError> 
     if let Some(item) = changeset.metadata.get(WORK_ITEM_KEY) {
         check_text(item, TRAILER_BAD, "trailer", id)?;
         trailers.push(format!("Vogt-Work-Item: {item}"));
+    }
+    if let Some(from) = changeset.metadata.get(MERGED_FROM_KEY) {
+        check_text(from, TRAILER_BAD, "trailer", id)?;
+        trailers.push(format!("Graft-Merged-From: {from}"));
     }
     let mut out = changeset.message.clone().into_bytes();
     if !out.is_empty() {

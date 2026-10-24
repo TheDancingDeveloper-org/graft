@@ -25,6 +25,8 @@ on_both_stores!(
     line_merges_pages_newest_first,
     a_merge_result_says_how_its_base_was_found,
     every_merge_of_the_gitflow_bench_finds_its_base_by_merge_point,
+    a_merge_needs_read_and_land_on_the_target_only,
+    a_changeset_on_two_lines_pairs_the_first_distinct_holders,
 );
 
 const START: &str = "1\n2\n3\n4\n5\n";
@@ -580,5 +582,115 @@ fn every_merge_of_the_gitflow_bench_finds_its_base_by_merge_point<M: MetaStore>(
         merged_by_point(&r, &hl, "main", at);
         // Into develop: from the release develop and main both merged.
         merged_by_point(&r, &hl, "develop", rc);
+    }
+}
+
+/// `LineMerge` needs repository read (for the source) and `land` on the
+/// target, nothing on the source line; `land --merged-from` the same.
+fn a_merge_needs_read_and_land_on_the_target_only<M: MetaStore>(f: &Fixture<M>) {
+    let (r, _) = start(f);
+    let d1 = land_text(&r, "develop", &with(START, 1, "1d1"));
+    let as_ = |scopes: &[&str]| {
+        block_on(r.e().line_merge(
+            &cx(scopes),
+            LineMerge {
+                repo: r.name.clone(),
+                src: "develop".to_owned(),
+                dst: "main".to_owned(),
+                src_at: None,
+                merge: MergeMode::Line,
+                deadline_ms: None,
+                message: None,
+            },
+        ))
+    };
+    let denied = |got: ApiResult<LineMergeOutcome>| match got {
+        Err(ApiError::PermissionDenied { scope, .. }) => scope,
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    };
+    assert_eq!(denied(as_(&[])), "repo:r:read");
+    assert_eq!(denied(as_(&["repo:r:read"])), "repo:r:land:main");
+    assert_eq!(
+        denied(as_(&["repo:r:land:develop"])),
+        "repo:r:land:main",
+        "land on the source is not land on the target"
+    );
+    assert_eq!(denied(as_(&["repo:other:land:main"])), "repo:r:read");
+    assert!(points(&r, "main").is_empty(), "nothing was recorded");
+    // The merge landing writes its paths, so it needs write on them too.
+    assert_eq!(denied(as_(&["repo:r:land:main"])), "repo:r:write");
+    match as_(&["repo:r:land:main", "repo:r:write:f"]) {
+        Ok(LineMergeOutcome::Merged { .. }) => {}
+        other => panic!("land on the target and write is enough: {other:?}"),
+    }
+
+    // A resolution landed with `merged_from` checks the same scopes.
+    land_text(&r, "develop", &with(START, 1, "1d2"));
+    let d2 = tip(&r, "develop");
+    let head = r
+        .commit(vec![tip(&r, "main")], &[("f", b"resolved\n")], &[])
+        .id;
+    let land_as = |scopes: &[&str]| {
+        block_on(r.e().land(
+            &cx(scopes),
+            Land {
+                repo: r.name.clone(),
+                head,
+                line: "main".to_owned(),
+                squash: false,
+                merge: MergeMode::Line,
+                deadline_ms: None,
+                merged_from: Some(MergedFrom {
+                    line: "develop".to_owned(),
+                    changeset: d2,
+                }),
+            },
+        ))
+    };
+    assert!(
+        matches!(
+            land_as(&["repo:r:land:develop"]),
+            Err(ApiError::PermissionDenied { .. })
+        ),
+        "land on the source is not land on the target"
+    );
+    assert!(matches!(
+        land_as(&["repo:r:land:main", "repo:r:write"]),
+        Ok(Landed::Landed { .. })
+    ));
+    assert_ne!(d1, d2);
+}
+
+/// A changeset held by two lines' own rows: `MergeBase` pairs the first
+/// holders, in line order, that sit on different lines, so the answer is
+/// the same on every store and every call.
+fn a_changeset_on_two_lines_pairs_the_first_distinct_holders<M: MetaStore>(f: &Fixture<M>) {
+    let (r, m0) = start(f);
+    // Two lines forked at m0 both move forward to x: each indexes x in
+    // its own rows (a create at a landed changeset would fork instead).
+    let x = r
+        .commit(vec![m0], &[("f", with(START, 1, "1x").as_bytes())], &[])
+        .id;
+    for line in ["b-line", "a-line"] {
+        create(&r, line, m0);
+        r.update_ref(line, Some(m0), x, RefKind::Line)
+            .expect("fast-forward");
+    }
+    let m1 = land_text(&r, "main", &with(START, 5, "5m"));
+
+    let first = base(&r, x, m1);
+    assert_eq!(first.base, Some(m0));
+    assert_ne!(first.via, MergeBaseVia::Ancestry);
+    for _ in 0..3 {
+        assert_eq!(base(&r, x, m1), first, "deterministic");
+    }
+    assert_eq!(base(&r, m1, x).base, Some(m0), "either way round");
+    // Each holder merges into main from the same base.
+    for line in ["a-line", "b-line"] {
+        match merge(&r, line, "main") {
+            Ok(LineMergeOutcome::Merged { base, .. }) => assert_eq!(base, m0, "{line}"),
+            Ok(LineMergeOutcome::UpToDate { .. }) if line == "b-line" => {}
+            other => panic!("{line}: {other:?}"),
+        }
     }
 }
