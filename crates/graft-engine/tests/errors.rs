@@ -178,8 +178,8 @@ fn invalid_path() {
         ))
     };
     assert_eq!(reason(list("dir/f", false, "")), "not-a-directory");
-    assert_eq!(reason(list("dir", false, "a/b")), "empty-component");
-    assert_eq!(reason(list("dir", true, "/x")), "empty-component");
+    assert_eq!(rule(list("dir", false, "a/b")), "page-token");
+    assert_eq!(rule(list("dir", true, "/x")), "page-token");
 
     repo.upload(&[b"x"]);
     assert_eq!(
@@ -610,6 +610,57 @@ fn limit_exceeded() {
         },
     ));
     assert_eq!(limit(diff), ("diff-paths".to_owned(), 1));
+}
+
+#[test]
+fn a_bad_page_token_is_never_echoed() {
+    let f = memory();
+    let e = &f.engine;
+    let repo = Repo::new(&f, "r");
+    let a = repo.commit(vec![], &[("dir/f", b"a")], &[]).id;
+    let secret = "graft_tok_SECRET//value";
+    let page = || Page {
+        limit: 1,
+        token: Some(secret.to_owned()),
+    };
+    let check = |r: ApiResult<String>| {
+        let e = err(r);
+        let shown = format!("{e:?} {e}");
+        assert!(!shown.contains("SECRET"), "cursor echoed: {shown}");
+        assert!(
+            matches!(&e, ApiError::InvalidChange { path, rule } if path.is_empty() && rule == "page-token"),
+            "{e:?}"
+        );
+    };
+    for recursive in [false, true] {
+        check(
+            block_on(e.list_tree(
+                &repo.cx,
+                ListTree {
+                    repo: "r".to_owned(),
+                    at: a,
+                    path: Some(p("dir")),
+                    recursive,
+                    page: page(),
+                },
+            ))
+            .map(|r| format!("{r:?}")),
+        );
+    }
+    check(
+        block_on(e.diff(
+            &repo.cx,
+            Diff {
+                repo: "r".to_owned(),
+                from: a,
+                to: a,
+                paths: vec![],
+                patch: None,
+                page: page(),
+            },
+        ))
+        .map(|r| format!("{r:?}")),
+    );
 }
 
 #[test]
