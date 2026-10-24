@@ -4,11 +4,12 @@
   `Graft-Changeset`, `Graft-Session`, `Graft-Work-Item` and `Graft-Batch`
   trailers; a dropped land's revert is its own commit. Each land is
   rebased onto the commit before it with line merge, so its commit keeps
-  upstream changes to the same files; no checks trailer (D22). The chain is
-  recorded (new `batch_commits` table) before the push. When a land does not
-  merge onto the commit before it, the replay does not reproduce the integration tip, or a batch has more than 500
-  lands, the batch is squashed as before and the PR body says why. The
-  cut now caps every batch at 500 lands. Once land-pr rebase-merges the
-  PR (D28), settling maps each merged commit back to its land by trailer;
-  a merge commit maps to the original shas, and a squash-merge maps only
-  the batch tip. graft runs no checks (D22).
+  upstream changes to the same files. There is no checks trailer (D22).
+  The chain is recorded (new `batch_commits` table) before the push. When
+  a land does not merge onto the commit before it, the replay does not
+  reproduce the integration tip, or a batch has more than 500 lands, the
+  batch is squashed as before and the PR body says why. The cut now caps
+  every batch at 500 lands. Once land-pr rebase-merges the PR (D28),
+  settling maps each merged commit back to its land by its trailer (read
+  from the last paragraph only); a merge commit maps to the original
+  shas, and a squash-merge maps only the batch tip.

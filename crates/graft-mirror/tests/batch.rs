@@ -1267,7 +1267,11 @@ async fn a_land_that_does_not_replay_squashes_the_batch_and_says_why() {
     assert_eq!(rec.lands, 2);
     assert!(w.db.batch_commits(rec.number).unwrap().is_empty());
     let head = rec.squash_sha.to_hex();
-    assert_eq!(chain_of(&w, &main, &head), [head.clone()], "one commit");
+    assert_eq!(
+        chain_of(&w, &main, &head),
+        std::slice::from_ref(&head),
+        "one commit"
+    );
     assert_eq!(w.show(&head, "shared.txt"), "one\nY\nthree");
     let body = &w.github.prs()[0].new.body;
     assert!(body.contains("squashed into one commit"), "{body}");
