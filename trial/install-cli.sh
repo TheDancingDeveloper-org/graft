@@ -34,7 +34,10 @@ fi
 
 log "building graft-cli at ${sha:0:12}"
 git -C "$src" checkout --quiet --detach "$sha"
-(cd "$src" && cargo build --release --locked -p graft-cli)
+# Build into the checkout's own target: a session's CARGO_TARGET_DIR (a shared
+# target) would leave an old $src/target/release/graft to be installed under
+# the new sha (WI-2414: trial 2 ran a pre-WI-2350 CLI without VOGT_SESSION_ID).
+(cd "$src" && CARGO_TARGET_DIR="$src/target" cargo build --release --locked -p graft-cli)
 
 mkdir -p "$bin_dir"
 # Install through a temp file and rename, so a running graft is not corrupted.

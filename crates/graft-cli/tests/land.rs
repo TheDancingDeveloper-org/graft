@@ -1247,3 +1247,78 @@ fn a_conflicted_line_merge_with_sync_is_three_commands() {
     let again = outside(&["--json", "line", "merge", "develop", "--into", "main"]).success();
     assert_eq!(json_out(again.get_output())["outcome"], json!("up_to_date"));
 }
+
+/// A draft committed in a Vogt session lands with `vogt.session` and
+/// `vogt.work_item`, though the caller's principal holds no session (an
+/// unbound token), and keeps them through a conflicting sync whose
+/// resolving commit runs without the environment (WI-2414).
+#[test]
+fn the_vogt_session_survives_land_and_a_conflicting_sync() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    let in_session = |args: &[&str]| {
+        let out = wc_cmd(&app)
+            .env("VOGT_SESSION_ID", "ses_trial")
+            .env("VOGT_WORK_ITEM", "WI-1")
+            .arg("--json")
+            .args(args)
+            .assert()
+            .success();
+        json_out(out.get_output())
+    };
+    let meta_of = |rev: &str| json_run(&app, &["show", rev])["metadata"].clone();
+
+    // Commit and land.
+    fs::write(app.join("README.md"), "one\n").unwrap();
+    in_session(&["commit", "-m", "one"]);
+    let landed = in_session(&["land"])["landed"].clone();
+    let meta = meta_of(landed.as_str().unwrap());
+    assert_eq!(meta["vogt.session"], json!("ses_trial"));
+    assert_eq!(meta["vogt.work_item"], json!("WI-1"));
+
+    // Commit, conflict, sync, resolve outside the session, land.
+    fs::write(
+        app.join("src/lib.rs"),
+        "fn a() { 1 }\nfn b() {}\nfn c() {}\n",
+    )
+    .unwrap();
+    in_session(&["commit", "-m", "two"]);
+    s.repo
+        .race(put("src/lib.rs", "fn a() { 2 }\nfn b() {}\nfn c() {}\n"));
+    run(&app, &["land"]).code(3);
+    run(&app, &["sync"]).code(3);
+    fs::write(
+        app.join("src/lib.rs"),
+        "fn a() { 3 }\nfn b() {}\nfn c() {}\n",
+    )
+    .unwrap();
+    let draft = json_run(&app, &["commit"]);
+    let meta = meta_of(draft["id"].as_str().unwrap());
+    assert_eq!(meta["vogt.session"], json!("ses_trial"));
+    let landed = json_run(&app, &["land"])["landed"].clone();
+    let meta = meta_of(landed.as_str().unwrap());
+    assert_eq!(meta["vogt.session"], json!("ses_trial"));
+    assert_eq!(meta["vogt.work_item"], json!("WI-1"));
+}
+
+/// The same after a sync that rebases cleanly: the server's rebase keeps
+/// the metadata.
+#[test]
+fn the_vogt_session_survives_a_clean_sync_rebase() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join("README.md"), "mine\n").unwrap();
+    wc_cmd(&app)
+        .env("VOGT_SESSION_ID", "ses_trial")
+        .args(["commit", "-m", "mine"])
+        .assert()
+        .success();
+    // The race lands theirs just before our land, which rebases onto it.
+    s.repo.race(put("docs/guide.md", "theirs\n"));
+    let landed = json_run(&app, &["land"])["landed"].clone();
+    run(&app, &["sync"]).success();
+    let shown = json_run(&app, &["show", landed.as_str().unwrap()]);
+    assert_eq!(shown["metadata"]["vogt.session"], json!("ses_trial"));
+}

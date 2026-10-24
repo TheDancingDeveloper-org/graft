@@ -510,6 +510,9 @@ pub fn graft(cwd: &Path) -> Command {
         .env_remove("GRAFT_AUTHOR_KIND")
         .env_remove("GRAFT_AUTHOR_DATE")
         .env("USER", "graft-test")
+        // No git config: the author default must not read the host's.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("NO_COLOR", "1");
     cmd
 }
