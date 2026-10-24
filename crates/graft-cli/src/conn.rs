@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use graft_client::fetch::FetchOptions;
 use graft_client::workcopy::GRAFT_DIR;
-use graft_client::workcopy::{Begun, DEFAULT_CACHE_BYTES, Recovered, WorkingCopy};
+use graft_client::workcopy::{
+    Begun, DEFAULT_CACHE_BYTES, Recovered, WcConfig, WcInfo, WcState, WorkingCopy,
+};
 use graft_client::workspace::DEFAULT_LEASE_MS;
 use graft_client::{Endpoint, Remote, discover};
 use graft_model::ChangesetId;
@@ -47,6 +49,41 @@ pub(crate) fn working_copy() -> Result<Option<WorkingCopy>, Failure> {
     Ok(Some(WorkingCopy::open(&cwd)?))
 }
 
+/// The configuration and state of the working copy containing the current
+/// directory, if there is one, without its index: for reads that need only
+/// the repository, the endpoint and the base.
+pub(crate) fn working_copy_info() -> Result<Option<WcInfo>, Failure> {
+    let cwd = env::current_dir()?;
+    if !cwd.ancestors().any(|d| d.join(GRAFT_DIR).is_dir()) {
+        return Ok(None);
+    }
+    Ok(Some(WorkingCopy::open_info(&cwd)?))
+}
+
+/// What [`connect`] and [`default_rev`] read of a working copy.
+pub(crate) trait WcView {
+    fn config(&self) -> &WcConfig;
+    fn state(&self) -> &WcState;
+}
+
+impl WcView for WorkingCopy {
+    fn config(&self) -> &WcConfig {
+        WorkingCopy::config(self)
+    }
+    fn state(&self) -> &WcState {
+        WorkingCopy::state(self)
+    }
+}
+
+impl WcView for WcInfo {
+    fn config(&self) -> &WcConfig {
+        WcInfo::config(self)
+    }
+    fn state(&self) -> &WcState {
+        WcInfo::state(self)
+    }
+}
+
 /// The working copy the command needs, or a usage error saying so.
 pub(crate) fn require_working_copy() -> Result<WorkingCopy, Failure> {
     working_copy()?.ok_or_else(|| Failure::usage("not inside a working copy (no .graft directory)"))
@@ -79,7 +116,7 @@ pub(crate) fn call_context() -> CallContext {
 /// Connects. The endpoint is `--endpoint`, else `GRAFT_ENDPOINT`, the node
 /// socket, or the working copy's configured server, in that order. The
 /// repository is `--repo`, else the working copy's.
-pub(crate) async fn connect(g: &Global, wc: Option<&WorkingCopy>) -> Result<Conn, Failure> {
+pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn, Failure> {
     let repo = match (&g.repo, wc) {
         (Some(repo), _) => repo.clone(),
         (None, Some(wc)) => wc.config().repo.clone(),
@@ -260,7 +297,7 @@ impl Session {
 
 /// The snapshot a read defaults to: the working copy's base, else the
 /// `main` line. Resolved by [`Conn::resolve`].
-pub(crate) fn default_rev(wc: Option<&WorkingCopy>) -> String {
+pub(crate) fn default_rev(wc: Option<&impl WcView>) -> String {
     match wc {
         Some(wc) => wc.state().base.to_string(),
         None => DEFAULT_LINE.to_owned(),
@@ -289,6 +326,6 @@ mod tests {
 
     #[test]
     fn default_rev_is_main_outside_a_working_copy() {
-        assert_eq!(default_rev(None), "main");
+        assert_eq!(default_rev(None::<&WcInfo>), "main");
     }
 }

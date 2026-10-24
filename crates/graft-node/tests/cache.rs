@@ -368,7 +368,10 @@ async fn crash_leftovers_are_cleaned_and_a_broken_index_wipes_the_cache() {
         drop(client);
         node.stop().await;
     }
-    // A write cut short by a crash leaves a temp file beside the objects.
+    // A write cut short by a crash leaves a temp file beside the objects,
+    // and no saved cache counters: the put removed them before it wrote
+    // (graft-store-fs, WI-2341), so the next open walks the cache.
+    let _ = std::fs::remove_file(cfg.cache_dir.join("objects").join(".usage"));
     let shard = cached_files(&cfg.cache_dir)[0].parent().unwrap().to_owned();
     let tmp = shard.join(format!("{}.1.0.tmp", "0".repeat(62)));
     std::fs::write(&tmp, b"GRF1 partial").unwrap();

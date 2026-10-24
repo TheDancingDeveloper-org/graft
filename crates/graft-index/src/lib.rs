@@ -11,6 +11,7 @@ use graft_store::{MetaStore, ObjectStore, RepoId, StoreResult, Write};
 
 mod ancestry;
 mod blame;
+mod cache;
 mod derive;
 mod history;
 pub mod kinds;
@@ -128,12 +129,18 @@ pub struct Overlay {
 pub struct Index<M, O> {
     meta: M,
     objects: O,
+    /// Changesets already read and decoded.
+    changesets: cache::ChangesetCache,
 }
 
 impl<M: MetaStore, O: ObjectStore> Index<M, O> {
     /// Wraps the stores.
     pub fn new(meta: M, objects: O) -> Self {
-        Self { meta, objects }
+        Self {
+            meta,
+            objects,
+            changesets: cache::ChangesetCache::new(cache::CACHE_WEIGHT),
+        }
     }
 
     /// The metadata store.
