@@ -338,6 +338,8 @@ message RebaseRequest {
   bytes changeset = 2;
   bytes onto = 3;
   MergeMode merge = 4;
+  // Compute the result and conflicts; write nothing (D27).
+  bool dry_run = 5;
 }
 
 message RevertRequest {

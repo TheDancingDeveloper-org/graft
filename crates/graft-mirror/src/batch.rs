@@ -700,6 +700,7 @@ where
                         changeset: squashed,
                         onto: base_tip,
                         merge: MergeMode::Line,
+                        dry_run: false,
                     },
                 )
                 .await

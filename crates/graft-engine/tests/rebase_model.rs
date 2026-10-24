@@ -252,6 +252,7 @@ fn rebase_with<M: MetaStore>(
             } else {
                 MergeMode::File
             },
+            dry_run: false,
         },
     ))
 }

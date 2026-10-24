@@ -231,6 +231,7 @@ impl<M: MetaStore + 'static> Run<'_, M> {
                                 changeset: head,
                                 onto,
                                 merge: MergeMode::File,
+                                dry_run: false,
                             },
                         )
                         .await;

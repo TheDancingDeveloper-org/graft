@@ -723,6 +723,7 @@ fn run_ops<M: MetaStore>(f: &Fixture<M>, ops: &[Op]) -> Result<(), TestCaseError
                             changeset: head,
                             onto: tip(&r),
                             merge: MergeMode::File,
+                            dry_run: false,
                         },
                     ));
                 }
