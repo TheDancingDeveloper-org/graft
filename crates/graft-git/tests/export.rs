@@ -754,3 +754,33 @@ fn rust_torrent_round_trips_ref_for_ref() {
     );
     assert_round_trip(&source, &out, &api, &map);
 }
+
+#[test]
+fn zero_padded_directories_export_every_subtree() {
+    // WI-2356: a 040000 entry makes its tree a raw record; the export used
+    // to write that record but not the trees beneath it.
+    let mut git = Git::init("zero-padded");
+    let leaf = git.blob(b"leaf\n");
+    let plain = git.blob(b"plain\n");
+    let inner = git.raw_tree(&[("100664", b"odd", &leaf)]);
+    let dir = git.raw_tree(&[("40000", b"inner", &inner), ("100644", b"leaf", &leaf)]);
+    let root = git.raw_tree(&[("040000", b"dir", &dir), ("100644", b"plain", &plain)]);
+    let c1 = git.commit_tree(&root, &[], "zero-padded dir");
+    let inner2 = git.raw_tree(&[("100600", b"odd", &leaf)]);
+    let dir2 = git.raw_tree(&[("040000", b"inner", &inner2), ("100644", b"leaf", &leaf)]);
+    let more = git.blob(b"more\n");
+    let root2 = git.raw_tree(&[
+        ("040000", b"dir", &dir2),
+        ("100644", b"more", &more),
+        ("100644", b"plain", &plain),
+    ]);
+    let c2 = git.commit_tree(&root2, &[&c1], "mode-only change below it, plus a file");
+    git.set_ref("refs/heads/main", &c2);
+    let dest = TempDir::new("zero-padded-dest");
+    import_and_export(&git, &["main"], &dest.0);
+    // The modes are hostile on purpose, so `fsck --strict` would refuse the
+    // source too: check the shas and that every object is present.
+    assert_eq!(commits_by_ref(&git.git_dir()), commits_by_ref(&dest.0));
+    git_in(&dest.0, &["fsck", "--connectivity-only", "--no-dangling"]);
+    git_in(&dest.0, &["rev-list", "--objects", "--all"]);
+}
