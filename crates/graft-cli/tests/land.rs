@@ -1322,3 +1322,36 @@ fn the_vogt_session_survives_a_clean_sync_rebase() {
     let shown = json_run(&app, &["show", landed.as_str().unwrap()]);
     assert_eq!(shown["metadata"]["vogt.session"], json!("ses_trial"));
 }
+
+/// A pending draft that `g sync` rebases client-side onto a land that
+/// arrived after the commit keeps its `vogt.*` metadata through the sync
+/// and the land.
+#[test]
+fn the_vogt_session_survives_a_client_sync_rebase_of_a_pending_draft() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join("README.md"), "mine\n").unwrap();
+    wc_cmd(&app)
+        .env("VOGT_SESSION_ID", "ses_trial")
+        .env("VOGT_WORK_ITEM", "WI-1")
+        .args(["commit", "-m", "mine"])
+        .assert()
+        .success();
+    // Theirs lands from another clone after our commit and before our
+    // land; sync rebases our pending draft onto it.
+    let other_dir = scratch();
+    let other = clone_app(&s, other_dir.path());
+    fs::write(other.join("docs/guide.md"), "theirs\n").unwrap();
+    run(&other, &["commit", "-m", "theirs"]).success();
+    run(&other, &["land"]).success();
+    run(&app, &["sync"]).success();
+    assert_eq!(
+        fs::read_to_string(app.join("docs/guide.md")).unwrap(),
+        "theirs\n"
+    );
+    let landed = json_run(&app, &["land"])["landed"].clone();
+    let meta = json_run(&app, &["show", landed.as_str().unwrap()])["metadata"].clone();
+    assert_eq!(meta["vogt.session"], json!("ses_trial"));
+    assert_eq!(meta["vogt.work_item"], json!("WI-1"));
+}

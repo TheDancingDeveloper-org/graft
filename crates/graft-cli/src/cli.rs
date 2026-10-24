@@ -274,7 +274,7 @@ pub(crate) struct CommitArgs {
     /// Replace the head draft instead of adding one; the old head is superseded
     #[arg(long)]
     pub(crate) amend: bool,
-    /// The author as `Name <email>` (default: GRAFT_AUTHOR_NAME and GRAFT_AUTHOR_EMAIL, else global git config user.name and user.email, else $USER with no email)
+    /// The author as `Name <email>` (default: GRAFT_AUTHOR_NAME and GRAFT_AUTHOR_EMAIL, else $USER with no email)
     #[arg(long, value_name = "AUTHOR")]
     pub(crate) author: Option<String>,
     /// What kind of author this is: human, agent, bot or ci (default: GRAFT_AUTHOR_KIND, else agent with VOGT_SESSION_ID set, else human)
