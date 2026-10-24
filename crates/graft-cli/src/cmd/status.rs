@@ -257,7 +257,7 @@ pub(crate) fn upstream_json(up: &Upstream, workspace: Option<&str>) -> Value {
 pub(crate) fn run(g: &Global, args: &StatusArgs) -> Result<(), Failure> {
     let wc = require_working_copy()?;
     let changes = wc.status()?;
-    let conflicts = wc.conflicts()?.map(|c| c.files).unwrap_or_default();
+    let conflicts = wc.open_conflicts()?;
     let ignored = if args.ignored {
         let mut list = wc.ignored()?;
         let cut = list.len() > MAX_IGNORED;
