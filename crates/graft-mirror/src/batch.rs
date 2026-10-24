@@ -1,7 +1,8 @@
 //! Batch mode (decision D21, `docs/architecture.md` §3c): agents land on a
 //! graft **integration line** forked from the followed GitHub `main`, and
-//! the batch reaches GitHub as **one squashed PR** that the operator merges.
-//! GitHub CI runs once per batch.
+//! the batch reaches GitHub as **one PR** carrying one commit per land
+//! (decision D26), which oversight reviews and `land-pr` rebase-merges
+//! (decision D28). GitHub CI runs once per batch.
 //!
 //! `graft-mirror pr-batch <line> --base main` runs [`Batcher::run`]:
 //!
@@ -20,19 +21,36 @@
 //!    nothing moves. Otherwise a merge changeset (first parent the line tip,
 //!    second the base tip) carries the line to the rebased snapshot, and the
 //!    line moves to it by compare-and-swap: a fast-forward, never a rewrite.
-//! 4. **Export** the line's net change against the base as one commit on
-//!    GitHub's current `main`: the integration tip's git tree (written by
-//!    `graft-git`'s deterministic exporter) with `main` as the only parent.
-//!    The commit object is built byte for byte from recorded fields
-//!    (`graft_git::export::commit_object`), stored in the local mirror and
-//!    recorded before anything is pushed, so a retry pushes the same sha.
+//! 4. **Export** the batch as a linear chain on GitHub's current `main`,
+//!    one commit per land, oldest first (D26). Each land is rebased with
+//!    line merge (D16) onto the replay before it, starting at the base, as
+//!    an unlanded changeset: a cherry-pick of the land's own change that
+//!    keeps what the base changed in the same files. Each replay's git tree
+//!    (written by `graft-git`'s deterministic exporter) becomes that land's
+//!    commit: the land's author and author time, the mirror as committer at
+//!    the same time, the land's message, and `Graft-Changeset`,
+//!    `Graft-Session`, `Graft-Work-Item` and `Graft-Batch` trailers. A
+//!    revert land is its own commit. The last commit's tree must equal the
+//!    cut tip's tree (the root check). When a land does not merge onto the
+//!    replay before it, the root check fails, or the batch has more than
+//!    [`MAX_COMMITS`] lands, the
+//!    batch is exported as one squashed commit instead, as D21 did, and the
+//!    PR body and the commit say why. Commit objects are built byte for
+//!    byte from recorded fields (`graft_git::export::commit_object`),
+//!    stored in the local mirror and recorded (the chain in
+//!    `batch_commits`) before anything is pushed, so a retry pushes the
+//!    same shas.
 //! 5. **Push** branch `graft/batch-<n>` with a lease that requires the
 //!    branch not to exist, and **open a PR** into the base (adopting one
-//!    already on the branch). The squashed commit's message lists every
-//!    land in the batch (changeset, author, session, work item,
-//!    attestations); the PR body lists as many as fit under
-//!    [`MAX_PR_BODY`] and names the commit message for the rest. Both end
-//!    with `Graft-Batch` trailers. The mirror never merges or queues it.
+//!    already on the branch). The PR body lists the lands (changeset,
+//!    author, session, work item, attestations) as many as fit under
+//!    [`MAX_PR_BODY`], and names the branch's commits (or the squashed
+//!    commit's message, which lists every land) for the rest. It ends with
+//!    `Graft-Batch` trailers. The mirror never merges or queues it.
+//! 6. **Settle.** Once follow has imported the PR's merge, each per-land
+//!    commit is mapped to the commit it merged as: a rebase-merge's new
+//!    commits by their `Graft-Changeset` trailer, a merge commit's by its
+//!    own shas. A squash-merge maps the batch tip only, as D21 did.
 //!
 //! Dropping a land (WI-2340): `--exclude <changeset>` lands a `Revert` of it
 //! on the integration line, as any land is, so the lands after it stay. Any
@@ -78,7 +96,7 @@ use crate::export::default_committer;
 use crate::follow::{FollowConfig, FollowLine, Follower, LineOutcome};
 use crate::git::{Mirror, PushOutcome};
 use crate::github::{Forge, Pull};
-use crate::text::clean_text;
+use crate::text::{clean_message, clean_text};
 use crate::{MirrorError, current_ref, move_ref};
 
 /// The authority batch mode claims for an integration line: nothing else
@@ -98,6 +116,17 @@ pub const DEFAULT_DROP_REASON: &str = "excluded by the operator";
 
 /// Dropped lands the PR body names; more are counted.
 pub const MAX_DROPS_LISTED: usize = 50;
+
+/// Per-land commits one batch carries (D26). The cut takes at most this
+/// many lands; a batch with more (one cut could not be applied to) is
+/// squashed.
+pub const MAX_COMMITS: usize = 500;
+
+/// The trailer naming a per-land commit's land.
+pub const CHANGESET_TRAILER: &str = "Graft-Changeset:";
+
+/// The longest land message a per-land commit keeps, in characters.
+const MESSAGE_CHARS: usize = 8000;
 
 /// The prefix of a batch branch: `graft/batch-<n>`.
 pub const BRANCH_PREFIX: &str = "graft/batch-";
@@ -136,9 +165,9 @@ const FIELD_CHARS: usize = 100;
 /// Where a batch is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatchState {
-    /// The squashed commit is built and recorded; nothing pushed yet.
+    /// The commits are built and recorded; nothing pushed yet.
     Planned,
-    /// `graft/batch-<n>` holds the squashed commit.
+    /// `graft/batch-<n>` holds the batch's commits.
     Pushed,
     /// A PR is open on the branch, waiting for the operator.
     Open,
@@ -197,15 +226,16 @@ pub struct BatchRecord {
     pub tip: ChangesetId,
     /// Lands in the batch (at most [`MAX_LANDS`]).
     pub lands: u64,
-    /// When the batch was planned (ms): the squashed commit's date.
+    /// When the batch was planned (ms): a squashed commit's date.
     pub created_ms: i64,
     /// `graft/batch-<n>`.
     pub branch: String,
     /// The PR title.
     pub title: String,
-    /// The PR body (also the squashed commit's message body).
+    /// The PR body (also a squashed commit's message body).
     pub body: String,
-    /// The squashed commit.
+    /// The branch head: the last per-land commit (D26), or the squashed
+    /// commit when the batch fell back to one.
     pub squash_sha: GitSha,
     /// The PR number, once opened.
     pub pr_number: Option<u64>,
@@ -219,6 +249,20 @@ pub struct BatchRecord {
     pub merge_sha: Option<GitSha>,
     /// The changeset follow imported that merge commit as.
     pub merged: Option<ChangesetId>,
+}
+
+/// One per-land commit of a batch (D26).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchCommit {
+    /// Its place in the chain, from 0 (the oldest land).
+    pub seq: u32,
+    /// The land it carries.
+    pub land: ChangesetId,
+    /// The commit pushed on the batch branch.
+    pub sha: GitSha,
+    /// The commit it reached the base branch as, once the PR merged and
+    /// follow imported it: a rebase-merge's new commit, or `sha` itself.
+    pub merged: Option<GitSha>,
 }
 
 /// Batch mode's record of one integration line.
@@ -349,6 +393,17 @@ struct LandLine {
     authored_ms: i64,
     /// The changeset this land reverts, when it is a revert.
     reverts: Option<ChangesetId>,
+    /// Its first parent: its own change is the diff from it.
+    parent: Option<ChangesetId>,
+    /// The author's name and email for a git ident.
+    ident: (String, String),
+    /// Author time, with its offset.
+    authored: Timestamp,
+    /// The whole message, cleaned for a commit (`@` kept) and bounded.
+    message: String,
+    /// The session and work item for commit trailers (`@` kept).
+    trailer_session: Option<String>,
+    trailer_work_item: Option<String>,
 }
 
 /// A land dropped from a batch: it and its revert are both in the batch.
@@ -384,6 +439,35 @@ fn system_ms() -> i64 {
 /// `<seconds> +0000`, as git writes a UTC date.
 fn git_time(ms: i64) -> String {
     format!("{} +0000", ms.div_euclid(1000))
+}
+
+/// `<seconds> <+hhmm>`, as git writes a date with its offset.
+fn git_time_at(t: Timestamp) -> String {
+    let off = i32::from(t.offset_min);
+    let sign = if off < 0 { '-' } else { '+' };
+    let off = off.abs();
+    format!(
+        "{} {sign}{:02}{:02}",
+        t.ms.div_euclid(1000),
+        off / 60,
+        off % 60
+    )
+}
+
+/// A name or email made safe for a git ident line: no angle brackets,
+/// newlines or other control characters.
+fn ident_part(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .filter(|c| !c.is_control() && *c != '<' && *c != '>')
+        .take(FIELD_CHARS)
+        .collect();
+    let out = out.trim().to_owned();
+    if out.is_empty() {
+        "unknown".to_owned()
+    } else {
+        out
+    }
 }
 
 /// A short form of a changeset id for listings.
@@ -736,6 +820,24 @@ where
     ) -> Result<ChangesetId, MirrorError> {
         let mut metadata = Metadata::new();
         metadata.insert(SYNC_KEY.to_owned(), absorbed.to_string());
+        let at = Timestamp {
+            ms: (self.clock)(),
+            offset_min: 0,
+        };
+        Ok(self
+            .create_with(parents, changes, message, metadata, at)
+            .await?)
+    }
+
+    /// A changeset on `parents` with `changes`, by the mirror.
+    async fn create_with(
+        &mut self,
+        parents: Vec<ChangesetId>,
+        changes: Vec<Change>,
+        message: String,
+        metadata: Metadata,
+        authored_at: Timestamp,
+    ) -> Result<ChangesetId, ApiError> {
         let cx = self.call("create");
         let created = self
             .api
@@ -750,10 +852,7 @@ where
                         email: self.config.committer.email.clone(),
                         kind: AuthorKind::Bot,
                     },
-                    authored_at: Timestamp {
-                        ms: (self.clock)(),
-                        offset_min: 0,
-                    },
+                    authored_at,
                     message,
                     metadata,
                     inline_blobs: Vec::new(),
@@ -998,6 +1097,18 @@ where
                     .metadata
                     .get(REVERTS_KEY)
                     .and_then(|r| ChangesetId::parse(r).ok()),
+                parent: cs.first_parent(),
+                ident: (ident_part(&cs.author.name), ident_part(&cs.author.email)),
+                authored: cs.authored_at,
+                message: clean_message(&cs.message, MESSAGE_CHARS, true),
+                trailer_session: cs
+                    .metadata
+                    .get(SESSION_KEY)
+                    .map(|v| clean_message(v, FIELD_CHARS, false)),
+                trailer_work_item: cs
+                    .metadata
+                    .get(WORK_ITEM_KEY)
+                    .map(|v| clean_message(v, FIELD_CHARS, false)),
             });
         }
         if lands.is_empty() {
@@ -1246,9 +1357,16 @@ where
         if lands.is_empty() {
             return Ok(Ok(None));
         }
+        // A batch carries at most MAX_COMMITS per-land commits (D26), so the
+        // cut always applies that cap.
+        let max_lands = self
+            .config
+            .max_lands
+            .unwrap_or(MAX_COMMITS)
+            .min(MAX_COMMITS);
         if let Some(age) = self.config.max_age_ms {
             let oldest_ms = lands.iter().map(|l| l.authored_ms).min().unwrap_or(0);
-            let full = self.config.max_lands.is_some_and(|m| lands.len() >= m);
+            let full = lands.len() >= max_lands;
             if !full && (self.clock)().saturating_sub(oldest_ms) < age {
                 return Ok(Err(BatchOutcome::NotDue {
                     lands: lands.len(),
@@ -1257,7 +1375,7 @@ where
             }
         }
         let mut uncut = None;
-        let (cut, base, held) = match self.config.max_lands {
+        let (cut, base, held) = match Some(max_lands) {
             Some(max) if lands.len() > max.max(1) && capped => {
                 uncut = Some(format!(
                     "the line has more than {MAX_LANDS} lands to batch, so the oldest are \
@@ -1338,25 +1456,6 @@ where
             TITLE_CHARS,
             false,
         );
-        let (body, message_body) = render(
-            &BatchHeader {
-                number,
-                line: self.config.line.clone(),
-                branch: self.config.base.branch.clone(),
-                base,
-                base_sha,
-                start: state.start,
-                tip: cut,
-                capped,
-                truncated,
-                drops,
-                held,
-                uncut,
-                max_lands: self.config.max_lands.unwrap_or(0),
-            },
-            &lands,
-        );
-
         // The tree: the integration tip, exported deterministically.
         let tree = {
             let cx = self.call("export");
@@ -1375,21 +1474,60 @@ where
             let tip_sha = exporter.export_changeset(cut).await?;
             self.mirror.commit_tree(tip_sha).await?
         };
-        let ident = format!(
-            "{} <{}> {}",
-            self.config.committer.name,
-            self.config.committer.email,
-            git_time(created_ms)
-        );
-        let record = ImportedCommit {
-            sha: GitSha([0; 20]),
-            headers: format!("author {ident}\ncommitter {ident}\n\n").into_bytes(),
-            message: None,
-            raw_trees: Vec::new(),
+        let (fallback, commits) = match self
+            .chain(number, base, base_sha, tree, created_ms, &lands)
+            .await?
+        {
+            Ok(commits) => (None, commits),
+            Err(why) => {
+                tracing::warn!(
+                    repo = %self.config.repo, line = %self.config.line, batch = number,
+                    "mirror batch: exported squashed: {why}"
+                );
+                (Some(why), Vec::new())
+            }
         };
-        let message = format!("{title}\n\n{message_body}");
-        let raw = commit_object(tree, &[base_sha], &record, &message);
-        let squash_sha = self.mirror.write_commit(&raw).await?;
+        let (body, message_body) = render(
+            &BatchHeader {
+                number,
+                line: self.config.line.clone(),
+                branch: self.config.base.branch.clone(),
+                base,
+                base_sha,
+                start: state.start,
+                tip: cut,
+                capped,
+                truncated,
+                drops,
+                held,
+                uncut,
+                max_lands,
+                fallback: fallback.clone(),
+            },
+            &lands,
+        );
+        let squash_sha = match commits.last() {
+            Some(c) => c.sha,
+            None => {
+                let ident = format!(
+                    "{} <{}> {}",
+                    self.config.committer.name,
+                    self.config.committer.email,
+                    git_time(created_ms)
+                );
+                let record = ImportedCommit {
+                    sha: GitSha([0; 20]),
+                    headers: format!("author {ident}\ncommitter {ident}\n\n").into_bytes(),
+                    message: None,
+                    raw_trees: Vec::new(),
+                };
+                // The body was cleaned for GitHub's markdown; a commit
+                // message keeps `@` as written (emails, co-author lines).
+                let message = format!("{title}\n\n{message_body}").replace("@\u{200b}", "@");
+                let raw = commit_object(tree, &[base_sha], &record, &message);
+                self.mirror.write_commit(&raw).await?
+            }
+        };
 
         let rec = BatchRecord {
             number,
@@ -1412,7 +1550,7 @@ where
             merge_sha: None,
             merged: None,
         };
-        if !self.db.insert_batch(&rec)? {
+        if !self.db.insert_batch(&rec, &commits)? {
             return Err(config_err(format!(
                 "another run opened a batch for line {} first",
                 self.config.line
@@ -1420,9 +1558,162 @@ where
         }
         tracing::info!(
             repo = %self.config.repo, line = %self.config.line, batch = number,
-            lands = rec.lands, held, squash = %squash_sha, "mirror batch planned"
+            lands = rec.lands, held, commits = commits.len(), head = %squash_sha,
+            "mirror batch planned"
         );
         Ok(Ok(Some(rec)))
+    }
+
+    /// The batch's per-land commits on `base_sha`, oldest first, written to
+    /// the mirror (D26). Each land's own change is replayed onto the base as
+    /// an unlanded changeset, and its tree is the land's commit's tree; the
+    /// last tree must be `tree`, the cut tip's. `Ok(Err(why))` when the
+    /// batch is to be squashed instead. One diff, one create and one export
+    /// per land, at most [`MAX_COMMITS`].
+    async fn chain(
+        &mut self,
+        number: u64,
+        base: ChangesetId,
+        base_sha: GitSha,
+        tree: GitSha,
+        created_ms: i64,
+        lands: &[LandLine],
+    ) -> Result<Result<Vec<BatchCommit>, String>, MirrorError> {
+        if lands.len() > MAX_COMMITS {
+            return Ok(Err(format!(
+                "the batch has {} lands, more than the {MAX_COMMITS} per-land commits a \
+                 batch carries",
+                lands.len()
+            )));
+        }
+        // Oldest first: each land is rebased (line merge) onto the replay
+        // before it. Its parent is landed, so `Rebase` moves the land alone:
+        // a cherry-pick of its own change that keeps whatever the base
+        // changed in the same files, never a whole-file overwrite.
+        let mut replays = Vec::with_capacity(lands.len());
+        let mut prev = base;
+        for land in lands.iter().rev() {
+            if land.parent.is_none() {
+                return Ok(Err(format!("land {} has no parent", short(land.id))));
+            }
+            let cx = self.call("replay");
+            prev = match self
+                .api
+                .rebase(
+                    &cx,
+                    Rebase {
+                        repo: self.config.repo.clone(),
+                        changeset: land.id,
+                        onto: prev,
+                        merge: MergeMode::Line,
+                        dry_run: false,
+                    },
+                )
+                .await
+            {
+                Ok(id) => id,
+                Err(ApiError::Conflict { paths, .. }) => {
+                    return Ok(Err(format!(
+                        "land {} does not merge onto the base and the lands before it \
+                         ({} conflicting path{})",
+                        short(land.id),
+                        paths.len(),
+                        if paths.len() == 1 { "" } else { "s" }
+                    )));
+                }
+                Err(e) => return Err(e.into()),
+            };
+            replays.push(prev);
+        }
+        let mut trees = Vec::with_capacity(replays.len());
+        {
+            let cx = self.call("export-chain");
+            let stamp = Stamp(created_ms);
+            let repo = self.config.repo.clone();
+            let committer = self.config.committer.clone();
+            let mut exporter = Exporter::new(
+                self.api,
+                &cx,
+                self.db,
+                &repo,
+                &committer,
+                &stamp,
+                self.mirror.dir(),
+            )?;
+            for r in &replays {
+                let sha = exporter.export_changeset(*r).await?;
+                trees.push(self.mirror.commit_tree(sha).await?);
+            }
+        }
+        if trees.last() != Some(&tree) {
+            return Ok(Err(
+                "replaying the lands onto the base does not reproduce the integration tip"
+                    .to_owned(),
+            ));
+        }
+        let mut parent = base_sha;
+        let mut out = Vec::with_capacity(trees.len());
+        for (seq, (land, tree)) in lands.iter().rev().zip(&trees).enumerate() {
+            let raw = land_commit(number, land, *tree, parent, &self.config.committer);
+            let sha = self.mirror.write_commit(&raw).await?;
+            out.push(BatchCommit {
+                seq: seq as u32,
+                land: land.id,
+                sha,
+                merged: None,
+            });
+            parent = sha;
+        }
+        Ok(Ok(out))
+    }
+
+    /// Where each of batch `rec`'s per-land commits reached the base
+    /// branch, given the PR's merge commit `merge` (imported by follow, so
+    /// in the mirror). A rebase-merge leaves one new commit per land, newest
+    /// at `merge`, each naming its land in its only `Graft-Changeset`
+    /// trailer; a merge commit has the branch head as its second parent and
+    /// keeps the commits as they are. A squash-merge maps nothing. Reads at
+    /// most one commit per land.
+    async fn map_merged(
+        &self,
+        rec: &BatchRecord,
+        merge: GitSha,
+    ) -> Result<Vec<BatchCommit>, MirrorError> {
+        let mut commits = self.db.batch_commits(rec.number)?;
+        if commits.is_empty() {
+            return Ok(commits);
+        }
+        let Ok(raw) = self.mirror.read_commit(merge).await else {
+            return Ok(Vec::new());
+        };
+        let (parents, _) = parse_commit(&raw);
+        if parents.len() == 2 && parents[1] == rec.squash_sha {
+            for c in &mut commits {
+                c.merged = Some(c.sha);
+            }
+            return Ok(commits);
+        }
+        let at: HashMap<ChangesetId, usize> = commits
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.land, i))
+            .collect();
+        let mut cur = merge;
+        for _ in 0..commits.len() {
+            let Ok(raw) = self.mirror.read_commit(cur).await else {
+                break;
+            };
+            let (parents, land) = parse_commit(&raw);
+            let Some(i) = land.and_then(|l| at.get(&l).copied()) else {
+                break;
+            };
+            commits[i].merged = Some(cur);
+            match parents.first() {
+                Some(p) => cur = *p,
+                None => break,
+            }
+        }
+        Ok(commits)
     }
 
     /// Runs whichever step the batch is at, until it waits on the operator
@@ -1440,7 +1731,7 @@ where
         Ok(())
     }
 
-    /// Pushes the squashed commit to `graft/batch-<n>`, on a lease that
+    /// Pushes the batch's head commit to `graft/batch-<n>`, on a lease that
     /// requires the branch not to exist. The same commit already there is
     /// fine (a retry); other commits are not overwritten, and the batch is
     /// rejected.
@@ -1524,6 +1815,7 @@ where
                 self.db.put_batch(rec)?;
                 return Ok(());
             };
+            let commits = self.map_merged(rec, merge).await?;
             rec.merged = Some(merged);
             rec.state = BatchState::Merged;
             rec.detail = format!("merged as {merge} (graft {merged})");
@@ -1550,7 +1842,7 @@ where
                 start_base: Some(rec.base),
                 sync_batch: cut_before_sync.then_some(rec.number),
             };
-            self.db.settle_batch(rec, &rec.line, &next)?;
+            self.db.settle_batch(rec, &rec.line, &next, &commits)?;
             tracing::info!(
                 line = %rec.line, batch = rec.number, merge = %merge,
                 "mirror batch merged"
@@ -1655,8 +1947,10 @@ struct BatchHeader {
     held: usize,
     /// Why a configured cap was not applied.
     uncut: Option<String>,
-    /// The cut's land cap (0 when none).
+    /// The cut's land cap.
     max_lands: usize,
+    /// Why the batch is one squashed commit instead of one per land.
+    fallback: Option<String>,
 }
 
 /// How many of `lands` (newest first) a batch capped at `max` takes, oldest
@@ -1677,9 +1971,9 @@ fn keep_with_reverts(lands: &[LandLine], max: usize) -> usize {
     }
 }
 
-/// One table row for a land. Every cell is bounded, so a row is too.
-fn land_row(land: &LandLine) -> String {
-    let cell = |s: &str| clean_text(s, FIELD_CHARS, false).replace('|', "\\|");
+/// A land's latest check results, bounded: `none`, or `<check> passed`
+/// and `<check> failed`, comma-separated.
+fn checks_text(land: &LandLine) -> String {
     let mut checks: Vec<String> = land
         .checks
         .iter()
@@ -1692,11 +1986,17 @@ fn land_row(land: &LandLine) -> String {
     if land.checks.len() > MAX_CHECKS {
         checks.push(format!("+{} more", land.checks.len() - MAX_CHECKS));
     }
-    let checks = if checks.is_empty() {
+    if checks.is_empty() {
         "none".to_owned()
     } else {
         checks.join(", ")
-    };
+    }
+}
+
+/// One table row for a land. Every cell is bounded, so a row is too.
+fn land_row(land: &LandLine) -> String {
+    let cell = |s: &str| clean_text(s, FIELD_CHARS, false).replace('|', "\\|");
+    let checks = checks_text(land);
     format!(
         "| `{}` | {} | {} | {} | {} | {} |\n",
         short(land.id),
@@ -1708,6 +2008,78 @@ fn land_row(land: &LandLine) -> String {
     )
 }
 
+/// A land's per-land commit message (D26): its own message (or a stand-in
+/// when it has none), then the `Graft-*` trailers.
+fn land_message(number: u64, land: &LandLine) -> String {
+    let text = land.message.trim();
+    let mut m = if text.is_empty() {
+        format!("graft land {}", short(land.id))
+    } else {
+        text.to_owned()
+    };
+    m.push_str(&format!("\n\n{CHANGESET_TRAILER} {}\n", land.id));
+    if let Some(s) = &land.trailer_session {
+        m.push_str(&format!("Graft-Session: {s}\n"));
+    }
+    if let Some(w) = &land.trailer_work_item {
+        m.push_str(&format!("Graft-Work-Item: {w}\n"));
+    }
+    // No `Graft-Checks` trailer: phase 1 consumes no checks (D22). Check
+    // results in commits are phase-2 surface (D25), which starts only with
+    // the graft-primary authority switch.
+    m.push_str(&format!("{BATCH_TRAILER} {number}\n"));
+    m
+}
+
+/// A land's per-land commit object on `parent`: the land's author and
+/// author time, `committer` at the same time, and [`land_message`]. Built
+/// from recorded fields only, so the same land on the same parent gives the
+/// same sha.
+fn land_commit(
+    number: u64,
+    land: &LandLine,
+    tree: GitSha,
+    parent: GitSha,
+    committer: &Committer,
+) -> Vec<u8> {
+    let when = git_time_at(land.authored);
+    let headers = format!(
+        "author {} <{}> {when}\ncommitter {} <{}> {when}\n\n",
+        land.ident.0, land.ident.1, committer.name, committer.email
+    );
+    let record = ImportedCommit {
+        sha: GitSha([0; 20]),
+        headers: headers.into_bytes(),
+        message: None,
+        raw_trees: Vec::new(),
+    };
+    commit_object(tree, &[parent], &record, &land_message(number, land))
+}
+
+/// A raw commit's parents, and the land its message names when its last
+/// paragraph (the trailers) has exactly one `Graft-Changeset` line. A
+/// squash-merge of several lands names more and maps to none; a line in
+/// the message body is not a trailer.
+fn parse_commit(raw: &[u8]) -> (Vec<GitSha>, Option<ChangesetId>) {
+    let text = String::from_utf8_lossy(raw);
+    let (head, message) = text.split_once("\n\n").unwrap_or((text.as_ref(), ""));
+    let message = message.trim_end().rsplit("\n\n").next().unwrap_or("");
+    let parents = head
+        .lines()
+        .filter_map(|l| l.strip_prefix("parent "))
+        .filter_map(GitSha::from_hex)
+        .collect();
+    let mut named = message
+        .lines()
+        .filter_map(|l| l.strip_prefix(CHANGESET_TRAILER))
+        .map(str::trim);
+    let land = match (named.next(), named.next()) {
+        (Some(id), None) => ChangesetId::parse(id).ok(),
+        _ => None,
+    };
+    (parents, land)
+}
+
 /// The PR body and the squashed commit's message body. Both say what the
 /// batch is, list its lands (newest first) and end with the trailers. The
 /// commit message lists every land. The PR body lists as many as fit in
@@ -1715,11 +2087,20 @@ fn land_row(land: &LandLine) -> String {
 fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
     let line = clean_text(&h.line, FIELD_CHARS, false);
     let branch = clean_text(&h.branch, FIELD_CHARS, false);
-    let mut head = format!(
-        "Batch {} of graft line `{line}`, squashed into one commit by graft-mirror \
-         (decision D21). graft never merges or queues this PR: the operator merges it.\n\n",
-        h.number
-    );
+    let mut head = match &h.fallback {
+        None => format!(
+            "Batch {} of graft line `{line}`, one commit per land, oldest first, by \
+             graft-mirror (decision D26). Merge it with rebase-merge to keep the commits \
+             (D28). graft never merges or queues this PR.\n\n",
+            h.number
+        ),
+        Some(why) => format!(
+            "Batch {} of graft line `{line}`, squashed into one commit by graft-mirror \
+             (the D26 fallback: {}). graft never merges or queues this PR.\n\n",
+            h.number,
+            clean_text(why, 300, false)
+        ),
+    };
     head.push_str(&format!(
         "- Base: `{branch}` at {} (graft {})\n",
         h.base_sha, h.base
@@ -1793,12 +2174,17 @@ fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
     message.push_str(&trailers);
 
     // The note for lands the PR body has no room for, at its longest.
-    let note = |n: usize| {
-        format!(
+    let note = |n: usize| match h.fallback {
+        None => format!(
+            "\n{n} more lands are on the branch, one commit each \
+             (`git log {}..{BRANCH_PREFIX}{}`).\n",
+            h.base_sha, h.number
+        ),
+        Some(_) => format!(
             "\n{n} more lands are listed in the squashed commit's message \
              (`git log -1 {BRANCH_PREFIX}{}`).\n",
             h.number
-        )
+        ),
     };
     let reserve = note(lands.len()).chars().count() + trailers.chars().count();
     let mut body = head;
@@ -1861,6 +2247,7 @@ mod tests {
             held: 0,
             uncut: None,
             max_lands: 0,
+            fallback: Some("test".to_owned()),
         }
     }
 
@@ -1881,6 +2268,15 @@ mod tests {
             checks,
             authored_ms: n as i64,
             reverts: None,
+            parent: None,
+            ident: ("Tess".to_owned(), "tess@example.com".to_owned()),
+            authored: Timestamp {
+                ms: 1_700_000_000_000 + i64::from(n),
+                offset_min: 600,
+            },
+            message: text("subject "),
+            trailer_session: Some(text("ses_x")),
+            trailer_work_item: Some(text("WI-1")),
         }
     }
 
@@ -1932,6 +2328,75 @@ mod tests {
         assert_eq!(listed[..], expected[..listed.len()]);
         let note = format!("\n{} more lands are listed", MAX_LANDS - listed.len());
         assert!(body.contains(&note), "{note}");
+    }
+
+    #[test]
+    fn a_land_commit_is_deterministic_and_names_its_land() {
+        let l = land(4, false);
+        let committer = Committer {
+            name: "graft-mirror".to_owned(),
+            email: "mirror@graft".to_owned(),
+        };
+        let raw = land_commit(3, &l, GitSha([2; 20]), GitSha([1; 20]), &committer);
+        assert_eq!(
+            raw,
+            land_commit(3, &l, GitSha([2; 20]), GitSha([1; 20]), &committer)
+        );
+        let text = String::from_utf8(raw.clone()).unwrap();
+        assert!(
+            text.contains("author Tess <tess@example.com> 1700000000 +1000\n"),
+            "{text}"
+        );
+        assert!(text.contains("committer graft-mirror <mirror@graft> 1700000000 +1000\n"));
+        assert!(
+            text.ends_with("Graft-Session: ses_x\nGraft-Work-Item: WI-1\nGraft-Batch: 3\n"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Graft-Checks"),
+            "phase 1 has no checks trailer"
+        );
+        assert_eq!(parse_commit(&raw), (vec![GitSha([1; 20])], Some(l.id)));
+        // A squash-merge message naming two lands maps to none.
+        let two = format!("{text}{CHANGESET_TRAILER} {}\n", land(5, false).id);
+        assert_eq!(parse_commit(two.as_bytes()).1, None);
+    }
+
+    #[test]
+    fn a_commit_message_keeps_at_and_only_trailers_name_the_land() {
+        let mut l = land(4, false);
+        l.message = clean_message(
+            "fix\n\nGraft-Changeset: not-a-trailer\n\nCo-authored-by: A <a@b.c>",
+            MESSAGE_CHARS,
+            true,
+        );
+        let msg = land_message(1, &l);
+        assert!(msg.contains("Co-authored-by: A <a@b.c>\n"), "{msg}");
+        assert!(!msg.contains('\u{200b}'));
+        let committer = Committer {
+            name: "m".to_owned(),
+            email: "m@m".to_owned(),
+        };
+        let raw = land_commit(1, &l, GitSha([2; 20]), GitSha([1; 20]), &committer);
+        assert_eq!(parse_commit(&raw).1, Some(l.id), "the body line is ignored");
+        // A commit whose only Graft-Changeset line is in its body names none.
+        let body_only = format!(
+            "tree {}\n\nsubject\n\nGraft-Changeset: {}\n\nlast paragraph\n",
+            GitSha([2; 20]),
+            l.id
+        );
+        assert_eq!(parse_commit(body_only.as_bytes()).1, None);
+    }
+
+    #[test]
+    fn idents_and_offsets_are_safe() {
+        assert_eq!(ident_part("Ev<il>\nName"), "EvilName");
+        assert_eq!(ident_part(" \n"), "unknown");
+        let t = Timestamp {
+            ms: 1_000,
+            offset_min: -330,
+        };
+        assert_eq!(git_time_at(t), "1 -0530");
     }
 
     #[test]
