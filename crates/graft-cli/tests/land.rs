@@ -981,6 +981,43 @@ fn the_pre_land_check_reports_clean_merges_and_draft_overlap() {
         drafts["skipped"].as_str().expect("note").contains("drafts"),
         "{value}"
     );
+    assert_eq!(
+        value["preflight"]["pre_land_check"]["overlap"],
+        json!("skipped(scope)"),
+        "{value}"
+    );
+}
+
+/// WI-2417: a token that can land but lacks `repo:<r>:drafts` still gets
+/// the conflict stop; only the overlap is skipped, and it says so on
+/// stderr and in JSON.
+#[test]
+fn a_land_token_without_drafts_still_gets_the_conflict_stop() {
+    let s = serve(Policy::Direct);
+    let (one, two) = (scratch(), scratch());
+    let app = two_writers_on_one_file(
+        &s,
+        one.path(),
+        two.path(),
+        "fn a() {}\nfn b() {}\nfn c() { 2 }\n",
+    );
+    s.repo
+        .set_scopes(&["repo:demo:read", "repo:demo:write", "repo:demo:land:main"]);
+    let tip = s.rt.block_on(s.repo.tip());
+    let a = wc_cmd(&app).args(["--json", "land"]).assert().code(3);
+    let error = error_of(&a);
+    assert_eq!(error["kind"], json!("conflict"), "{error}");
+    let pre = &error["preflight"];
+    assert_eq!(pre["stop"], json!(true), "{error}");
+    assert_eq!(pre["conflicts"], json!(["src/lib.rs"]));
+    assert_eq!(
+        pre["pre_land_check"],
+        json!({"rebase": "ran", "overlap": "skipped(scope)"}),
+        "{error}"
+    );
+    let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    assert!(err.contains("draft overlap not checked"), "{err}");
+    assert_eq!(s.rt.block_on(s.repo.tip()), tip, "nothing was sent");
 }
 
 #[test]

@@ -109,9 +109,13 @@ To run the WI-2270 trial end to end:
    name repo `rusttorrent` and line `trial-1`; override with
    `GRAFT_ATTESTER_REPO` and `GRAFT_ATTESTER_LINE`) and run `deploy/up.sh`.
 3. From a machine on the tailnet, `trial/create-trial-line.sh` creates
-   `trial-1` at the current tip of rustTorrent `main` (it leaves an existing
-   line alone), then `trial/mint-agent-tokens.sh N` mints the agents' tokens
-   (`read`, `write`, `land:trial-1`; never `main`).
+   `trial-1` at the current tip of the followed base line (it leaves an
+   existing line alone), then `trial/mint-agent-tokens.sh N` mints the
+   agents' tokens (`read`, `write`, `drafts`, `land:trial-1`; never the base
+   line). Both take `GRAFT_TRIAL_REPO` (default `rusttorrent`),
+   `GRAFT_TRIAL_BASE` (default `main`) and `GRAFT_TRIAL_LINE`; for vogt, the
+   trial line forks from `rust-core`:
+   `GRAFT_TRIAL_REPO=vogt GRAFT_TRIAL_BASE=rust-core`.
 4. When the agents are done, `graft-mirror pr-batch trial-1` opens the one
    squashed PR (D21).
 

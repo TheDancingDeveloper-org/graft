@@ -79,6 +79,8 @@ pub struct DraftCheck {
     /// Why the read was skipped: the scope the caller lacks, or a server
     /// that does not answer it.
     pub skipped: Option<String>,
+    /// The short reason code for `skipped`: `scope` or `unserved`.
+    pub skip_code: Option<&'static str>,
 }
 
 /// What the pre-land check found.
@@ -94,6 +96,9 @@ pub struct Preflight {
     pub conflict: Option<ApiError>,
     /// Why the dry-run rebase was not run, when a server does not answer it.
     pub preview_skipped: Option<String>,
+    /// The dry-run rebase was sent (false when the stack is on the tip, or
+    /// it was skipped).
+    pub preview_ran: bool,
     /// The draft overlap.
     pub drafts: DraftCheck,
 }
@@ -114,6 +119,42 @@ impl Preflight {
         }
     }
 
+    /// What ran, as `{rebase, overlap}`: `ran`, `not_needed` or
+    /// `skipped(<code>)`. The rebase needs only what a land needs; the
+    /// overlap needs `repo:<r>:drafts` (WI-2417).
+    pub fn summary(&self) -> Value {
+        let rebase = match (&self.preview_skipped, self.preview_ran) {
+            (Some(_), _) => "skipped(unserved)".to_owned(),
+            (None, true) => "ran".to_owned(),
+            (None, false) => "not_needed".to_owned(),
+        };
+        let overlap = match self.drafts.skip_code {
+            Some(code) => format!("skipped({code})"),
+            None => "ran".to_owned(),
+        };
+        json!({"rebase": rebase, "overlap": overlap})
+    }
+
+    /// Notes for parts of the check that did not run, for stderr in every
+    /// output mode, so a skipped part is never silent.
+    pub fn skip_notes(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(why) = &self.preview_skipped {
+            out.push(format!("pre-land: conflict preview not run ({why})"));
+        }
+        if let Some(why) = &self.drafts.skipped {
+            let still = if self.preview_ran {
+                "; the conflict preview still ran"
+            } else {
+                ""
+            };
+            out.push(format!(
+                "pre-land: draft overlap not checked ({why}){still}"
+            ));
+        }
+        out
+    }
+
     /// The `preflight` object every client returns.
     pub fn json(&self) -> Value {
         let conflicts = self.conflict_paths();
@@ -127,6 +168,7 @@ impl Preflight {
         let d = &self.drafts;
         json!({
             "checked": true,
+            "pre_land_check": self.summary(),
             "tip": self.tip.to_string(),
             "stop": self.stops(),
             "preview_skipped": self.preview_skipped,
@@ -155,12 +197,10 @@ impl Preflight {
         })
     }
 
-    /// One line per finding, for text output.
+    /// One line per finding, for text output. Skipped parts are in
+    /// [`Preflight::skip_notes`].
     pub fn lines(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if let Some(why) = &self.preview_skipped {
-            out.push(format!("pre-land: conflict preview not run ({why})"));
-        }
         let conflicts = self.conflict_paths();
         for p in &conflicts {
             out.push(format!("pre-land: conflict {p}"));
@@ -175,9 +215,6 @@ impl Preflight {
             out.push("pre-land: (both-changed files cut at the limit)".to_owned());
         }
         let d = &self.drafts;
-        if let Some(why) = &d.skipped {
-            out.push(format!("pre-land: draft overlap not checked ({why})"));
-        }
         for r in &d.overlaps {
             let w = &r.workspace;
             let who = match (&w.work_item, &w.session) {
@@ -234,6 +271,7 @@ pub async fn preflight<A: RepoApi + WorkspaceApi>(
         both_changed_truncated: false,
         conflict: None,
         preview_skipped: None,
+        preview_ran: false,
         drafts: DraftCheck::default(),
     };
     if tip != req.base {
@@ -253,8 +291,11 @@ pub async fn preflight<A: RepoApi + WorkspaceApi>(
             )
             .await;
         match dry {
-            Ok(_) => {}
-            Err(e @ ApiError::Conflict { .. }) => out.conflict = Some(e),
+            Ok(_) => out.preview_ran = true,
+            Err(e @ ApiError::Conflict { .. }) => {
+                out.preview_ran = true;
+                out.conflict = Some(e);
+            }
             Err(e) if unserved(&e) => out.preview_skipped = Some(UNSERVED.to_owned()),
             Err(e) => return Err(e),
         }
@@ -380,11 +421,11 @@ async fn drafts<A: WorkspaceApi>(
             let page = match api.overlapping_drafts(cx, ask).await {
                 Ok(page) => page,
                 Err(ApiError::PermissionDenied { scope, .. }) => {
-                    return Ok(skipped(format!("needs the {scope} scope")));
+                    return Ok(skipped("scope", format!("needs the {scope} scope")));
                 }
                 // The check is advisory: a server that does not serve the
                 // read lets the land go on without it.
-                Err(e) if unserved(&e) => return Ok(skipped(UNSERVED.to_owned())),
+                Err(e) if unserved(&e) => return Ok(skipped("unserved", UNSERVED.to_owned())),
                 Err(e) => return Err(e),
             };
             pages += 1;
@@ -413,6 +454,7 @@ async fn drafts<A: WorkspaceApi>(
         overlaps: rows.into_values().collect(),
         truncated,
         skipped: None,
+        skip_code: None,
     })
 }
 
@@ -426,9 +468,10 @@ fn unserved(e: &ApiError) -> bool {
     matches!(e, ApiError::Unavailable { .. } | ApiError::Rejected { .. })
 }
 
-fn skipped(why: String) -> DraftCheck {
+fn skipped(code: &'static str, why: String) -> DraftCheck {
     DraftCheck {
         skipped: Some(why),
+        skip_code: Some(code),
         ..DraftCheck::default()
     }
 }
