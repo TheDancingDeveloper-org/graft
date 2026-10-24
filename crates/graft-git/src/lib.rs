@@ -75,7 +75,8 @@ pub struct BadPath {
     pub path: String,
     /// The rule broken: a [`graft_model::PathError::reason`], the
     /// portability rule (`portability (case-clash)`), `duplicate-entry` or
-    /// `unsupported-mode`.
+    /// `unsupported-mode`; or `blob-bytes` for a blob over
+    /// [`import::MAX_BLOB_BYTES`](crate::import::MAX_BLOB_BYTES).
     pub reason: String,
     /// The first commit (in import order) that introduced it.
     pub commit: GitSha,

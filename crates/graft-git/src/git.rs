@@ -393,6 +393,12 @@ impl Repo {
         Ok(obj.data)
     }
 
+    /// The size of an object, read from its header without its body.
+    pub(crate) fn size(&self, sha: GitSha) -> Result<u64, GitError> {
+        let id = gix::ObjectId::from_bytes_or_panic(&sha.0);
+        Ok(self.inner.find_header(id).map_err(read_err)?.size())
+    }
+
     /// A tree's entries, cached.
     pub(crate) fn tree(&mut self, sha: GitSha) -> Result<Arc<Vec<RawEntry>>, GitError> {
         if let Some(t) = self.trees.get(&sha) {
