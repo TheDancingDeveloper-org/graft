@@ -614,9 +614,10 @@ fn annotated_and_signed_tag_objects_round_trip() {
     assert_round_trips(&git.git_dir());
 }
 
-/// Tags that name a tree or a blob, directly or through a tag object.
+/// Tags that name a tree or a blob, directly or through a tag object. The
+/// mirror map holds tags of commits only, so import skips them and reports
+/// each by name and kind; everything else imports.
 #[test]
-#[ignore = "WI-2358: import drops these tags without a word"]
 fn tags_of_trees_and_blobs_are_reported() {
     let mut git = Git::init("tag-tree");
     git.write("a", b"a\n");
@@ -626,7 +627,31 @@ fn tags_of_trees_and_blobs_are_reported() {
     git.set_ref("refs/tags/tree-light", &tree);
     git.set_ref("refs/tags/blob-light", &blob);
     git.run(&["tag", "-a", "tree-annotated", "-m", "a tree", &tree]);
-    assert_round_trips(&git.git_dir());
+    git.run(&["tag", "kept"]);
+    let (result, imported) = import(&git.git_dir());
+    let outcome = result.expect("import succeeds");
+    assert_eq!(imported.map.len(), 1, "the commit is imported");
+    let tags: Vec<&str> = outcome
+        .report
+        .tags
+        .iter()
+        .map(|(t, _)| t.as_str())
+        .collect();
+    assert_eq!(tags, ["kept"]);
+    let named: Vec<(&str, &str)> = outcome
+        .report
+        .skipped_tags
+        .iter()
+        .map(|t| (t.name.as_str(), t.kind))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("blob-light", "blob"),
+            ("tree-annotated", "tree"),
+            ("tree-light", "tree")
+        ]
+    );
 }
 
 // --- modes and kinds ------------------------------------------------------

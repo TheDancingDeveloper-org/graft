@@ -39,7 +39,7 @@ use crate::export::{GitSource, commit_sha, export_tree, learn_raw_trees, tree_sh
 use crate::git::{Kind, RawCommit, Repo, author, parse_commit, submodule_id};
 use crate::map::{ImportedCommit, ImportedTag, MirrorMap};
 use crate::walk::topo;
-use crate::{BadPath, GitError, GitSha, Unrepresentable};
+use crate::{BadPath, GitError, GitSha, NonCommitTag, Unrepresentable};
 
 /// The metadata key that carries an imported commit's git sha (operator
 /// decision, 2026-10-22). Without it, commits that differ only in what a
@@ -68,7 +68,8 @@ pub struct ImportConfig {
     pub repo: String,
     /// Git refs to import, mapped to graft lines (`refs/heads/main` → `main`).
     pub lines: Vec<(String, String)>,
-    /// Import every tag under `refs/tags/` that names a commit.
+    /// Import every tag under `refs/tags/` that names a commit. Tags of a
+    /// tree or a blob are skipped and listed in [`ImportReport::skipped_tags`].
     pub tags: bool,
     /// Commits allowed to fail the fidelity check (`--allow-lossy`).
     pub allow_lossy: Vec<GitSha>,
@@ -109,6 +110,8 @@ pub struct ImportReport {
     pub tags: Vec<(String, ChangesetId)>,
     /// Tags whose raw tag objects (annotated, signed, nested) were recorded.
     pub tag_objects: u64,
+    /// Tags skipped because they name a tree or a blob; export loses them.
+    pub skipped_tags: Vec<NonCommitTag>,
 }
 
 /// Imports everything reachable from the configured refs that is not yet in
@@ -132,11 +135,15 @@ where
         line_tips.push((line.clone(), sha));
     }
     let mut tag_tips = Vec::new();
+    let mut non_commit = Vec::new();
     if config.tags {
         for name in repo.refs_under("refs/tags/")? {
+            let short = name["refs/tags/".len()..].to_owned();
             if let Some(sha) = repo.resolve(&name)? {
                 let objects = repo.tag_chain(&name)?;
-                tag_tips.push((name["refs/tags/".len()..].to_owned(), sha, objects));
+                tag_tips.push((short, sha, objects));
+            } else if let Some(kind) = repo.non_commit_kind(&name)? {
+                non_commit.push(NonCommitTag { name: short, kind });
             }
         }
     }
@@ -162,6 +169,7 @@ where
         return Err(GitError::Fidelity(importer.failed));
     }
     let mut report = importer.report;
+    report.skipped_tags = non_commit;
     for (line, sha) in line_tips {
         report.lines.push((line, importer.ids.changeset(map, sha)?));
     }

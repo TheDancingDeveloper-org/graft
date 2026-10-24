@@ -375,6 +375,20 @@ impl Repo {
         Ok((header.kind() == gix::objs::Kind::Commit).then(|| to_sha(id)))
     }
 
+    /// What `name` peels to when that is not a commit: `tree` or `blob`.
+    /// `None` for a commit, or when the ref does not exist.
+    pub(crate) fn non_commit_kind(&self, name: &str) -> Result<Option<&'static str>, GitError> {
+        let Some(mut r) = self.inner.try_find_reference(name).map_err(read_err)? else {
+            return Ok(None);
+        };
+        let id = r.peel_to_id().map_err(read_err)?.detach();
+        Ok(match self.inner.find_header(id).map_err(read_err)?.kind() {
+            gix::objs::Kind::Tree => Some("tree"),
+            gix::objs::Kind::Blob => Some("blob"),
+            _ => None,
+        })
+    }
+
     /// The tag objects `name` peels through to reach its target, outermost
     /// first: empty for a lightweight ref. Stops at the first object that is
     /// not a tag, or at a tag whose `object` line does not parse.

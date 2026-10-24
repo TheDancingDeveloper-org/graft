@@ -93,6 +93,16 @@ pub struct Unrepresentable {
     pub reason: &'static str,
 }
 
+/// A tag import skipped: it names a tree or a blob, directly or through tag
+/// objects. The mirror map records tags of commits only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonCommitTag {
+    /// The tag name, without `refs/tags/`.
+    pub name: String,
+    /// What it peels to: `tree` or `blob`.
+    pub kind: &'static str,
+}
+
 /// A git interop failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitError {
