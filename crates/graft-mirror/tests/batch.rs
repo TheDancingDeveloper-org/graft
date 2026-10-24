@@ -101,6 +101,31 @@ impl FakeGitHub {
         sha
     }
 
+    /// The PR is rebase-merged: each branch commit is replayed onto `main`
+    /// with a new committer, as GitHub's rebase merge does.
+    fn rebase_merge(&self, number: u64) -> String {
+        let mut prs = self.prs.lock().unwrap();
+        let pr = prs.iter_mut().find(|p| p.number == number).unwrap();
+        let head = format!("refs/heads/{}", pr.new.head);
+        let list = git(
+            &self.upstream,
+            &["rev-list", "--reverse", &format!("refs/heads/main..{head}")],
+        );
+        let mut tip = git(&self.upstream, &["rev-parse", "refs/heads/main"]);
+        for c in list.lines() {
+            let tree = git(&self.upstream, &["rev-parse", &format!("{c}^{{tree}}")]);
+            let message = git(&self.upstream, &["log", "-1", "--format=%B", c]);
+            tip = git(
+                &self.upstream,
+                &["commit-tree", &tree, "-p", &tip, "-m", &message],
+            );
+        }
+        git(&self.upstream, &["update-ref", "refs/heads/main", &tip]);
+        pr.open = false;
+        pr.merged = Some(tip.clone());
+        tip
+    }
+
     fn close(&self, number: u64) {
         let mut prs = self.prs.lock().unwrap();
         prs.iter_mut().find(|p| p.number == number).unwrap().open = false;
@@ -366,7 +391,7 @@ fn opened(outcome: BatchOutcome) -> BatchRecord {
 }
 
 #[tokio::test]
-async fn a_batch_is_one_squashed_pr_and_the_next_forks_from_its_merge() {
+async fn a_batch_is_one_pr_and_the_next_forks_from_its_merge() {
     let w = World::new().await;
     w.start().await;
     let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
@@ -419,11 +444,12 @@ async fn a_batch_is_one_squashed_pr_and_the_next_forks_from_its_merge() {
     assert_eq!(rec.branch, "graft/batch-1");
     assert_eq!(rec.base_sha.to_hex(), moved);
 
-    // One commit on GitHub's current main, holding the batch's net change.
+    // One commit per land on GitHub's current main, holding the batch's
+    // net change.
     let squash = support::branch(&w.upstream, "graft/batch-1").unwrap();
     assert_eq!(squash, rec.squash_sha.to_hex());
     assert_eq!(
-        git(&w.upstream, &["rev-parse", &format!("{squash}^@")]),
+        git(&w.upstream, &["rev-parse", &format!("{squash}~2")]),
         moved
     );
     assert_eq!(w.changed(&moved, &squash), ["a.txt", "b.txt"]);
@@ -1049,4 +1075,103 @@ fn a_db_from_before_batch_cuts_opens_and_its_lines_are_not_cut() {
     let db = MirrorDb::open(&path).unwrap();
     let back = db.batch_line(LINE).unwrap().unwrap();
     assert_eq!((back.start_base, back.sync_batch), (Some(id), Some(7)));
+}
+
+#[tokio::test]
+async fn a_batch_of_three_lands_is_three_commits_and_a_rebase_merge_maps_back() {
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let b = w
+        .land(&[("b.txt", "b1\n")], "add b\n\nwith a body", 2)
+        .await;
+    let c = w.land(&[("a.txt", "a2\n")], "change a", 3).await;
+    let main = support::branch(&w.upstream, "main").unwrap();
+
+    let rec = opened(w.batcher().run().await.unwrap().outcome);
+    assert_eq!(rec.lands, 3);
+    let commits = w.db.batch_commits(rec.number).unwrap();
+    assert_eq!(
+        commits.iter().map(|c| c.land).collect::<Vec<_>>(),
+        [a, b, c],
+        "one commit per land, oldest first"
+    );
+    let head = support::branch(&w.upstream, "graft/batch-1").unwrap();
+    assert_eq!(head, commits[2].sha.to_hex());
+    let chain = git(
+        &w.upstream,
+        &["rev-list", "--reverse", &format!("{main}..{head}")],
+    );
+    let chain: Vec<&str> = chain.lines().collect();
+    assert_eq!(
+        chain,
+        commits.iter().map(|c| c.sha.to_hex()).collect::<Vec<_>>()
+    );
+    // Each commit is its land's own change, with its author and trailers.
+    assert_eq!(w.changed(&main, chain[0]), ["a.txt"]);
+    assert_eq!(w.changed(chain[0], chain[1]), ["b.txt"]);
+    assert_eq!(w.changed(chain[1], chain[2]), ["a.txt"]);
+    assert_eq!(w.show(chain[2], "a.txt"), "a2");
+    let message = git(&w.upstream, &["log", "-1", "--format=%B", chain[1]]);
+    assert!(message.starts_with("add b\n\nwith a body\n"), "{message}");
+    for text in [
+        format!("Graft-Changeset: {b}"),
+        "Graft-Session: ses_2".to_owned(),
+        "Graft-Work-Item: WI-2".to_owned(),
+        "Graft-Checks: none".to_owned(),
+        "Graft-Batch: 1".to_owned(),
+    ] {
+        assert!(message.contains(&text), "{text} missing from {message}");
+    }
+    let who = git(
+        &w.upstream,
+        &["log", "-1", "--format=%an <%ae> %at", chain[1]],
+    );
+    assert_eq!(who, "Tess <tess@example.com> 1700000002");
+    let body = &w.github.prs()[0].new.body;
+    assert!(body.contains("one commit per land"), "{body}");
+    for id in [a, b, c] {
+        assert!(body.contains(&short(id)), "the land table keeps every land");
+    }
+
+    // land-pr rebase-merges it: new shas, same trees; each maps back.
+    let merged = w.github.rebase_merge(1);
+    let run = w.batcher().run().await.unwrap();
+    let settled = run.settled.expect("batch 1 settled");
+    assert_eq!(settled.state, BatchState::Merged);
+    assert_eq!(settled.merge_sha.unwrap().to_hex(), merged);
+    let mapped = w.db.batch_commits(1).unwrap();
+    let new = git(
+        &w.upstream,
+        &["rev-list", "--reverse", &format!("{main}..{merged}")],
+    );
+    let new: Vec<&str> = new.lines().collect();
+    assert_eq!(new.len(), 3);
+    for (c, sha) in mapped.iter().zip(&new) {
+        assert_eq!(c.merged.map(|s| s.to_hex()).as_deref(), Some(*sha));
+        assert_ne!(c.merged, Some(c.sha), "a rebase-merge makes new commits");
+    }
+    assert_eq!([mapped[0].land, mapped[1].land, mapped[2].land], [a, b, c]);
+}
+
+#[tokio::test]
+async fn a_dropped_land_and_its_revert_are_each_a_commit() {
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let b = w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    let main = support::branch(&w.upstream, "main").unwrap();
+    let rec = opened(
+        w.batcher_with(&w.db, |c| c.exclude = vec![a])
+            .run()
+            .await
+            .unwrap()
+            .outcome,
+    );
+    let commits = w.db.batch_commits(rec.number).unwrap();
+    assert_eq!(commits.len(), 3, "a, b and a's revert");
+    assert_eq!([commits[0].land, commits[1].land], [a, b]);
+    let head = commits[2].sha.to_hex();
+    assert_eq!(w.changed(&main, &head), ["b.txt"]);
+    assert_eq!(w.changed(&commits[1].sha.to_hex(), &head), ["a.txt"]);
 }

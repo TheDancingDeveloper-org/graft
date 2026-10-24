@@ -15,7 +15,7 @@ use graft_git::map::{ImportedCommit, MirrorMap, RawTree};
 use graft_git::{GitError, GitSha};
 use graft_model::{BlobId, ChangesetId, ObjectId, RepoPath};
 
-use crate::batch::{BatchLine, BatchRecord, BatchState};
+use crate::batch::{BatchCommit, BatchLine, BatchRecord, BatchState};
 use crate::pulls::{ImportState, PrImport};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -94,6 +94,14 @@ CREATE TABLE IF NOT EXISTS batch_drops (
     revert BLOB NOT NULL,
     reason TEXT NOT NULL,
     PRIMARY KEY (line, land)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS batch_commits (
+    batch INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    land BLOB NOT NULL,
+    sha BLOB NOT NULL,
+    merged_sha BLOB,
+    PRIMARY KEY (batch, seq)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pr_imports (
     number INTEGER PRIMARY KEY,
@@ -612,7 +620,13 @@ impl MirrorDb {
     /// Records a new batch, in one transaction that refuses it when its
     /// number is taken or its line already has a batch that is not final:
     /// two runs never both open a batch for one line.
-    pub fn insert_batch(&self, rec: &BatchRecord) -> Result<bool, GitError> {
+    /// `commits` is the batch's per-land chain (D26), oldest first, written
+    /// in the same transaction; empty for a squashed batch.
+    pub fn insert_batch(
+        &self,
+        rec: &BatchRecord,
+        commits: &[BatchCommit],
+    ) -> Result<bool, GitError> {
         let mut conn = self.conn();
         let txn = conn.transaction().map_err(db_err)?;
         let busy: i64 = txn
@@ -627,8 +641,56 @@ impl MirrorDb {
             return Ok(false);
         }
         write_batch(&txn, rec)?;
+        for c in commits {
+            txn.execute(
+                "INSERT INTO batch_commits (batch, seq, land, sha, merged_sha)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    rec.number as i64,
+                    c.seq as i64,
+                    &c.land.0.0[..],
+                    &c.sha.0[..],
+                    c.merged.map(|s| s.0.to_vec()),
+                ],
+            )
+            .map_err(db_err)?;
+        }
         txn.commit().map_err(db_err)?;
         Ok(true)
+    }
+
+    /// Batch `number`'s per-land commits, oldest first (D26). Empty for a
+    /// squashed batch. At most one batch's commits (bounded by the cap).
+    pub fn batch_commits(&self, number: u64) -> Result<Vec<BatchCommit>, GitError> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, land, sha, merged_sha FROM batch_commits
+                 WHERE batch = ?1 ORDER BY seq",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![number as i64], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, Option<Vec<u8>>>(3)?,
+                ))
+            })
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, land, sha, merged) = row.map_err(db_err)?;
+            out.push(BatchCommit {
+                seq: seq as u32,
+                land: ChangesetId(id_col(land)?),
+                sha: sha_col(Some(sha))?
+                    .ok_or_else(|| GitError::Map("mirror db: malformed batch commit".into()))?,
+                merged: sha_col(merged)?,
+            });
+        }
+        Ok(out)
     }
 
     /// Replaces the record of batch `rec.number`.
@@ -636,18 +698,30 @@ impl MirrorDb {
         write_batch(&self.conn(), rec)
     }
 
-    /// Records batch `rec` as merged and the line state the next batch
-    /// starts from, in one transaction.
+    /// Records batch `rec` as merged, the line state the next batch
+    /// starts from, and where each of `commits` merged, in one transaction.
     pub fn settle_batch(
         &self,
         rec: &BatchRecord,
         line: &str,
         state: &BatchLine,
+        commits: &[BatchCommit],
     ) -> Result<(), GitError> {
         let mut conn = self.conn();
         let txn = conn.transaction().map_err(db_err)?;
         write_batch(&txn, rec)?;
         put_batch_line(&txn, line, state)?;
+        for c in commits {
+            txn.execute(
+                "UPDATE batch_commits SET merged_sha = ?3 WHERE batch = ?1 AND seq = ?2",
+                params![
+                    rec.number as i64,
+                    c.seq as i64,
+                    c.merged.map(|s| s.0.to_vec())
+                ],
+            )
+            .map_err(db_err)?;
+        }
         txn.commit().map_err(db_err)
     }
 
