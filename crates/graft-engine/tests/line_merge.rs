@@ -24,6 +24,7 @@ on_both_stores!(
     an_older_merge_below_a_full_page_of_rows_is_found,
     line_merges_pages_newest_first,
     a_merge_result_says_how_its_base_was_found,
+    every_merge_of_the_gitflow_bench_finds_its_base_by_merge_point,
     a_merge_needs_read_and_land_on_the_target_only,
     a_changeset_on_two_lines_pairs_the_first_distinct_holders,
 );
@@ -308,26 +309,54 @@ fn the_merge_point_is_written_with_its_journal_entry<M: MetaStore>(f: &Fixture<M
     let resolution = r
         .commit(vec![tip(&r, "main")], &[("f", b"resolved\n")], &[])
         .id;
-    let landed = block_on(r.e().land(
-        &r.cx,
-        Land {
-            repo: r.name.clone(),
-            head: resolution,
-            line: "main".to_owned(),
-            squash: false,
-            merge: MergeMode::Line,
-            deadline_ms: None,
-            merged_from: Some(MergedFrom {
-                line: "develop".to_owned(),
-                changeset: develop,
-            }),
-        },
-    ));
-    assert!(matches!(landed, Ok(Landed::Landed { .. })), "{landed:?}");
+    let land = Land {
+        repo: r.name.clone(),
+        head: resolution,
+        line: "main".to_owned(),
+        squash: false,
+        merge: MergeMode::Line,
+        deadline_ms: None,
+        merged_from: Some(MergedFrom {
+            line: "develop".to_owned(),
+            changeset: develop,
+        }),
+    };
+    let landed = block_on(r.e().land(&r.cx, land.clone()));
+    let Ok(Landed::Landed { landed, .. }) = landed else {
+        panic!("{landed:?}");
+    };
     let point = points(&r, "main");
     assert_eq!(point.len(), 2);
-    assert_eq!(point[0].dst_changeset, resolution);
+    assert_eq!(point[0].dst_changeset, landed);
     assert_eq!(point[0].src_changeset, develop);
+
+    // It lands stamped with what it merged, so it exports with the
+    // Graft-Merged-From trailer; otherwise it is the resolution.
+    assert_ne!(landed, resolution);
+    let got = block_on(r.e().get_changesets(
+        &r.cx,
+        GetChangesets {
+            repo: r.name.clone(),
+            ids: vec![landed, resolution],
+        },
+    ))
+    .expect("get changesets");
+    let (stamped, original) = (&got.found[0].changeset, &got.found[1].changeset);
+    assert_eq!(
+        stamped.metadata.get("graft.merged-from"),
+        Some(&format!("develop@{develop}"))
+    );
+    let mut unstamped = stamped.clone();
+    unstamped.metadata.remove("graft.merged-from");
+    assert_eq!(&unstamped, original);
+
+    // A retry of the same land finds the same result, and writes no row.
+    let again = block_on(r.e().land(&r.cx, land));
+    assert!(
+        matches!(again, Ok(Landed::Landed { landed: l, .. }) if l == landed),
+        "{again:?}"
+    );
+    assert_eq!(points(&r, "main").len(), 2);
 }
 
 /// develop takes the hotfix, then nine merges from feature: more rows than
@@ -480,6 +509,82 @@ fn a_capped_hop_budget_falls_back_to_ancestry_on_sqlite() {
     shallow(&sqlite_with(hops(1)));
 }
 
+/// Lands a new file `name` on `line`'s tip: edits that never conflict, so
+/// a merge's result is only about its base.
+fn land_file<M: MetaStore>(r: &Repo<'_, M>, line: &str, name: &str) -> ChangesetId {
+    let id = r
+        .commit(vec![tip(r, line)], &[(name, name.as_bytes())], &[])
+        .id;
+    let landed = block_on(r.e().land(
+        &r.cx,
+        Land {
+            repo: r.name.clone(),
+            head: id,
+            line: line.to_owned(),
+            squash: false,
+            merge: MergeMode::Line,
+            deadline_ms: None,
+            merged_from: None,
+        },
+    ));
+    assert!(matches!(landed, Ok(Landed::Landed { .. })), "{landed:?}");
+    id
+}
+
+/// Merges `src` into `dst` and checks the base: the merge point the
+/// bench's git run would use, never the ancestry walk's fork point.
+fn merged_by_point<M: MetaStore>(r: &Repo<'_, M>, src: &str, dst: &str, want: ChangesetId) {
+    match merge(r, src, dst) {
+        Ok(LineMergeOutcome::Merged { base, via, .. }) => {
+            assert_ne!(via, MergeBaseVia::Ancestry, "{src} into {dst}");
+            assert_eq!(base, want, "{src} into {dst}");
+        }
+        other => panic!("merge {src} into {dst}: {other:?}"),
+    }
+}
+
+/// The gitflow history of the branching bench (WI-2362, WI-2372), two
+/// releases deep: interim and final back-merges, and each hotfix a line
+/// from main merged into main and develop. Every merge finds the base git
+/// finds, by merge point, within the default budget; release/1.1 → main
+/// starts from main's hotfix merge, which develop holds.
+fn every_merge_of_the_gitflow_bench_finds_its_base_by_merge_point<M: MetaStore>(f: &Fixture<M>) {
+    let (r, _) = start(f);
+    for rel in 0..2 {
+        for n in 0..3 {
+            land_file(&r, "develop", &format!("d{rel}r{n}"));
+        }
+        let rl = format!("release/1.{rel}");
+        create(&r, &rl, tip(&r, "develop"));
+        land_file(&r, "develop", &format!("d{rel}next"));
+        land_file(&r, &rl, &format!("rf{rel}a"));
+        let rb = land_file(&r, &rl, &format!("rf{rel}b"));
+        merged(&r, &rl, "develop");
+        land_file(&r, "develop", &format!("d{rel}mid"));
+        let rc = land_file(&r, &rl, &format!("rf{rel}c"));
+        // Into main from main's tip, which the release holds: the start
+        // for release/1.0 (by ancestry, no merge point yet), and main's
+        // hotfix merge for release/1.1, through develop's merge rows.
+        let main_tip = tip(&r, "main");
+        if rel == 0 {
+            assert_eq!(base(&r, rc, main_tip).base, Some(main_tip));
+            merged(&r, &rl, "main");
+        } else {
+            merged_by_point(&r, &rl, "main", main_tip);
+        }
+        // The final back-merge starts from the interim one.
+        merged_by_point(&r, &rl, "develop", rb);
+        land_file(&r, "develop", &format!("d{rel}post"));
+        let hl = format!("hotfix/hf{rel}");
+        create(&r, &hl, tip(&r, "main"));
+        let at = tip(&r, "main");
+        land_file(&r, &hl, &format!("hf{rel}"));
+        merged_by_point(&r, &hl, "main", at);
+        // Into develop: from the release develop and main both merged.
+        merged_by_point(&r, &hl, "develop", rc);
+    }
+}
+
 /// `LineMerge` needs repository read (for the source) and `land` on the
 /// target, nothing on the source line; `land --merged-from` the same.
 fn a_merge_needs_read_and_land_on_the_target_only<M: MetaStore>(f: &Fixture<M>) {
@@ -549,11 +654,67 @@ fn a_merge_needs_read_and_land_on_the_target_only<M: MetaStore>(f: &Fixture<M>) 
         ),
         "land on the source is not land on the target"
     );
+    // Denied on the paths: the stamped head is never stored.
+    let mut stamped = block_on(r.e().get_changesets(
+        &r.cx,
+        GetChangesets {
+            repo: r.name.clone(),
+            ids: vec![head],
+        },
+    ))
+    .expect("get changesets")
+    .found[0]
+        .changeset
+        .clone();
+    stamped
+        .metadata
+        .insert("graft.merged-from".to_owned(), format!("develop@{d2}"));
+    let stamped = stamped.id();
     assert!(matches!(
-        land_as(&["repo:r:land:main", "repo:r:write"]),
-        Ok(Landed::Landed { .. })
+        land_as(&["repo:r:land:main"]),
+        Err(ApiError::PermissionDenied { .. })
     ));
+    let stored = |id| {
+        block_on(r.e().get_changesets(
+            &r.cx,
+            GetChangesets {
+                repo: r.name.clone(),
+                ids: vec![id],
+            },
+        ))
+        .expect("get changesets")
+        .missing
+        .is_empty()
+    };
+    assert!(!stored(stamped), "a denied land leaves no draft");
+    let Ok(Landed::Landed { landed, .. }) = land_as(&["repo:r:land:main", "repo:r:write"]) else {
+        panic!("land on the target and write is enough");
+    };
+    assert_eq!(landed, stamped);
     assert_ne!(d1, d2);
+
+    // The landed head, landed on another line with `merged_from`: refused
+    // as landed, not stamped and landed a second time.
+    create(&r, "other", tip(&r, "develop"));
+    let again = block_on(r.e().land(
+        &r.cx,
+        Land {
+            repo: r.name.clone(),
+            head: landed,
+            line: "other".to_owned(),
+            squash: false,
+            merge: MergeMode::Line,
+            deadline_ms: None,
+            merged_from: Some(MergedFrom {
+                line: "develop".to_owned(),
+                changeset: d2,
+            }),
+        },
+    ));
+    match again {
+        Err(ApiError::InvalidChange { rule, .. }) => assert_eq!(rule, "draft-landed"),
+        other => panic!("expected draft-landed, got {other:?}"),
+    }
 }
 
 /// A changeset held by two lines' own rows: `MergeBase` pairs the first

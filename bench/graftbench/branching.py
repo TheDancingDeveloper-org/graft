@@ -31,9 +31,11 @@ A third variant uses the server's merge (D29, WI-2368):
 
 - `linemerge`: `graft line merge SRC --into DST` merges on the server and
   records a merge point, so the next merge starts from it. On a conflict the
-  error carries the base, the source and the tip; the client carries
-  base..source into a working copy on DST, resolves by rule and lands with
-  `graft land --merged-from SRC@SOURCE`, which records the merge point.
+  merge runs in a working copy on DST with `--sync`, which writes
+  base..source into its files; the client resolves by rule, commits and
+  lands with `graft land --merged-from SRC@SOURCE`, which records the merge
+  point (three commands). A hotfix is a `hotfix/<name>` line merged into
+  main and develop, as git flow merges the hotfix branch.
 
 Tags: graft has no tag command (tag refs come only from `graft-mirror
 follow`, WI-2342), so a tag is a line `tags/<name>` made with
@@ -390,6 +392,17 @@ class GraftRun:
             self.land(wc)
 
     def fix(self, op: Op) -> None:
+        if self.variant == "linemerge" and op.name.startswith("hf"):
+            # hotfix/*, as git flow does it: a line from main, merged into
+            # main (develop by its pick op), so the merge points record it.
+            hl = f"hotfix/{op.name}"
+            self.cut(Op("cut", line=hl, src="main"))
+            wc = self.wc("int", hl)
+            self.edit_commit(wc, op.commits, op.name)
+            self.land(wc)
+            self.line_merge(Op("merge", line="main", src=hl))
+            self.fixes[op.name] = hl
+            return
         wc = self.wc("int", op.line)
         self.edit_commit(wc, op.commits, op.name)
         self.fixes[op.name] = self.land(wc)
@@ -443,11 +456,16 @@ class GraftRun:
             self.notes.append(f"carry onto {dst}: nothing to land")
 
     def line_merge(self, op: Op) -> None:
-        """`graft line merge`; on a conflict, carry from the server's base and
-        land the resolution with `--merged-from`."""
+        """`graft line merge --sync` in a working copy on the target; on a
+        conflict the merge is written into its files, resolved by rule,
+        committed and landed with `--merged-from`: three commands."""
+        k = ("int", op.line)
+        if k not in self.wcs:
+            self.wc("int", op.line)
+        wc = self.wcs[k]
         for _ in range(MAX_ATTEMPTS):
-            args = ["line", "merge", op.src, "--into", op.line, "--repo", self.repo]
-            r, j = self.jcall(args, cwd=self.w, check=False)
+            args = ["line", "merge", op.src, "--into", op.line, "--sync"]
+            r, j = self.jcall(args, cwd=wc, check=False)
             if r.rc == 0:
                 self.c.carries += 1
                 self.c.carry_clean += 1
@@ -458,8 +476,14 @@ class GraftRun:
             if r.rc == 4:
                 continue
             e = j.get("error", {})
-            if r.rc == 3 and e.get("kind") == "conflict" and e.get("base") and e.get("source"):
-                self.carry(e["base"], e["source"], op.line, ["--merged-from", f"{op.src}@{e['source']}"])
+            if r.rc == 3 and e.get("kind") == "conflicted" and e.get("merged_from"):
+                paths = sorted(c["path"] for c in e.get("conflicts", []) if c.get("mode") == "markers")
+                self.c.conflicts += 1
+                self.c.carries += 1
+                self.c.carry_conflicted += 1
+                self.c.conflict_blocks += self.resolve_files(wc, paths)
+                self.call(["commit", "-m", f"merge {op.src} into {op.line}"], cwd=wc)
+                self.land(wc, ["--merged-from", e["merged_from"]])
                 return
             raise StepError(f"graft line merge exit {r.rc} ({e.get('kind')}): {(r.err or r.out).strip()[:300]}")
         raise StepError(f"graft line merge did not succeed in {MAX_ATTEMPTS} attempts")
@@ -481,6 +505,9 @@ class GraftRun:
 
     def pick(self, op: Op) -> None:
         cs = self.fixes[op.src]
+        if cs.startswith("hotfix/"):  # git flow merges the hotfix line itself
+            self.line_merge(Op("merge", line=op.line, src=cs))
+            return
         _, j = self.jcall(["show", cs, "--repo", self.repo], cwd=self.w)
         self.carry(j["parents"][0], cs, op.line)
 

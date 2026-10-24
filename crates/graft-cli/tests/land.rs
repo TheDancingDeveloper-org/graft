@@ -1155,3 +1155,95 @@ fn line_merge_then_merges_and_a_conflict_resolved_with_merged_from() {
         stderr(&usage)
     );
 }
+
+/// D29 in three commands: in a working copy on the target, `line merge
+/// --sync` writes a conflicted merge into the files, then `commit` and
+/// `land --merged-from` land the resolution with its merge point, stamped
+/// with what it merged.
+#[test]
+fn a_conflicted_line_merge_with_sync_is_three_commands() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let outside = |args: &[&str]| {
+        graft(dir.path())
+            .args(["--endpoint", &s.url, "--repo", "demo"])
+            .args(args)
+            .assert()
+    };
+    outside(&["line", "create", "develop", "--from", "main"]).success();
+    graft(dir.path())
+        .args([
+            "--endpoint",
+            &s.url,
+            "clone",
+            "demo",
+            "dev",
+            "--line",
+            "develop",
+        ])
+        .assert()
+        .success();
+    let dev = dir.path().join("dev");
+    fs::write(dev.join("README.md"), "from develop\n").unwrap();
+    fs::write(dev.join("docs/guide.md"), "guide, developed\n").unwrap();
+    json_run(&dev, &["commit", "-m", "develop"]);
+    json_run(&dev, &["land"]);
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join("README.md"), "from main\n").unwrap();
+    json_run(&app, &["commit", "-m", "main readme"]);
+    json_run(&app, &["land"]);
+
+    // --sync needs a working copy on the target.
+    let usage = run(
+        &dev,
+        &["line", "merge", "develop", "--into", "main", "--sync"],
+    )
+    .code(2);
+    assert!(stderr(&usage).contains("--sync"), "{}", stderr(&usage));
+
+    // 1: the merge conflicts and is written into the files.
+    let conflict = wc_cmd(&app)
+        .args(["--json", "line", "merge", "develop", "--sync"])
+        .assert()
+        .code(3);
+    let error = error_of(&conflict);
+    assert_eq!(error["kind"], json!("conflicted"), "{error}");
+    assert_eq!(error["conflicts"][0]["path"], json!("README.md"), "{error}");
+    assert_eq!(error["conflicts"][0]["mode"], json!("markers"), "{error}");
+    let source = error["source"].as_str().expect("source").to_owned();
+    let from = error["merged_from"]
+        .as_str()
+        .expect("merged_from")
+        .to_owned();
+    assert_eq!(from, format!("develop@{source}"));
+    let readme = fs::read_to_string(app.join("README.md")).unwrap();
+    assert!(readme.contains("<<<<<<<"), "{readme}");
+    assert_eq!(
+        fs::read_to_string(app.join("docs/guide.md")).unwrap(),
+        "guide, developed\n"
+    );
+
+    // 2 and 3: resolve, commit, land as the merge of `source`.
+    fs::write(app.join("README.md"), "from both\n").unwrap();
+    json_run(&app, &["commit", "-m", "merge develop"]);
+    let landed = json_run(&app, &["land", "--merged-from", &from]);
+    assert_eq!(landed["outcome"], json!("landed"), "{landed}");
+    let list = json_out(
+        outside(&["--json", "line", "merges", "main", "--limit", "1"])
+            .success()
+            .get_output(),
+    );
+    assert_eq!(list["merges"][0]["src_changeset"], json!(source), "{list}");
+    assert_eq!(
+        list["merges"][0]["dst_changeset"], landed["landed"],
+        "{list}"
+    );
+    let shown = json_out(
+        outside(&["--json", "show", landed["landed"].as_str().unwrap()])
+            .success()
+            .get_output(),
+    );
+    assert!(shown.to_string().contains(&from), "{shown}");
+    let again = outside(&["--json", "line", "merge", "develop", "--into", "main"]).success();
+    assert_eq!(json_out(again.get_output())["outcome"], json!("up_to_date"));
+}

@@ -21,7 +21,10 @@
 //! Each rule is an indexed read "at or below a position". A search follows
 //! at most `merge_hops` lines deep and spends at most `merge_reads` reads;
 //! a capped search answers "not contained", and `MergeBase` then falls
-//! back to the ancestry walk, saying so (`via`).
+//! back to the ancestry walk, saying so (`via`). Within one query each
+//! indexed read is made once and remembered, and so is each answer, by
+//! bound: a line holding a changeset up to `b` holds it up to any higher
+//! bound. The budget pays for distinct rows, not the paths that reach them.
 //!
 //! `LineMerge` builds the merge as `Revert` builds an inverse: a changeset
 //! on the base whose root is the source's, rebased onto the target's tip
@@ -68,6 +71,23 @@ pub(crate) struct MergeSource {
 }
 
 impl MergeSource {
+    /// The `graft.merged-from` value naming this source.
+    fn value(&self) -> String {
+        format!("{}@{}", self.line, self.changeset)
+    }
+
+    /// `head` carrying this source in its `graft.merged-from` metadata, or
+    /// `None` when it already does.
+    pub(crate) fn stamp(&self, head: &Changeset) -> Option<Changeset> {
+        let value = self.value();
+        if head.metadata.get(MERGED_FROM) == Some(&value) {
+            return None;
+        }
+        let mut stamped = head.clone();
+        stamped.metadata.insert(MERGED_FROM.to_owned(), value);
+        Some(stamped)
+    }
+
     /// The merge point row and its journal entry, for the landing at
     /// `dst_pos` on `dst`; both go in the land's CAS transaction.
     pub(crate) fn writes(&self, dst: &str, dst_pos: u64) -> [Write; 2] {
@@ -92,12 +112,26 @@ struct Point {
     id: ChangesetId,
 }
 
-/// The budget and memory of one containment search.
+/// What a search knows of whether a line contains a changeset: contained
+/// up to any bound at or above `yes`, and not up to any bound at or below
+/// `no` (a line up to a higher bound holds more).
+#[derive(Default)]
+struct Known {
+    yes: Option<u64>,
+    no: Option<u64>,
+}
+
+/// The budget and memory of one containment search. Each indexed read is
+/// made once per query and remembered, so the budget pays for distinct
+/// rows, not for the paths that reach them.
 struct Search {
     hops: u32,
     reads: u32,
     capped: bool,
-    memo: HashMap<(String, u64, ChangesetId), bool>,
+    memo: HashMap<(String, ChangesetId), Known>,
+    positions: HashMap<(String, ChangesetId), Option<u64>>,
+    forks: HashMap<String, Option<(String, u64)>>,
+    pages: HashMap<(String, u64), Vec<graft_store::LineMergeRow>>,
 }
 
 impl Search {
@@ -164,7 +198,87 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             reads: self.config.merge_reads,
             capped: false,
             memo: HashMap::new(),
+            positions: HashMap::new(),
+            forks: HashMap::new(),
+            pages: HashMap::new(),
         }
+    }
+
+    /// `id`'s position on `line` (following forks), read once per search.
+    /// `None` when the budget is spent.
+    async fn pos_on(
+        &self,
+        repo: RepoId,
+        s: &mut Search,
+        line: &str,
+        id: ChangesetId,
+    ) -> Result<Option<Option<u64>>, ApiError> {
+        let key = (line.to_owned(), id);
+        if let Some(&pos) = s.positions.get(&key) {
+            return Ok(Some(pos));
+        }
+        if !s.read() {
+            return Ok(None);
+        }
+        let pos = self
+            .meta
+            .line_pos(repo, line, id)
+            .await
+            .map_err(errors::store)?;
+        s.positions.insert(key, pos);
+        Ok(Some(pos))
+    }
+
+    /// `line`'s fork row, read once per search. `None` when the budget is
+    /// spent.
+    async fn fork_of(
+        &self,
+        repo: RepoId,
+        s: &mut Search,
+        line: &str,
+    ) -> Result<Option<Option<(String, u64)>>, ApiError> {
+        if let Some(fork) = s.forks.get(line) {
+            return Ok(Some(fork.clone()));
+        }
+        if !s.read() {
+            return Ok(None);
+        }
+        let fork = self
+            .meta
+            .line_fork(repo, line)
+            .await
+            .map_err(errors::store)?;
+        s.forks.insert(line.to_owned(), fork.clone());
+        Ok(Some(fork))
+    }
+
+    /// Up to `limit` (at most a page) of the merge rows into `line` at or
+    /// below `at`, newest first, read once per search. `None` when the
+    /// budget is spent.
+    async fn rows_into(
+        &self,
+        repo: RepoId,
+        s: &mut Search,
+        line: &str,
+        at: u64,
+        limit: u32,
+    ) -> Result<Option<Vec<graft_store::LineMergeRow>>, ApiError> {
+        // Every page is read whole, so a remembered one answers any limit.
+        let key = (line.to_owned(), at);
+        if !s.pages.contains_key(&key) {
+            if !s.read() {
+                return Ok(None);
+            }
+            let rows = self
+                .meta
+                .line_merges(repo, line, None, at, ROWS_PER_READ)
+                .await
+                .map_err(errors::store)?;
+            s.pages.insert(key.clone(), rows);
+        }
+        Ok(Some(
+            s.pages[&key].iter().take(limit as usize).cloned().collect(),
+        ))
     }
 
     /// The changeset at `pos` on the line whose tip `tip` is at `tip_pos`:
@@ -195,17 +309,25 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         depth: u32,
     ) -> Boxed<'a, bool> {
         Box::pin(async move {
-            let key = (line.to_owned(), bound, p.id);
-            if let Some(&hit) = s.memo.get(&key) {
-                return Ok(hit);
+            let key = (line.to_owned(), p.id);
+            if let Some(k) = s.memo.get(&key) {
+                if k.yes.is_some_and(|y| y <= bound) {
+                    return Ok(true);
+                }
+                if k.no.is_some_and(|n| n >= bound) {
+                    return Ok(false);
+                }
             }
             let was_capped = s.capped;
             let got = self
                 .contains_by_rules(repo, s, line, bound, p, depth)
                 .await?;
-            // A "no" from a capped search is not an answer to remember.
-            if got || !s.capped || was_capped {
-                s.memo.insert(key, got);
+            let k = s.memo.entry(key).or_default();
+            if got {
+                k.yes = Some(k.yes.map_or(bound, |y| y.min(bound)));
+            } else if !s.capped || was_capped {
+                // A "no" from a capped search is not an answer to remember.
+                k.no = Some(k.no.map_or(bound, |n| n.max(bound)));
             }
             Ok(got)
         })
@@ -222,14 +344,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     ) -> Result<bool, ApiError> {
         // Rules 1 and 2 for a position on the line or a line it forked
         // from: one index read.
-        if !s.read() {
+        let Some(pos) = self.pos_on(repo, s, line, p.id).await? else {
             return Ok(false);
-        }
-        let pos = self
-            .meta
-            .line_pos(repo, line, p.id)
-            .await
-            .map_err(errors::store)?;
+        };
         match pos {
             Some(q) if q <= bound => return Ok(true),
             // On the line above the bound: landed after the bound on the
@@ -249,36 +366,32 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
 
         // Rule 4: `p` is a merge landing whose two inputs `line` holds.
-        if p.pos > 0 && s.read() {
-            let rows = self
-                .meta
-                .line_merges(repo, &p.line, None, p.pos, 1)
-                .await
-                .map_err(errors::store)?;
-            if let Some(row) = rows.into_iter().find(|r| r.dst_pos == p.pos) {
-                let from = Point {
-                    line: row.src,
-                    pos: row.src_pos,
-                    id: row.src_changeset,
-                };
-                if self
-                    .contains(repo, s, line, bound, &from, depth + 1)
-                    .await?
-                    && s.read()
-                {
-                    let (cs, _) = self.changeset(repo, p.id).await?;
-                    if let Some(parent) = cs.first_parent() {
-                        let below = Point {
-                            line: p.line.clone(),
-                            pos: p.pos - 1,
-                            id: parent,
-                        };
-                        if self
-                            .contains(repo, s, line, bound, &below, depth + 1)
-                            .await?
-                        {
-                            return Ok(true);
-                        }
+        if p.pos > 0
+            && let Some(rows) = self.rows_into(repo, s, &p.line, p.pos, 1).await?
+            && let Some(row) = rows.into_iter().find(|r| r.dst_pos == p.pos)
+        {
+            let from = Point {
+                line: row.src,
+                pos: row.src_pos,
+                id: row.src_changeset,
+            };
+            if self
+                .contains(repo, s, line, bound, &from, depth + 1)
+                .await?
+                && s.read()
+            {
+                let (cs, _) = self.changeset(repo, p.id).await?;
+                if let Some(parent) = cs.first_parent() {
+                    let below = Point {
+                        line: p.line.clone(),
+                        pos: p.pos - 1,
+                        id: parent,
+                    };
+                    if self
+                        .contains(repo, s, line, bound, &below, depth + 1)
+                        .await?
+                    {
+                        return Ok(true);
                     }
                 }
             }
@@ -289,14 +402,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         // missed silently: running out of reads marks the search capped.
         let mut below = Some(bound);
         while let Some(at) = below {
-            if !s.read() {
+            let Some(rows) = self.rows_into(repo, s, line, at, ROWS_PER_READ).await? else {
                 break;
-            }
-            let rows = self
-                .meta
-                .line_merges(repo, line, None, at, ROWS_PER_READ)
-                .await
-                .map_err(errors::store)?;
+            };
             below = next_page(&rows);
             for row in rows {
                 if self
@@ -309,12 +417,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
 
         // Rule 2 through merges: the parent line below the fork point.
-        if s.read()
-            && let Some((parent, q)) = self
-                .meta
-                .line_fork(repo, line)
-                .await
-                .map_err(errors::store)?
+        if let Some(Some((parent, q))) = self.fork_of(repo, s, line).await?
             && self
                 .contains(repo, s, &parent, bound.min(q), p, depth + 1)
                 .await?
@@ -349,14 +452,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         // read budget.
         let mut below = Some(dst.pos);
         'rows: while let Some(at) = below {
-            if !s.read() {
+            let Some(rows) = self
+                .rows_into(repo, &mut s, &dst.line, at, ROWS_PER_READ)
+                .await?
+            else {
                 break;
-            }
-            let rows = self
-                .meta
-                .line_merges(repo, &dst.line, None, at, ROWS_PER_READ)
-                .await
-                .map_err(errors::store)?;
+            };
             below = next_page(&rows);
             for row in rows {
                 if s.reads == 0 {
@@ -417,23 +518,13 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
 
         // A fork of one line from the other.
-        if s.read()
-            && let Some((parent, q)) = self
-                .meta
-                .line_fork(repo, &src.line)
-                .await
-                .map_err(errors::store)?
+        if let Some(Some((parent, q))) = self.fork_of(repo, &mut s, &src.line).await?
             && parent == dst.line
             && let Some(id) = self.at_pos(repo, dst.id, dst.pos, q).await?
         {
             better(&mut best, ((q, 1), id, MergeBaseVia::Fork));
         }
-        if s.read()
-            && let Some((parent, q)) = self
-                .meta
-                .line_fork(repo, &dst.line)
-                .await
-                .map_err(errors::store)?
+        if let Some(Some((parent, q))) = self.fork_of(repo, &mut s, &dst.line).await?
             && parent == src.line
             && let Some(id) = self.at_pos(repo, src.id, src.pos, q).await?
         {

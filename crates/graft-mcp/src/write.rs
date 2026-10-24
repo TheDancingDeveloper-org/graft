@@ -1237,7 +1237,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
 
     #[tool(
         name = "graft_merge",
-        description = "Merge line `src` into line `into` (default main), D29. Only `into` moves, by compare-and-swap, and a merge point is recorded so the next merge starts from it. Answers merged (with the base and `via`: merge_point, fork, or ancestry when the bounded search fell back) or up_to_date. A conflict carries the tip (`onto`), `base` and `source` ids: resolve in a workspace on `into` and graft_land with merged_from `<src>@<source>`. Needs read on src and land on into.",
+        description = "Merge line `src` into line `into` (default main), D29. Only `into` moves, by compare-and-swap, and a merge point is recorded so the next merge starts from it. Answers merged (with the base and `via`: merge_point, fork, or ancestry when the bounded search fell back) or up_to_date. A conflict carries the tip (`onto`), `base` and `source` ids: resolve in a workspace on `into` and graft_land with merged_from `<src>@<source>`. Needs read on the repo, land on `into`, and write on every path the merge changes.",
         annotations(
             title = "Merge line",
             read_only_hint = false,
