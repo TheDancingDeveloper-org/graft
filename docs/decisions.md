@@ -50,6 +50,9 @@ Already decided by the operator (2026-10-22):
   [D25](#d25-post-land-checks-on-the-batch-line) and
   [D26](#d26-one-commit-per-land-in-a-batch-pr). graft keeps no review state;
   review stays on the GitHub batch PR.
+- **D27** (operator, 2026-10-24): `graft land` runs the conflict preview and
+  the draft-overlap check by default and stops on a real conflict. See
+  [D27](#d27-pre-land-check-in-graft-land).
 - **D28** (operator, 2026-10-24, WI-2351): batch PRs get oversight's
   standard review and are merged by `land-pr` once GitHub's required checks
   pass. The operator no longer holds the merge button. Amends D21 and D26.
@@ -57,9 +60,6 @@ Already decided by the operator (2026-10-22):
 - **D29** (operator, 2026-10-24, WI-2363): a merge between lines records a
   merge point per (source, target) pair, read by `MergeBase`; history stays
   first-parent. See [D29](#d29-merge-points-between-lines).
-- **D27** (operator, 2026-10-24): `graft land` runs the conflict preview and
-  the draft-overlap check by default and stops on a real conflict. See
-  [D27](#d27-pre-land-check-in-graft-land).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -816,8 +816,9 @@ change to the frozen changeset encoding.** The design is
 [design.md §8.9](design.md#89-merges-between-lines).
 
 - **What is stored.** Each merge landing appends one `line_merges` row
-  (SQLite schema version 6): the source line, the target line, the source
-  changeset and its position, and the target position the merge landed at.
+  (SQLite schema version 7; version 6 is the draft path index): the source
+  line, the target line, the source changeset and its position, and the
+  target position the merge landed at.
   The latest row for a pair is that pair's merge point.
 - **One transaction.** The row is written in the land's CAS transaction,
   with its journal entry (`LineMerged`). Only the target ref moves; the
