@@ -20,7 +20,7 @@ PR.
 | Server | graft-dev VM, redeployed at graft `main` 3e8ba5d (#175; image `sha256:9ab165f2…`). Mirror lag 0 before the trial |
 | Repository | `rusttorrent`, followed from GitHub `TheDancingDeveloper-org/rustTorrent` |
 | Line | `trial-2`, forked at GitHub `main` 7e112d7 (trial 1's batch), policy `direct` (the default line policy) |
-| Agents | 9 Opus 5.5 Vogt worker sessions, at most 4 at once, 4 agent tokens (`trial/mint-agent-tokens.sh`, `GRAFT_TRIAL_LINE=trial-2`, #174), graft CLI built from 3e8ba5d |
+| Agents | 10 Opus 5.5 Vogt worker sessions (8 item workers, 2 fix-forwards), at most 4 at once, 4 agent tokens (`trial/mint-agent-tokens.sh`, `GRAFT_TRIAL_LINE=trial-2`, #174), graft CLI built from 3e8ba5d |
 | GitHub | ruleset 25363247 gets D28's setup: a `pull_request` rule allowing rebase, plus an OrganizationAdmin bypass (operator-approved). The merge queue rebases |
 | Export | `graft-mirror pr-batch trial-2 --base main`, a one-off container with a temporary GitHub token file |
 
@@ -67,6 +67,11 @@ WI-2155 got one real follow-up land, and the operator swapped in #202 and
   trip, nothing written. The e2e fix (c70989a) ran the correct CLI, but the
   check was skipped because the trial token lacks the drafts scope (WI-2417).
   Trial 3 must measure D27 with fixed tokens.
+- The worker logs for #195, #199 and #202 say "pre-land check". The CLI they
+  ran had no pre-land check: its `graft land --help` has no `--no-check` flag,
+  checked at 20:13Z. So those lines report the server's land outcome (refused
+  on conflict, or rebased cleanly), not a D27 result. This note counts them
+  that way.
 
 ### Land-to-main time
 
@@ -77,7 +82,7 @@ Land time (from the worker logs) to the merge of #216 at 20:32:38Z, 9 lands:
 | all 9 lands | 0.69 h | 9.29 h | 9.29 h |
 | second wave (6 lands from 19:50Z) | 0.66 h | 0.71 h | 0.71 h |
 
-The first 3 lands (11:15–11:17Z) waited about 8.5 h for an operator answer on replacing the already-delivered logging items, not for graft or review. Batch timing: #215 opened 19:56Z and was closed 20:05Z after gui-e2e failed. The recut #216 opened 20:17:13Z and merged 20:32:38Z (15.4 min, one review, one merge-queue run).
+The first 3 lands (11:15–11:17Z) waited until the second wave started at 19:48Z, after the operator chose replacements for the already-delivered logging items. That wait was not graft or review time. Batch timing: #215 opened 19:56Z and was closed 20:07:59Z after gui-e2e failed. The recut #216 opened 20:17:13Z and merged 20:32:38Z (15.4 min).
 
 ### Batch PR review
 
@@ -88,17 +93,17 @@ The first 3 lands (11:15–11:17Z) waited about 8.5 h for an operator answer on 
 | #215 | merge queue gui-e2e | 4 failures | Name column squeezed to 0 px by the new default columns: context menu, recheck, settings and sort tests | yes: all 4 from #199 (ceb6e8b) |
 | #216 | Sonnet | clean | 7 original commits patch-identical to #215 (`git patch-id`); both fixes confirmed; nits only | yes |
 
-Every finding was pinned to a single land by its commit and Graft-Changeset trailer. One-commit-per-land (D26) made that possible; trial 1's squashed commit could not.
+Every finding but one was pinned to a single land by its commit and Graft-Changeset trailer; Sonnet's empty-filter note on #215 spans #195 and #196. One-commit-per-land (D26) made that possible; trial 1's squashed commit could not.
 
 ### Authorship and history on GitHub
 
 - rustTorrent `main` gained 9 commits from #216, one per land, in land order, rebased by the merge queue (the ruleset's REBASE method). The D28 ruleset change (pull_request rule plus admin bypass) was applied but not needed: land-pr went through the queue.
 - Every commit has `Graft-Changeset`, `Graft-Work-Item` and `Graft-Batch` trailers.
-- Only c70989a has `Graft-Session`, and every commit is authored `graft <graft@localhost>`. Root cause (WI-2414): `trial/install-cli.sh` honoured an inherited `CARGO_TARGET_DIR` and installed a stale pre-WI-2350 CLI under a fresh stamp, so the 8 earlier lands carried no session and the default author fell back to `$USER@localhost`. Fixed in graft #176 (installer target dir; author is env-only, and an empty email gives the mirror identity, WI-2412). The correct CLI was installed at 20:13Z, before the last land.
+- Only c70989a has `Graft-Session`, and every commit is authored `graft <graft@localhost>`. Root cause (WI-2414): `trial/install-cli.sh` honoured an inherited `CARGO_TARGET_DIR` and installed a stale pre-WI-2350 CLI under a fresh stamp, so the 8 earlier lands carried no session and the default author fell back to `graft@localhost` (`$USER` is unset in Vogt sessions, so the name defaulted to `graft`). Fixed in graft #176 (installer target dir; author is env-only, and an empty email gives the mirror identity, WI-2412). The correct CLI was installed at 20:13Z, before the last land.
 
 ### Fix-forward and revert
 
-- 2 fix-forwards, 0 reverts. cc14243 fixed the DeepSeek blocker on #196 in about 1.5 min of worker time. c70989a fixed the 4 gui-e2e failures from #199 in about 9 min.
+- 2 fix-forwards, 0 reverts. cc14243 fixed the DeepSeek blocker on #196 (session started 19:59:23Z, landed by 20:00:44Z). c70989a fixed the 4 gui-e2e failures from #199 (session started 20:08:01Z, landed by 20:16:56Z).
 - Neither fix could join the open batch: pr-batch keeps one open batch per line (WI-2415). #215 was closed unmerged (graft marked batch 2 rejected), and the next run recut everything as batch 3.
 
 ## Comparison
@@ -108,7 +113,7 @@ Every finding was pinned to a single land by its commit and Graft-Changeset trai
 | Units | 108 PRs over the window | 4 lands, 1 batch PR | 7 item lands + 2 fixes, 2 (1 rejected, 1 merged) batch PRs |
 | Merge time p50 / p90 | 1.6 h / 16.2 h | 17.3 h (one batch, no reviewer) | 0.69 h / 9.29 h (second wave 0.66 h / 0.71 h); recut PR open to merge 15.4 min |
 | Queue conflicts or failures | 8 of 55 entries | 0 | 1 of 2 batch PRs (gui-e2e, 4 tests, one land) |
-| Contention tested | yes (140 co-editing pairs) | no | 3 same-file pairs, 2 conflicts, 1 pre-land stop |
+| Contention tested | yes (140 co-editing pairs) | no | 3 same-file pairs, 2 conflicts, 1 land refused by the server |
 | History on GitHub | one squash or rebase per PR | one squashed commit | 9 commits, one per land, with trailers |
 | Attribution | author per PR | every land `graft` | `graft@localhost` (stale CLI, fixed in #176) |
 
@@ -116,7 +121,7 @@ Every finding was pinned to a single land by its commit and Graft-Changeset trai
 
 | Item | Gap | State |
 | --- | --- | --- |
-| WI-2411 | the client ignores `.gitignore`, so every web worker moved node_modules and dist out by hand | in progress |
+| WI-2411 | the client ignores `.gitignore`, so every web worker moved node_modules and dist out by hand | pushed (aae394a), PR next |
 | WI-2412 | the default author was `<user>@localhost`, with no env-only fallback | done (#176) |
 | WI-2413 | `graft status` still lists a conflict after the markers are removed | open, next |
 | WI-2414 | lands carried no `vogt.session`, because the installer installed a stale CLI | done (#176) |
