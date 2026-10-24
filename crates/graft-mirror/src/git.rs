@@ -238,6 +238,41 @@ impl Mirror {
             .collect())
     }
 
+    /// `git ls-remote` for upstream tags matching `pattern` under
+    /// `refs/tags/`: each tag name (without `refs/tags/`) and the commit it
+    /// names, peeled through annotated tags, sorted by name.
+    pub async fn ls_remote_tags(
+        &self,
+        pattern: &str,
+    ) -> Result<Vec<(String, GitSha)>, GitCliError> {
+        let spec = format!("refs/tags/{pattern}");
+        let out = ok(
+            Some(&self.dir),
+            &["ls-remote", "--tags", self.upstream.as_str(), &spec],
+        )
+        .await?;
+        let text = String::from_utf8_lossy(&out);
+        let mut tags: std::collections::BTreeMap<String, GitSha> = Default::default();
+        let mut peeled = std::collections::BTreeSet::new();
+        for line in text.lines() {
+            let mut parts = line.split('\t');
+            let (Some(sha), Some(name)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let (Some(sha), Some(name)) = (GitSha::from_hex(sha), name.strip_prefix("refs/tags/"))
+            else {
+                continue;
+            };
+            if let Some(base) = name.strip_suffix("^{}") {
+                tags.insert(base.to_owned(), sha);
+                peeled.insert(base.to_owned());
+            } else if !peeled.contains(name) {
+                tags.insert(name.to_owned(), sha);
+            }
+        }
+        Ok(tags.into_iter().collect())
+    }
+
     /// Fetches `branches` from upstream into [`UPSTREAM_NS`], forced: the
     /// copy always equals upstream, and follow decides what graft may take.
     pub async fn fetch(&self, branches: &[&str]) -> Result<(), GitCliError> {

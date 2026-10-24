@@ -155,6 +155,7 @@ impl World {
                 allow_lossy: Vec::new(),
                 batch: 64,
                 interval: Duration::from_secs(15),
+                tags: None,
             },
         )
         .with_clock(clock);
