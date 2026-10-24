@@ -29,3 +29,5 @@ graft-gc = { workspace = true, features = ["planted-bugs"] }
 # import plus graft-git export carry them round.
 graft-git.workspace = true
 graft-mirror = { path = "../graft-mirror" }
+# Hostile API clients (WI-2348): graft-auth verifies the hostile tokens.
+graft-auth.workspace = true
