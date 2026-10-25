@@ -104,7 +104,6 @@ impl Env {
     /// A clone in its own named workspace, for a second writer.
     async fn clone_in(&self, name: &str, workspace: Option<&str>) -> WorkingCopy {
         let config = WcConfig {
-            server: None,
             endpoint: None,
             repo: REPO.to_owned(),
             workspace: workspace.map(str::to_owned),

@@ -83,12 +83,16 @@ pub(crate) fn working_copy_info() -> Result<Option<WcInfo>, Failure> {
 /// What [`connect`] and [`default_rev`] read of a working copy.
 pub(crate) trait WcView {
     fn config(&self) -> &WcConfig;
+    fn server(&self) -> Option<&str>;
     fn state(&self) -> &WcState;
 }
 
 impl WcView for WorkingCopy {
     fn config(&self) -> &WcConfig {
         WorkingCopy::config(self)
+    }
+    fn server(&self) -> Option<&str> {
+        WorkingCopy::server(self)
     }
     fn state(&self) -> &WcState {
         WorkingCopy::state(self)
@@ -98,6 +102,9 @@ impl WcView for WorkingCopy {
 impl WcView for WcInfo {
     fn config(&self) -> &WcConfig {
         WcInfo::config(self)
+    }
+    fn server(&self) -> Option<&str> {
+        WcInfo::server(self)
     }
     fn state(&self) -> &WcState {
         WcInfo::state(self)
@@ -187,7 +194,7 @@ pub(crate) fn resolve_settings(
     });
     let token_override = read_token(g)?;
     resolve_settings_from_sources(
-        wc.map(WcView::config),
+        wc.map(|view| (view.config(), view.server())),
         user,
         endpoint_override,
         token_override,
@@ -195,18 +202,18 @@ pub(crate) fn resolve_settings(
 }
 
 fn resolve_settings_from_sources(
-    wc: Option<&WcConfig>,
+    wc: Option<(&WcConfig, Option<&str>)>,
     user: &UserConfig,
     endpoint_override: Option<Endpoint>,
     token_override: Option<String>,
 ) -> Result<ResolvedSettings, Failure> {
     let selected_server = wc
-        .and_then(|config| config.server.as_deref())
+        .and_then(|(_, server)| server)
         .or(user.default_server.as_deref());
     let named = selected_server.and_then(|name| user.servers.get(name));
     let legacy_endpoint = wc
-        .filter(|config| config.server.is_none())
-        .and_then(|config| config.endpoint.as_deref())
+        .filter(|(_, server)| server.is_none())
+        .and_then(|(config, _)| config.endpoint.as_deref())
         .map(Endpoint::parse);
     if endpoint_override.is_none()
         && legacy_endpoint.is_none()
@@ -224,7 +231,7 @@ fn resolve_settings_from_sources(
     let endpoint = endpoint_override
         .clone()
         .or_else(|| {
-            wc.and_then(|config| config.server.as_ref())
+            wc.and_then(|(_, server)| server)
                 .and(named_endpoint.clone())
         })
         .or_else(|| {
@@ -543,12 +550,10 @@ mod tests {
     fn working_copy_server_precedes_the_user_default() {
         let dir = tempfile::tempdir().unwrap();
         let user = user_with_servers(dir.path());
-        let wc = WcConfig {
-            server: Some("working".to_owned()),
-            ..WcConfig::default()
-        };
+        let wc = WcConfig::default();
 
-        let settings = resolve_settings_from_sources(Some(&wc), &user, None, None).unwrap();
+        let settings =
+            resolve_settings_from_sources(Some((&wc, Some("working"))), &user, None, None).unwrap();
         assert_eq!(settings.server.as_deref(), Some("working"));
         assert_eq!(settings.endpoint, Endpoint::parse("http://working.example"));
         assert_eq!(settings.token.as_deref(), Some("working-secret"));
@@ -613,7 +618,7 @@ mod tests {
             ..WcConfig::default()
         };
 
-        let settings = resolve_settings_from_sources(Some(&wc), &user, None, None).unwrap();
+        let settings = resolve_settings_from_sources(Some((&wc, None)), &user, None, None).unwrap();
 
         assert_eq!(settings.endpoint, Endpoint::parse("http://legacy.example"));
         assert_eq!(settings.server, None);
@@ -623,13 +628,10 @@ mod tests {
     #[test]
     fn full_overrides_bypass_a_missing_working_copy_server() {
         let user = UserConfig::default();
-        let wc = WcConfig {
-            server: Some("removed".to_owned()),
-            ..WcConfig::default()
-        };
+        let wc = WcConfig::default();
 
         let settings = resolve_settings_from_sources(
-            Some(&wc),
+            Some((&wc, Some("removed"))),
             &user,
             Some(Endpoint::parse("http://override.example")),
             Some("override-secret".to_owned()),

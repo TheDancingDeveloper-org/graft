@@ -47,7 +47,6 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
             None => None,
         };
         let config = WcConfig {
-            server: conn.server.clone(),
             endpoint: conn
                 .server
                 .is_none()
@@ -55,7 +54,7 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
             repo: conn.repo.clone(),
             workspace: None,
         };
-        let (wc, stats) = workcopy::clone(
+        let (mut wc, stats) = workcopy::clone(
             &conn.remote,
             &cx,
             &dest,
@@ -66,6 +65,7 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
             &FetchOptions::default(),
         )
         .await?;
+        wc.set_server(conn.server.clone())?;
         let base = wc.state().base;
         let files = wc.index().entries.len();
         if g.json {

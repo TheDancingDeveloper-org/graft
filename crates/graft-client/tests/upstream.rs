@@ -43,7 +43,6 @@ impl Env {
 
     async fn clone(&self, name: &str) -> WorkingCopy {
         let config = WcConfig {
-            server: None,
             endpoint: None,
             repo: REPO.to_owned(),
             workspace: Some(name.to_owned()),
