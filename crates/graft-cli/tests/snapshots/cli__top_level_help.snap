@@ -1,5 +1,6 @@
 ---
 source: crates/graft-cli/tests/cli.rs
+assertion_line: 144
 expression: text(out.get_output())
 ---
 The graft command-line client.
@@ -38,3 +39,8 @@ Options:
       --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
+
+Server roles:
+  serve   Run the authoritative server
+  node    Run the host cache daemon
+  mirror  Import, follow, batch or export git repositories

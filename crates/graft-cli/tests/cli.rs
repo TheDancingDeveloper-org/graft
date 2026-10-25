@@ -117,6 +117,9 @@ fn help_is_public_facing_for_every_command() {
         &["version"],
         &["mcp"],
         &["lsp"],
+        &["serve"],
+        &["node"],
+        &["mirror"],
     ];
 
     for command in COMMANDS {

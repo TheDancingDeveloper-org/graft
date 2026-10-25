@@ -28,6 +28,7 @@ pub mod socket;
 
 mod auth;
 mod cache;
+mod entry;
 mod flight;
 mod objects;
 mod repos;
@@ -51,6 +52,7 @@ use tokio::net::UnixListener;
 use tonic::codec::CompressionEncoding;
 
 pub use config::NodeConfig;
+pub use entry::run;
 pub use metrics::NodeMetrics;
 pub use socket::Peer;
 
