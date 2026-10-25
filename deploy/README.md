@@ -12,6 +12,8 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 | `server.toml` | graft-server config (`max_token_ttl_s = 2592000`, 30 days) |
 | `mirror.toml` | graft-mirror follows rustTorrent `main` into repo `rusttorrent` |
 | `mirror-fluent2.toml`, `mirror-vogt.toml` | graft-mirror-fluent2 and graft-mirror-vogt follow fluent2-egui `main` and vogt `rust-core` into repos `fluent2-egui` and `vogt` (trial 3) |
+| `mirrors.tsv`, `compose.onboarded.yml` | followed-repository registry and generated Compose services |
+| `onboard-repo.sh` | one-step, idempotent repository onboarding; `--dry-run` prints the plan |
 | `up.sh` | idempotent deploy: bootstrap secrets, pull, config pre-flight, `up -d --wait`, readiness gate with rollback, health check |
 | `backup/` | backup script, systemd timer, `install.sh`, `restore-rehearsal.sh` (WI-2307) |
 | `monitoring/` | Prometheus alert rules and scrape config for the ops repo (WI-2307) |
@@ -94,14 +96,53 @@ starts the mirrors, and a mirror's first `follow` against an empty repository
 is the initial import, as it was for `rusttorrent`. So the first deploy after
 a repository is added imports it, and a re-run changes nothing. `up.sh`
 pre-flights every mirror config, and waits up to `GRAFT_REFS_WAIT` seconds
-for each repository's first ref. Only `rusttorrent` fails the deploy at that
-deadline. A larger first import (vogt) that is still running gets a warning,
-and its mirror keeps going.
+for each repository's first ref. A repository that still has no ref when `GRAFT_REFS_WAIT` expires fails
+the deploy with "no ref after import". That is distinct from the "importing"
+log printed while the wait is still running, and from an error returned by
+the refs endpoint.
 
-To add another: write `mirror-<short>.toml`, add a service like
-`graft-mirror-vogt` to `compose.yml` (next free port, own volume, own token
-file), add the repository to `repos` and a line to `mirrors` in `up.sh`, and
-add a scrape target in `monitoring/prometheus-scrape.yml`.
+### Onboard another repository
+
+Run this from the graft checkout on the graft-dev VM, in a plain operator
+terminal on the graft-dev checkout:
+
+```sh
+deploy/onboard-repo.sh OWNER/REPO BASE [LINE]
+```
+
+`LINE` defaults to `trial-1`. Use `--dry-run` first to print every planned
+file and operational action without changing the checkout, deploying, or
+minting credentials. The command adds one row to `mirrors.tsv`, writes the
+language-agnostic mirror config, regenerates `compose.onboarded.yml`, and
+runs `deploy/up.sh`. The normal deploy path creates the graft repository,
+mints its mirror token, starts the service, and waits for that repository's
+first imported ref before the command creates the integration line.
+
+A private upstream (one anonymous `git ls-remote` cannot read) gets a
+`[github] token_file` pointing at `/run/secrets/github-token`, mounted from
+`/etc/graft/github-token` on the host. The mirror's entrypoint is
+`deploy/private-follow.sh`, which reads that file into git's
+`http.extraHeader`. The token is not written into the config, printed, or
+placed in argv. An empty token file fails the mirror. Builtin public mirrors
+stay unauthenticated. Place the host file before onboarding a private
+repository; the file is mode 0600 and owned by uid 10001, like the other
+`/etc/graft` secrets. Generated mirror configs are mode 0644 so that user can
+read them.
+
+Session credentials follow D10 and `trial/mint-agent-tokens.sh`: one
+`--kind agent` token per session, minted with `--session`, scopes `read`,
+`write`, `drafts` and `land:<line>`. Mint it when the session starts:
+
+```sh
+deploy/onboard-repo.sh --mint-session OWNER/REPO ses_… [--work-item WI-N]
+```
+
+The token is written to a mode-0600 file and is never printed, passed in
+argv, or stored for another session to share. A rerun with the same base
+leaves the mirror and line unchanged. A rerun that names a different base
+fails instead of silently keeping the registered one. The command prints the
+D28 ruleset checklist that must be applied to the GitHub repository before
+its first batch is landed.
 
 Check that a mirror has caught up (lag 0) on the VM:
 

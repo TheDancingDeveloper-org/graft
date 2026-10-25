@@ -49,6 +49,7 @@ set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 secrets=${GRAFT_SECRETS_DIR:-/etc/graft}
+registry=$here/mirrors.tsv
 export GRAFT_SECRETS_DIR=$secrets
 
 # An unreadable deploy.env is an error, not a skip: skipping it would move the
@@ -69,15 +70,14 @@ set -a
 set +a
 
 # Every repository the stack serves; creating one that exists is a no-op.
-repos=(rusttorrent graft-dev fluent2-egui vogt)
-# The followed repositories, one graft-mirror service each (trial 3):
-# service, graft repository, token file under $secrets, config in deploy/.
-# A new repository's first follow is its initial import.
-mirrors=(
-  "graft-mirror rusttorrent mirror-token mirror.toml"
-  "graft-mirror-fluent2 fluent2-egui mirror-token-fluent2 mirror-fluent2.toml"
-  "graft-mirror-vogt vogt mirror-token-vogt mirror-vogt.toml"
-)
+repos=(graft-dev)
+# One registry row per followed repository. The first follow is its import.
+mirrors=()
+while IFS='|' read -r svc mrepo _owner_repo _base tok cfg _port _source; do
+  [[ -n $svc && $svc != \#* ]] || continue
+  repos+=("$mrepo")
+  mirrors+=("$svc $mrepo $tok $cfg")
+done <"$registry"
 mirror_services=()
 mirror_configs=()
 for m in "${mirrors[@]}"; do
@@ -114,7 +114,8 @@ die() {
 }
 
 compose() {
-  docker compose --env-file "$here/image.env" -f "$here/compose.yml" "$@"
+  docker compose --env-file "$here/image.env" -f "$here/compose.yml" \
+    -f "$here/compose.onboarded.yml" "$@"
 }
 
 # Run a shell snippet as root in a throwaway container from the pinned image,
@@ -338,9 +339,9 @@ refs() {
 # Wait for one followed repository's first ref. The deadline is this repo's
 # own $refs_wait seconds, not a budget shared with the repos already checked:
 # a first import of a later repo (vogt is large) gets the full wait. A repo
-# that answers with an empty ref list is still importing; that is a warning
-# only when its own deadline passes. An error from the endpoint is different
-# and fails the deploy.
+# that answers with an empty ref list is still importing. When the deadline
+# passes with no ref, that is "no ref after import" and fails the deploy,
+# distinct from the importing log. An error from the endpoint also fails.
 wait_for_refs() {
   local svc=$1 mrepo=$2 tok=$3
   local deadline=$((SECONDS + refs_wait)) err rc
@@ -366,8 +367,8 @@ wait_for_refs() {
       die "$mrepo refs endpoint failed; not treating an endpoint error as a slow import (see: docker logs graft-dev-${svc#graft-})"
     fi
     if [ "$SECONDS" -ge "$deadline" ]; then
-      log "warning: $mrepo has no refs after ${refs_wait}s; its first import may still be running (see: docker logs graft-dev-${svc#graft-})"
-      return 0
+      log "error: $mrepo has no ref after import (${refs_wait}s); this is not the importing state (see: docker logs graft-dev-${svc#graft-})"
+      die "$mrepo has no ref after import"
     fi
     sleep "${GRAFT_REFS_POLL:-10}"
   done

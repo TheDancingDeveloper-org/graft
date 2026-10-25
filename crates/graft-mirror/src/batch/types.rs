@@ -139,6 +139,8 @@ pub struct BatchRecord {
     pub tip: ChangesetId,
     /// Lands in the batch (at most [`MAX_LANDS`]).
     pub lands: u64,
+    /// Lands present when the batch PR first opened.
+    pub initial_lands: u64,
     /// When the batch was planned (ms): a squashed commit's date.
     pub created_ms: i64,
     /// `graft/batch-<n>`.
