@@ -54,6 +54,9 @@ fn main() -> ExitCode {
         Err(e) => return parse_failure(e),
     };
     let json = cli.global.json;
+    if let Err(failure) = enter_directory(&cli.global) {
+        return ExitCode::from(failure.report(json) as u8);
+    }
     let result = dispatch(&cli);
     let code = match result {
         Ok(()) => Exit::Ok,
@@ -77,6 +80,19 @@ fn parse_failure(e: clap::Error) -> ExitCode {
         return ExitCode::from(code as u8);
     }
     e.exit()
+}
+
+/// `graft -C <dir>` runs as if it had been started in `<dir>`.
+fn enter_directory(g: &cli::Global) -> Result<(), Failure> {
+    if let Some(dir) = &g.directory {
+        std::env::set_current_dir(dir).map_err(|e| {
+            Failure::from(std::io::Error::other(format!(
+                "cannot enter {}: {e}",
+                dir.display()
+            )))
+        })?;
+    }
+    Ok(())
 }
 
 fn dispatch(cli: &Cli) -> Result<(), Failure> {
