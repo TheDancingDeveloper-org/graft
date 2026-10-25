@@ -74,6 +74,8 @@ jobs:
         run: .github/scripts/docs-only.sh "$BASE_SHA"
       - if: steps.scope.outputs.docs_only == 'true'
         run: echo "docs-only change; skipping the Rust build"
+      - if: steps.scope.outputs.docs_only == 'true'
+        run: python3 bench/render.py docs/guide/bench.svg
       - uses: dtolnay/rust-toolchain@stable
         if: steps.scope.outputs.docs_only != 'true'
         with:
