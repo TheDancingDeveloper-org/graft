@@ -50,11 +50,21 @@ pub struct Site {
 
 impl Site {
     /// A fresh site with `extra` TOML appended to the base config.
+    ///
+    /// The free-space floor is off (`min_free_fraction = 0.0`) unless `extra`
+    /// sets it: the production default refuses every write below 5% free on
+    /// the volume holding the temp dir, so a nearly full CI runner would
+    /// fail unrelated tests with `Unavailable { retry_after_ms: 60000 }`.
     pub fn new(tag: &str, extra: &str) -> Self {
         let dir = TempDir::new(tag);
         let config = dir.path().join("server.toml");
+        let floor = if extra.contains("min_free_fraction") {
+            ""
+        } else {
+            "min_free_fraction = 0.0\n"
+        };
         let text = format!(
-            "listen = \"127.0.0.1:0\"\nobjects_dir = \"{}\"\nmeta_db = \"{}\"\njson_logs = false\nshutdown_grace_s = 5\n{extra}\n",
+            "listen = \"127.0.0.1:0\"\nobjects_dir = \"{}\"\nmeta_db = \"{}\"\njson_logs = false\nshutdown_grace_s = 5\n{floor}{extra}\n",
             dir.path().join("objects").display(),
             dir.path().join("meta/meta.db").display(),
         );

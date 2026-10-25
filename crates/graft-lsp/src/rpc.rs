@@ -210,4 +210,15 @@ mod tests {
         assert!(matches!(got[0], Ok(Some(Frame::TooLarge))));
         assert!(matches!(&got[1], Ok(Some(Frame::Body(b))) if b == b"[]"));
     }
+
+    #[test]
+    fn response_shape_preserves_typed_limit_errors() {
+        let value = response(
+            json!(1),
+            Err(RpcError::failed("too large")
+                .with_data(json!({"error": "limit_exceeded", "max_bytes": 8}))),
+        );
+        assert_eq!(value["error"]["data"]["error"], "limit_exceeded");
+        assert_eq!(value["error"]["data"]["max_bytes"], 8);
+    }
 }
