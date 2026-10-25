@@ -76,6 +76,10 @@ pub enum MirrorError {
     Config(String),
     /// GitHub refused or could not be reached.
     Forge(ForgeError),
+    /// `git fetch` failed (authentication or the network). The message
+    /// names the command and the failure class, never a token or a URL
+    /// that carries credentials.
+    Fetch(String),
     /// An authority switch step refused, described.
     Switch(String),
     /// The mirror DB has no git commit for a line's tip, and has not
@@ -99,6 +103,7 @@ impl fmt::Display for MirrorError {
             MirrorError::Api(e) => write!(f, "the graft API refused: {e:?}"),
             MirrorError::Config(what) => write!(f, "configuration: {what}"),
             MirrorError::Forge(e) => e.fmt(f),
+            MirrorError::Fetch(what) => write!(f, "git fetch failed: {what}"),
             MirrorError::Switch(what) => write!(f, "authority switch: {what}"),
             MirrorError::Unmapped {
                 db,

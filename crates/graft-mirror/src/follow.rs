@@ -169,6 +169,10 @@ pub struct Follower<'a, A> {
     cx: CallContext,
     db: &'a MirrorDb,
     mirror: Mirror,
+    /// When set, `git fetch` uses this remote instead of the mirror's
+    /// upstream. `ls-remote` is unchanged. Tests use it to fail the fetch
+    /// after listing succeeds.
+    fetch_remote: Option<String>,
     config: FollowConfig,
     metrics: Option<Metrics>,
     clock: fn() -> i64,
@@ -201,6 +205,7 @@ where
             cx,
             db,
             mirror,
+            fetch_remote: None,
             config,
             metrics: None,
             clock: system_ms,
@@ -208,6 +213,12 @@ where
             seen_tags: HashMap::new(),
             last_tags: TagReport::default(),
         }
+    }
+
+    /// Fetches from `remote` instead of the configured upstream.
+    pub fn with_fetch_remote(mut self, remote: impl Into<String>) -> Self {
+        self.fetch_remote = Some(remote.into());
+        self
     }
 
     /// Exports lag and divergence to `metrics`.
@@ -473,7 +484,16 @@ where
             self.db.set_line(&l.line, &state)?;
         }
 
-        self.mirror.fetch(&[l.branch.as_str()]).await?;
+        let fetched = match &self.fetch_remote {
+            Some(remote) => self.mirror.fetch_from(remote, &[l.branch.as_str()]).await,
+            None => self.mirror.fetch(&[l.branch.as_str()]).await,
+        };
+        if let Err(e) = fetched {
+            // Not caught up. Do not zero the changeset lag: it stays at the
+            // last measured value (unset until a fetch succeeds). Seconds of
+            // lag keep counting from behind_since_ms. The message is scrubbed.
+            return Err(MirrorError::Fetch(scrub_git(&e.to_string())));
+        }
         let repo = self.config.repo.clone();
         let cx = self.call("resolve");
         let tip = current_ref(self.api, &cx, &repo, &l.line).await?;
@@ -594,4 +614,41 @@ where
             .with_label_values(&[line])
             .set(i64::from(state.diverged.is_some()));
     }
+}
+
+/// Drops credentials from a git CLI failure: URL userinfo
+/// (`scheme://user:secret@host`) and `Bearer`/`Basic` header values.
+fn scrub_git(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut rest = msg;
+    while !rest.is_empty() {
+        let scheme = ["https://", "http://", "ssh://"]
+            .into_iter()
+            .find(|s| rest.starts_with(s));
+        if let Some(scheme) = scheme {
+            let after = &rest[scheme.len()..];
+            if let Some(at) = after.find('@') {
+                let userinfo = &after[..at];
+                if userinfo.contains(':') && !userinfo.contains('/') {
+                    out.push_str(scheme);
+                    out.push_str("***@");
+                    rest = &after[at + 1..];
+                    continue;
+                }
+            }
+        }
+        let word = ["Bearer ", "Basic "]
+            .into_iter()
+            .find(|w| rest.starts_with(w));
+        if let Some(word) = word {
+            out.push_str(word.trim_end());
+            out.push_str(" ***");
+            rest = rest[word.len()..].trim_start_matches(|c: char| !c.is_whitespace());
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
 }

@@ -572,3 +572,100 @@ async fn a_too_deep_tag_chain_is_skipped_and_the_rest_follow() {
     assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
     assert!(f.last_tags().too_deep.is_empty(), "reported once");
 }
+
+fn assert_fetch_failed(outcome: LineOutcome) -> String {
+    match outcome {
+        LineOutcome::Failed(msg) => {
+            assert!(
+                msg.starts_with("git fetch failed:"),
+                "fetch failure is a typed error, got {msg}"
+            );
+            for secret in ["ghp_supersecret", "x-access-token:", "user:secret"] {
+                assert!(
+                    !msg.contains(secret),
+                    "the error carries a secret ({secret}): {msg}"
+                );
+            }
+            msg
+        }
+        other => panic!("expected a failed fetch, got {other:?}"),
+    }
+}
+
+fn follower_fetching<'a>(
+    w: &'a World,
+    db: &'a MirrorDb,
+    metrics: &Metrics,
+    fetch_from: &str,
+) -> Follower<'a, Api> {
+    w.follower(db, metrics).with_fetch_remote(fetch_from)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fetch_auth_failure_is_a_typed_error_and_does_not_report_caught_up() {
+    let w = World::new().await;
+    w.commit();
+    w.push();
+    let db = w.open_db();
+    let m = metrics();
+    // Listing uses the real local upstream. Fetch is sent at an HTTPS URL
+    // whose userinfo is a token, so git refuses authentication and no
+    // commit is imported.
+    let mut f = follower_fetching(
+        &w,
+        &db,
+        &m,
+        "https://x-access-token:ghp_supersecret@github.com/example/missing.git",
+    );
+    let msg = assert_fetch_failed(poll(&mut f).await);
+    assert!(
+        !msg.contains("github.com/example") || msg.contains("***@"),
+        "a credentialled URL is scrubbed: {msg}"
+    );
+    assert_eq!(
+        lag_changesets(&m),
+        0,
+        "lag was never measured, not zeroed as caught up"
+    );
+    assert!(lag_seconds(&m) >= 0.0);
+    assert_eq!(db.commit_count().unwrap(), 0, "nothing imported");
+    assert!(w.tip().await.is_none(), "the graft line was not created");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unreachable_remote_fetch_is_a_typed_error() {
+    let w = World::new().await;
+    let tip = w.commit();
+    w.push();
+    let db = w.open_db();
+    let m = metrics();
+    // Catch up once, so a later failure must not look like a fresh zero.
+    {
+        let mut ok = w.follower(&db, &m);
+        assert!(matches!(poll(&mut ok).await, LineOutcome::Imported { .. }));
+    }
+    assert_eq!(lag_changesets(&m), 0);
+    w.commit();
+    w.push();
+
+    let dead = w.mirror_dir.parent().unwrap().join("not-a-remote");
+    std::fs::write(&dead, b"not a git repository\n").unwrap();
+    let mut f = follower_fetching(&w, &db, &m, dead.to_str().unwrap());
+    let msg = assert_fetch_failed(poll(&mut f).await);
+    assert!(!msg.contains("ghp_"), "{msg}");
+    assert_eq!(
+        lag_changesets(&m),
+        0,
+        "failed fetch does not invent a lag of caught-up"
+    );
+    assert!(
+        lag_seconds(&m) >= 0.0,
+        "seconds of lag are not cleared by the failure"
+    );
+    assert_eq!(
+        w.tip_sha(&db).await,
+        Some(tip),
+        "graft stayed on the last import"
+    );
+    assert_eq!(db.commit_count().unwrap(), 1);
+}
