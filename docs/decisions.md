@@ -923,7 +923,7 @@ Rejected:
 
 ## D31. Phase 1 measures agent friction, not read latency
 
-**Status:** accepted (operator decision, 2026-10-25, review [WI-2445](https://github.com)).
+**Status:** accepted (operator decision, 2026-10-25, review WI-2445).
 
 **The phase-1 MVP target is minimal agent friction and multi-session building without conflict churn.** Speed is not that target. It is two guards:
 
