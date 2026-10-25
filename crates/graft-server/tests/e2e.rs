@@ -60,12 +60,12 @@ async fn fetch_snapshot(
     files
 }
 
-// Quarantine (WI-2467): ~75s kill-9 import/fetch/fsck failed once on an
-// unrelated merge-queue run (PR #196) and passed on retry, with no stable
-// cause. nextest skips `#[ignore]`d tests, so the required `test` job no
-// longer flakes on it. The merge-queue slow step runs it with `--run-ignored
-// only-this`; see docs/known-flakes.md.
-#[ignore = "slow kill-9 e2e; merge-queue slow set only (WI-2467)"]
+// Quarantine (WI-2469, recorded under WI-2467): ~75s kill-9 import/fetch/fsck
+// failed once on an unrelated merge-queue run (PR #196) and passed on retry,
+// with no stable cause. nextest skips `#[ignore]`d tests, so the required
+// `test` job no longer flakes on it. The non-required merge-queue `slow` job
+// runs it with `--run-ignored only`; see docs/known-flakes.md.
+#[ignore = "slow kill-9 e2e; non-required merge-queue slow job (WI-2469)"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn import_kill9_restart_fetch_fsck() {
     let site = Site::new("server-e2e", "");

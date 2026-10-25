@@ -100,7 +100,11 @@ async fn with_upstream_down_cached_reads_work_and_misses_fail_fast() {
     // The cache survives a restart, still with no upstream.
     drop(client);
     node.stop().await;
+    let cache_dir = node.dir.clone();
     drop(node);
+    // The store lock is process-wide and lives as long as any Node clone.
+    // Wait until it is actually free before the next open (WI-2467).
+    NodeRun::wait_until_cache_unlocked(&cache_dir, &up.url()).await;
     let node = NodeRun::start(config(dir.path(), &up.url())).await;
     let client = node.client(&tok).await;
     let again = client
