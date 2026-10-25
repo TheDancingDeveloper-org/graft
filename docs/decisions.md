@@ -68,7 +68,15 @@ Already decided by the operator (2026-10-22):
 - **D33** (operator, 2026-10-25, WI-2443): an empty changeset with fewer
   than two parents is valid only when it carries `mirror.git-commit` from a
   git import. Native empty changesets stay rejected, and a native write may
-  not set `mirror.*`. See [D33](#d33-empty-imported-changesets).
+  not set `mirror.*`. See [D33](#d33-empty-imported-changesets). Amended by
+  [D34](#d34-canonical-empty-root): exactly one canonical empty root is a
+  native exception.
+- **D34** (operator, 2026-10-25, WI-2366): exactly one canonical empty root
+  changeset is valid. No parents, no changes, fixed fields (no author, time
+  or randomness), so its id is a constant every new repository shares.
+  Other native empty changesets stay rejected. Amends validity rule 9 and
+  D33's native-empty rejection for that one changeset only. See
+  [D34](#d34-canonical-empty-root).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -107,6 +115,7 @@ Already decided by the operator (2026-10-22):
 | D29 | Merges between lines | **Decided:** one merge point per (source, target) line pair, written with the land and read by `MergeBase`; first-parent history, no second parent, no encoding change | — |
 | D30 | Appending to an open batch | **Decided:** a land after `pr-batch` joins the open, unsealed batch PR as one more commit (fast-forward with a lease); sealed batches take no appends | — |
 | D33 | Empty imported changesets | **Decided:** an empty changeset with fewer than two parents is valid only with `mirror.git-commit` (git import); native empty changesets stay rejected, and a native write may not set `mirror.*` | — |
+| D34 | Canonical empty root | **Decided:** exactly one empty, parentless root changeset is valid, with fixed content and a constant id shared by every new repository; other native empty changesets stay rejected; D33's git-import exception is unchanged | — |
 
 ---
 
@@ -1033,3 +1042,42 @@ validity rule consumers enforce.
 
 The model and importer change is a later PR. This decision does not
 implement it.
+
+## D34. Canonical empty root
+
+**Decided (operator, 2026-10-25, WI-2366): exactly one empty, parentless
+root changeset is valid.** It has no parents and no changes. Every other
+field is fixed: no author, no time and no randomness, so nothing in the id
+comes from the server, the clock or a random source. Its id is therefore a
+constant, and every new repository starts from that same well-known root.
+This amends validity rule 9 in [design.md §4.5](design.md#45-changesets)
+and narrows D33's rejection of native empty changesets to every empty
+changeset except this one. D33's git-import exception is unchanged: an
+empty changeset with fewer than two parents is still valid when metadata
+carries `mirror.git-commit`. The canonical encoding does not change.
+Existing golden vectors are unchanged. The code PR that implements this
+adds one new golden vector for the canonical root; this decision does not.
+
+- **Fixed content.** Parents empty, changes empty, root the empty-repository
+  root tree, author the fixed empty identity (empty name, empty email, kind
+  `bot`), `authored_at` the epoch (`0` ms, offset `0`), message empty,
+  metadata empty. A second parentless empty changeset, or this shape with
+  any field different, is not the canonical root and stays rejected.
+- **`graft init` (D32).** Creating a local repository writes this one
+  changeset and points the line at it. The working copy's first commit is a
+  child of that root. Two repositories created by `graft init` share the
+  root id before either has a real commit. A remote repository created
+  empty uses the same root; this decision does not add a second root shape.
+- **Still rejected.** A native empty changeset with a parent, a native
+  parentless changeset that is not this fixed content, and any native write
+  that sets `mirror.*`. An empty change list with two or more parents stays
+  a merge, as before.
+- **Rejected:**
+  - a fresh root id per repository (author, time or a random nonce in the
+    content), which would make two new repositories incomparable at the root
+    and put server time or randomness in an id;
+  - allowing every native empty changeset, which D33 kept closed;
+  - changing the encoding or regenerating the existing golden vectors.
+
+The model change and `graft init` writing this root are later PRs. This
+decision does not implement them.

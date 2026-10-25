@@ -310,14 +310,23 @@ Canonical payload: `u8 version(1)`, `u32 n ‖ parents`, `root(32)`,
 7. the result is a well-formed tree, with no path that is both a file and a
    directory;
 8. the change count is within the limit (100,000 by default);
-9. a changeset with no changes is allowed only with more than one parent,
-   or — for a git import only ([D33](decisions.md#d33-empty-imported-changesets)) —
-   with fewer than two parents (a single parent or none) when metadata carries
-   `mirror.git-commit` ([D19](decisions.md#d19-import-identity)). The native
-   write boundary rejects any `mirror.*` key, so a native client cannot set
-   `mirror.git-commit` and a native empty changeset is still rejected. The
-   encoding is unchanged, and the golden vectors for native changesets are
-   unchanged.
+9. a changeset with no changes is allowed only with more than one parent
+   (a merge), or as exactly one canonical empty root
+   ([D34](decisions.md#d34-canonical-empty-root)), or — for a git import only
+   ([D33](decisions.md#d33-empty-imported-changesets)) — with fewer than two
+   parents (a single parent or none) when metadata carries
+   `mirror.git-commit` ([D19](decisions.md#d19-import-identity)). The
+   canonical empty root is the only native exception: no parents, no
+   changes, and every other field fixed (empty name and email, kind `bot`,
+   `authored_at` at the epoch with offset 0, empty message, empty metadata,
+   root the empty-repository root tree). No author, time or randomness
+   enters the id, so the id is a constant shared by every new repository.
+   Any other native empty changeset stays rejected. The native write
+   boundary still rejects any `mirror.*` key, so a native client cannot set
+   `mirror.git-commit`. The encoding is unchanged. Existing golden vectors
+   are unchanged; the code PR adds one golden vector for the canonical root.
+   `graft init` ([D32](decisions.md#d32-local-repositories)) writes this
+   root and points the line at it, so the first real commit is its child.
 
 ### 4.6 Refs and lines
 
@@ -579,7 +588,11 @@ crate on this path).
 
 **What is unchanged.** CAS lands, one transaction per logical write, the
 journal, objects durable before metadata names them, id-pruned diffs, GC off
-by default, typed errors, bounded responses. A conflicting land still exits
+by default, typed errors, bounded responses. A new local repository starts
+at the canonical empty root ([D34](decisions.md#d34-canonical-empty-root)):
+`graft init` writes that one fixed changeset and points the line at it.
+The first commit is a child of that root, and every repository `graft init`
+creates shares the root id. A conflicting land still exits
 3 and is resolved by the client. `kill -9` during a land loses no
 acknowledged write, because durability is the store's, not the transport's.
 Commit, sync, land, log, diff, blame, stack, revert, pick, tag and line all
