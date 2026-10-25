@@ -392,7 +392,7 @@ where
         let mut bad: BTreeMap<(Vec<u8>, String), GitSha> = BTreeMap::new();
         let skip: HashSet<GitSha> = misshapen.iter().copied().collect();
         let mut sizes: HashMap<GitSha, u64> = HashMap::new();
-        let mut unrepresentable: Vec<Unrepresentable> = misshapen
+        let unrepresentable: Vec<Unrepresentable> = misshapen
             .into_iter()
             .map(|commit| Unrepresentable {
                 commit,
@@ -429,12 +429,6 @@ where
                         let path = c.path.as_str().as_bytes().to_vec();
                         bad.entry((path, "blob-bytes".to_owned())).or_insert(sha);
                     }
-                }
-                if raw.parents.len() < 2 && changes.is_empty() {
-                    unrepresentable.push(Unrepresentable {
-                        commit: sha,
-                        reason: "empty-changeset",
-                    });
                 }
             } else {
                 for o in offences {

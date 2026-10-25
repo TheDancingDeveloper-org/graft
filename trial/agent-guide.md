@@ -1,6 +1,7 @@
 # Delivering a task through graft (trial)
 
 **This overrides the repository `AGENTS.md` git workflow for the trial.**
+The general guide (no trial hosts) is [docs/agents.md](../docs/agents.md); this file is the trial's copy.
 Deliver through graft only. No `git push`. No GitHub PRs. No branches. Do not
 create `g<phase>-…` or `wi-…` branches, do not run `git commit`, and do not
 open or wait for a PR. Your change reaches the trial line `$LINE` only through `graft land`. You
