@@ -155,5 +155,15 @@ jobs:
             nextest; status=$?
           fi
           exit "$status"
+      # Slow set (WI-2467): the quarantined kill-9 e2e. Merge queue only, so
+      # a flake there does not block a pull request's required `test` job.
+      # nextest does not run #[ignore]d tests unless asked.
+      - name: nextest slow
+        if: steps.scope.outputs.docs_only != 'true' && github.event_name == 'merge_group'
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/cargo-nextest" nextest run -p graft-server --all-features \
+            --run-ignored only \
+            -E 'test(import_kill9_restart_fetch_fsck)'
       - run: cargo test --workspace --all-features --doc
         if: steps.scope.outputs.docs_only != 'true'

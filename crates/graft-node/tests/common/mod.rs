@@ -271,7 +271,9 @@ pub struct NodeRun {
     pub socket: PathBuf,
     pub node: Node,
     stop: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<Result<(), String>>>,
+    /// The task that accepts connections. It is joined on stop, so no clone
+    /// of the node outlives the test's own (WI-2467).
+    serve: Option<JoinHandle<()>>,
 }
 
 pub fn config(dir: &Path, upstream: &str) -> NodeConfig {
@@ -295,33 +297,44 @@ impl NodeRun {
         let node = Node::open(&config, NodeMetrics::new().unwrap()).expect("open node");
         let (tx, rx) = oneshot::channel::<()>();
         let serving = node.clone();
-        let task = tokio::spawn(async move {
+        let serve = tokio::spawn(async move {
             serving
                 .serve(listener, async {
                     let _ = rx.await;
                 })
                 .await
+                .expect("serve failed")
         });
         Self {
             dir: config.cache_dir.clone(),
             socket: config.socket.clone(),
             node,
             stop: Some(tx),
-            task: Some(task),
+            serve: Some(serve),
         }
     }
 
-    /// Stops the node and waits for its serve task to finish, so the socket
-    /// is free by the time this returns.
+    /// Stops the node, so the socket and the cache lock are free by the time
+    /// this returns.
+    ///
+    /// The serve task's runtime holds a clone of the node, and tonic keeps a
+    /// further clone per connection, each in a task of its own. Those clones
+    /// own the cache store's exclusive lock (`flock` on `cache/objects`), so
+    /// a connection that is still draining holds it after `serve` returns.
+    /// The next `Node::open` of this cache then panics with "in use by
+    /// another process" (WI-2467). `Runtime::shutdown_timeout` drops every
+    /// such task, which is how the daemon frees the lock.
     pub async fn stop(&mut self) {
         if let Some(tx) = self.stop.take() {
             let _ = tx.send(());
         }
-        if let Some(task) = self.task.take() {
-            let done = tokio::time::timeout(Duration::from_secs(5), task)
-                .await
-                .expect("node did not stop within 5s");
-            done.expect("serve task panicked").expect("serve failed");
+        // Join, don't abort. Tonic serves each connection on a task of its
+        // own, spawned from the accept task and holding a clone of the node.
+        // Aborting the accept task leaves those clones (and the cache
+        // `flock`) alive; waiting for `serve` to finish waits for them too,
+        // because the accept task does not return until they have (WI-2467).
+        if let Some(serve) = self.serve.take() {
+            serve.await.expect("node serve task panicked");
         }
     }
 
