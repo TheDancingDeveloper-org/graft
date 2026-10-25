@@ -210,7 +210,7 @@ pub const SPECS: &[MetricSpec] = &[
         MIRROR_LAG_CHANGESETS,
         G,
         &["line"],
-        "Mirror lag in changesets.",
+        "Mirror lag in changesets; -1 means the upstream fetch or list failed and lag is unknown.",
     ),
     spec(
         MIRROR_DIVERGENCE,

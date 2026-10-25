@@ -1,0 +1,7 @@
+# Custom labels on the estate self-hosted runners (see ci.yml runner-policy).
+self-hosted-runner:
+  labels:
+    - self-hosted
+    - docker
+    - macos
+    - graft-dev

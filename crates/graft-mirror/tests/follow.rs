@@ -572,3 +572,134 @@ async fn a_too_deep_tag_chain_is_skipped_and_the_rest_follow() {
     assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
     assert!(f.last_tags().too_deep.is_empty(), "reported once");
 }
+
+fn follower_of<'a>(
+    w: &'a World,
+    db: &'a MirrorDb,
+    metrics: &Metrics,
+    upstream: &str,
+) -> Follower<'a, Api> {
+    let config = FollowConfig {
+        repo: REPO.to_owned(),
+        lines: vec![FollowLine {
+            branch: "main".to_owned(),
+            line: "main".to_owned(),
+        }],
+        allow_lossy: Vec::new(),
+        batch: 2,
+        interval: graft_mirror::follow::POLL_INTERVAL,
+        tags: None,
+    };
+    let mirror = Mirror::new(&w.mirror_dir, upstream);
+    Follower::new(&w.api, cx(), db, mirror, config)
+        .with_metrics(metrics.clone())
+        .with_clock(clock)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bad_token_on_the_configured_upstream_is_a_typed_error() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let m = metrics();
+    // The token is wrong for the configured upstream itself, so `ls-remote`
+    // fails before any fetch. That is the expired-token case.
+    let mut f = follower_of(
+        &w,
+        &db,
+        &m,
+        "https://x-access-token:ghp_supersecret@github.com/example/missing.git",
+    );
+    let err = f.poll_once().await.expect_err("a bad token fails the poll");
+    let msg = err.to_string();
+    assert!(
+        msg.starts_with("git fetch failed:"),
+        "listing failure is a typed fetch error, got {msg}"
+    );
+    for secret in ["ghp_supersecret", "x-access-token:"] {
+        assert!(!msg.contains(secret), "the error carries a secret: {msg}");
+    }
+    assert!(
+        msg.contains("***@") || !msg.contains("github.com"),
+        "a credentialled URL is scrubbed when git echoes it: {msg}"
+    );
+    assert_eq!(
+        lag_changesets(&m),
+        -1,
+        "the line is marked in error, not caught up"
+    );
+    assert_eq!(db.commit_count().unwrap(), 0, "nothing imported");
+    assert!(w.tip().await.is_none(), "the graft line was not created");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unreachable_configured_upstream_is_a_typed_error() {
+    let w = World::new().await;
+    let tip = w.commit();
+    w.push();
+    let db = w.open_db();
+    let m = metrics();
+    {
+        let mut ok = w.follower(&db, &m);
+        assert!(matches!(poll(&mut ok).await, LineOutcome::Imported { .. }));
+    }
+    assert_eq!(lag_changesets(&m), 0);
+    assert_eq!(m.mirror_divergence.with_label_values(&["main"]).get(), 0);
+    w.commit();
+    w.push();
+
+    let dead = w.mirror_dir.parent().unwrap().join("not-a-remote");
+    std::fs::write(&dead, b"not a git repository\n").unwrap();
+    let mut f = follower_of(&w, &db, &m, dead.to_str().unwrap());
+    let err = f
+        .poll_once()
+        .await
+        .expect_err("a dead upstream fails the poll");
+    let msg = err.to_string();
+    assert!(msg.starts_with("git fetch failed:"), "{msg}");
+    assert_eq!(
+        lag_changesets(&m),
+        -1,
+        "the line is marked in error, not caught up"
+    );
+    assert!(lag_seconds(&m) >= 0.0);
+    assert_eq!(
+        w.tip_sha(&db).await,
+        Some(tip),
+        "graft stayed on the last import"
+    );
+    assert_eq!(db.commit_count().unwrap(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tag_listing_failure_is_a_typed_fetch_error() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let m = metrics();
+    let dead = w.mirror_dir.parent().unwrap().join("not-a-tag-remote");
+    std::fs::write(&dead, b"not a git repository\n").unwrap();
+    let config = FollowConfig {
+        repo: REPO.to_owned(),
+        lines: vec![FollowLine {
+            branch: "main".to_owned(),
+            line: "main".to_owned(),
+        }],
+        allow_lossy: Vec::new(),
+        batch: 2,
+        interval: graft_mirror::follow::POLL_INTERVAL,
+        tags: Some("*".to_owned()),
+    };
+    let mirror = Mirror::new(&w.mirror_dir, dead.to_str().unwrap());
+    let mut follower = Follower::new(&w.api, cx(), &db, mirror, config)
+        .with_metrics(m.clone())
+        .with_clock(clock);
+
+    let error = follower
+        .poll_tags()
+        .await
+        .expect_err("a dead tag upstream fails the poll");
+    assert!(
+        error.to_string().starts_with("git fetch failed:"),
+        "{error}"
+    );
+    assert_eq!(lag_changesets(&m), -1);
+}

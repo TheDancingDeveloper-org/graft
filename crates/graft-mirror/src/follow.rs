@@ -31,7 +31,9 @@
 //!
 //! Lag: `graft_mirror_lag_changesets` is the number of upstream commits graft
 //! lacks, and `graft_mirror_lag_seconds` is how long the line has been
-//! behind (since follow first saw upstream ahead), 0 when caught up.
+//! behind (since follow first saw upstream ahead), 0 when caught up. A
+//! `graft_mirror_lag_changesets` value of -1 means the upstream fetch or list
+//! failed and the lag is unknown.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -48,7 +50,7 @@ use graft_telemetry::Metrics;
 
 use crate::db::{LineState, MirrorDb};
 use crate::git::Mirror;
-use crate::{MirrorError, current_ref, move_ref};
+use crate::{GitCliError, MirrorError, current_ref, move_ref};
 
 /// The poll interval of phase 1 (decision D9).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
@@ -264,13 +266,18 @@ where
         let heads = match self.mirror.ls_remote(&branches).await {
             Ok(heads) => heads,
             Err(e) => {
-                // Lag keeps counting while upstream is unreachable.
+                // Listing the configured upstream failed (a bad token, a
+                // dead host). That is the fetch failure an operator sees:
+                // a typed error, not a caught-up lag of 0. The changeset
+                // lag gauge is marked with its bounded error value (-1).
+                let err = MirrorError::Fetch(scrub_git(&e.to_string()));
                 for l in &self.config.lines {
+                    self.note_fetch_error(&l.line);
                     if let Ok(state) = self.db.line(&l.line) {
                         self.export_state(&l.line, &state);
                     }
                 }
-                return Err(e.into());
+                return Err(err);
             }
         };
         let mut out = Vec::with_capacity(heads.len());
@@ -314,7 +321,11 @@ where
         let Some(pattern) = self.config.tags.clone() else {
             return Ok(report);
         };
-        let upstream = self.mirror.ls_remote_tags(&pattern).await?;
+        let upstream = self
+            .mirror
+            .ls_remote_tags(&pattern)
+            .await
+            .map_err(|e| self.fetch_error(e))?;
         let listed: HashMap<&str, GitSha> = upstream
             .iter()
             .map(|t| (t.name.as_str(), t.commit))
@@ -369,7 +380,10 @@ where
             .map(|(t, _)| t.name.as_str())
             .collect();
         if !annotated.is_empty() {
-            self.mirror.fetch_tags(&annotated).await?;
+            self.mirror
+                .fetch_tags(&annotated)
+                .await
+                .map_err(|e| self.fetch_error(e))?;
         }
         for (tag, id) in todo {
             let name = &tag.name;
@@ -473,7 +487,14 @@ where
             self.db.set_line(&l.line, &state)?;
         }
 
-        self.mirror.fetch(&[l.branch.as_str()]).await?;
+        let fetched = self.mirror.fetch(&[l.branch.as_str()]).await;
+        if let Err(e) = fetched {
+            self.note_fetch_error(&l.line);
+            // Not caught up. The changeset lag is the bounded error value
+            // (-1), not zero. Seconds of lag keep counting from
+            // behind_since_ms. The message is scrubbed.
+            return Err(MirrorError::Fetch(scrub_git(&e.to_string())));
+        }
         let repo = self.config.repo.clone();
         let cx = self.call("resolve");
         let tip = current_ref(self.api, &cx, &repo, &l.line).await?;
@@ -582,6 +603,22 @@ where
         }
     }
 
+    /// Marks `line` as failing its upstream fetch. `-1` is the bounded
+    /// error state: the line is not caught up, and the metric cannot be
+    /// mistaken for a measured lag of zero.
+    fn note_fetch_error(&self, line: &str) {
+        if let Some(m) = &self.metrics {
+            m.mirror_lag_changesets.with_label_values(&[line]).set(-1);
+        }
+    }
+
+    fn fetch_error(&self, error: GitCliError) -> MirrorError {
+        for line in &self.config.lines {
+            self.note_fetch_error(&line.line);
+        }
+        MirrorError::Fetch(scrub_git(&error.to_string()))
+    }
+
     fn export_state(&self, line: &str, state: &LineState) {
         let Some(m) = &self.metrics else { return };
         let lag_ms = state
@@ -593,5 +630,60 @@ where
         m.mirror_divergence
             .with_label_values(&[line])
             .set(i64::from(state.diverged.is_some()));
+    }
+}
+
+/// Drops credentials from a git CLI failure: URL userinfo
+/// (`scheme://userinfo@host`) and `Bearer`/`Basic` header values.
+fn scrub_git(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut rest = msg;
+    while !rest.is_empty() {
+        let scheme = ["https://", "http://", "ssh://"]
+            .into_iter()
+            .find(|s| rest.starts_with(s));
+        if let Some(scheme) = scheme {
+            let after = &rest[scheme.len()..];
+            if let Some(at) = after.find('@') {
+                let userinfo = &after[..at];
+                if !userinfo.contains('/') {
+                    out.push_str(scheme);
+                    out.push_str("***@");
+                    rest = &after[at + 1..];
+                    continue;
+                }
+            }
+        }
+        let word = ["Bearer ", "Basic "]
+            .into_iter()
+            .find(|w| rest.starts_with(w));
+        if let Some(word) = word {
+            out.push_str(word.trim_end());
+            out.push_str(" ***");
+            rest = rest[word.len()..].trim_start_matches(|c: char| !c.is_whitespace());
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrub_git;
+
+    #[test]
+    fn git_errors_scrub_url_userinfo_and_authorization_values() {
+        let message = concat!(
+            "https://ghp_token@github.com/owner/repo Bearer bearer-token ",
+            "http://user:password@example.com/repo Basic basic-token"
+        );
+
+        assert_eq!(
+            scrub_git(message),
+            "https://***@github.com/owner/repo Bearer *** http://***@example.com/repo Basic ***"
+        );
     }
 }
