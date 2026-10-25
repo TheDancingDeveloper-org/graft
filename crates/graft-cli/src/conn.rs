@@ -133,8 +133,8 @@ pub(crate) fn call_context() -> CallContext {
     }
 }
 
-/// Connects. Endpoint and token overrides resolve independently; named server
-/// selection is the working copy's server, then the user default.
+/// Connects. Named credentials are used only when their server owns the
+/// resolved endpoint.
 pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn, Failure> {
     let repo = match (&g.repo, wc) {
         (Some(repo), _) => repo.clone(),
@@ -200,39 +200,54 @@ fn resolve_settings_from_sources(
     endpoint_override: Option<Endpoint>,
     token_override: Option<String>,
 ) -> Result<ResolvedSettings, Failure> {
-    let server = wc
-        .and_then(|config| config.server.clone())
-        .or_else(|| user.default_server.clone());
-    let named = server.as_ref().and_then(|name| user.servers.get(name));
-    if (endpoint_override.is_none() || token_override.is_none())
-        && server.is_some()
+    let selected_server = wc
+        .and_then(|config| config.server.as_deref())
+        .or(user.default_server.as_deref());
+    let named = selected_server.and_then(|name| user.servers.get(name));
+    let legacy_endpoint = wc
+        .filter(|config| config.server.is_none())
+        .and_then(|config| config.endpoint.as_deref())
+        .map(Endpoint::parse);
+    if endpoint_override.is_none()
+        && legacy_endpoint.is_none()
+        && selected_server.is_some()
         && named.is_none()
     {
-        let name = server.as_deref().unwrap_or_default();
+        let name = selected_server.unwrap_or_default();
         return Err(Failure::new(
             crate::Exit::Failure,
             "config",
             format!("server {name} is not configured; run `graft login {name} --endpoint URL`"),
         ));
     }
+    let named_endpoint = named.map(|server| Endpoint::parse(&server.endpoint));
     let endpoint = endpoint_override
-        .or_else(|| named.map(|server| Endpoint::parse(&server.endpoint)))
+        .clone()
+        .or_else(|| {
+            wc.and_then(|config| config.server.as_ref())
+                .and(named_endpoint.clone())
+        })
         .or_else(|| {
             let socket = Path::new(NODE_SOCKET);
             socket.exists().then(|| Endpoint::NodeSocket(socket.to_owned()))
         })
-        .or_else(|| {
-            wc.and_then(|config| config.endpoint.as_deref())
-                .map(Endpoint::parse)
-        })
+        .or(legacy_endpoint)
+        .or(named_endpoint.clone())
         .ok_or_else(|| {
             Failure::usage(
                 "no endpoint: pass --endpoint, set GRAFT_ENDPOINT, run `graft login`, or use a configured working copy",
             )
         })?;
+    let server = named_endpoint
+        .as_ref()
+        .filter(|named_endpoint| **named_endpoint == endpoint)
+        .and(selected_server)
+        .map(str::to_owned);
     let token = match token_override {
         Some(token) => Some(token),
-        None => named
+        None => server
+            .as_ref()
+            .and(named)
             .map(|server| token_from_file(&server.token_file))
             .transpose()?,
     };
@@ -551,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_and_token_overrides_resolve_independently() {
+    fn endpoint_override_does_not_reuse_an_unrelated_named_token() {
         let dir = tempfile::tempdir().unwrap();
         let user = user_with_servers(dir.path());
         let endpoint = Endpoint::parse("http://override.example");
@@ -559,7 +574,8 @@ mod tests {
         let endpoint_only =
             resolve_settings_from_sources(None, &user, Some(endpoint.clone()), None).unwrap();
         assert_eq!(endpoint_only.endpoint, endpoint);
-        assert_eq!(endpoint_only.token.as_deref(), Some("default-secret"));
+        assert_eq!(endpoint_only.server, None);
+        assert_eq!(endpoint_only.token, None);
 
         let token_only =
             resolve_settings_from_sources(None, &user, None, Some("override-secret".to_owned()))
@@ -569,6 +585,39 @@ mod tests {
             Endpoint::parse("http://default.example")
         );
         assert_eq!(token_only.token.as_deref(), Some("override-secret"));
+    }
+
+    #[test]
+    fn endpoint_override_reuses_a_named_token_only_when_it_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+
+        let settings = resolve_settings_from_sources(
+            None,
+            &user,
+            Some(Endpoint::parse("http://default.example")),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(settings.server.as_deref(), Some("default"));
+        assert_eq!(settings.token.as_deref(), Some("default-secret"));
+    }
+
+    #[test]
+    fn legacy_working_copy_endpoint_precedes_the_user_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+        let wc = WcConfig {
+            endpoint: Some("http://legacy.example".to_owned()),
+            ..WcConfig::default()
+        };
+
+        let settings = resolve_settings_from_sources(Some(&wc), &user, None, None).unwrap();
+
+        assert_eq!(settings.endpoint, Endpoint::parse("http://legacy.example"));
+        assert_eq!(settings.server, None);
+        assert_eq!(settings.token, None);
     }
 
     #[test]
@@ -586,7 +635,7 @@ mod tests {
             Some("override-secret".to_owned()),
         )
         .unwrap();
-        assert_eq!(settings.server.as_deref(), Some("removed"));
+        assert_eq!(settings.server, None);
         assert_eq!(
             settings.endpoint,
             Endpoint::parse("http://override.example")

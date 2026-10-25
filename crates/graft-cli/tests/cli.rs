@@ -696,6 +696,36 @@ fn login_persists_named_server_and_clone_uses_it_without_overrides() {
 }
 
 #[test]
+fn endpoint_override_clone_records_the_override_not_the_default_server() {
+    let default_server = serve();
+    let override_server = serve();
+    let home = scratch();
+    let config_path = home.path().join("config.toml");
+    let token_path = home.path().join("override-token");
+    fs::write(&token_path, "override-secret\n").unwrap();
+
+    graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["login", "dev", "--endpoint", &default_server.url])
+        .write_stdin("default-secret")
+        .assert()
+        .success();
+    graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .arg("--endpoint")
+        .arg(&override_server.url)
+        .arg("--token-file")
+        .arg(&token_path)
+        .args(["clone", REPO, "app"])
+        .assert()
+        .success();
+
+    let working_config = fs::read_to_string(home.path().join("app/.graft/config")).unwrap();
+    assert!(working_config.contains(&format!("endpoint = {}", override_server.url)));
+    assert!(!working_config.contains("server = dev"));
+}
+
+#[test]
 fn explicit_connection_overrides_a_missing_working_copy_server() {
     let served = serve();
     let dir = scratch();
