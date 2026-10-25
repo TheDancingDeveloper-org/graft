@@ -310,14 +310,29 @@ Canonical payload: `u8 version(1)`, `u32 n ‖ parents`, `root(32)`,
 7. the result is a well-formed tree, with no path that is both a file and a
    directory;
 8. the change count is within the limit (100,000 by default);
-9. a changeset with no changes is allowed only with more than one parent,
-   or — for a git import only ([D33](decisions.md#d33-empty-imported-changesets)) —
-   with fewer than two parents (a single parent or none) when metadata carries
-   `mirror.git-commit` ([D19](decisions.md#d19-import-identity)). The native
-   write boundary rejects any `mirror.*` key, so a native client cannot set
-   `mirror.git-commit` and a native empty changeset is still rejected. The
-   encoding is unchanged, and the golden vectors for native changesets are
-   unchanged.
+9. a changeset with no changes is allowed only with more than one parent
+   (a merge), or as exactly one canonical empty root
+   ([D34](decisions.md#d34-canonical-empty-root)), or — for a git import only
+   ([D33](decisions.md#d33-empty-imported-changesets)) — with fewer than two
+   parents (a single parent or none) when metadata carries
+   `mirror.git-commit` ([D19](decisions.md#d19-import-identity)). The
+   canonical empty root is the only native exception: no parents, no
+   changes, and every other field fixed (empty name and email, kind `bot`,
+   `authored_at` at the epoch with offset 0, empty message, empty metadata,
+   root the empty tree). The empty tree is the tree of no entries, the one
+   exception in [§4.4](#44-trees). Its canonical payload is the version byte
+   alone (`[1]`), and its id is `Tree::default().id()`, the constant
+   `td0a89364d3af4e3469f3f4f545b3fb47ef2c72f9f2daddeedbd1821d18a4234a`
+   (`golden_empty_tree_id` in `graft-model`). The engine names the same value
+   `empty_tree` (`graft-engine` `source::empty_tree`, `graft-client`
+   `fetch::empty_tree`): `Tree::default().id()`. No author, time or randomness
+   enters the id, so the id is a constant shared by every new repository.
+   Any other native empty changeset stays rejected. The native write
+   boundary still rejects any `mirror.*` key, so a native client cannot set
+   `mirror.git-commit`. The encoding is unchanged. Existing golden vectors
+   are unchanged; the code PR adds one golden vector for the canonical root.
+   `graft init` ([D32](decisions.md#d32-local-repositories)) writes this
+   root and points the line at it, so the first real commit is its child.
 
 ### 4.6 Refs and lines
 
@@ -579,7 +594,13 @@ crate on this path).
 
 **What is unchanged.** CAS lands, one transaction per logical write, the
 journal, objects durable before metadata names them, id-pruned diffs, GC off
-by default, typed errors, bounded responses. A conflicting land still exits
+by default, typed errors, bounded responses. A new local repository starts
+at the canonical empty root ([D34](decisions.md#d34-canonical-empty-root)):
+`graft init` writes that one fixed changeset and points the line at it.
+The first commit is a child of that root, and every repository `graft init`
+creates shares the root id. A repository created by `graft import` does not
+start at that root: it keeps the imported git roots, as
+[§11.2](#112-export) states. A conflicting land still exits
 3 and is resolved by the client. `kill -9` during a land loses no
 acknowledged write, because durability is the store's, not the transport's.
 Commit, sync, land, log, diff, blame, stack, revert, pick, tag and line all
@@ -1623,6 +1644,29 @@ the import with a list of offenders ([D11](decisions.md#d11-path-rules-on-import
   in the land record, so it is deterministic after the fact); the message plus
   trailers `Graft-Changeset: <id>` and, when present, `Graft-Session: <ses_…>`
   and `Vogt-Work-Item: WI-…`. The parents are the git shas of the parents.
+- **The canonical empty root is not exported**
+  ([D34](decisions.md#d34-canonical-empty-root)). Its author is the fixed
+  empty identity and it is never landed, so the native commit header would be
+  `author <> 0 +0000` with no land record to give a committer time, which
+  `git fsck` rejects. Git export skips that one changeset. Each of its
+  children exports as a parentless git root commit (the canonical root is
+  omitted from the parent list). No other changeset is skipped. A repository
+  created by git import does not contain the canonical root unless an
+  imported commit was itself that changeset, which an ordinary git history
+  is not: import keeps the imported roots and does not insert the canonical
+  root above them ([D33](decisions.md#d33-empty-imported-changesets) is
+  unchanged).
+- **Round trip.** `export(import(c)).sha == c.sha` is unchanged, because
+  import does not add the canonical root and export does not drop imported
+  roots. Exporting a repository `graft init` created and importing that git
+  repository back does **not** restore the canonical root as a parent. The
+  children come back as imported root commits. That is acceptable: the
+  canonical root has an empty tree and no message, so omitting it changes no
+  file content and no commit message. Two `graft init` repositories still
+  share the root id before export; after an export/import round trip they
+  share git history only from the first real commit. Re-import does not
+  invent the parent, and nothing in this decision special-cases a second
+  import to put it back.
 
 `graft-mirror export --to <bare repo>` writes a complete git repository
 (every line, tag and landed changeset). This is the **exit path**. It is run as
