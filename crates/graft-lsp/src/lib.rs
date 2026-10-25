@@ -68,6 +68,56 @@ pub const COMMANDS: &[&str] = &[
 /// The largest file [`READ_FILE_REQUEST`] returns.
 pub const MAX_READ_BYTES: usize = 8 << 20;
 
+/// The largest serialized JSON-RPC response. Feature-specific pagination and
+/// caps should stay below this; this is the final boundary backstop.
+pub const MAX_RESPONSE_BYTES: usize = 8 << 20;
+
+/// A response-producing LSP surface and its externally visible bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputSpec {
+    /// Request, command, or notification name.
+    pub name: &'static str,
+    /// How an oversized list or content result is continued or refused.
+    pub bound: OutputBound,
+}
+
+/// A response's bounding strategy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputBound {
+    /// The caller follows a page token.
+    Paginated,
+    /// The result is clipped, truncated, or refused with `limit_exceeded`.
+    Capped,
+}
+
+/// Every LSP surface that returns a list or repository content.
+pub const OUTPUTS: &[OutputSpec] = &[
+    OutputSpec {
+        name: "textDocument/hover",
+        bound: OutputBound::Capped,
+    },
+    OutputSpec {
+        name: "textDocument/codeLens",
+        bound: OutputBound::Capped,
+    },
+    OutputSpec {
+        name: "textDocument/publishDiagnostics",
+        bound: OutputBound::Capped,
+    },
+    OutputSpec {
+        name: "graft.diffBase",
+        bound: OutputBound::Paginated,
+    },
+    OutputSpec {
+        name: "graft.blameFile",
+        bound: OutputBound::Capped,
+    },
+    OutputSpec {
+        name: READ_FILE_REQUEST,
+        bound: OutputBound::Capped,
+    },
+];
+
 /// How the input ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ended {
@@ -254,7 +304,7 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> LspServer<A> {
             return self.notification(&method, params).await;
         };
         let result = self.request(&method, params).await;
-        self.outbox.push(rpc::response(id, result));
+        self.outbox.push(bounded_response(id, result));
         None
     }
 
@@ -487,6 +537,18 @@ fn publish(uri: &str, diagnostics: Vec<Value>) -> Value {
     )
 }
 
+fn bounded_response(id: Value, result: Result<Value, RpcError>) -> Value {
+    let response = rpc::response(id.clone(), result);
+    if serde_json::to_vec(&response).is_ok_and(|body| body.len() <= MAX_RESPONSE_BYTES) {
+        return response;
+    }
+    rpc::response(
+        id,
+        Err(RpcError::failed("response exceeds the LSP size limit")
+            .with_data(json!({"error": "limit_exceeded", "max_bytes": MAX_RESPONSE_BYTES}))),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +571,14 @@ mod tests {
             Some("src/lib.rs".to_owned())
         );
         std::fs::remove_file(link).unwrap();
+    }
+
+    #[test]
+    fn oversized_responses_become_typed_limit_errors() {
+        let response = bounded_response(json!(7), Ok(json!("x".repeat(MAX_RESPONSE_BYTES))));
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["error"]["data"]["error"], "limit_exceeded");
+        assert_eq!(response["error"]["data"]["max_bytes"], MAX_RESPONSE_BYTES);
+        assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_RESPONSE_BYTES);
     }
 }

@@ -39,6 +39,17 @@ pub struct ToolSpec {
     pub description: &'static str,
     /// Whether the tool only reads (`readOnlyHint`).
     pub read_only: bool,
+    /// How the result obeys the response bound.
+    pub bound: ToolBound,
+}
+
+/// A tool result's externally visible bounding strategy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolBound {
+    /// A cursor or offset continues a bounded list or content chunk.
+    Paginated,
+    /// The result is capped and reports truncation where content is clipped.
+    Capped,
 }
 
 /// Every tool, in the order of design §10.1.
@@ -47,100 +58,120 @@ pub const TOOLS: &[ToolSpec] = &[
         name: "graft_log",
         description: "First-parent history, optionally for paths.",
         read_only: true,
+        bound: ToolBound::Paginated,
     },
     ToolSpec {
         name: "graft_show",
         description: "A changeset with its patch.",
         read_only: true,
+        bound: ToolBound::Paginated,
     },
     ToolSpec {
         name: "graft_diff",
         description: "Diff two changesets, with capped patches.",
         read_only: true,
+        bound: ToolBound::Paginated,
     },
     ToolSpec {
         name: "graft_blame",
         description: "Line origins for a file.",
         read_only: true,
+        bound: ToolBound::Paginated,
     },
     ToolSpec {
         name: "graft_read",
         description: "Read a file at a changeset.",
         read_only: true,
+        bound: ToolBound::Paginated,
     },
     ToolSpec {
         name: "graft_ls",
         description: "List a directory at a changeset.",
         read_only: true,
+        bound: ToolBound::Paginated,
     },
     ToolSpec {
         name: "graft_status",
         description: "Working-copy status (stdio only).",
         read_only: true,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_upstream",
         description: "What changed on the line since the base, and whether your work would merge onto its tip.",
         read_only: true,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_draft_overlap",
         description: "Other live workspaces with open drafts on these paths (no contents). Needs repo:<r>:drafts.",
         read_only: true,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_commit",
         description: "Create a draft from inline content or the working copy.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_land",
         description: "Land the workspace stack on a line.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_sync",
         description: "Move the workspace base to the line tip.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_revert",
         description: "Create a draft that inverts a changeset.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_pick",
         description: "Create a draft that re-applies a landed changeset.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_conflicts",
         description: "Conflicting paths of a workspace's stack, with markers.",
         read_only: true,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_resolve",
         description: "Rebase the stack onto a target with given resolutions.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_line_create",
         description: "Fork a new line at a changeset; never overwrites.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_merge",
         description: "Merge one line into another, recording a merge point.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_tag",
         description: "Create an immutable tag at a changeset; never moves.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
     ToolSpec {
         name: "graft_workspace",
         description: "Open, renew or close a workspace.",
         read_only: false,
+        bound: ToolBound::Capped,
     },
 ];
