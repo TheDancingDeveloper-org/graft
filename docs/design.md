@@ -511,6 +511,33 @@ Everything implements or consumes those traits:
 A **parity test** lists every API operation and asserts that it has a CLI
 command and an MCP tool, or an explicit, documented exclusion.
 
+### 5.3 Crate map
+
+The crate boundaries are drawn so that three workers can build in parallel
+without touching the same files ([plan.md](plan.md#crate-ownership-and-parallelism)).
+
+| Crate | Kind | Owns | Depends on |
+| --- | --- | --- | --- |
+| `graft-model` | lib | ids, paths, blobs, trees, changesets, canonical encodings, pure tree algorithms (apply changes, diff trees) over an `ObjectSource` trait | — |
+| `graft-proto` | lib | API traits, wire types, typed errors, limits, protocol version, codec frames | model |
+| `graft-store` | lib | `ObjectStore` and `MetaStore` ports, the in-memory test store, the port conformance suite | model |
+| `graft-store-fs` | lib | filesystem `ObjectStore` (server and node) | store, model |
+| `graft-store-sqlite` | lib | SQLite `MetaStore`, schema and migrations | store, model |
+| `graft-index` | lib | derived-data framework and kinds; `Log`, ancestry, `Blame` | store, model |
+| `graft-engine` | lib | `RepoApi`/`WorkspaceApi` implementation: create, reads, diff, rebase, land, workspaces, journal, ACL checks | index, store, model, proto, auth |
+| `graft-gc` | lib | draft expiry, object holder accounting, sweep | store, model |
+| `graft-auth` | lib | principals, tokens, scopes, path rules | model, proto |
+| `graft-telemetry` | lib | tracing and metrics setup, the metric name registry | — |
+| `graft-server` | bin | transport, wiring, config, admin subcommands, server-hosted MCP | engine, gc, auth, telemetry, proto, store-fs, store-sqlite, mcp |
+| `graft-node` | bin | node cache daemon | proto, store-fs, auth, telemetry |
+| `graft-client` | lib | remote API client, fetch, working copy, sparse, status | proto, model, store-fs |
+| `graft-mcp` | lib | MCP server over the API traits | proto |
+| `graft-lsp` | lib | LSP server over the API traits and the working copy | proto, client |
+| `graft-cli` | bin `graft` | commands; `graft mcp` and `graft lsp` | client, mcp, lsp, proto, telemetry |
+| `graft-git` | lib | git import, export, and id mapping. The only crate that knows git | model, proto |
+| `graft-mirror` | bin | follow, batch PR export (D21), export mirror, authority switch (the per-land PR bridge was removed under D21/D22) | git, proto, client, telemetry |
+| `graft-testkit` | lib (dev only) | fake clock, synthetic repos, crash harness, pilot harness | model, store, proto |
+
 ### 5.4 Local repositories
 
 A local repository is a repository whose storage is a directory on the
@@ -521,12 +548,12 @@ second engine and not a cache of a remote.
 
 **Where it lives.** `graft init [DIR]` creates two things:
 
-- the repository directory, default `DIR/.graft/repo` (or `DIR` itself when
-  `DIR` is given and is empty and named as a bare repo with `--bare`):
-  SQLite metadata (`meta.sqlite`, the same schema and migrations as the
-  server) and the filesystem object tree (`objects/`, the same frames as
-  `graft-store-fs`). One repository, one directory. The name is `--repo`,
-  defaulting to the directory's name.
+- the repository directory, at `DIR/.graft/repo`: SQLite metadata
+  (`meta.sqlite`, the same schema and migrations as the server) and the
+  filesystem object tree (`objects/`, the same frames as
+  `graft-store-fs`). One repository, one directory. `DIR` defaults to the
+  current directory. The repository name is `--repo`, defaulting to the
+  directory's name. There is no `--bare` form.
 - the working copy in `DIR`, whose configured server is the literal
   `local:<path-to-repo>`. A second working copy is `graft clone
   <path-to-repo>` (or `graft clone <working-copy>`, which reads that
@@ -538,6 +565,8 @@ and `graft-store-fs`, the same wiring the server uses, and passes that trait
 object to the commands. No HTTP, no socket, no token. The process takes an
 exclusive lock file (`repo.lock`, `flock`) for the life of the command; a
 second process exits with a typed busy error instead of opening the store.
+That includes a long-running `graft mcp` stdio session: while it holds
+the lock, every other command on this repository exits busy.
 One process at a time is the whole concurrency story: there are no leases to
 renew across processes, and the single local principal is implicit (no auth
 crate on this path).
@@ -569,33 +598,6 @@ intact) is a follow-up, not part of this item.
 - No offline writes against a *remote* repository. The offline-first
   non-goal stands for those.
 - No GC on by default, same as the server.
-
-### 5.3 Crate map
-
-The crate boundaries are drawn so that three workers can build in parallel
-without touching the same files ([plan.md](plan.md#crate-ownership-and-parallelism)).
-
-| Crate | Kind | Owns | Depends on |
-| --- | --- | --- | --- |
-| `graft-model` | lib | ids, paths, blobs, trees, changesets, canonical encodings, pure tree algorithms (apply changes, diff trees) over an `ObjectSource` trait | — |
-| `graft-proto` | lib | API traits, wire types, typed errors, limits, protocol version, codec frames | model |
-| `graft-store` | lib | `ObjectStore` and `MetaStore` ports, the in-memory test store, the port conformance suite | model |
-| `graft-store-fs` | lib | filesystem `ObjectStore` (server and node) | store, model |
-| `graft-store-sqlite` | lib | SQLite `MetaStore`, schema and migrations | store, model |
-| `graft-index` | lib | derived-data framework and kinds; `Log`, ancestry, `Blame` | store, model |
-| `graft-engine` | lib | `RepoApi`/`WorkspaceApi` implementation: create, reads, diff, rebase, land, workspaces, journal, ACL checks | index, store, model, proto, auth |
-| `graft-gc` | lib | draft expiry, object holder accounting, sweep | store, model |
-| `graft-auth` | lib | principals, tokens, scopes, path rules | model, proto |
-| `graft-telemetry` | lib | tracing and metrics setup, the metric name registry | — |
-| `graft-server` | bin | transport, wiring, config, admin subcommands, server-hosted MCP | engine, gc, auth, telemetry, proto, store-fs, store-sqlite, mcp |
-| `graft-node` | bin | node cache daemon | proto, store-fs, auth, telemetry |
-| `graft-client` | lib | remote API client, fetch, working copy, sparse, status | proto, model, store-fs |
-| `graft-mcp` | lib | MCP server over the API traits | proto |
-| `graft-lsp` | lib | LSP server over the API traits and the working copy | proto, client |
-| `graft-cli` | bin `graft` | commands; `graft mcp` and `graft lsp` | client, mcp, lsp, proto, telemetry |
-| `graft-git` | lib | git import, export, and id mapping. The only crate that knows git | model, proto |
-| `graft-mirror` | bin | follow, batch PR export (D21), export mirror, authority switch (the per-land PR bridge was removed under D21/D22) | git, proto, client, telemetry |
-| `graft-testkit` | lib (dev only) | fake clock, synthetic repos, crash harness, pilot harness | model, store, proto |
 
 ## 6. Storage
 
