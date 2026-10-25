@@ -110,7 +110,8 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
         };
         let cache = s.wc.open_cache(DEFAULT_CACHE_BYTES)?;
         let ws = s.workspace_ref();
-        let out = with_heartbeat(
+        let fetch = FetchOptions::default();
+        let landed = with_heartbeat(
             &s.conn.remote,
             &s.cx,
             ws,
@@ -121,22 +122,51 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
                 &cache,
                 &s.cx,
                 &opts,
-                &FetchOptions::default(),
+                &fetch,
             ),
         )
-        .await
-        .map_err(|e| {
-            let failure = Failure::from(e);
-            let note = match failure.kind() {
-                "conflict" => {
-                    "nothing changed: run `graft sync` (or `graft land --sync`) to write the conflicts into the files"
+        .await;
+        // graft-client writes conflict files only for `ApiError::Conflict`.
+        // A stale base is the same refusal with the tip and the paths to
+        // re-sync; `--sync` still asks the working copy to write them.
+        let out = match landed {
+            Err(graft_client::Error::Api(graft_proto::ApiError::StaleBase(detail))) if args.sync => {
+                let stale = Failure::from(graft_proto::ApiError::StaleBase(detail))
+                    .with_detail("preflight", preflight.clone());
+                match s
+                    .wc
+                    .sync_writing_conflicts(
+                        &s.conn.remote,
+                        &cache,
+                        &s.cx,
+                        DEFAULT_LEASE_MS,
+                        &fetch,
+                    )
+                    .await
+                {
+                    Err(e @ graft_client::Error::Conflicted(_)) => {
+                        return Err(Failure::from(e).with_detail("preflight", preflight));
+                    }
+                    Ok(_) | Err(_) => return Err(stale),
                 }
-                "contended" => "retryable: run `graft land` again, or wait longer with --wait",
-                "unavailable" => "retryable: land is idempotent, so run `graft land` again",
-                _ => return failure,
-            };
-            failure.with_note(note).with_detail("preflight", preflight.clone())
-        })?;
+            }
+            other => other.map_err(|e| {
+                let failure = Failure::from(e);
+                let note = match failure.kind() {
+                    "conflict" => Some(
+                        "nothing changed: run `graft sync` (or `graft land --sync`) to write the conflicts into the files",
+                    ),
+                    "contended" => Some("retryable: run `graft land` again, or wait longer with --wait"),
+                    "unavailable" => Some("retryable: land is idempotent, so run `graft land` again"),
+                    _ => None,
+                };
+                let failure = match note {
+                    Some(note) => failure.with_note(note),
+                    None => failure,
+                };
+                failure.with_detail("preflight", preflight.clone())
+            })?,
+        };
         let line = s.wc.state().line.clone();
         match out {
             LandOutcome::Landed {

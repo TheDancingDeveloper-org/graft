@@ -119,6 +119,7 @@ pub(crate) fn api_exit(e: &ApiError) -> (Exit, &'static str) {
         ApiError::Conflict { .. } | ApiError::MergeConflict(_) => (Exit::Conflict, "conflict"),
         ApiError::RefConflict { .. } => (Exit::Conflict, "ref_conflict"),
         ApiError::Contended { .. } => (Exit::Contended, "contended"),
+        ApiError::StaleBase(_) => (Exit::Conflict, "conflict"),
         ApiError::Rejected { .. } => (Exit::Rejected, "rejected"),
         ApiError::PermissionDenied { .. } => (Exit::Denied, "permission_denied"),
         ApiError::Unauthenticated => (Exit::Denied, "unauthenticated"),
@@ -162,6 +163,19 @@ impl From<ApiError> for Failure {
             ApiError::MergeConflict(m) => conflicted(failure, &m.paths, m.onto)
                 .with_detail("base", m.base.to_string().into())
                 .with_detail("source", m.source.to_string().into()),
+            ApiError::StaleBase(detail) => {
+                let mut failure = failure
+                    .with_detail("current_tip", detail.current_tip.to_string().into())
+                    .with_detail("paths", json!(detail.paths))
+                    .with_detail("truncated", detail.truncated.into());
+                for path in &detail.paths {
+                    failure = failure.with_note(format!("changed {path}"));
+                }
+                if detail.truncated {
+                    failure = failure.with_note("more changed paths were omitted");
+                }
+                failure.with_note("run `graft sync`, then `graft land`")
+            }
             _ => failure,
         }
     }
@@ -267,6 +281,7 @@ impl From<io::Error> for Failure {
 #[cfg(test)]
 mod tests {
     use graft_model::ChangesetId;
+    use graft_proto::error::StaleBase;
 
     use super::*;
 
@@ -296,6 +311,14 @@ mod tests {
                 Exit::Rejected,
             ),
             (
+                ApiError::StaleBase(Box::new(StaleBase {
+                    current_tip: id,
+                    paths: vec!["a".into()],
+                    truncated: false,
+                })),
+                Exit::Conflict,
+            ),
+            (
                 ApiError::PermissionDenied {
                     scope: "read".into(),
                     path: None,
@@ -318,6 +341,33 @@ mod tests {
         for (err, want) in cases {
             assert_eq!(api_exit(&err).0, want, "{err:?}");
         }
+    }
+
+    #[test]
+    fn stale_base_renders_actionable_bounded_details() {
+        let current_tip = ChangesetId::hash(b"tip");
+        let failure: Failure = ApiError::StaleBase(Box::new(StaleBase {
+            current_tip,
+            paths: vec!["a".into(), "b".into()],
+            truncated: true,
+        }))
+        .into();
+
+        assert_eq!(failure.exit, Exit::Conflict);
+        assert_eq!(failure.kind, "conflict");
+        assert!(failure.message.contains(&current_tip.to_string()));
+        assert_eq!(failure.detail["current_tip"], current_tip.to_string());
+        assert_eq!(failure.detail["paths"], json!(["a", "b"]));
+        assert_eq!(failure.detail["truncated"], true);
+        assert_eq!(
+            failure.notes,
+            [
+                "changed a",
+                "changed b",
+                "more changed paths were omitted",
+                "run `graft sync`, then `graft land`",
+            ]
+        );
     }
 
     #[test]

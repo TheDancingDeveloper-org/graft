@@ -373,10 +373,55 @@ async fn a_conflicting_sync_publishes_conflict_regions() {
     let diags = env.client.diagnostics_for(&lib).await;
     assert_eq!(codes(&diags), vec![(1, 1, "conflict".into())]);
     let land = env.command("graft.land", json!([])).await;
-    assert_eq!(land["error"]["data"]["error"], "rejected", "{land}");
+    // The stack is still behind the tip, so land returns the stale base
+    // (WI-2441) rather than a generic rejection.
+    assert_eq!(land["error"]["data"]["error"], "stale_base", "{land}");
+    assert_eq!(land["error"]["data"]["current_tip"], theirs.to_string());
     assert_eq!(
         codes(&env.client.diagnostics_for(&lib).await),
         vec![(1, 1, "conflict".into())]
+    );
+}
+
+#[tokio::test]
+async fn a_stale_base_land_publishes_conflict_regions() {
+    let mut env = Env::new().await;
+    env.initialize().await;
+    let lib = env.uri("src/lib.rs");
+    env.open(&lib).await;
+
+    env.write("src/lib.rs", "fn a() { 1 }\nfn b() { mine }\n");
+    let done = env
+        .command("graft.commit", json!([{"message": "mine"}]))
+        .await;
+    assert!(done["result"]["id"].is_string(), "{done}");
+    let theirs = env
+        .rig
+        .land_on_main(
+            &[("src/lib.rs", "fn a() { 1 }\nfn b() { theirs }\n")],
+            author("Bo", AuthorKind::Human),
+            &[],
+            "theirs",
+        )
+        .await;
+    env.client.take_seen();
+
+    let land = env.command("graft.land", json!([])).await;
+    assert_eq!(land["error"]["data"]["error"], "stale_base", "{land}");
+    assert_eq!(land["error"]["data"]["paths"], json!(["src/lib.rs"]));
+    assert_eq!(land["error"]["data"]["current_tip"], theirs.to_string());
+    let diags = env.client.diagnostics_for(&lib).await;
+    assert_eq!(codes(&diags), vec![(1, 1, "conflict".into())], "{diags:?}");
+    assert!(
+        diags[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&short(theirs)),
+        "{diags:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.root.join("src/lib.rs")).unwrap(),
+        "fn a() { 1 }\nfn b() { mine }\n"
     );
 }
 

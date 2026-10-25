@@ -382,6 +382,7 @@ pub(crate) fn error_name(e: &ApiError) -> &'static str {
         ApiError::MissingObjects { .. } => "missing_objects",
         ApiError::RefConflict { .. } => "ref_conflict",
         ApiError::Conflict { .. } => "conflict",
+        ApiError::StaleBase(_) => "stale_base",
         ApiError::Contended { .. } => "contended",
         ApiError::Rejected { .. } => "rejected",
         ApiError::PermissionDenied { .. } => "permission_denied",

@@ -406,7 +406,7 @@ async fn after_a_conflict_sync_writes_markers_and_an_edit_commit_and_land_succee
     // Land: Conflict, and the working copy and the draft are untouched.
     let err = env.land(&mut wc).await.unwrap_err();
     assert!(
-        matches!(&err, Error::Api(ApiError::Conflict { onto, .. }) if *onto == tip),
+        matches!(&err, Error::Api(ApiError::StaleBase(d)) if d.current_tip == tip && d.paths == ["src/lib.rs"] && !d.truncated),
         "{err:?}"
     );
     assert_eq!(wc.state().head, Some(head));
@@ -605,7 +605,7 @@ async fn land_with_file_merge_refuses_edits_to_separate_regions() {
     };
     let err = env.land_with(&mut two, &o).await.unwrap_err();
     assert!(
-        matches!(&err, Error::Api(ApiError::Conflict { .. })),
+        matches!(&err, Error::Api(ApiError::StaleBase(d)) if d.paths == ["src/lib.rs"] && !d.truncated),
         "{err:?}"
     );
     assert_eq!(two.state().head, head);
@@ -622,7 +622,7 @@ async fn land_line_merge_still_refuses_edits_to_the_same_line() {
     let tip = env.repo.tip().await;
     let err = env.land(&mut two).await.unwrap_err();
     assert!(
-        matches!(&err, Error::Api(ApiError::Conflict { onto, .. }) if *onto == tip),
+        matches!(&err, Error::Api(ApiError::StaleBase(d)) if d.current_tip == tip && d.paths == ["src/lib.rs"] && !d.truncated),
         "{err:?}"
     );
     // Nothing moved: the line, the draft and the file are as they were.

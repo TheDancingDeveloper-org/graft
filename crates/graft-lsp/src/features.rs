@@ -466,6 +466,11 @@ pub(crate) fn api_error(e: ApiError) -> RpcError {
         data["onto"] = onto.to_string().into();
         data["paths"] = paths.iter().map(|p| p.path.clone()).collect();
     }
+    if let ApiError::StaleBase(detail) = &e {
+        data["current_tip"] = detail.current_tip.to_string().into();
+        data["paths"] = detail.paths.clone().into();
+        data["truncated"] = detail.truncated.into();
+    }
     RpcError::failed(e.to_string()).with_data(data)
 }
 
@@ -479,6 +484,7 @@ fn error_kind(e: &ApiError) -> &'static str {
         ApiError::MissingObjects { .. } => "missing_objects",
         ApiError::RefConflict { .. } => "ref_conflict",
         ApiError::Conflict { .. } => "conflict",
+        ApiError::StaleBase(_) => "stale_base",
         ApiError::Contended { .. } => "contended",
         ApiError::Rejected { .. } => "rejected",
         ApiError::PermissionDenied { .. } => "permission_denied",

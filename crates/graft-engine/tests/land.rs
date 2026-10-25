@@ -326,20 +326,21 @@ fn a_moved_tip_is_rebased_and_the_line_ends_with_both<M: MetaStore>(
     );
 }
 
-fn same_file_lands_conflict_once<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+fn same_file_land_reports_the_stale_base<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
     let t = T::new(&f, &[("a", b"1")]);
     let one = t.commit(t.root, &[("a", b"one")]);
     let two = t.commit(t.root, &[("a", b"two")]);
     landed(t.land(one, "trunk"));
     match t.land(two, "trunk") {
-        Err(ApiError::Conflict { paths, onto }) => {
-            assert_eq!(onto, one);
-            assert_eq!(paths.len(), 1);
-            assert_eq!(paths[0].path, "a");
-            assert_eq!(paths[0].ours, Some(blob_id(b"two")));
-            assert_eq!(paths[0].theirs, Some(blob_id(b"one")));
+        Err(ApiError::StaleBase(detail)) => {
+            assert_eq!(detail.current_tip, one);
+            assert_eq!(detail.paths, ["a"]);
+            assert!(!detail.truncated);
+            let debug = format!("{detail:?}");
+            assert!(!debug.contains("one"));
+            assert!(!debug.contains("two"));
         }
-        other => panic!("expected Conflict, got {other:?}"),
+        other => panic!("expected StaleBase, got {other:?}"),
     }
     assert_eq!(t.tip("trunk").target, one);
     assert_eq!(t.kinds().last().map(String::as_str), Some("LandAttempt"));
@@ -351,6 +352,44 @@ fn same_file_lands_conflict_once<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder
     );
     // The loser is untouched.
     assert_eq!(t.r.changeset(two).state, DraftState::Abandoned);
+}
+
+fn stale_base_paths_are_bounded<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+    let seed: Vec<(String, String)> = (0..65)
+        .map(|i| (format!("changed-{i:02}"), "base".to_owned()))
+        .collect();
+    let seed_files: Vec<(&str, &[u8])> = seed
+        .iter()
+        .map(|(name, content)| (name.as_str(), content.as_bytes()))
+        .collect();
+    let t = T::new(&f, &seed_files);
+    let tip: Vec<(String, String)> = (0..65)
+        .map(|i| (format!("changed-{i:02}"), format!("tip-{i}")))
+        .collect();
+    let tip_files: Vec<(&str, &[u8])> = tip
+        .iter()
+        .map(|(name, content)| (name.as_str(), content.as_bytes()))
+        .collect();
+    let one = t.commit(t.root, &tip_files);
+    let ours: Vec<(String, String)> = (0..65)
+        .map(|i| (format!("changed-{i:02}"), format!("ours-{i}")))
+        .collect();
+    let ours_files: Vec<(&str, &[u8])> = ours
+        .iter()
+        .map(|(name, content)| (name.as_str(), content.as_bytes()))
+        .collect();
+    let two = t.commit(t.root, &ours_files);
+    landed(t.land(one, "trunk"));
+    match t.land(two, "trunk") {
+        Err(ApiError::StaleBase(detail)) => {
+            assert_eq!(detail.current_tip, one);
+            assert_eq!(detail.paths.len(), 64);
+            assert_eq!(detail.paths.first().map(String::as_str), Some("changed-00"));
+            assert_eq!(detail.paths.last().map(String::as_str), Some("changed-63"));
+            assert!(detail.truncated);
+        }
+        other => panic!("expected StaleBase, got {other:?}"),
+    }
 }
 
 fn a_retried_land_returns_the_same_landed<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
@@ -852,7 +891,8 @@ fn refused_lands<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
 on_both![
     fast_forward_lands_the_head,
     a_moved_tip_is_rebased_and_the_line_ends_with_both,
-    same_file_lands_conflict_once,
+    same_file_land_reports_the_stale_base,
+    stale_base_paths_are_bounded,
     a_retried_land_returns_the_same_landed,
     a_stack_lands_draft_by_draft,
     changes_already_on_the_line_land_as_the_tip,

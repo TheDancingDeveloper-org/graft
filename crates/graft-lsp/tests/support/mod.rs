@@ -230,7 +230,9 @@ impl RepoApi for Rig {
     async fn revert(&self, _: &CallContext, _: Revert) -> ApiResult<ChangesetId> {
         Err(fake())
     }
-    /// The PR bridge: the stack must sit on the line tip.
+    /// The real land path, so a conflicting land returns `StaleBase`
+    /// (WI-2441). A stack already on the tip still goes through the PR
+    /// bridge the conformance tests expect.
     async fn land(&self, _: &CallContext, req: Land) -> ApiResult<Landed> {
         let tip = self.tip().await;
         let head = self
@@ -248,10 +250,7 @@ impl RepoApi for Rig {
             .next()
             .ok_or_else(fake)?;
         if head.changeset.parents.first().copied() != tip {
-            return Err(ApiError::Rejected {
-                policy: "pr-bridge".into(),
-                detail: "the stack is not on the line tip; sync first".into(),
-            });
+            return self.engine.land(&admin(), req).await;
         }
         let mut prs = self.prs.lock().unwrap();
         let n = match prs.iter().position(|h| *h == req.head) {
