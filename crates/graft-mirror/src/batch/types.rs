@@ -18,7 +18,10 @@ pub const BATCH: &str = "batch";
 
 /// The metadata key on a sync changeset, naming the base tip it absorbed.
 /// The land list skips changesets that carry it.
-pub const SYNC_KEY: &str = "mirror.batch-sync";
+pub const SYNC_KEY: &str = "batch.sync-base";
+
+/// The sync key written before D33 reserved `mirror.*` for git imports.
+const LEGACY_SYNC_KEY: &str = "mirror.batch-sync";
 
 /// The metadata key graft's `Revert` puts on a revert, naming the changeset
 /// it inverts (graft-engine's `revert::REVERTS`).
@@ -406,5 +409,13 @@ pub(crate) fn short(id: ChangesetId) -> String {
 
 /// Whether a changeset with `metadata` is a sync changeset the mirror made.
 pub fn is_sync(metadata: &Metadata) -> bool {
-    metadata.contains_key(SYNC_KEY)
+    sync_base(metadata).is_some()
+}
+
+/// The base a sync changeset absorbed, including the pre-D33 key.
+pub(crate) fn sync_base(metadata: &Metadata) -> Option<&str> {
+    metadata
+        .get(SYNC_KEY)
+        .or_else(|| metadata.get(LEGACY_SYNC_KEY))
+        .map(String::as_str)
 }

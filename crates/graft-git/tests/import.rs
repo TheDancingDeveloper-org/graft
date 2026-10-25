@@ -334,22 +334,30 @@ fn bad_paths_stop_the_import_with_the_full_list() {
 }
 
 #[test]
-fn empty_non_merge_commits_are_reported() {
+fn empty_root_and_four_empty_single_parent_commits_import_losslessly() {
     let mut git = Git::init("empty");
-    git.write("f", b"1\n");
-    let base = git.commit("base");
-    let empty = git.commit("nothing");
-    let api = FakeApi::new();
-    let map = MemoryMirrorMap::new();
-    let err = run(&api, &map, &config(&git, &["main"])).unwrap_err();
-    let GitError::Unrepresentable(list) = err else {
-        panic!("expected Unrepresentable, got {err:?}");
-    };
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].commit, GitSha::from_hex(&empty).unwrap());
-    assert_eq!(list[0].reason, "empty-changeset");
-    assert!(api.calls().is_empty());
-    assert_ne!(base, empty);
+    let root = git.commit_tree(EMPTY_TREE, &[], "empty root");
+    let mut commits = vec![root.clone()];
+    let mut parent = root;
+    for n in 1..=4 {
+        let commit = git.commit_tree(EMPTY_TREE, &[&parent], &format!("empty {n}"));
+        commits.push(commit.clone());
+        parent = commit;
+    }
+    git.set_ref("refs/heads/main", &parent);
+
+    let (api, map, report) = import_all(&git, &["main"]);
+    assert_eq!(report.commits, 5);
+    assert_eq!(report.verified, 5);
+    for (index, sha) in commits.iter().enumerate() {
+        let sha = GitSha::from_hex(sha).unwrap();
+        let changeset = api
+            .changeset(map.changeset_of(sha).unwrap().unwrap())
+            .unwrap();
+        assert!(changeset.changes.is_empty());
+        assert_eq!(changeset.parents.len(), usize::from(index > 0));
+        assert_eq!(changeset.metadata[SHA_KEY], sha.to_hex());
+    }
 }
 
 #[test]

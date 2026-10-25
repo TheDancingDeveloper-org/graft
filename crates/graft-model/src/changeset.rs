@@ -22,6 +22,10 @@ pub const CHANGESET_VERSION: u8 = 1;
 /// The default limit on changes in one changeset (validity rule 8).
 pub const DEFAULT_MAX_CHANGES: usize = 100_000;
 
+/// Git import provenance that permits an otherwise-empty root or
+/// single-parent changeset (D33).
+const MIRROR_GIT_COMMIT: &str = "mirror.git-commit";
+
 /// Sorted string map for tools. Keys under `graft.` are reserved.
 pub type Metadata = BTreeMap<String, String>;
 
@@ -256,7 +260,10 @@ impl Changeset {
         if self.parents.is_empty() && !opts.allow_root {
             return Err(Violation::new(None, Rule::RootChangeset));
         }
-        if self.changes.is_empty() && self.parents.len() < 2 {
+        if self.changes.is_empty()
+            && self.parents.len() < 2
+            && !self.metadata.contains_key(MIRROR_GIT_COMMIT)
+        {
             return Err(Violation::new(None, Rule::EmptyChangeset));
         }
         if self.changes.len() > opts.max_changes {
@@ -338,7 +345,8 @@ pub enum Rule {
     FileAndDirectory,
     /// 8: the change count is within the limit.
     TooManyChanges,
-    /// 9: a changeset with no changes needs more than one parent.
+    /// 9: a changeset with no changes needs more than one parent, unless it
+    /// carries git import provenance.
     EmptyChangeset,
     /// A `Put` names the `tree` kind, which only the server writes.
     PutKind,
