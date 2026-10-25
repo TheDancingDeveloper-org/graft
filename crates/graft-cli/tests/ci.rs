@@ -94,7 +94,7 @@ fn stage() -> Stage {
 
 fn exchange_cmd(dir: &Path, endpoint: &str) -> assert_cmd::Command {
     let mut cmd = graft(dir);
-    cmd.args(["--endpoint", endpoint, "ci", "exchange"]);
+    cmd.args(["--experimental", "--endpoint", endpoint, "ci", "exchange"]);
     cmd
 }
 
@@ -222,7 +222,14 @@ fn exchange_then_attest_then_the_attested_land_succeeds() {
     );
     for check in ["ci/build", "ci/test"] {
         graft(ci_dir.path())
-            .args(["--endpoint", &url, "--repo", "demo", "--token-file"])
+            .args([
+                "--experimental",
+                "--endpoint",
+                &url,
+                "--repo",
+                "demo",
+                "--token-file",
+            ])
             .arg(&token)
             .args([
                 "attest",

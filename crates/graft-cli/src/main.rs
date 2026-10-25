@@ -45,9 +45,6 @@ pub(crate) enum Exit {
     Unavailable = 7,
 }
 
-/// Commands that are designed but not built yet (`docs/plan.md`).
-const PLANNED: &[&str] = &[];
-
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -97,6 +94,11 @@ fn enter_directory(g: &cli::Global) -> Result<(), Failure> {
 
 fn dispatch(cli: &Cli) -> Result<(), Failure> {
     let g = &cli.global;
+    if matches!(cli.command, Command::Attest(_) | Command::Ci(_)) && !experimental_enabled(g) {
+        return Err(Failure::usage(
+            "experimental; enable with GRAFT_EXPERIMENTAL=1".to_owned(),
+        ));
+    }
     match &cli.command {
         Command::Clone(args) => cmd::clone::run(g, args),
         Command::Status(args) => cmd::status::run(g, args),
@@ -127,15 +129,13 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         },
         Command::Planned(args) => {
             let name = args.first().map_or("", String::as_str);
-            if PLANNED.contains(&name) {
-                Err(Failure::usage(format!(
-                    "graft {name}: not implemented yet (see docs/plan.md)"
-                )))
-            } else {
-                Err(Failure::usage(format!("unknown command: {name}")))
-            }
+            Err(Failure::usage(format!("unknown command: {name}")))
         }
     }
+}
+
+fn experimental_enabled(global: &cli::Global) -> bool {
+    global.experimental || std::env::var_os("GRAFT_EXPERIMENTAL").is_some_and(|value| value == "1")
 }
 
 #[cfg(test)]

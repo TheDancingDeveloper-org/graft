@@ -136,25 +136,25 @@ pub(crate) const OPS: &[Op] = &[
     op(
         "create_repo",
         "AdminApi",
-        Surface::Excluded("admin; graft-server admin subcommands (G1.12)"),
+        Surface::Excluded("server administration only"),
         false,
     ),
     op(
         "import_changesets",
         "AdminApi",
-        Surface::Excluded("admin; graft-server admin subcommands (G1.12)"),
+        Surface::Excluded("server administration only"),
         false,
     ),
     op(
         "gc",
         "AdminApi",
-        Surface::Excluded("admin; graft-server admin subcommands (G1.12)"),
+        Surface::Excluded("server administration only"),
         false,
     ),
     op(
         "mint_token",
         "AdminApi",
-        Surface::Excluded("admin; graft-server admin subcommands (G1.12)"),
+        Surface::Excluded("server administration only"),
         false,
     ),
 ];
