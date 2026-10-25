@@ -36,7 +36,10 @@ mod upstream;
 use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
+
+use tokio::sync::Notify;
 
 use axum::Router;
 use axum::extract::Request as HttpRequest;
@@ -59,6 +62,12 @@ use crate::objects::Objects;
 use crate::upstream::{Upstream, UpstreamConfig};
 
 /// A running node's state. Cheap to clone.
+///
+/// `GetObjects` answers and cache-miss fetches are started with
+/// [`Node::track`]. Those tasks clone this node and hold the cache store
+/// lock until they finish. [`Node::serve`] stops accepting new tasks when the
+/// socket stops and waits for the remaining work before it returns, so the
+/// lock is free when `serve` finishes (WI-2467).
 #[derive(Clone)]
 pub struct Node {
     objects: Objects,
@@ -66,6 +75,73 @@ pub struct Node {
     metrics: NodeMetrics,
     max_connections: usize,
     max_streams: u32,
+    tracked: Tracker,
+}
+
+/// Tasks spawned by the node that clone it (object answers, fetch leads).
+///
+/// Completed tasks leave no retained entry. [`Node::serve`] closes the
+/// tracker and waits for the remaining tasks to finish naturally, including
+/// blocking cache work, so their store handles are dropped before `serve`
+/// returns (WI-2467).
+#[derive(Clone)]
+pub(crate) struct Tracker {
+    active: Arc<AtomicUsize>,
+    stopping: Arc<AtomicBool>,
+    idle: Arc<Notify>,
+}
+
+impl Tracker {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicUsize::new(0)),
+            stopping: Arc::new(AtomicBool::new(false)),
+            idle: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Spawns `task`. After shutdown has begun, does not spawn.
+    pub(crate) fn spawn<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        if self.stopping.load(Ordering::Acquire) {
+            self.finish();
+            return;
+        }
+        let tracker = self.clone();
+        tokio::spawn(async move {
+            let _active = ActiveTask(tracker);
+            task.await;
+        });
+    }
+
+    fn finish(&self) {
+        if self.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.idle.notify_one();
+        }
+    }
+
+    /// Refuses new tasks and waits until every spawned task has finished.
+    async fn join(&self) {
+        self.stopping.store(true, Ordering::Release);
+        loop {
+            let idle = self.idle.notified();
+            if self.active.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            idle.await;
+        }
+    }
+}
+
+struct ActiveTask(Tracker);
+
+impl Drop for ActiveTask {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
 }
 
 impl Node {
@@ -97,12 +173,14 @@ impl Node {
             },
             metrics.clone(),
         )?;
+        let tracked = Tracker::new();
         let flights = Arc::new(Flights::new(
             config.max_inflight_objects,
             cache.clone(),
             upstream.clone(),
             service_token,
             metrics.clone(),
+            tracked.clone(),
         ));
         Ok(Self {
             objects: Objects {
@@ -110,6 +188,7 @@ impl Node {
                 cache,
                 flights,
                 metrics: metrics.clone(),
+                tasks: tracked.clone(),
             },
             forwarder: Forwarder {
                 upstream,
@@ -118,6 +197,7 @@ impl Node {
             metrics,
             max_connections: config.max_connections,
             max_streams: config.max_streams_per_connection,
+            tracked,
         })
     }
 
@@ -165,13 +245,17 @@ impl Node {
             shutdown.await;
             closer.close();
         };
-        tonic::transport::Server::builder()
+        let served = tonic::transport::Server::builder()
             .max_concurrent_streams(Some(self.max_streams))
             .http2_keepalive_interval(Some(Duration::from_secs(30)))
             .add_routes(tonic::service::Routes::from(self.router()))
             .serve_with_incoming_shutdown(incoming, shutdown)
             .await
-            .map_err(|e| format!("serve: {e}"))
+            .map_err(|e| format!("serve: {e}"));
+        // GetObjects and fetch tasks hold Node clones. Join them before
+        // returning so the cache lock is free (WI-2467).
+        self.tracked.join().await;
+        served
     }
 }
 

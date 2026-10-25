@@ -51,6 +51,8 @@ pub(crate) struct Objects {
     pub(crate) cache: Arc<Cache>,
     pub(crate) flights: Arc<Flights>,
     pub(crate) metrics: NodeMetrics,
+    /// Joins the answer task when the node stops (WI-2467).
+    pub(crate) tasks: crate::Tracker,
 }
 
 #[tonic::async_trait]
@@ -97,7 +99,8 @@ impl pb::object_service_server::ObjectService for Objects {
         let deferred = ids.split_off(ids.len().min(MAX_IDS));
         let (tx, rx) = mpsc::channel(1);
         let this = self.clone();
-        tokio::spawn(async move {
+        // Holds `this` (and the cache lock) until the node joins it.
+        self.tasks.spawn(async move {
             let outcome = this
                 .answer(req.repo, ids, deferred, caller.token, &tx)
                 .await;
