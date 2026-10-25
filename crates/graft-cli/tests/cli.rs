@@ -222,8 +222,21 @@ fn diff_stat_of_the_working_copy_counts_an_edit() {
     fs::write(app.join("README.md"), "edited\n").unwrap();
     let out = graft(&app).args(["diff", "--stat"]).assert().success();
     let text = text(out.get_output());
-    assert!(text.contains("README.md"), "{text}");
-    assert!(text.contains("1 file"), "{text}");
+    assert!(text.contains("README.md |     2 +1     -1"), "{text}");
+    assert!(text.contains("1 file, 1 insertion, 1 deletion"), "{text}");
+}
+
+#[test]
+fn diff_stat_marks_oversized_working_copy_files_truncated() {
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path(), &[]);
+    fs::write(app.join("README.md"), vec![b'x'; 64 * 1024 + 1]).unwrap();
+    graft(&app)
+        .args(["diff", "--stat"])
+        .assert()
+        .success()
+        .stdout(contains("README.md | ? (truncated)"));
 }
 
 #[test]

@@ -5,13 +5,15 @@
 //! patch the command already asks for (or, for the working copy, a local
 //! patch of the same shape), capped the same way the patch is.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 
 use graft_client::fetch::load_blob;
 use graft_client::workcopy::{FileStatus, WorkingCopy};
 use graft_model::{Change, EntryKind};
 use graft_proto::api::RepoApi;
 use graft_proto::types::{Diff, Page, PatchOptions};
+use imara_diff::{Algorithm, Diff as LineDiff, InternedInput};
 use serde_json::json;
 
 use crate::cli::{DiffArgs, Global};
@@ -26,7 +28,7 @@ use crate::render::{diff, kind_name, print_json, short};
 const PATCH_CONTEXT: u32 = 3;
 const PATCH_MAX_BYTES: u64 = 64 * 1024;
 
-/// How many files `--stat` counts. Past this the rest are named only.
+/// How many files `--stat` counts before reporting that more were omitted.
 const STAT_FILES: usize = 100;
 
 /// Diffs two changesets, or the working copy.
@@ -51,13 +53,16 @@ fn working_copy_diff(g: &Global, stat: bool) -> Result<(), Failure> {
             "files": changes.iter().map(change_json).collect::<Vec<_>>(),
         });
         if stat {
-            value["stat"] = json!(working_copy_stat(&wc, &changes));
+            let rows = working_copy_stat(&wc, &changes)?;
+            value["stat"] = json!(rows);
+            value["stat_omitted"] = json!(changes.len().saturating_sub(rows.len()));
         }
         return print_json(&value);
     }
     if stat {
-        let rows = working_copy_stat(&wc, &changes);
+        let rows = working_copy_stat(&wc, &changes)?;
         print_stat(&rows)?;
+        print_omitted(changes.len(), rows.len())?;
         return Ok(());
     }
     for change in &changes {
@@ -72,23 +77,21 @@ fn working_copy_diff(g: &Global, stat: bool) -> Result<(), Failure> {
 }
 
 /// Added and removed lines against the base blob in the local cache.
-fn working_copy_stat(wc: &WorkingCopy, changes: &[FileStatus]) -> Vec<StatRow> {
-    let cache = wc.open_cache(64 * 1024 * 1024).ok();
-    let rt = tokio::runtime::Builder::new_current_thread().build().ok();
+fn working_copy_stat(wc: &WorkingCopy, changes: &[FileStatus]) -> Result<Vec<StatRow>, Failure> {
+    let cache = wc.open_cache(64 * 1024 * 1024)?;
+    let rt = tokio::runtime::Builder::new_current_thread().build()?;
     changes
         .iter()
         .take(STAT_FILES)
         .map(|change| {
-            let counts = match (&cache, &rt) {
-                (Some(cache), Some(rt)) => rt.block_on(one_stat(wc, cache, change)),
-                _ => (0, 0, true),
-            };
-            StatRow {
+            let counts = rt.block_on(one_stat(wc, &cache, change))?;
+            Ok(StatRow {
                 path: change.path().to_string(),
                 added: counts.0,
                 removed: counts.1,
                 binary: counts.2,
-            }
+                truncated: counts.3,
+            })
         })
         .collect()
 }
@@ -97,20 +100,40 @@ async fn one_stat(
     wc: &WorkingCopy,
     cache: &graft_store_fs::FsObjectStore,
     change: &FileStatus,
-) -> (u32, u32, bool) {
+) -> Result<(u32, u32, bool, bool), Failure> {
     let path = change.path();
+    if matches!(change, FileStatus::Added(_) | FileStatus::Modified(_)) {
+        let metadata = fs::metadata(wc.root().join(path.as_str()))?;
+        if metadata.len() > PATCH_MAX_BYTES {
+            return Ok((0, 0, false, true));
+        }
+    }
     let old = match change {
         FileStatus::Added(_) => None,
         FileStatus::Modified(_) | FileStatus::Deleted(_) => {
             let Some(entry) = wc.index().entries.get(path) else {
-                return (0, 0, true);
+                return Err(Failure::new(
+                    crate::Exit::Failure,
+                    "state",
+                    "working-copy index entry is missing",
+                ));
             };
             if !matches!(entry.kind, EntryKind::File | EntryKind::Exec) {
-                return (0, 0, true);
+                return Ok((0, 0, true, false));
+            }
+            if entry.stat.size > PATCH_MAX_BYTES {
+                return Ok((0, 0, false, true));
             }
             match load_blob(cache, entry.id.0).await {
                 Ok(Some(bytes)) => Some(bytes),
-                _ => return (0, 0, true),
+                Ok(None) => {
+                    return Err(Failure::new(
+                        crate::Exit::Failure,
+                        "store",
+                        "base blob is missing from cache",
+                    ));
+                }
+                Err(error) => return Err(error.into()),
             }
         }
     };
@@ -118,13 +141,25 @@ async fn one_stat(
         FileStatus::Deleted(_) => None,
         FileStatus::Added(_) | FileStatus::Modified(_) => {
             let file = wc.root().join(path.as_str());
-            match fs::read(&file) {
-                Ok(bytes) => Some(bytes),
-                Err(_) => return (0, 0, true),
-            }
+            Some(read_capped(&file)?)
         }
     };
-    lines_of(old.as_deref(), new.as_deref())
+    if new
+        .as_ref()
+        .is_some_and(|bytes| bytes.len() > PATCH_MAX_BYTES as usize)
+    {
+        return Ok((0, 0, false, true));
+    }
+    let (added, removed, binary) = lines_of(old.as_deref(), new.as_deref());
+    Ok((added, removed, binary, false))
+}
+
+fn read_capped(path: &std::path::Path) -> Result<Vec<u8>, Failure> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(PATCH_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Insertions and deletions by line. A changed line counts as one of each.
@@ -149,26 +184,16 @@ fn as_text(bytes: Option<&[u8]>) -> Result<Option<&str>, ()> {
     }
 }
 
-/// Line counts of a histogram-free diff: equal lines cancel, the rest are
-/// insertions or deletions. Order is not aligned, so a moved line counts as
-/// unchanged; a changed line counts as one deletion and one insertion.
+/// Line counts from the same histogram algorithm as server-side patches.
 fn diff_lines(old: &str, new: &str) -> (u32, u32) {
-    use std::collections::BTreeMap;
-    let mut counts: BTreeMap<&str, i32> = BTreeMap::new();
-    for line in old.lines() {
-        *counts.entry(line).or_default() -= 1;
-    }
-    for line in new.lines() {
-        *counts.entry(line).or_default() += 1;
-    }
+    let input = InternedInput::new(old, new);
+    let mut diff = LineDiff::compute(Algorithm::Histogram, &input);
+    diff.postprocess_lines(&input);
     let mut added = 0u32;
     let mut removed = 0u32;
-    for n in counts.values() {
-        if *n > 0 {
-            added = added.saturating_add(*n as u32);
-        } else {
-            removed = removed.saturating_add((-*n) as u32);
-        }
+    for hunk in diff.hunks() {
+        added = added.saturating_add(u32::try_from(hunk.after.len()).unwrap_or(u32::MAX));
+        removed = removed.saturating_add(u32::try_from(hunk.before.len()).unwrap_or(u32::MAX));
     }
     (added, removed)
 }
@@ -209,12 +234,16 @@ fn changeset_diff(g: &Global, args: &DiffArgs, from: &str, to: &str) -> Result<(
         if g.json {
             let mut value = diff(from, to, &result);
             if args.stat {
-                value["stat"] = json!(stat_of(&result.files));
+                let rows = stat_of(&result.files);
+                value["stat"] = json!(rows);
+                value["stat_omitted"] = json!(result.files.len().saturating_sub(rows.len()));
             }
             return print_json(&value);
         }
         if args.stat {
-            print_stat(&stat_of(&result.files))?;
+            let rows = stat_of(&result.files);
+            print_stat(&rows)?;
+            print_omitted(result.files.len(), rows.len())?;
             if let Some(next) = &result.next {
                 outln!("more: --cursor {next}");
             }
@@ -244,10 +273,11 @@ struct StatRow {
     added: u32,
     removed: u32,
     binary: bool,
+    truncated: bool,
 }
 
 /// Counts from the patches the diff already returned. A file with no patch
-/// (binary, or truncated to nothing) is reported as binary.
+/// is binary unless the server marked its patch truncated.
 fn stat_of(files: &[graft_proto::types::FileDiff]) -> Vec<StatRow> {
     files
         .iter()
@@ -261,7 +291,8 @@ fn stat_of(files: &[graft_proto::types::FileDiff]) -> Vec<StatRow> {
                 path,
                 added,
                 removed,
-                binary: f.patch.is_none(),
+                binary: f.patch.is_none() && !f.truncated,
+                truncated: f.truncated,
             }
         })
         .collect()
@@ -294,7 +325,9 @@ fn print_stat(rows: &[StatRow]) -> Result<(), crate::error::Failure> {
         files += 1;
         added = added.saturating_add(row.added);
         removed = removed.saturating_add(row.removed);
-        if row.binary {
+        if row.truncated {
+            outln!("{:<width$} | ? (truncated)", row.path, width = width);
+        } else if row.binary {
             outln!("{:<width$} | Bin", row.path, width = width);
         } else {
             outln!(
@@ -308,11 +341,23 @@ fn print_stat(rows: &[StatRow]) -> Result<(), crate::error::Failure> {
         }
     }
     outln!(
-        "{files} file{}, {added} insertion{}, {removed} deletion{}",
+        "{files} file{}, {added} insertion{}, {removed} deletion{}{}",
         plural(files),
         plural(added),
-        plural(removed)
+        plural(removed),
+        if rows.iter().any(|row| row.truncated) {
+            " (partial)"
+        } else {
+            ""
+        }
     );
+    Ok(())
+}
+
+fn print_omitted(total: usize, shown: usize) -> Result<(), Failure> {
+    if total > shown {
+        outln!("more: {} files omitted", total - shown);
+    }
     Ok(())
 }
 
@@ -323,11 +368,45 @@ fn plural(n: u32) -> &'static str {
 impl serde::Serialize for StatRow {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("StatRow", 4)?;
+        let mut s = serializer.serialize_struct("StatRow", 5)?;
         s.serialize_field("path", &self.path)?;
         s.serialize_field("added", &self.added)?;
         s.serialize_field("removed", &self.removed)?;
         s.serialize_field("binary", &self.binary)?;
+        s.serialize_field("truncated", &self.truncated)?;
         s.end()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use graft_model::{Change, EntryKind, ObjectId, RepoPath};
+    use graft_proto::types::FileDiff;
+
+    use super::{diff_lines, stat_of};
+
+    #[test]
+    fn line_diff_counts_a_move() {
+        assert_eq!(diff_lines("one\ntwo\nthree\n", "two\nthree\none\n"), (1, 1));
+    }
+
+    #[test]
+    fn line_diff_aligns_repeated_lines() {
+        assert_eq!(diff_lines("same\nold\nsame\n", "same\nnew\nsame\n"), (1, 1));
+    }
+
+    #[test]
+    fn stat_marks_a_cut_server_patch_truncated() {
+        let rows = stat_of(&[FileDiff {
+            change: Change::Put {
+                path: RepoPath::new("large.txt").unwrap(),
+                kind: EntryKind::File,
+                id: ObjectId([1; 32]),
+            },
+            patch: Some("--- a/large.txt\n+++ b/large.txt\n@@ -1 +1 @@\n-old\n+new\n".into()),
+            truncated: true,
+        }]);
+        assert!(rows[0].truncated);
+        assert!(!rows[0].binary);
     }
 }

@@ -1880,6 +1880,7 @@ dependencies = [
  "graft-store-fs",
  "graft-telemetry",
  "graft-testkit",
+ "imara-diff",
  "insta",
  "jsonschema",
  "predicates",
