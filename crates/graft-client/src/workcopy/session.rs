@@ -10,9 +10,10 @@
 //!
 //! `sync` fast-forwards a working copy with no stack, moving the workspace
 //! by reopening it at the line tip. With a stack it asks the server to
-//! `Sync`; when the server refuses with `Conflict`, the working copy moves
-//! to the tip anyway and the conflicts are written into the files
-//! (`super::conflict`), for the author to resolve and commit.
+//! `Sync`; when the server refuses with `Conflict` (or a land with
+//! `StaleBase`), the working copy moves to the tip anyway and the conflicts
+//! are written into the files (`super::conflict`), for the author to resolve
+//! and commit.
 //!
 //! **Moves that span the server and the disk.** Moving the workspace and
 //! moving the files are two steps, and either can fail after the other has
@@ -708,10 +709,12 @@ impl WorkingCopy {
                     }
                     contended_until
                 }
-                Err(ApiError::Conflict { .. }) if opts.sync && !synced => {
-                    // Writes the conflicts (`Conflicted`), or, when the line
-                    // moved on again and the stack now rebases cleanly,
-                    // lands the rebased stack.
+                Err(ApiError::Conflict { .. } | ApiError::StaleBase(_)) if opts.sync && !synced => {
+                    // A stale base is the same refusal with the current tip
+                    // and the paths to re-sync (WI-2441). Writes the
+                    // conflicts (`Conflicted`), or, when the line moved on
+                    // again and the stack now rebases cleanly, lands the
+                    // rebased stack.
                     self.sync_writing_conflicts(api, cache, cx, opts.lease_ms, fetch)
                         .await?;
                     synced = true;

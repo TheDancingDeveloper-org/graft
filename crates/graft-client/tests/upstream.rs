@@ -257,7 +257,7 @@ async fn an_uncommitted_conflict_reports_its_hunks_and_the_land_conflicts() {
     assert!(!up.clean());
     let err = env.land(&mut wc).await.unwrap_err();
     assert!(
-        matches!(err, Error::Api(ApiError::Conflict { .. })),
+        matches!(err, Error::Api(ApiError::StaleBase(ref d)) if d.paths == ["src/lib.rs"] && !d.truncated),
         "{err:?}"
     );
 }
