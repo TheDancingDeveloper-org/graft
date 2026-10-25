@@ -118,8 +118,14 @@ fn help_is_public_facing_for_every_command() {
         &["mcp"],
         &["lsp"],
         &["serve"],
+        &["serve", "admin"],
         &["node"],
         &["mirror"],
+        &["mirror", "import"],
+        &["mirror", "follow"],
+        &["mirror", "pr-batch"],
+        &["mirror", "export"],
+        &["mirror", "authority"],
     ];
 
     for command in COMMANDS {

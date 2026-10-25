@@ -46,10 +46,9 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
            [--max-lands <n>] [--max-age <seconds>]
                                         sync an integration line onto the
                                         followed base, export its net change
-                                        as one squashed PR (D21); never merges
+                                        as one squashed PR; never merges
   authority <status|freeze|verify|flip|unfreeze> --config <file> --line <l>
-         [--last N]                     switch a line's authority (§11.3);
-                                        docs/runbooks/authority-switch.md
+         [--last N]                     switch a line's authority safely
 
   The server URL defaults to GRAFT_ENDPOINT; the token comes from
   GRAFT_TOKEN or --token-file / token_file.";

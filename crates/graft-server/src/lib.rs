@@ -32,7 +32,7 @@ use config::ServerConfig;
 const USAGE: &str = "usage: graft-server [--config <file>] <serve|admin> [args]
   serve                          run the server
   admin token mint --subject <s> --scope <scope>... [--ttl <secs>]
-        [--kind human|agent|ci|service] [--session <ses_…>] [--work-item <WI-…>]
+        [--kind human|agent|ci|service] [--session <ses_…>] [--work-item <item>]
                                  mint a token (printed to stdout)
   admin token revoke             revoke the token read from stdin (server running)
   admin repo create <name>       create a repository
