@@ -857,7 +857,15 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> ServerHandler for McpSer
     ) -> Result<CallToolResponse, ErrorData> {
         let auth = http_auth(&context);
         let tcc = ToolCallContext::new(self, request, context);
-        AUTH.scope(auth, self.tool_router.call(tcc)).await
+        let result = AUTH.scope(auth, self.tool_router.call(tcc)).await?;
+        // One place every tool result passes. A handler that pages or clips
+        // stays under the cap; one that does not is refused here, typed,
+        // instead of leaving the process.
+        if crate::render::response_fits(&result) {
+            Ok(result)
+        } else {
+            Ok(crate::render::ToolError::TooLarge.into_result().into())
+        }
     }
 
     async fn list_resource_templates(

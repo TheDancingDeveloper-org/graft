@@ -362,3 +362,128 @@ async fn upstream_changed_paths_shrink_to_the_byte_cap() {
     assert!(returned < 100 && returned > 0, "page shrank to {returned}");
     assert!(body["next"].is_string(), "the shrunk page has a cursor");
 }
+
+/// A working copy whose status payload is deliberately larger than the cap.
+struct OversizedStatus;
+
+impl graft_mcp::WorkingCopyTools for OversizedStatus {
+    fn status<'a>(&'a self, _repo: &'a str) -> graft_mcp::WorkingCopyFuture<'a, Value> {
+        Box::pin(async { Ok(json!({"blob": "x".repeat(MAX_RESULT_BYTES)})) })
+    }
+
+    fn commit<'a>(
+        &'a self,
+        _cx: &'a graft_proto::CallContext,
+        _req: graft_mcp::WorkingCopyCommit,
+    ) -> graft_mcp::WorkingCopyFuture<'a, Value> {
+        Box::pin(async { Ok(json!({})) })
+    }
+
+    fn land<'a>(
+        &'a self,
+        _cx: &'a graft_proto::CallContext,
+        _req: graft_mcp::WorkingCopyLand,
+    ) -> graft_mcp::WorkingCopyFuture<'a, Option<Value>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn sync<'a>(
+        &'a self,
+        _cx: &'a graft_proto::CallContext,
+        _req: graft_mcp::WorkingCopySync,
+    ) -> graft_mcp::WorkingCopyFuture<'a, Option<Value>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+#[tokio::test]
+async fn every_registered_tool_result_fits_and_an_oversized_status_is_typed() {
+    use std::sync::Arc;
+    let client = support::connect_with(Fake::standard(), Some(Arc::new(OversizedStatus))).await;
+    let result = call(&client, "graft_status", json!({"repo": "r"})).await;
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(structured(&result)["kind"], "result_too_large");
+    assert!(serde_json::to_vec(&result).unwrap().len() <= MAX_RESULT_BYTES);
+
+    // One ordinary call per registered tool. Typed errors still go through
+    // `call_tool`, so a handler that forgot the cap fails this too.
+    let calls: &[(&str, Value)] = &[
+        (
+            "graft_log",
+            json!({"repo": "r", "from": "main", "limit": 1}),
+        ),
+        (
+            "graft_show",
+            json!({"repo": "r", "changeset": cid(1).to_string()}),
+        ),
+        (
+            "graft_diff",
+            json!({"repo": "r", "from": cid(1).to_string(), "to": "main", "patch": false}),
+        ),
+        (
+            "graft_blame",
+            json!({"repo": "r", "path": "src/lib.rs", "at": "main"}),
+        ),
+        (
+            "graft_read",
+            json!({"repo": "r", "path": "src/lib.rs", "at": "main"}),
+        ),
+        ("graft_ls", json!({"repo": "r", "at": "main"})),
+        ("graft_upstream", json!({"repo": "r"})),
+        (
+            "graft_draft_overlap",
+            json!({"repo": "r", "paths": ["src/lib.rs"]}),
+        ),
+        (
+            "graft_commit",
+            json!({"repo": "r", "workspace": "w", "message": "m", "files": []}),
+        ),
+        ("graft_land", json!({"repo": "r", "workspace": "w"})),
+        ("graft_sync", json!({"repo": "r", "workspace": "w"})),
+        (
+            "graft_revert",
+            json!({"repo": "r", "workspace": "w", "changeset": cid(1).to_string()}),
+        ),
+        (
+            "graft_pick",
+            json!({"repo": "r", "workspace": "w", "changeset": cid(1).to_string()}),
+        ),
+        ("graft_conflicts", json!({"repo": "r", "workspace": "w"})),
+        (
+            "graft_resolve",
+            json!({"repo": "r", "workspace": "w", "resolutions": []}),
+        ),
+        (
+            "graft_line_create",
+            json!({"repo": "r", "name": "side", "at": "main"}),
+        ),
+        (
+            "graft_merge",
+            json!({"repo": "r", "from": "side", "into": "main"}),
+        ),
+        (
+            "graft_tag",
+            json!({"repo": "r", "name": "v0", "at": "main"}),
+        ),
+        (
+            "graft_workspace",
+            json!({"repo": "r", "action": "get", "name": "w"}),
+        ),
+    ];
+    let registered: std::collections::BTreeSet<&str> =
+        graft_mcp::TOOLS.iter().map(|t| t.name).collect();
+    let called: std::collections::BTreeSet<&str> = calls
+        .iter()
+        .map(|(n, _)| *n)
+        .chain(["graft_status"])
+        .collect();
+    assert_eq!(
+        called, registered,
+        "the sweep must name every registered tool"
+    );
+    for (tool, args) in calls {
+        let result = call(&client, tool, args.clone()).await;
+        let size = serde_json::to_vec(&result).unwrap().len();
+        assert!(size <= MAX_RESULT_BYTES, "{tool} returned {size} bytes");
+    }
+}

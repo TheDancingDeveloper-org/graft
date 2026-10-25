@@ -767,9 +767,20 @@ use rmcp::service::{RoleClient, RunningService};
 /// Serves `api` over an in-memory duplex with stdio framing and returns a
 /// connected client.
 pub async fn connect(api: Arc<Fake>) -> RunningService<RoleClient, ()> {
+    connect_with(api, None).await
+}
+
+/// Like [`connect`], optionally attaching a working copy.
+pub async fn connect_with(
+    api: Arc<Fake>,
+    working_copy: Option<Arc<dyn graft_mcp::WorkingCopyTools>>,
+) -> RunningService<RoleClient, ()> {
     let (client_io, server_io) = tokio::io::duplex(1 << 20);
     let (server_read, server_write) = tokio::io::split(server_io);
-    let server = McpServer::new(api, principal());
+    let mut server = McpServer::new(api, principal());
+    if let Some(wc) = working_copy {
+        server = server.with_working_copy(wc);
+    }
     tokio::spawn(async move {
         let _ = server.serve_io(server_read, server_write).await;
     });
