@@ -31,7 +31,9 @@
 //!
 //! Lag: `graft_mirror_lag_changesets` is the number of upstream commits graft
 //! lacks, and `graft_mirror_lag_seconds` is how long the line has been
-//! behind (since follow first saw upstream ahead), 0 when caught up.
+//! behind (since follow first saw upstream ahead), 0 when caught up. A
+//! `graft_mirror_lag_changesets` value of -1 means the upstream fetch or list
+//! failed and the lag is unknown.
 
 use std::collections::HashMap;
 use std::future::Future;
