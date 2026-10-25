@@ -50,9 +50,9 @@ pub(crate) struct Lease {
 /// The longest repository name.
 pub const MAX_REPO_NAME: usize = 64;
 
-/// Metadata keys under this prefix are the server's (`graft.rebased-from`
-/// and friends); `CreateChangeset` refuses them.
-const RESERVED_METADATA: &str = "graft.";
+/// Metadata keys under these prefixes are the server's or an importer's;
+/// `CreateChangeset` refuses them.
+const RESERVED_METADATA: [&str; 2] = ["graft.", "mirror."];
 
 /// Checks a repository name: 1 to 64 of `[A-Za-z0-9._-]`, not starting with
 /// `.` or `-`. Names become directory names in the object store.
@@ -141,7 +141,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         if req
             .metadata
             .keys()
-            .any(|k| k.starts_with(RESERVED_METADATA))
+            .any(|k| RESERVED_METADATA.iter().any(|prefix| k.starts_with(prefix)))
         {
             return Err(errors::invalid(None, "reserved-metadata"));
         }
