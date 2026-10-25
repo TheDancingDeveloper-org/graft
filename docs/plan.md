@@ -92,6 +92,7 @@ What remains:
 | WI-2314 | CI OOM flake: quarantined (#91); remove the quarantine after a day with `oom_kill` at 0 |
 | WI-2329 | review leftovers (p4) |
 | WI-2366 | embedded single-binary mode: a future phase (p4) |
+| WI-2415 | D30 append to the open batch (implement, after WI-2435) |
 
 Done: WI-2307 (graft-dev alerts), WI-2317 (tailnet SSH). Won't do: WI-2240
 (D10 token front).
@@ -101,6 +102,22 @@ and §11.4 steps 1 to 4.
 
 New items follow the work item format below. Each names its crates, and new
 items keep the rule of one area per branch.
+
+**WI-2415 Append a land to the open batch PR (D30, design §11.6).**
+- Crates: `graft-mirror` (the batch modules split out by WI-2435)
+- Needs: WI-2434 (this design), WI-2435 (the `batch.rs` split)
+- Deliver: on an open, unsealed batch whose line moved only by lands since
+  the cut, replay the new lands onto the batch's last commit, root-check,
+  record, and push a fast-forward of `graft/batch-<n>` with a lease on the
+  old head; rewrite the PR body's land table; `--exclude` appends its revert
+  instead of superseding; `--no-append` keeps the old wait. Sealed (auto-merge,
+  queued or merging), over-cap, sync-after-cut or failed-replay batches take
+  no append, and the run says why.
+- Accept: open batch of N, land a fix, a run gives N+1 commits on the same
+  PR with the first N shas unchanged; a concurrent push to the branch loses
+  the lease and nothing is forced; a sealed batch is left alone.
+- Test: batch tests on the fake forge for each case above, and a golden test
+  that the appended chain's shas are the same on a retry.
 
 ### Phase 2 inventory (parked)
 
