@@ -86,6 +86,19 @@ crates/
   graft-testkit       test fixtures and harnesses (dev only)
 ```
 
+## Platforms
+
+Release builds (`.github/workflows/release.yml`) produce static binaries for:
+
+- `x86_64-unknown-linux-musl`
+- `aarch64-unknown-linux-musl`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+
+CI (`.github/workflows/ci.yml`) builds and tests on the Linux self-hosted runners only. macOS binaries are built on release; they are not part of the required merge-queue checks. The binary list is `scripts/release/binaries.txt` (`graft`, `graft-server`, `graft-node`, `graft-mirror`).
+
+`cargo install graft-cli` is not available yet: the workspace is `publish = false` and still version `0.0.0`. The release tag publishes `graft-*` crates only, never a crate named `graft`. A Homebrew tap is not part of this release.
+
 ## Building
 
 ```sh
