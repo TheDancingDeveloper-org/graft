@@ -134,4 +134,7 @@ fn exposition_uses_documented_names_and_labels() {
     );
     assert!(text.contains(r#"graft_journal_lsn{repo="graft"} 42"#));
     assert!(text.contains("graft_watch_subscribers 4"));
+    assert!(text.contains(
+        "# HELP graft_mirror_lag_changesets Mirror lag in changesets; -1 means the upstream fetch or list failed and lag is unknown."
+    ));
 }

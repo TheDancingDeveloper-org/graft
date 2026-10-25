@@ -1,8 +1,8 @@
 # graft
 
-[![CI](https://github.com/sprooty/graft/actions/workflows/ci.yml/badge.svg)](https://github.com/sprooty/graft/actions/workflows/ci.yml)
+[![CI](https://github.com/TheDancingDeveloper-org/graft/actions/workflows/ci.yml/badge.svg)](https://github.com/TheDancingDeveloper-org/graft/actions/workflows/ci.yml)
 [![Licence: AGPL-3.0-only](https://img.shields.io/badge/licence-AGPL--3.0--only-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/sprooty/graft?display_name=tag)](https://github.com/sprooty/graft/releases)
+[![Release](https://img.shields.io/github/v/release/TheDancingDeveloper-org/graft?display_name=tag)](https://github.com/TheDancingDeveloper-org/graft/releases)
 
 graft is a server-centric source control system: many clients share one
 history, and the server does the commit, history, diff, rebase and land.
@@ -16,28 +16,34 @@ yet. What is delivered is in [docs/status.md](docs/status.md).
 
 ## Install
 
-> **lands in v0.1.0.** There is no GitHub release and no crates.io package
-> yet. The three install lines below are the ones the release will publish.
-> Until then, build from a checkout: `cargo run -p graft-cli -- --help`.
+> **lands in v0.1.0.** There is no GitHub release or container image yet.
+> The binary and container commands below use the locations that release will
+> publish. Until then, build from a checkout:
+> `cargo run -p graft-cli -- --help`.
 
 Release binaries (Linux and macOS, x86_64 and aarch64):
 
+Release CI builds and checksum-verifies all four target archives. The Rust
+test suite runs separately on the repository's self-hosted CI runner; the
+release matrix does not run target-specific tests from the packaged archives.
+
 ```sh
-curl -fsSL -o graft.tar.gz https://github.com/sprooty/graft/releases/latest/download/graft-x86_64-unknown-linux-musl.tar.gz
+curl -fsSL -o graft.tar.gz https://github.com/TheDancingDeveloper-org/graft/releases/download/v0.1.0/graft-x86_64-unknown-linux-musl.tar.gz
 tar -xzf graft.tar.gz
 ./graft version
 ```
 
 From crates.io:
 
-```sh
-cargo install graft-cli
-```
+`cargo install graft-cli` is not available for v0.1.0. The CLI still depends
+on unpublished workspace crates through path dependencies, so this release
+ships binaries and the container image only. Publishing the dependency chain
+to crates.io is follow-up work.
 
 Container image:
 
 ```sh
-docker run --rm ghcr.io/sprooty/graft:latest version
+docker run --rm ghcr.io/thedancingdeveloper-org/graft:v0.1.0 version
 ```
 
 Today the workspace is four binaries (`graft`, `graft-server`, `graft-node`,
