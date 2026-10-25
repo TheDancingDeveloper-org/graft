@@ -74,6 +74,7 @@ impl Env {
     /// not yet begun.
     async fn clone_bare(&self, name: &str, workspace: Option<&str>) -> WorkingCopy {
         let config = WcConfig {
+            server: None,
             endpoint: None,
             repo: REPO.to_owned(),
             workspace: workspace.map(str::to_owned),

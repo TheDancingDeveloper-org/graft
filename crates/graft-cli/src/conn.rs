@@ -1,6 +1,6 @@
 //! Connecting to a server or node, finding the working copy, and the call
-//! context. The bearer token comes from `--token-file` or `GRAFT_TOKEN`, and
-//! is never printed or put in an argument.
+//! context. Credentials resolve from explicit overrides, environment, then a
+//! named user configuration. Tokens are never printed or put in an argument.
 
 use std::env;
 use std::fs;
@@ -13,7 +13,7 @@ use graft_client::workcopy::{
     Begun, DEFAULT_CACHE_BYTES, Recovered, WcConfig, WcInfo, WcState, WorkingCopy,
 };
 use graft_client::workspace::DEFAULT_LEASE_MS;
-use graft_client::{Endpoint, Remote, discover};
+use graft_client::{ENDPOINT_ENV, Endpoint, NODE_SOCKET, Remote};
 use graft_model::{ChangesetId, IdPrefix, ObjectKind};
 use graft_proto::ApiError;
 use graft_proto::api::RepoApi;
@@ -21,6 +21,7 @@ use graft_proto::context::{CallContext, Principal, PrincipalKind};
 use graft_proto::types::{ListRefs, Log, Page, ResolveRef, WorkspaceRef};
 
 use crate::cli::{DEFAULT_LINE, Global};
+use crate::config::UserConfig;
 use crate::error::Failure;
 
 /// The environment variable that carries the bearer token.
@@ -31,11 +32,18 @@ pub(crate) const TOKEN_ENV: &str = "GRAFT_TOKEN";
 pub(crate) struct Conn {
     pub(crate) remote: Remote,
     pub(crate) repo: String,
+    pub(crate) server: Option<String>,
     /// The line a short id is looked for on: the working copy's, else `main`.
     line: String,
     /// Changesets the working copy knows (base, head, an unfinished move),
     /// the first place a short id is looked for.
     known: Vec<ChangesetId>,
+}
+
+pub(crate) struct ResolvedSettings {
+    pub(crate) server: Option<String>,
+    pub(crate) endpoint: Endpoint,
+    pub(crate) token: Option<String>,
 }
 
 /// How many refs, and how many changesets of the line's recent history, a
@@ -125,9 +133,8 @@ pub(crate) fn call_context() -> CallContext {
     }
 }
 
-/// Connects. The endpoint is `--endpoint`, else `GRAFT_ENDPOINT`, the node
-/// socket, or the working copy's configured server, in that order. The
-/// repository is `--repo`, else the working copy's.
+/// Connects. Endpoint and token overrides resolve independently; named server
+/// selection is the working copy's server, then the user default.
 pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn, Failure> {
     let repo = match (&g.repo, wc) {
         (Some(repo), _) => repo.clone(),
@@ -138,19 +145,10 @@ pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn
             ));
         }
     };
-    let endpoint = match &g.endpoint {
-        Some(text) => Endpoint::parse(text),
-        None => {
-            let configured = wc.and_then(|wc| wc.config().endpoint.clone());
-            discover(configured.as_deref()).ok_or_else(|| {
-                Failure::usage(
-                    "no endpoint: pass --endpoint, set GRAFT_ENDPOINT, or run inside a working copy",
-                )
-            })?
-        }
-    };
-    let remote = Remote::connect(endpoint).await?;
-    let remote = match read_token(g)? {
+    let user = crate::config::load()?;
+    let settings = resolve_settings(g, wc, &user)?;
+    let remote = Remote::connect(settings.endpoint).await?;
+    let remote = match settings.token {
         Some(token) => remote.with_token(token),
         None => remote,
     };
@@ -170,8 +168,78 @@ pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn
     Ok(Conn {
         remote,
         repo,
+        server: settings.server,
         line,
         known,
+    })
+}
+
+pub(crate) fn resolve_settings(
+    g: &Global,
+    wc: Option<&impl WcView>,
+    user: &UserConfig,
+) -> Result<ResolvedSettings, Failure> {
+    let endpoint_override = g.endpoint.as_deref().map(Endpoint::parse).or_else(|| {
+        env::var(ENDPOINT_ENV)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| Endpoint::parse(&value))
+    });
+    let token_override = read_token(g)?;
+    resolve_settings_from_sources(
+        wc.map(WcView::config),
+        user,
+        endpoint_override,
+        token_override,
+    )
+}
+
+fn resolve_settings_from_sources(
+    wc: Option<&WcConfig>,
+    user: &UserConfig,
+    endpoint_override: Option<Endpoint>,
+    token_override: Option<String>,
+) -> Result<ResolvedSettings, Failure> {
+    let server = wc
+        .and_then(|config| config.server.clone())
+        .or_else(|| user.default_server.clone());
+    let named = server.as_ref().and_then(|name| user.servers.get(name));
+    if (endpoint_override.is_none() || token_override.is_none())
+        && server.is_some()
+        && named.is_none()
+    {
+        let name = server.as_deref().unwrap_or_default();
+        return Err(Failure::new(
+            crate::Exit::Failure,
+            "config",
+            format!("server {name} is not configured; run `graft login {name} --endpoint URL`"),
+        ));
+    }
+    let endpoint = endpoint_override
+        .or_else(|| named.map(|server| Endpoint::parse(&server.endpoint)))
+        .or_else(|| {
+            let socket = Path::new(NODE_SOCKET);
+            socket.exists().then(|| Endpoint::NodeSocket(socket.to_owned()))
+        })
+        .or_else(|| {
+            wc.and_then(|config| config.endpoint.as_deref())
+                .map(Endpoint::parse)
+        })
+        .ok_or_else(|| {
+            Failure::usage(
+                "no endpoint: pass --endpoint, set GRAFT_ENDPOINT, run `graft login`, or use a configured working copy",
+            )
+        })?;
+    let token = match token_override {
+        Some(token) => Some(token),
+        None => named
+            .map(|server| token_from_file(&server.token_file))
+            .transpose()?,
+    };
+    Ok(ResolvedSettings {
+        server,
+        endpoint,
+        token,
     })
 }
 
@@ -187,7 +255,7 @@ pub(crate) fn read_token(g: &Global) -> Result<Option<String>, Failure> {
         .filter(|t| !t.is_empty()))
 }
 
-fn token_from_file(path: &Path) -> Result<String, Failure> {
+pub(crate) fn token_from_file(path: &Path) -> Result<String, Failure> {
     let text = fs::read_to_string(path).map_err(|e| {
         Failure::new(
             crate::Exit::Failure,
@@ -411,6 +479,35 @@ pub(crate) fn repo_path(text: &str) -> Result<graft_model::RepoPath, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ServerConfig;
+
+    fn user_with_servers(dir: &Path) -> UserConfig {
+        let default_token = dir.join("default-token");
+        let working_token = dir.join("working-token");
+        fs::write(&default_token, "default-secret\n").unwrap();
+        fs::write(&working_token, "working-secret\n").unwrap();
+        UserConfig {
+            default_server: Some("default".to_owned()),
+            servers: [
+                (
+                    "default".to_owned(),
+                    ServerConfig {
+                        endpoint: "http://default.example".to_owned(),
+                        token_file: default_token,
+                    },
+                ),
+                (
+                    "working".to_owned(),
+                    ServerConfig {
+                        endpoint: "http://working.example".to_owned(),
+                        token_file: working_token,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
 
     #[test]
     fn token_file_is_trimmed_and_never_empty() {
@@ -425,5 +522,75 @@ mod tests {
     #[test]
     fn default_rev_is_main_outside_a_working_copy() {
         assert_eq!(default_rev(None::<&WcInfo>), "main");
+    }
+
+    #[test]
+    fn working_copy_server_precedes_the_user_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+        let wc = WcConfig {
+            server: Some("working".to_owned()),
+            ..WcConfig::default()
+        };
+
+        let settings = resolve_settings_from_sources(Some(&wc), &user, None, None).unwrap();
+        assert_eq!(settings.server.as_deref(), Some("working"));
+        assert_eq!(settings.endpoint, Endpoint::parse("http://working.example"));
+        assert_eq!(settings.token.as_deref(), Some("working-secret"));
+    }
+
+    #[test]
+    fn user_default_is_used_outside_a_working_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+
+        let settings = resolve_settings_from_sources(None, &user, None, None).unwrap();
+        assert_eq!(settings.server.as_deref(), Some("default"));
+        assert_eq!(settings.endpoint, Endpoint::parse("http://default.example"));
+        assert_eq!(settings.token.as_deref(), Some("default-secret"));
+    }
+
+    #[test]
+    fn endpoint_and_token_overrides_resolve_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+        let endpoint = Endpoint::parse("http://override.example");
+
+        let endpoint_only =
+            resolve_settings_from_sources(None, &user, Some(endpoint.clone()), None).unwrap();
+        assert_eq!(endpoint_only.endpoint, endpoint);
+        assert_eq!(endpoint_only.token.as_deref(), Some("default-secret"));
+
+        let token_only =
+            resolve_settings_from_sources(None, &user, None, Some("override-secret".to_owned()))
+                .unwrap();
+        assert_eq!(
+            token_only.endpoint,
+            Endpoint::parse("http://default.example")
+        );
+        assert_eq!(token_only.token.as_deref(), Some("override-secret"));
+    }
+
+    #[test]
+    fn full_overrides_bypass_a_missing_working_copy_server() {
+        let user = UserConfig::default();
+        let wc = WcConfig {
+            server: Some("removed".to_owned()),
+            ..WcConfig::default()
+        };
+
+        let settings = resolve_settings_from_sources(
+            Some(&wc),
+            &user,
+            Some(Endpoint::parse("http://override.example")),
+            Some("override-secret".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(settings.server.as_deref(), Some("removed"));
+        assert_eq!(
+            settings.endpoint,
+            Endpoint::parse("http://override.example")
+        );
+        assert_eq!(settings.token.as_deref(), Some("override-secret"));
     }
 }

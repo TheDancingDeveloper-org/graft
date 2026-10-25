@@ -501,6 +501,7 @@ pub fn graft(cwd: &Path) -> Command {
     cmd.current_dir(cwd)
         .env_remove("GRAFT_ENDPOINT")
         .env_remove("GRAFT_TOKEN")
+        .env("GRAFT_CONFIG", cwd.join(".graft-test-config.toml"))
         // Tests run inside Vogt sessions and as any user; keep the caller's
         // identity out so ids and output don't depend on it.
         .env_remove("VOGT_SESSION_ID")

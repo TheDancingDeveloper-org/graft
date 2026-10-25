@@ -105,6 +105,7 @@ impl Env {
     /// A working copy of `main` holding `sparse`, with its workspace open.
     async fn clone(&self, name: &str, sparse: Sparse) -> WorkingCopy {
         let config = WcConfig {
+            server: None,
             endpoint: None,
             repo: REPO.to_owned(),
             workspace: None,

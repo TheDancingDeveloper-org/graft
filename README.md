@@ -11,8 +11,9 @@ git-like commands without a branch or a pull request per change.
 
 **Status: pre-v0.1.0, phase 1 (a git alternative).** Import, clone, commit,
 sync, line-merge land and git export work today through the CLI, MCP and LSP.
-Local mode, `graft login`, clone-by-URL and release binaries are not shipped
-yet. What is delivered is in [docs/status.md](docs/status.md).
+Local mode, clone-by-URL and release binaries are not shipped yet. Named
+server login and config are available in the CLI. What is delivered is in
+[docs/status.md](docs/status.md).
 
 ## Install
 
@@ -67,25 +68,24 @@ The server-side line merge (merge3) keeps both edits. Overlapping edits exit
 
 ## Quick start: server
 
-> **lands in v0.1.0** for `graft serve --dev`, `graft login`, and
+> **lands in v0.1.0** for `graft serve --dev` and
 > `graft clone graft://…`. Today a server is the `graft-server` binary with
-> a config file, and the client takes `GRAFT_ENDPOINT` plus `--token-file`
-> ([docs/agents.md](docs/agents.md)).
+> a config file. Run `graft login <name> --endpoint URL` once, then clone by
+> repository name ([docs/agents.md](docs/agents.md)).
 
 ```sh
-graft serve --dev --repo demo
-# prints: graft clone graft://127.0.0.1:PORT/demo
-graft clone graft://127.0.0.1:PORT/demo
+graft login dev --endpoint http://127.0.0.1:17888 < ~/.config/graft/token
+graft clone demo
 cd demo
 printf 'hello\n' > readme.txt
 graft commit -m "hello"
 graft land
 ```
 
-`--dev` binds loopback, generates a signing key, writes an admin token into
-the user config (never on stdout or the command line) and prints the clone
-command. `graft login <name> --endpoint URL` is how a client stores a token
-for any other server; the token is read from stdin.
+The future `--dev` mode will bind loopback, generate a signing key, write an
+admin token into the user config (never on stdout or the command line) and
+print the clone command. Today `graft login` reads the token from stdin (or
+`--token-file`), verifies the server, and stores a private token-file reference.
 
 ## Using it with agents
 

@@ -29,6 +29,7 @@ fn cx() -> CallContext {
 
 fn config() -> WcConfig {
     WcConfig {
+        server: None,
         endpoint: None,
         repo: REPO.to_owned(),
         workspace: None,

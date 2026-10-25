@@ -47,7 +47,11 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
             None => None,
         };
         let config = WcConfig {
-            endpoint: Some(conn.remote.endpoint().to_string()),
+            server: conn.server.clone(),
+            endpoint: conn
+                .server
+                .is_none()
+                .then(|| conn.remote.endpoint().to_string()),
             repo: conn.repo.clone(),
             workspace: None,
         };

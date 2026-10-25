@@ -105,6 +105,8 @@ const DIFF_PAGE: u32 = 1000;
 /// The working copy's configuration (`.graft/config`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WcConfig {
+    /// Named server in the user's config, when the clone selected one.
+    pub server: Option<String>,
     /// Server endpoint, when configured (see [`crate::discover`]).
     pub endpoint: Option<String>,
     /// Repository.
@@ -964,6 +966,9 @@ impl WorkingCopy {
 
     fn config_text(&self) -> String {
         let mut s = format!("repo = {}\n", self.config.repo);
+        if let Some(server) = &self.config.server {
+            s.push_str(&format!("server = {server}\n"));
+        }
         if let Some(e) = &self.config.endpoint {
             s.push_str(&format!("endpoint = {e}\n"));
         }
@@ -1377,6 +1382,7 @@ fn parse_config(text: &str) -> Result<WcConfig> {
             .ok_or_else(|| Error::State("config has no repo".to_owned()))?
             .to_string(),
         endpoint: kv.get("endpoint").map(|s| s.to_string()),
+        server: kv.get("server").map(|s| s.to_string()),
         workspace: kv.get("workspace").map(|s| s.to_string()),
     })
 }
@@ -1589,6 +1595,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = ChangesetId::hash(b"base");
         let config = WcConfig {
+            server: Some("dev".into()),
             endpoint: Some("http://x:1".into()),
             repo: "r".into(),
             workspace: None,
