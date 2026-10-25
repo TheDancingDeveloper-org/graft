@@ -222,14 +222,28 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> LspServer<A> {
     /// Remembers a conflict, so its regions are published, and turns the
     /// failure into a request error.
     fn write_failed(&mut self, e: ClientError) -> RpcError {
-        if let ClientError::Api(ApiError::Conflict { paths, onto }) = &e {
-            self.conflict = Some(Conflict {
-                onto: *onto,
-                paths: paths
+        // A stale base is the land-time form of a conflict (WI-2441): the
+        // regions still have to be published, against the tip it names.
+        let remembered = match &e {
+            ClientError::Api(ApiError::Conflict { paths, onto }) => Some((
+                *onto,
+                paths
                     .iter()
                     .filter_map(|p| RepoPath::new(&p.path).ok())
                     .collect(),
-            });
+            )),
+            ClientError::Api(ApiError::StaleBase(detail)) => Some((
+                detail.current_tip,
+                detail
+                    .paths
+                    .iter()
+                    .filter_map(|p| RepoPath::new(p).ok())
+                    .collect(),
+            )),
+            _ => None,
+        };
+        if let Some((onto, paths)) = remembered {
+            self.conflict = Some(Conflict { onto, paths });
         }
         client_error(e)
     }

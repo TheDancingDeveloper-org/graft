@@ -83,22 +83,20 @@ exit 3
 stdout:
 
 stderr:
-graft: 1 paths conflict onto ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08
-  conflict README.md
+graft: base is behind line tip ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08; sync, then land again
+  changed README.md
+  run `graft sync`, then `graft land`
   nothing changed: run `graft sync` (or `graft land --sync`) to write the conflicts into the files
 
 json:
 {
   "error": {
-    "conflicts": [
-      {
-        "mode": null,
-        "path": "README.md"
-      }
-    ],
+    "current_tip": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
     "kind": "conflict",
-    "message": "1 paths conflict onto ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
-    "onto": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
+    "message": "base is behind line tip ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08; sync, then land again",
+    "paths": [
+      "README.md"
+    ],
     "preflight": {
       "both_changed_truncated": false,
       "checked": true,
@@ -118,7 +116,8 @@ json:
       "preview_skipped": null,
       "stop": false,
       "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
-    }
+    },
+    "truncated": false
   }
 }
 
@@ -142,7 +141,27 @@ json:
     ],
     "kind": "conflicted",
     "message": "1 file conflicts with ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
-    "onto": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08"
+    "onto": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
+    "preflight": {
+      "both_changed_truncated": false,
+      "checked": true,
+      "conflicts": [],
+      "conflicts_truncated": false,
+      "drafts": {
+        "checked": true,
+        "overlaps": [],
+        "skipped": null,
+        "truncated": false
+      },
+      "merges_cleanly": [],
+      "pre_land_check": {
+        "overlap": "ran",
+        "rebase": "not_needed"
+      },
+      "preview_skipped": null,
+      "stop": false,
+      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+    }
   }
 }
 
@@ -193,7 +212,27 @@ json:
 {
   "error": {
     "kind": "rejected",
-    "message": "rejected by attested: c8a97237d489dda1dc0f65ba920d05eafee4584f25fa2211ae0104eac6f6a915e has no passing ci/build attestation"
+    "message": "rejected by attested: c8a97237d489dda1dc0f65ba920d05eafee4584f25fa2211ae0104eac6f6a915e has no passing ci/build attestation",
+    "preflight": {
+      "both_changed_truncated": false,
+      "checked": true,
+      "conflicts": [],
+      "conflicts_truncated": false,
+      "drafts": {
+        "checked": true,
+        "overlaps": [],
+        "skipped": null,
+        "truncated": false
+      },
+      "merges_cleanly": [],
+      "pre_land_check": {
+        "overlap": "ran",
+        "rebase": "not_needed"
+      },
+      "preview_skipped": null,
+      "stop": false,
+      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+    }
   }
 }
 
@@ -208,7 +247,27 @@ json:
 {
   "error": {
     "kind": "rejected",
-    "message": "rejected by attested: ci/test failed on c8a97237d489dda1dc0f65ba920d05eafee4584f25fa2211ae0104eac6f6a915e (https://ci.example/run/7)"
+    "message": "rejected by attested: ci/test failed on c8a97237d489dda1dc0f65ba920d05eafee4584f25fa2211ae0104eac6f6a915e (https://ci.example/run/7)",
+    "preflight": {
+      "both_changed_truncated": false,
+      "checked": true,
+      "conflicts": [],
+      "conflicts_truncated": false,
+      "drafts": {
+        "checked": true,
+        "overlaps": [],
+        "skipped": null,
+        "truncated": false
+      },
+      "merges_cleanly": [],
+      "pre_land_check": {
+        "overlap": "ran",
+        "rebase": "not_needed"
+      },
+      "preview_skipped": null,
+      "stop": false,
+      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+    }
   }
 }
 
@@ -224,7 +283,27 @@ json:
 {
   "error": {
     "kind": "permission_denied",
-    "message": "permission denied: needs repo:demo:land:main"
+    "message": "permission denied: needs repo:demo:land:main",
+    "preflight": {
+      "both_changed_truncated": false,
+      "checked": true,
+      "conflicts": [],
+      "conflicts_truncated": false,
+      "drafts": {
+        "checked": false,
+        "overlaps": [],
+        "skipped": "needs the repo:demo:drafts scope",
+        "truncated": false
+      },
+      "merges_cleanly": [],
+      "pre_land_check": {
+        "overlap": "skipped(scope)",
+        "rebase": "not_needed"
+      },
+      "preview_skipped": null,
+      "stop": false,
+      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+    }
   }
 }
 
@@ -239,7 +318,27 @@ json:
 {
   "error": {
     "kind": "unauthenticated",
-    "message": "unauthenticated"
+    "message": "unauthenticated",
+    "preflight": {
+      "both_changed_truncated": false,
+      "checked": true,
+      "conflicts": [],
+      "conflicts_truncated": false,
+      "drafts": {
+        "checked": true,
+        "overlaps": [],
+        "skipped": null,
+        "truncated": false
+      },
+      "merges_cleanly": [],
+      "pre_land_check": {
+        "overlap": "ran",
+        "rebase": "not_needed"
+      },
+      "preview_skipped": null,
+      "stop": false,
+      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+    }
   }
 }
 

@@ -1,110 +1,158 @@
 # graft
 
-graft is a server-centric source control system for workloads made mostly of
-short-lived AI agent sessions and CI jobs on shared hosts. It takes the ideas
-Anthropic described for Scion in
-[*Redesigning source control*](https://www.anthropic.com/engineering/redesigning-source-control)
-and starts from a clean slate, in Rust.
+[![CI](https://github.com/sprooty/graft/actions/workflows/ci.yml/badge.svg)](https://github.com/sprooty/graft/actions/workflows/ci.yml)
+[![Licence: AGPL-3.0-only](https://img.shields.io/badge/licence-AGPL--3.0--only-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/sprooty/graft?display_name=tag)](https://github.com/sprooty/graft/releases)
 
-> **Status: phase 1, a git alternative ([D22](docs/decisions.md#d22-phase-1-is-a-git-alternative)).**
-> Import, sparse clone, many working copies per host, line creation, commit,
-> sync, server-side rebase with line merge, lock-free land, conflict preview
-> and resolution, line merge with merge points, pick, tags, log, diff,
-> blame, git export, and batch delivery to GitHub (one commit per land)
-> all work end to end, through the CLI, MCP (HTTP and stdio) and LSP. GC is
-> wired in and off by default. CI
-> checks in the land path are built but switched off (phase 2). What is
-> delivered, and what is next, is in [docs/status.md](docs/status.md).
+graft is a server-centric source control system: many clients share one
+history, and the server does the commit, history, diff, rebase and land.
+It is for agent fleets — many short sessions on one codebase — that need
+git-like commands without a branch or a pull request per change.
 
-## Bench
+**Status: pre-v0.1.0, phase 1 (a git alternative).** Import, clone, commit,
+sync, line-merge land and git export work today through the CLI, MCP and LSP.
+Local mode, `graft login`, clone-by-URL and release binaries are not shipped
+yet. What is delivered is in [docs/status.md](docs/status.md).
+
+## Install
+
+> **lands in v0.1.0.** There is no GitHub release and no crates.io package
+> yet. The three install lines below are the ones the release will publish.
+> Until then, build from a checkout: `cargo run -p graft-cli -- --help`.
+
+Release binaries (Linux and macOS, x86_64 and aarch64):
+
+```sh
+curl -fsSL -o graft.tar.gz https://github.com/sprooty/graft/releases/latest/download/graft-x86_64-unknown-linux-musl.tar.gz
+tar -xzf graft.tar.gz
+./graft version
+```
+
+From crates.io:
+
+```sh
+cargo install graft-cli
+```
+
+Container image:
+
+```sh
+docker run --rm ghcr.io/sprooty/graft:latest version
+```
+
+Today the workspace is four binaries (`graft`, `graft-server`, `graft-node`,
+`graft-mirror`). One binary that also serves, caches and mirrors is part of
+the same release.
+
+## Quick start: local
+
+> **lands in v0.1.0.** `graft init` does not exist yet. A local repository
+> will be a directory the CLI opens in-process: no server, no daemon, no
+> token. The commands below are the ones that mode will accept.
+
+```sh
+graft init demo && cd demo
+printf 'one\n' > file.txt
+graft commit -m "start"
+graft log
+graft clone . ../demo-2          # a second working copy of the same repository
+printf 'one\ntwo\n' > file.txt
+graft commit -m "add a line"
+graft land                       # moves the line by compare-and-swap
+```
+
+From the second copy, edit a different region of `file.txt`, commit and land.
+The server-side line merge (merge3) keeps both edits. Overlapping edits exit
+3 with conflict markers in the file.
+
+## Quick start: server
+
+> **lands in v0.1.0** for `graft serve --dev`, `graft login`, and
+> `graft clone graft://…`. Today a server is the `graft-server` binary with
+> a config file, and the client takes `GRAFT_ENDPOINT` plus `--token-file`
+> ([docs/agents.md](docs/agents.md)).
+
+```sh
+graft serve --dev --repo demo
+# prints: graft clone graft://127.0.0.1:PORT/demo
+graft clone graft://127.0.0.1:PORT/demo
+cd demo
+printf 'hello\n' > readme.txt
+graft commit -m "hello"
+graft land
+```
+
+`--dev` binds loopback, generates a signing key, writes an admin token into
+the user config (never on stdout or the command line) and prints the clone
+command. `graft login <name> --endpoint URL` is how a client stores a token
+for any other server; the token is read from stdin.
+
+## Using it with agents
+
+The agent loop is clone, edit, commit, sync, land. A conflict comes back in
+the files (exit 3), not as a pull request. The short guide, including the
+exit codes and what never to do, is [docs/agents.md](docs/agents.md).
+
+MCP is `graft mcp` on stdio today. The HTTP `/mcp` endpoint and the tool
+list are in [docs/agents.md](docs/agents.md) (checkout-less agents).
+
+## Migrating from git
+
+Git stays in the mirror. Nothing else in graft speaks git.
+
+| Step | Command | What it does |
+| --- | --- | --- |
+| Import | `graft-mirror import` | Lossless import of a git repository, including raw tag objects |
+| Follow | `graft-mirror follow` | Keep a git remote and graft in step |
+| Batch export | `graft-mirror pr-batch` | Deliver lands to GitHub as one pull request, one commit per land |
+| Full export | `graft-mirror export` | Write the history back out to git. This is the exit path |
+
+> **lands in v0.1.0.** `graft import <git-path>` into a local repository,
+> and `graft mirror …` as subcommands of the one binary. Until then the
+> commands are the `graft-mirror` binary.
+
+## How it compares
+
+| | graft | git | jj | Sapling | OpenScion |
+| --- | --- | --- | --- | --- | --- |
+| Unit of history | changeset on a shared line | commit on a branch | change | commit, with a server | changeset (Scion model) |
+| Concurrent work | many working copies land on one line | branch and pull request per change | local changes, no server | server-backed stacks | designed for agent fleets |
+| Conflict | returned in the files (merge3) | merge or rebase, client-side | client-side | client-side | returned to the client |
+| Where the work runs | the server | the client | the client | client plus server | a server |
+| Agent surface | CLI, MCP, LSP | CLI | CLI | CLI | not published |
+| Status | pre-v0.1.0, phase 1 | mature | mature | mature | a design, not a product |
+
+graft does not run builds, tests or checkers. It does not try to be
+git-compatible. Command names follow git where the meaning is the same.
+
+## Benchmarks
 
 ![graft against git](docs/guide/bench.svg)
 
 One chart from the committed result files: clone, sparse clone, log,
 `log --path`, blame, status, sync and concurrent lands at 1,000 and
-10,000 commits, plus the real-PR replay and the branching-strategy runs.
+10,000 commits, plus a real-PR replay and the branching-strategy runs.
 How it was measured, and what is not on the chart, is in
 [docs/guide/benchmarks.md](docs/guide/benchmarks.md).
-
-
-## The idea in six lines
-
-- **The server computes.** Commits, history, diff, blame, rebase and landing
-  run on the server. The client lays out files and keeps a bounded cache.
-- **Changesets, not snapshots.** A changeset lists the files it changed
-  against its first parent and commits to its root tree. Writes cost the size
-  of the change.
-- **Content-addressed everything** (BLAKE3). Any tier can cache any object,
-  and any reader can verify it.
-- **Lock-free landing.** Refs move only by compare-and-swap. `land` rebases
-  on the server and retries there, so a client that loses a race is never
-  stranded.
-- **Drafts, not branches.** Work in progress lives in leased workspaces, and
-  orphans are collected incrementally.
-- **One API, four faces:** gRPC, the `graft` CLI, an MCP server for agents,
-  and an LSP server for editors.
-
-graft is **not** git-compatible and does not try to be. Command names follow
-git where the meaning is the same. Git itself lives only in a migration bridge
-(`graft-mirror`), which does lossless import, a two-way GitHub mirror, and a
-full export.
 
 ## Documents
 
 | Document | What it covers |
 | --- | --- |
-| [docs/design.md](docs/design.md) | goals, data model, tiers, storage, API, landing, git interop, auth, observability, failure modes |
-| [docs/status.md](docs/status.md) | what is delivered, measured numbers, and the phase 1 backlog |
-| [docs/plan.md](docs/plan.md) | phases (D22), backlog, and the build waves as history |
-| [docs/decisions.md](docs/decisions.md) | open questions for the operator, with options and recommendations |
+| [docs/design.md](docs/design.md) | goals, data model, storage, API, landing, git interop |
+| [docs/status.md](docs/status.md) | what is delivered, measured numbers, and what is still open |
+| [docs/plan.md](docs/plan.md) | phases, backlog, and the build waves as history |
+| [docs/decisions.md](docs/decisions.md) | operator decisions, including phase 1 (D22) and the phase-1 bar (D31) |
+| [docs/architecture.md](docs/architecture.md) | crate map, the idea in six lines, runtime and deploy diagrams |
+| [docs/agents.md](docs/agents.md) | the agent loop, exit codes, MCP |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | how changes land |
 | [AGENTS.md](AGENTS.md) | rules for agent sessions working in this repository |
 
-## Layout
+## Contributing
 
-```text
-crates/
-  graft-model         ids, paths, blobs, trees, changesets, pure tree algorithms
-  graft-proto         API traits, wire types, errors, object frames (gzip)
-  graft-store         storage ports, in-memory test store, conformance suite
-  graft-store-fs      filesystem ObjectStore
-  graft-store-sqlite  SQLite MetaStore
-  graft-index         derived data; log, ancestry, blame
-  graft-engine        the repository engine (implements the API traits)
-  graft-gc            draft expiry and object collection
-  graft-auth          principals, tokens, scopes
-  graft-telemetry     tracing, metrics, metric names
-  graft-server        bin: the authoritative server
-  graft-node          bin: the per-host cache daemon
-  graft-client        client library: remote API, fetch, working copy
-  graft-cli           bin `graft`
-  graft-mcp           MCP server over the API traits
-  graft-lsp           LSP server over the API traits
-  graft-git           git import, export and mapping (the only git-aware crate)
-  graft-mirror        bin: git and GitHub mirror
-  graft-attester      bin: trial attester, builds and tests drafts, posts Attest (phase 2, off)
-  graft-testkit       test fixtures and harnesses (dev only)
-```
-
-## Platforms
-
-Release builds (`.github/workflows/release.yml`) produce static binaries for:
-
-- `x86_64-unknown-linux-musl`
-- `aarch64-unknown-linux-musl`
-- `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
-
-CI (`.github/workflows/ci.yml`) builds and tests on the Linux self-hosted runners only. macOS binaries are built on release; they are not part of the required merge-queue checks. The binary list is `scripts/release/binaries.txt` (`graft`, `graft-server`, `graft-node`, `graft-mirror`).
-
-`cargo install graft-cli` is not available yet: the workspace is `publish = false` and still version `0.0.0`. The release tag publishes `graft-*` crates only, never a crate named `graft`. A Homebrew tap is not part of this release.
-
-## Building
-
-```sh
-CARGO_BUILD_JOBS=4 cargo check --workspace --all-targets
-cargo run -p graft-cli -- version
-```
+graft is early. The design is [docs/design.md](docs/design.md); work lands
+on short-lived branches through the merge queue. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licence
 

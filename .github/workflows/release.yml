@@ -68,7 +68,8 @@ jobs:
           [ "$bad" -eq 0 ]
 
   dry-run:
-    # Not a publish. Runs on PRs, the nightly schedule, and a manual dry run.
+    # Fast script validation. The image and release-assembly jobs below also
+    # run without publishing, so a tag is never their first execution.
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'schedule' ||
@@ -90,8 +91,10 @@ jobs:
           set -eu
           version=0.0.0-dry-run
           scripts/release/changelog.sh "$version"
-          grep -q "$version" CHANGELOG.md
+          scripts/release/release-notes.sh "$version" release-notes.md
+          grep -q "^## $version " release-notes.md
           git checkout -- CHANGELOG.md 2>/dev/null || git clean -f -- CHANGELOG.md >/dev/null
+          rm -f release-notes.md
           # Fragments stay. A release PR deletes them after committing CHANGELOG.md.
           test -f changes/README.md
 
@@ -187,7 +190,6 @@ jobs:
   # image.yml itself still builds on its own tag and dispatch triggers.
   image:
     needs: [binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-x86_64, binaries-macos-aarch64]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, docker]
     timeout-minutes: 60
     permissions:
@@ -207,8 +209,13 @@ jobs:
           set -eu
           owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           image="ghcr.io/$owner/graft"
-          echo "tags=$image:sha-$GITHUB_SHA,$image:$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "tags=$image:sha-$GITHUB_SHA,$image:$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=$image:dry-run-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/login-action@v3
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -217,15 +224,14 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
-          push: true
+          push: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.ref.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-  publish:
+  release-assembly:
     needs: [binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-x86_64, binaries-macos-aarch64, image]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted]
     timeout-minutes: 30
     permissions:
@@ -248,13 +254,17 @@ jobs:
       - name: Changelog section
         run: |
           set -eu
-          tag="${GITHUB_REF_NAME}"
-          scripts/release/changelog.sh "$tag"
-          # Release notes are the new section only (up to the next heading).
-          awk 'NR>1 && /^## / { exit } { print }' CHANGELOG.md > release-notes.md
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version=${GITHUB_REF_NAME#v}
+          else
+            version=0.0.0-dry-run
+            scripts/release/changelog.sh "$version"
+          fi
+          scripts/release/release-notes.sh "$version" release-notes.md
       - name: crates.io dry-run (graft-* only)
         run: RELEASE_PUBLISH=0 scripts/release/publish-crates.sh
       - name: GitHub release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

@@ -726,8 +726,11 @@ async fn run_client(e: Rc<HarnessEngine>, me: Shared<Client>, history: Shared<Hi
                 }
                 let _ = again(4, async || sync(&e, &cx, &history, client).await).await;
             }
-            Err(ApiError::Conflict { .. }) => {
+            Err(ApiError::Conflict { .. } | ApiError::StaleBase(_)) => {
                 // Resolve: a new root for the same intent, on the new tip.
+                // A stale base is the same dead end as a content conflict:
+                // the client's base is behind, so retrying the same head
+                // cannot land.
                 me.borrow_mut().pending = None;
             }
             Err(_) => {
