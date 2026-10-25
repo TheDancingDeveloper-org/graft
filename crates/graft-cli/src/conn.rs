@@ -140,20 +140,51 @@ pub(crate) fn call_context() -> CallContext {
     }
 }
 
+/// A `--repo` value is a name, or `graft://` / `grafts://` carrying the endpoint.
+fn split_repo_arg(repo: &str) -> Result<(String, Option<String>), Failure> {
+    if repo.starts_with("graft://") || repo.starts_with("grafts://") {
+        let url = graft_client::RepoUrl::parse(repo).map_err(Failure::usage)?;
+        if url.line.is_some() {
+            return Err(Failure::usage(
+                "--repo graft URL does not take ?line=; pass the line to the command",
+            ));
+        }
+        Ok((url.repo, Some(url.endpoint)))
+    } else if repo.contains("://") {
+        Err(Failure::usage(
+            "expected a repository name, graft://host[:port]/repo, or grafts://host[:port]/repo",
+        ))
+    } else {
+        Ok((repo.to_owned(), None))
+    }
+}
+
 /// Connects. Named credentials are used only when their server owns the
 /// resolved endpoint.
 pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn, Failure> {
-    let repo = match (&g.repo, wc) {
-        (Some(repo), _) => repo.clone(),
-        (None, Some(wc)) => wc.config().repo.clone(),
+    let (repo, url_endpoint) = match (&g.repo, wc) {
+        (Some(repo), _) => split_repo_arg(repo)?,
+        (None, Some(wc)) => (wc.config().repo.clone(), None),
         (None, None) => {
             return Err(Failure::usage(
                 "no repository: pass --repo, or run inside a working copy",
             ));
         }
     };
+    let mut g = g.clone();
+    if let Some(from_url) = &url_endpoint {
+        match &g.endpoint {
+            Some(flag) if Endpoint::parse(flag) != Endpoint::parse(from_url) => {
+                return Err(Failure::usage(
+                    "--endpoint does not match the graft URL; pass one of them",
+                ));
+            }
+            None => g.endpoint = Some(from_url.clone()),
+            Some(_) => {}
+        }
+    }
     let user = crate::config::load()?;
-    let settings = resolve_settings(g, wc, &user)?;
+    let settings = resolve_settings(&g, wc, &user)?;
     let remote = Remote::connect(settings.endpoint).await?;
     let remote = match settings.token {
         Some(token) => remote.with_token(token),

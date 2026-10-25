@@ -231,6 +231,11 @@ pub struct McpServer<A> {
     pub(crate) api: Arc<A>,
     principal: Option<Principal>,
     pub(crate) working_copy: Option<Arc<dyn WorkingCopyTools>>,
+    /// The server this process is connected to (`http://` or `https://`),
+    /// when the launcher knows one. A `graft://` URL whose endpoint differs
+    /// is refused. Absent (the in-process HTTP mount) means a URL is refused:
+    /// the process has no remote endpoint to match.
+    pub(crate) endpoint: Option<String>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -240,6 +245,7 @@ impl<A> Clone for McpServer<A> {
             api: Arc::clone(&self.api),
             principal: self.principal.clone(),
             working_copy: self.working_copy.clone(),
+            endpoint: self.endpoint.clone(),
             tool_router: self.tool_router.clone(),
         }
     }
@@ -272,6 +278,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             api,
             principal,
             working_copy: None,
+            endpoint: None,
             tool_router,
         }
     }
@@ -283,6 +290,13 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
     #[must_use]
     pub fn with_working_copy(mut self, working_copy: Arc<dyn WorkingCopyTools>) -> Self {
         self.working_copy = Some(working_copy);
+        self
+    }
+
+    /// Records the server this process is connected to. `graft_workspace`
+    /// accepts a `graft://` URL only when its endpoint is this one.
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
         self
     }
 

@@ -11,8 +11,8 @@ git-like commands without a branch or a pull request per change.
 
 **Status: pre-v0.1.0, phase 1 (a git alternative).** Import, clone, commit,
 sync, line-merge land and git export work today through the CLI, MCP and LSP.
-Local mode, clone-by-URL and release binaries are not shipped yet. Named
-server login and config are available in the CLI. What is delivered is in
+Local mode and release binaries are not shipped yet. Named server login,
+config and clone-by-URL are available in the CLI. What is delivered is in
 [docs/status.md](docs/status.md).
 
 ## Install
@@ -76,10 +76,10 @@ The server-side line merge (merge3) keeps both edits. Overlapping edits exit
 
 ## Quick start: server
 
-> **lands in v0.1.0** for `graft serve --dev` and
-> `graft clone graft://…`. Today a server is the `graft-server` binary with
-> a config file. Run `graft login <name> --endpoint URL` once, then clone by
-> repository name ([docs/agents.md](docs/agents.md)).
+> **lands in v0.1.0** for `graft serve --dev`. Clone by URL works today:
+> `graft clone graft://HOST:PORT/REPO`. The token comes from a matching
+> `graft login`, never from the URL. A bare repository name still uses the
+> default server ([docs/agents.md](docs/agents.md)).
 
 ```sh
 graft login dev --endpoint http://127.0.0.1:17888 < ~/.config/graft/token

@@ -2,7 +2,7 @@
 
 graft is a server-centric source control system. A **repository** holds history as changesets on a **line** (the usual one is `main`). A **workspace** is one agent's place to work: a lease on the server plus a stack of **drafts**. A draft is a changeset that is not on the line yet. **Land** rebases that stack onto the line tip and moves the line by compare-and-swap. There is no branch per change and no pull request between agents: concurrent work lands on the same line, and a conflict comes back in the files.
 
-Cloning by URL is coming in v0.1.0. For today's repository-name clone, log in to a named server once; the working copy records that server name.
+Log in to a named server once. `graft clone graft://HOST:PORT/REPO` uses the server whose endpoint matches that URL; the working copy records the server name. A bare repository name still uses the default server. A token never goes in the URL.
 
 ## Setup
 
@@ -17,7 +17,7 @@ The token is a bearer credential. Never print it, never pass it as an argument, 
 
 ## The loop
 
-1. **Clone.** `graft clone REPO DIR --line main` then `cd DIR`. A working copy is also a workspace. `graft workspace` shows it; `graft workspace renew` extends the lease.
+1. **Clone.** `graft clone graft://HOST:PORT/REPO DIR` (or `graft clone REPO DIR --line main` when a default server is configured) then `cd DIR`. A working copy is also a workspace. `graft workspace` shows it; `graft workspace renew` extends the lease.
 2. **Edit** with ordinary tools. `graft status` lists changes; `graft diff` shows them. `graft status --upstream` asks, without moving anything, how far the line tip is ahead and whether your files would merge or conflict. `graft status --drafts` lists other live workspaces with open drafts on those files (needs the `repo:<r>:drafts` scope).
 3. **Commit** a draft: `graft commit -m "message"`. More edits become another draft, or replace the head with `graft commit --amend`. `graft stack` lists the drafts; `graft stack squash` makes them one. Author defaults to `GRAFT_AUTHOR_NAME` / `GRAFT_AUTHOR_EMAIL`. Kind defaults to `GRAFT_AUTHOR_KIND` when set, else `human`. An agent sets `GRAFT_AUTHOR_KIND=agent`.
 4. **Sync** to pick up other lands: `graft sync`. Exit 0 means the working copy is on the tip (a stack is rebased). Exit 3 means conflicts; see below.
