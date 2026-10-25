@@ -65,7 +65,7 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
     };
     let target = clone_target(&args.repo)?;
     if let Some(from_url) = &target.line
-        && args.line != crate::cli::DEFAULT_LINE
+        && args.line_explicit
         && args.line != *from_url
     {
         return Err(Failure::usage(

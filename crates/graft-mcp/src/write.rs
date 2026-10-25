@@ -14,7 +14,7 @@ use graft_model::{
     Timestamp,
 };
 use graft_proto::{
-    ApiError, CallContext, Frame, PrincipalKind,
+    ApiError, CallContext, Frame, PrincipalKind, RepoUrl,
     api::{RepoApi, WorkspaceApi},
     types::{
         ConflictReason, ConflictSide, ConflictView, CreateChangeset, CreateLine, DraftState,
@@ -959,11 +959,9 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         cx: &CallContext,
         args: WorkspaceArgs,
     ) -> Result<CallToolResult, ToolError> {
-        let repo = repo_from_arg(&args.repo)?;
+        let (repo, from_url) = repo_from_arg(&args.repo, self.endpoint.as_deref())?;
         check_name("repo", &repo)?;
-        if args.action != WorkspaceAction::Open
-            && (args.repo.starts_with("graft://") || args.repo.starts_with("grafts://"))
-        {
+        if args.action != WorkspaceAction::Open && from_url.is_some() {
             return Err(invalid("a graft URL is accepted only when action is open"));
         }
         if let Some(name) = &args.name {
@@ -998,10 +996,18 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         };
         let view = match args.action {
             WorkspaceAction::Open => {
-                let line = args
-                    .line
-                    .clone()
-                    .ok_or_else(|| invalid("`line` is required to open a workspace"))?;
+                let line = match (&args.line, from_url.as_ref().and_then(|u| u.line.clone())) {
+                    (Some(given), Some(named)) if given != &named => {
+                        return Err(invalid(
+                            "the URL already names a line; drop `line` or drop ?line=",
+                        ));
+                    }
+                    (Some(given), _) => given.clone(),
+                    (None, Some(named)) => named,
+                    (None, None) => {
+                        return Err(invalid("`line` is required to open a workspace"));
+                    }
+                };
                 check_name("line", &line)?;
                 let at = match &args.at {
                     Some(rev) => Some(self.resolve(cx, &repo, rev).await?),
@@ -1315,42 +1321,33 @@ fn merge_mode(arg: Option<MergeArg>) -> MergeMode {
     }
 }
 
-/// `graft_workspace` accepts a repository name or `graft://host[:port]/repo`.
-/// The endpoint is not used: the MCP server is already connected. Userinfo is
-/// refused so a token is not accepted in the URL.
-fn repo_from_arg(value: &str) -> Result<String, ToolError> {
+/// `graft_workspace` accepts a repository name or a `graft://` URL parsed by
+/// [`RepoUrl`]. A URL is accepted only when its endpoint is the server this
+/// process is connected to. `?line=` is returned for `open` to use.
+fn repo_from_arg(
+    value: &str,
+    connected: Option<&str>,
+) -> Result<(String, Option<RepoUrl>), ToolError> {
     if !(value.starts_with("graft://") || value.starts_with("grafts://")) {
         if value.contains("://") {
             return Err(invalid(
                 "expected a repository name or graft://host[:port]/repo",
             ));
         }
-        return Ok(value.to_owned());
+        return Ok((value.to_owned(), None));
     }
-    let (tls, rest) = if let Some(rest) = value.strip_prefix("grafts://") {
-        (true, rest)
-    } else {
-        (false, value.strip_prefix("graft://").unwrap_or(value))
-    };
-    let _ = tls;
-    if rest.contains('@') {
+    let url = RepoUrl::parse(value).map_err(|message| invalid(&message))?;
+    let Some(connected) = connected else {
         return Err(invalid(
-            "a graft URL must not carry userinfo; configure the server token separately",
+            "a graft URL names a server, and this MCP process has no connected endpoint to match",
+        ));
+    };
+    if !url.matches_endpoint(connected) {
+        return Err(invalid(
+            "the graft URL names a different server than the one this MCP process is connected to",
         ));
     }
-    let Some((authority, after)) = rest.split_once('/') else {
-        return Err(invalid("expected graft://host[:port]/repo"));
-    };
-    if authority.is_empty() || after.is_empty() {
-        return Err(invalid("expected graft://host[:port]/repo"));
-    }
-    let path = after.split(['?', '#']).next().unwrap_or(after);
-    if path.is_empty() || path.contains('/') {
-        return Err(invalid(
-            "repository name in a graft URL must be a single path segment",
-        ));
-    }
-    Ok(path.to_owned())
+    Ok((url.repo.clone(), Some(url)))
 }
 
 fn invalid(message: &str) -> ToolError {
@@ -1636,14 +1633,24 @@ mod tests {
     }
 
     #[test]
-    fn workspace_repo_accepts_a_graft_url() {
-        assert_eq!(
-            repo_from_arg("graft://graft-dev:17888/rusttorrent").unwrap(),
-            "rusttorrent"
-        );
-        assert_eq!(repo_from_arg("grafts://[2001:db8::1]/app").unwrap(), "app");
-        assert!(repo_from_arg("graft://token@host/repo").is_err());
-        assert!(repo_from_arg("http://host/repo").is_err());
+    fn workspace_repo_accepts_a_matching_graft_url() {
+        let here = Some("http://graft-dev:17888");
+        let (repo, url) =
+            repo_from_arg("graft://graft-dev:17888/rusttorrent?line=trial", here).unwrap();
+        assert_eq!(repo, "rusttorrent");
+        assert_eq!(url.unwrap().line.as_deref(), Some("trial"));
+        let (repo, url) =
+            repo_from_arg("grafts://[2001:db8::1]/app", Some("https://[2001:db8::1]")).unwrap();
+        assert_eq!(repo, "app");
+        assert!(url.unwrap().line.is_none());
+        assert!(repo_from_arg("graft://token@host/repo", here).is_err());
+        assert!(repo_from_arg("http://host/repo", here).is_err());
+        assert!(repo_from_arg("graft://host:abc/repo", here).is_err());
+        assert!(repo_from_arg("graft://[::1/repo", here).is_err());
+        assert!(repo_from_arg("graft://a:1:2/repo", here).is_err());
+        assert!(repo_from_arg("graft://other:1/repo", here).is_err());
+        assert!(repo_from_arg("graft://graft-dev:17888/repo", None).is_err());
+        assert_eq!(repo_from_arg("demo", None).unwrap().0, "demo");
     }
 
     #[test]
