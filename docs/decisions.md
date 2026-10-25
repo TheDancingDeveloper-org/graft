@@ -919,3 +919,53 @@ Rejected:
   breaks the lease rule and the determinism of D26.
 - An opt-in `pr-batch --append`: a fix-forward that needs a flag gets
   forgotten; appending is the default and `--no-append` turns it off.
+
+## D32. Local repositories
+
+**Decided (operator, 2026-10-25, WI-2366): a local repository is a directory
+holding the SQLite metadata and the object tree, and the CLI opens the
+engine in-process when the working copy's server is `local`. The
+"clients are online" non-goal stands for remote repositories only.** The
+design is [design.md §5.4](design.md#54-local-repositories).
+
+- **Storage.** One directory: `meta.sqlite` (the server's schema and
+  migrations, `graft-store-sqlite`) and `objects/` (`graft-store-fs` frames).
+  No new encoding. `graft init [DIR] [--repo NAME]` creates it and a working
+  copy whose server is `local:<path>`. `graft clone <path>` opens another
+  working copy on the same directory and does not use the network.
+- **Opening.** The CLI builds `graft-engine`'s in-process `RepoApi` over those
+  two stores, the wiring the server already uses, and runs the command
+  against the trait. No HTTP, no node socket, no token. An exclusive lock
+  file (`repo.lock`) is held for the command; a second process gets a typed
+  busy error. One process at a time replaces leases. The local principal is
+  implicit.
+- **Unchanged rules.** Compare-and-swap lands, one transaction per logical
+  write (with its journal entry), objects durable before metadata names
+  them, costs follow the change, GC off by default, typed errors, bounded
+  responses. A conflict exits 3. `kill -9` during a land loses no
+  acknowledged write.
+- **Same commands.** Commit, sync, land, log, diff, blame, stack, revert,
+  pick, tag and line. `graft import` into it and `graft mirror export` out of
+  it. `graft mcp` on stdio uses the same trait object. The same binary still
+  clones a remote server when the server value is an endpoint.
+- **Not local.** No node daemon, no HTTP, no `/mcp` over HTTP, no tokens, no
+  ACL, no multi-user. Writing to a remote repository while offline stays
+  unsupported.
+- **Promotion.** Moving a local repository onto a server (`graft
+  push-to-server`) is a follow-up. This decision does not define it. The
+  working copy switches to a remote only by changing its server value, which
+  does not copy history.
+
+Why: first-run friction. Today trying graft needs a server, a mirror, a
+secrets directory and a minted token. Raised from a future-phase note to p1
+on 2026-10-25.
+
+Rejected:
+
+- A local cache that queues writes and reconciles later. That is the
+  offline-first model this decision keeps out, and it needs a second
+  consistency story.
+- A long-running local daemon. The point is no extra process. The lock file
+  is enough for one user.
+- A new store or a new crate. The server's sqlite and filesystem stores
+  already are the engine's ports.
