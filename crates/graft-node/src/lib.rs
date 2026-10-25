@@ -36,11 +36,10 @@ mod upstream;
 use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
+use tokio::sync::Notify;
 
 use axum::Router;
 use axum::extract::Request as HttpRequest;
@@ -66,9 +65,9 @@ use crate::upstream::{Upstream, UpstreamConfig};
 ///
 /// `GetObjects` answers and cache-miss fetches are started with
 /// [`Node::track`]. Those tasks clone this node and hold the cache store
-/// lock until they finish. [`Node::serve`] aborts them when the socket stops
-/// and joins them before it returns, so the lock is free when `serve`
-/// finishes (WI-2467).
+/// lock until they finish. [`Node::serve`] stops accepting new tasks when the
+/// socket stops and waits for the remaining work before it returns, so the
+/// lock is free when `serve` finishes (WI-2467).
 #[derive(Clone)]
 pub struct Node {
     objects: Objects,
@@ -81,54 +80,67 @@ pub struct Node {
 
 /// Tasks spawned by the node that clone it (object answers, fetch leads).
 ///
-/// [`Node::serve`] joins them, so their store handles are dropped before
-/// `serve` returns (WI-2467).
+/// Completed tasks leave no retained entry. [`Node::serve`] closes the
+/// tracker and waits for the remaining tasks to finish naturally, including
+/// blocking cache work, so their store handles are dropped before `serve`
+/// returns (WI-2467).
 #[derive(Clone)]
 pub(crate) struct Tracker {
-    set: Arc<Mutex<JoinSet<()>>>,
+    active: Arc<AtomicUsize>,
     stopping: Arc<AtomicBool>,
+    idle: Arc<Notify>,
 }
 
 impl Tracker {
     fn new() -> Self {
         Self {
-            set: Arc::new(Mutex::new(JoinSet::new())),
+            active: Arc::new(AtomicUsize::new(0)),
             stopping: Arc::new(AtomicBool::new(false)),
+            idle: Arc::new(Notify::new()),
         }
     }
 
     /// Spawns `task`. After shutdown has begun, does not spawn.
-    ///
-    /// The registrar does not hold a [`Node`]. It takes the same lock
-    /// [`Tracker::join`] takes before inserting, so a task cannot be missed
-    /// by shutdown except during the gap closed by [`Tracker::join`]'s second
-    /// pass.
     pub(crate) fn spawn<F>(&self, task: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let set = self.set.clone();
-        let stopping = self.stopping.clone();
+        self.active.fetch_add(1, Ordering::AcqRel);
+        if self.stopping.load(Ordering::Acquire) {
+            self.finish();
+            return;
+        }
+        let tracker = self.clone();
         tokio::spawn(async move {
-            let mut set = set.lock().await;
-            if stopping.load(Ordering::Acquire) {
-                return;
-            }
-            set.spawn(task);
+            let _active = ActiveTask(tracker);
+            task.await;
         });
     }
 
-    /// Aborts every spawned task and waits until it has dropped.
-    async fn join(&self) {
-        for _ in 0..8 {
-            {
-                let mut set = self.set.lock().await;
-                self.stopping.store(true, Ordering::Release);
-                set.abort_all();
-                while set.join_next().await.is_some() {}
-            }
-            tokio::task::yield_now().await;
+    fn finish(&self) {
+        if self.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.idle.notify_one();
         }
+    }
+
+    /// Refuses new tasks and waits until every spawned task has finished.
+    async fn join(&self) {
+        self.stopping.store(true, Ordering::Release);
+        loop {
+            let idle = self.idle.notified();
+            if self.active.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            idle.await;
+        }
+    }
+}
+
+struct ActiveTask(Tracker);
+
+impl Drop for ActiveTask {
+    fn drop(&mut self) {
+        self.0.finish();
     }
 }
 
