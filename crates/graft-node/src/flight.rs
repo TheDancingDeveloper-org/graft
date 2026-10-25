@@ -77,6 +77,8 @@ pub(crate) struct Flights {
     service_token: Option<Token>,
     metrics: NodeMetrics,
     next_request: AtomicU64,
+    /// Joins fetch leads when the node stops (WI-2467).
+    tasks: crate::Tracker,
 }
 
 impl Flights {
@@ -86,6 +88,7 @@ impl Flights {
         upstream: Upstream,
         service_token: Option<Token>,
         metrics: NodeMetrics,
+        tasks: crate::Tracker,
     ) -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
@@ -95,6 +98,7 @@ impl Flights {
             service_token,
             metrics,
             next_request: AtomicU64::new(0),
+            tasks,
         }
     }
 
@@ -147,7 +151,8 @@ impl Flights {
                 fills: tokio::task::JoinSet::new(),
                 filling: Arc::new(AtomicU64::new(0)),
             };
-            tokio::spawn(lead.run(token));
+            // The lead holds `Flights` (and the cache) until the node joins it.
+            self.tasks.spawn(lead.run(token));
         }
         waiters
     }

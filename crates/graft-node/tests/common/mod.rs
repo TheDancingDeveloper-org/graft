@@ -271,7 +271,8 @@ pub struct NodeRun {
     pub socket: PathBuf,
     pub node: Node,
     stop: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<Result<(), String>>>,
+    /// The task that accepts connections. Joined on stop (WI-2467).
+    serve: Option<JoinHandle<()>>,
 }
 
 pub fn config(dir: &Path, upstream: &str) -> NodeConfig {
@@ -295,33 +296,38 @@ impl NodeRun {
         let node = Node::open(&config, NodeMetrics::new().unwrap()).expect("open node");
         let (tx, rx) = oneshot::channel::<()>();
         let serving = node.clone();
-        let task = tokio::spawn(async move {
+        let serve = tokio::spawn(async move {
             serving
                 .serve(listener, async {
                     let _ = rx.await;
                 })
                 .await
+                .expect("serve failed")
         });
         Self {
             dir: config.cache_dir.clone(),
             socket: config.socket.clone(),
             node,
             stop: Some(tx),
-            task: Some(task),
+            serve: Some(serve),
         }
     }
 
-    /// Stops the node and waits for its serve task to finish, so the socket
-    /// is free by the time this returns.
+    /// Stops the accept task and waits up to 5s for it to finish.
+    ///
+    /// `Node::serve` joins the tasks that held the cache lock before this
+    /// returns, so a later `Node::open` of the same cache does not see
+    /// "in use by another process" (WI-2467). This run's own `Node` is still
+    /// alive until the run is dropped; drop it before opening again.
     pub async fn stop(&mut self) {
         if let Some(tx) = self.stop.take() {
             let _ = tx.send(());
         }
-        if let Some(task) = self.task.take() {
-            let done = tokio::time::timeout(Duration::from_secs(5), task)
+        if let Some(serve) = self.serve.take() {
+            let done = tokio::time::timeout(Duration::from_secs(5), serve)
                 .await
                 .expect("node did not stop within 5s");
-            done.expect("serve task panicked").expect("serve failed");
+            done.expect("node serve task panicked");
         }
     }
 
