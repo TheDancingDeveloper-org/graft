@@ -26,8 +26,8 @@ use graft_mcp::{
     WorkingCopySync, WorkingCopyTools, WorkingCopyUpstream,
 };
 use graft_model::{Author, AuthorKind, Metadata, Timestamp};
-use graft_proto::CallContext;
 use graft_proto::types::WorkspaceRef;
+use graft_proto::{ApiError, CallContext};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -301,7 +301,7 @@ impl WorkingCopyTools for Served {
                 ..LandOptions::default()
             };
             let ws = self.workspace_ref(&wc);
-            let out = with_heartbeat(
+            let landed = with_heartbeat(
                 &*self.remote,
                 cx,
                 ws,
@@ -309,8 +309,21 @@ impl WorkingCopyTools for Served {
                 HEARTBEAT_EVERY,
                 wc.land(&*self.remote, &cache, cx, &opts, &FetchOptions::default()),
             )
-            .await
-            .map_err(client)?;
+            .await;
+            let out = match landed {
+                Err(ClientError::Api(ApiError::StaleBase(detail))) => {
+                    return Ok(Some(json!({
+                        "outcome": "conflict",
+                        "kind": "stale_base",
+                        "current_tip": detail.current_tip.to_string(),
+                        "paths": detail.paths,
+                        "truncated": detail.truncated,
+                        "guidance": "run graft_sync, then graft_land",
+                        "recovered": recovered,
+                    })));
+                }
+                other => other.map_err(client)?,
+            };
             let line = wc.state().line.clone();
             let value = match out {
                 LandOutcome::Landed {

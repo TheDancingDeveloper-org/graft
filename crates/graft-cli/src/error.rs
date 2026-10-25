@@ -119,7 +119,7 @@ pub(crate) fn api_exit(e: &ApiError) -> (Exit, &'static str) {
         ApiError::Conflict { .. } | ApiError::MergeConflict(_) => (Exit::Conflict, "conflict"),
         ApiError::RefConflict { .. } => (Exit::Conflict, "ref_conflict"),
         ApiError::Contended { .. } => (Exit::Contended, "contended"),
-        ApiError::StaleBase(_) => (Exit::Rejected, "stale_base"),
+        ApiError::StaleBase(_) => (Exit::Conflict, "conflict"),
         ApiError::Rejected { .. } => (Exit::Rejected, "rejected"),
         ApiError::PermissionDenied { .. } => (Exit::Denied, "permission_denied"),
         ApiError::Unauthenticated => (Exit::Denied, "unauthenticated"),
@@ -316,7 +316,7 @@ mod tests {
                     paths: vec!["a".into()],
                     truncated: false,
                 })),
-                Exit::Rejected,
+                Exit::Conflict,
             ),
             (
                 ApiError::PermissionDenied {
@@ -353,8 +353,8 @@ mod tests {
         }))
         .into();
 
-        assert_eq!(failure.exit, Exit::Rejected);
-        assert_eq!(failure.kind, "stale_base");
+        assert_eq!(failure.exit, Exit::Conflict);
+        assert_eq!(failure.kind, "conflict");
         assert!(failure.message.contains(&current_tip.to_string()));
         assert_eq!(failure.detail["current_tip"], current_tip.to_string());
         assert_eq!(failure.detail["paths"], json!(["a", "b"]));

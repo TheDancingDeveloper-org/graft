@@ -350,10 +350,10 @@ fn after_a_conflict_sync_writes_markers_and_edit_commit_land_succeeds() {
     s.repo
         .race(put("src/lib.rs", "fn a() { 2 }\nfn b() {}\nfn c() {}\n"));
 
-    // Land: 5, a stale base, and nothing changes.
-    let a = wc_cmd(&app).args(["--json", "land"]).assert().code(5);
+    // Land: 3, a stale-base conflict, and nothing changes.
+    let a = wc_cmd(&app).args(["--json", "land"]).assert().code(3);
     let error = error_of(&a);
-    assert_eq!(error["kind"], json!("stale_base"));
+    assert_eq!(error["kind"], json!("conflict"));
     assert_eq!(error["paths"], json!(["src/lib.rs"]));
     assert_eq!(error["truncated"], json!(false));
     let tip = s.rt.block_on(s.repo.tip());
@@ -934,9 +934,9 @@ fn the_pre_land_check_stops_a_real_conflict_and_no_check_skips_it() {
     let a = wc_cmd(&app)
         .args(["--json", "land", "--no-check"])
         .assert()
-        .code(5);
+        .code(3);
     let error = error_of(&a);
-    assert_eq!(error["kind"], json!("stale_base"));
+    assert_eq!(error["kind"], json!("conflict"));
     assert_eq!(error["current_tip"], json!(tip.to_string()));
     assert_eq!(error["paths"], json!(["src/lib.rs"]));
     assert_eq!(error["truncated"], json!(false));
@@ -1324,7 +1324,7 @@ fn the_vogt_session_survives_land_and_a_conflicting_sync() {
     in_session(&["commit", "-m", "two"]);
     s.repo
         .race(put("src/lib.rs", "fn a() { 2 }\nfn b() {}\nfn c() {}\n"));
-    run(&app, &["land"]).code(5);
+    run(&app, &["land"]).code(3);
     run(&app, &["sync"]).code(3);
     fs::write(
         app.join("src/lib.rs"),

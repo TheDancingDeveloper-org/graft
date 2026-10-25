@@ -303,18 +303,46 @@ fn run(case: &Case) -> Result<(), TestCaseError> {
     let root_tree = r.changeset(tip.target).changeset.root;
     prop_assert_eq!(r.fetch(root_tree), model);
 
-    // The attempt budget rules out `Contended`, and a racer that conflicts
-    // with nothing lands.
+    // Conflicts are the model's, the attempt budget rules out `Contended`,
+    // and a racer that conflicts with nothing lands.
     for (i, result) in results.iter().enumerate() {
         let racer = &case.racers[i];
-        if let Err(ApiError::Contended { .. }) = result {
-            prop_assert!(
-                (case.attempts as usize) < n,
-                "racer {} contended with a budget of {} for {} racers",
-                i,
-                case.attempts,
-                n
-            );
+        match result {
+            Err(ApiError::StaleBase(detail)) => {
+                let q = chain[&detail.current_tip];
+                let since_base: BTreeSet<usize> = line_changes
+                    .range(racer.base as u64 + 1..=q)
+                    .flat_map(|(_, paths)| paths.iter().copied())
+                    .collect();
+                let first = racer
+                    .drafts
+                    .iter()
+                    .map(|draft| {
+                        draft
+                            .intersection(&since_base)
+                            .copied()
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .find(|hit| !hit.is_empty());
+                let want: Vec<String> = first
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|path| PATHS[path].to_owned())
+                    .collect();
+                prop_assert!(!want.is_empty(), "racer {} conflicted with nothing", i);
+                prop_assert_eq!(&detail.paths, &want);
+                prop_assert!(!detail.truncated);
+            }
+            Err(ApiError::Contended { .. }) => {
+                prop_assert!(
+                    (case.attempts as usize) < n,
+                    "racer {} contended with a budget of {} for {} racers",
+                    i,
+                    case.attempts,
+                    n
+                );
+            }
+            _ => {}
         }
         // A racer that conflicts with nothing lands when the budget allows.
         let alone = case

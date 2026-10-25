@@ -164,11 +164,7 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
                     Some(note) => failure.with_note(note),
                     None => failure,
                 };
-                if failure.kind() == "stale_base" {
-                    failure.with_detail("preflight", preflight.clone())
-                } else {
-                    failure
-                }
+                failure.with_detail("preflight", preflight.clone())
             })?,
         };
         let line = s.wc.state().line.clone();
