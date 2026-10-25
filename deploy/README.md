@@ -96,14 +96,15 @@ starts the mirrors, and a mirror's first `follow` against an empty repository
 is the initial import, as it was for `rusttorrent`. So the first deploy after
 a repository is added imports it, and a re-run changes nothing. `up.sh`
 pre-flights every mirror config, and waits up to `GRAFT_REFS_WAIT` seconds
-for each repository's first ref. Only `rusttorrent` fails the deploy at that
-deadline. A larger first import (vogt) that is still running gets a warning,
-and its mirror keeps going.
+for each repository's first ref. A repository that still has no ref when `GRAFT_REFS_WAIT` expires fails
+the deploy with "no ref after import". That is distinct from the "importing"
+log printed while the wait is still running, and from an error returned by
+the refs endpoint.
 
 ### Onboard another repository
 
 Run this from the graft checkout on the graft-dev VM, in a plain operator
-terminal that has the workspace `secret` wrapper and its Infisical identity:
+terminal on the graft-dev checkout:
 
 ```sh
 deploy/onboard-repo.sh OWNER/REPO BASE [LINE]
@@ -116,6 +117,17 @@ language-agnostic mirror config, regenerates `compose.onboarded.yml`, and
 runs `deploy/up.sh`. The normal deploy path creates the graft repository,
 mints its mirror token, starts the service, and waits for that repository's
 first imported ref before the command creates the integration line.
+
+A private upstream (one anonymous `git ls-remote` cannot read) gets a
+`[github] token_file` pointing at `/run/secrets/github-token`, mounted from
+`/etc/graft/github-token` on the host. The mirror's entrypoint is
+`deploy/private-follow.sh`, which reads that file into git's
+`http.extraHeader`. The token is not written into the config, printed, or
+placed in argv. An empty token file fails the mirror. Builtin public mirrors
+stay unauthenticated. Place the host file before onboarding a private
+repository; the file is mode 0600 and owned by uid 10001, like the other
+`/etc/graft` secrets. Generated mirror configs are mode 0644 so that user can
+read them.
 
 Session credentials follow D10 and `trial/mint-agent-tokens.sh`: one
 `--kind agent` token per session, minted with `--session`, scopes `read`,

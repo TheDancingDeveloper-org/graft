@@ -65,6 +65,7 @@ fn empty() -> Global {
         endpoint: None,
         repo: None,
         token_file: None,
+        directory: None,
     }
 }
 

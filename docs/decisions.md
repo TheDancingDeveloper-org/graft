@@ -65,6 +65,10 @@ Already decided by the operator (2026-10-22):
   batch PR is open and unsealed is appended to it as one more per-land
   commit, a fast-forward with a lease; no close and recut. Amends D21 and
   D28. See [D30](#d30-a-land-after-pr-batch-joins-the-open-batch-pr).
+- **D33** (operator, 2026-10-25, WI-2443): an empty changeset with fewer
+  than two parents is valid only when it carries `mirror.git-commit` from a
+  git import. Native empty changesets stay rejected, and a native write may
+  not set `mirror.*`. See [D33](#d33-empty-imported-changesets).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -102,6 +106,7 @@ Already decided by the operator (2026-10-22):
 | D28 | Batch PR review and merge | **Decided:** oversight reviews the batch PR as a whole; `land-pr` rebase-merges it past the squash queue (`--admin`) once GitHub's required checks pass; graft still never merges. Amends D21, D26 | — |
 | D29 | Merges between lines | **Decided:** one merge point per (source, target) line pair, written with the land and read by `MergeBase`; first-parent history, no second parent, no encoding change | — |
 | D30 | Appending to an open batch | **Decided:** a land after `pr-batch` joins the open, unsealed batch PR as one more commit (fast-forward with a lease); sealed batches take no appends | — |
+| D33 | Empty imported changesets | **Decided:** an empty changeset with fewer than two parents is valid only with `mirror.git-commit` (git import); native empty changesets stay rejected, and a native write may not set `mirror.*` | — |
 
 ---
 
@@ -920,7 +925,6 @@ Rejected:
 - An opt-in `pr-batch --append`: a fix-forward that needs a flag gets
   forgotten; appending is the default and `--no-append` turns it off.
 
-
 ## D31. Phase 1 measures agent friction, not read latency
 
 **Status:** accepted (operator decision, 2026-10-25, review WI-2445).
@@ -939,3 +943,93 @@ Rejected:
 **Unchanged.** D22 stands. Phase 2 (CI, D25) still starts only with the graft-primary authority switch. graft runs no build, test, check or checker anywhere in phase 1.
 
 **Wording.** graft does not remove conflicts on registration lists, moves or lockfiles. It reduces conflicts through line merge, and surfaces the rest in the agent's own session instead of as a DIRTY PR or a queue ejection hours later.
+
+## D32. Local repositories
+
+**Decided (operator, 2026-10-25, WI-2366): a local repository is a directory
+holding the SQLite metadata and the object tree, and the CLI opens the
+engine in-process when the working copy's server is `local`. The
+"clients are online" non-goal stands for remote repositories only.** The
+design is [design.md §5.4](design.md#54-local-repositories).
+
+- **Storage.** One directory: `meta.sqlite` (the server's schema and
+  migrations, `graft-store-sqlite`) and `objects/` (`graft-store-fs` frames).
+  No new encoding. `graft init [DIR] [--repo NAME]` creates it and a working
+  copy whose server is `local:<path>`. `graft clone <path>` opens another
+  working copy on the same directory and does not use the network.
+- **Opening.** The CLI builds `graft-engine`'s in-process `RepoApi` over those
+  two stores, the wiring the server already uses, and runs the command
+  against the trait. No HTTP, no node socket, no token. An exclusive lock
+  file (`repo.lock`) is held for the command; a second process gets a typed
+  busy error. One process at a time replaces leases. The local principal is
+  implicit.
+- **Unchanged rules.** Compare-and-swap lands, one transaction per logical
+  write (with its journal entry), objects durable before metadata names
+  them, costs follow the change, GC off by default, typed errors, bounded
+  responses. A conflict exits 3. `kill -9` during a land loses no
+  acknowledged write.
+- **Same commands.** Commit, sync, land, log, diff, blame, stack, revert,
+  pick, tag and line. `graft import` into it and `graft mirror export` out of
+  it. `graft mcp` on stdio uses the same trait object. The same binary still
+  clones a remote server when the server value is an endpoint.
+- **Not local.** No node daemon, no HTTP, no `/mcp` over HTTP, no tokens, no
+  ACL, no multi-user. Writing to a remote repository while offline stays
+  unsupported.
+- **Promotion.** Moving a local repository onto a server (`graft
+  push-to-server`) is a follow-up. This decision does not define it. The
+  working copy switches to a remote only by changing its server value, which
+  does not copy history.
+
+Why: first-run friction. Today trying graft needs a server, a mirror, a
+secrets directory and a minted token. Raised from a future-phase note to p1
+on 2026-10-25.
+
+Rejected:
+
+- A local cache that queues writes and reconciles later. That is the
+  offline-first model this decision keeps out, and it needs a second
+  consistency story.
+- A long-running local daemon. The point is no extra process. The lock file
+  is enough for one user.
+- A new store or a new crate. The server's sqlite and filesystem stores
+  already are the engine's ports.
+
+## D33. Empty imported changesets
+
+**Decided (operator, 2026-10-25, WI-2443): an empty changeset with fewer
+than two parents is valid only when its metadata carries `mirror.git-commit`.**
+That covers a single-parent commit and a parentless root. Native
+`CreateChangeset` with no changes and fewer than two parents stays rejected.
+This is an exception to validity rule 9 in
+[design.md §4.5](design.md#45-changesets). The canonical encoding does not
+change, and the golden vectors for native changesets are unchanged.
+
+rustnzb `main` has four single-parent commits whose tree is byte-identical
+to the parent's (`1443f1c2b16d527a0bb3345f8ad81a1c31f8da50`,
+`0951bf9507873a632742f7ffc27739f4dabdf37f`,
+`6bca7aecd7131ab4780d4b5eb3bf1b802a06da9d`,
+`48c2c30bd8768eef4c6672eee1cbf58adf23fb72`). Import precheck reports
+`empty-changeset` and writes nothing, so the follow never creates a ref.
+An empty change list is already a legal encoding for a merge
+(`parents.len() >= 2`). Accepting it for one parent does not change the
+bytes of ids, trees, changesets, frames or tokens. It does change the
+validity rule consumers enforce.
+
+- **Chosen:** `Changeset::check` allows zero changes with fewer than two
+  parents only when metadata contains `mirror.git-commit` (D19). The native
+  write boundary rejects any metadata key under `mirror.*`, including
+  `mirror.git-commit`, so only `graft-git` on import can set it. Export
+  already reproduces an empty diff from an empty change list plus the stored
+  raw headers, so `export(import(c)).sha == c.sha` holds. Native requests
+  without the key still fail `Rule::EmptyChangeset`, and a native request
+  that supplies `mirror.*` fails at the boundary before that rule.
+- **Rejected:**
+  - splicing the empty commits out of parent links and keeping only the raw
+    commit in the mirror (lossy against the complete DAG and against 100%
+    fidelity; every descendant's git parent changes);
+  - rewriting the four commits upstream before the follow can proceed;
+  - treating `--allow-lossy` as covering them (it only names commits whose
+    export sha does not match, and these never get that far).
+
+The model and importer change is a later PR. This decision does not
+implement it.

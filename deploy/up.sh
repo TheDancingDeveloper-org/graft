@@ -339,9 +339,9 @@ refs() {
 # Wait for one followed repository's first ref. The deadline is this repo's
 # own $refs_wait seconds, not a budget shared with the repos already checked:
 # a first import of a later repo (vogt is large) gets the full wait. A repo
-# that answers with an empty ref list is still importing; that is a warning
-# only when its own deadline passes. An error from the endpoint is different
-# and fails the deploy.
+# that answers with an empty ref list is still importing. When the deadline
+# passes with no ref, that is "no ref after import" and fails the deploy,
+# distinct from the importing log. An error from the endpoint also fails.
 wait_for_refs() {
   local svc=$1 mrepo=$2 tok=$3
   local deadline=$((SECONDS + refs_wait)) err rc
@@ -367,8 +367,8 @@ wait_for_refs() {
       die "$mrepo refs endpoint failed; not treating an endpoint error as a slow import (see: docker logs graft-dev-${svc#graft-})"
     fi
     if [ "$SECONDS" -ge "$deadline" ]; then
-      log "warning: $mrepo has no refs after ${refs_wait}s; its first import may still be running (see: docker logs graft-dev-${svc#graft-})"
-      return 0
+      log "error: $mrepo has no ref after import (${refs_wait}s); this is not the importing state (see: docker logs graft-dev-${svc#graft-})"
+      die "$mrepo has no ref after import"
     fi
     sleep "${GRAFT_REFS_POLL:-10}"
   done
