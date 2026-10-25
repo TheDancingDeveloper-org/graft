@@ -1,6 +1,6 @@
 # Bench methodology
 
-How the numbers in [docs/guide/bench.svg](guide/bench.svg) were measured,
+How the numbers in [bench.svg](bench.svg) were measured,
 and how to read them. The chart is generated from committed result files
 by `python3 bench/render.py`. It does not invent a figure.
 
@@ -27,7 +27,7 @@ as a speed change.
 
 The twelve-run read-path medians recorded by WI-2341 on 2026-10-24 are
 not in any file under `bench/results/`. They are written in
-[docs/status.md](status.md) and [docs/decisions.md](decisions.md) (D31):
+[docs/status.md](../status.md) and [docs/decisions.md](../decisions.md) (D31):
 
 | | 1k graft / git | 10k graft / git |
 | --- | ---: | ---: |
@@ -38,7 +38,7 @@ not in any file under `bench/results/`. They are written in
 Those cells are the floor. The single-run p50s drawn on the chart are
 older and slower, and they are not the floor.
 
-The scale-1,000 table in `docs/status.md` (clone 89 ms, status 5.6 ms,
+The scale-1,000 table in [docs/status.md](../status.md) (clone 89 ms, status 5.6 ms,
 and the rest of that table) also has no committed `results.json`. It is
 not drawn.
 
@@ -74,7 +74,7 @@ The chart uses the agreement block.
 `bench/results/2026-10-24-branching/results.json`, seed 2362. The chart
 shows round trips and conflict blocks for trunk, git flow and release
 branches, graft-tracked against git. This file predates merge points
-(WI-2372). `docs/status.md` records the later hand-off: with merge points,
+(WI-2372). [docs/status.md](../status.md) records the later hand-off: with merge points,
 graft reports the same conflicts as git (18 of 18 blocks) and merges
 `release/1.1` into `main` clean. That later run is not in this file, so
 it is not on the chart. The file will be regenerated; until then the
