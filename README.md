@@ -21,9 +21,11 @@ yet. What is delivered is in [docs/status.md](docs/status.md).
 > publish. Until then, build from a checkout:
 > `cargo run -p graft-cli -- --help`.
 
-Release binaries (Linux and macOS, x86_64 and aarch64):
+Release binaries (Linux x86_64 and aarch64; macOS Apple Silicon):
 
-Release CI builds and checksum-verifies all four target archives. The Rust
+Release CI builds and checksum-verifies all three target archives. There is no
+self-hosted Intel macOS runner, so v0.1.0 does not publish an
+`x86_64-apple-darwin` archive. The Rust
 test suite runs separately on the repository's self-hosted CI runner; the
 release matrix does not run target-specific tests from the packaged archives.
 
