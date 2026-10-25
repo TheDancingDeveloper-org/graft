@@ -93,10 +93,11 @@ jobs:
           scripts/release/changelog.sh "$version"
           scripts/release/release-notes.sh "$version" release-notes.md
           grep -q "^## $version " release-notes.md
+          test -f changes/README.md
+          test -z "$(find changes -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit)"
+          git checkout -- changes
           git checkout -- CHANGELOG.md 2>/dev/null || git clean -f -- CHANGELOG.md >/dev/null
           rm -f release-notes.md
-          # Fragments stay. A release PR deletes them after committing CHANGELOG.md.
-          test -f changes/README.md
 
 
   binaries-linux-x86_64:
@@ -238,7 +239,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -261,8 +261,6 @@ jobs:
             scripts/release/changelog.sh "$version"
           fi
           scripts/release/release-notes.sh "$version" release-notes.md
-      - name: crates.io dry-run (graft-* only)
-        run: RELEASE_PUBLISH=0 scripts/release/publish-crates.sh
       - name: GitHub release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:

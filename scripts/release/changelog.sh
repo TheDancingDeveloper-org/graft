@@ -4,9 +4,9 @@
 # Usage: scripts/release/changelog.sh <version>
 #   version is the release tag without a leading v (for example 0.1.0).
 #
-# Fragments are concatenated under a dated heading. README.md is skipped.
-# This script does not delete fragments; the release PR does that after the
-# assembled section is committed.
+# Fragments are concatenated under a dated heading, then deleted so the
+# release PR can commit CHANGELOG.md and the consumed fragments together.
+# changes/README.md is retained.
 set -eu
 
 version=${1:?usage: changelog.sh <version>}
@@ -45,4 +45,9 @@ trap 'rm -f "$tmp"' EXIT
 
 mv "$tmp" "$out"
 trap - EXIT
+for fragment in "$changes"/*.md; do
+  [ -f "$fragment" ] || continue
+  [ "$(basename "$fragment")" = README.md ] && continue
+  rm -- "$fragment"
+done
 printf 'wrote %s\n' "$out"
