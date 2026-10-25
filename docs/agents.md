@@ -20,7 +20,7 @@ The token is a bearer credential. Never print it, never pass it as an argument, 
 
 1. **Clone.** `g clone REPO DIR --line main` then `cd DIR`. A working copy is also a workspace. `g workspace` shows it; `g workspace renew` extends the lease.
 2. **Edit** with ordinary tools. `g status` lists changes; `g diff` shows them. `g status --upstream` asks, without moving anything, how far the line tip is ahead and whether your files would merge or conflict. `g status --drafts` lists other live workspaces with open drafts on those files (needs the `repo:<r>:drafts` scope).
-3. **Commit** a draft: `g commit -m "message"`. More edits become another draft, or replace the head with `g commit --amend`. `g stack` lists the drafts; `g stack squash` makes them one. Author defaults to `GRAFT_AUTHOR_NAME` / `GRAFT_AUTHOR_EMAIL`. Kind defaults to `GRAFT_AUTHOR_KIND`, else `agent` when `VOGT_SESSION_ID` is set, else `human`.
+3. **Commit** a draft: `g commit -m "message"`. More edits become another draft, or replace the head with `g commit --amend`. `g stack` lists the drafts; `g stack squash` makes them one. Author defaults to `GRAFT_AUTHOR_NAME` / `GRAFT_AUTHOR_EMAIL`. Kind defaults to `GRAFT_AUTHOR_KIND` when set, else `human`. An agent sets `GRAFT_AUTHOR_KIND=agent`.
 4. **Sync** to pick up other lands: `g sync`. Exit 0 means the working copy is on the tip (a stack is rebased). Exit 3 means conflicts; see below.
 5. **Land:** `g land` (add `--squash` to land the stack as one changeset). Before it sends anything, land runs a pre-land check: a dry-run rebase that stops on a real conflict, plus a report of overlapping drafts. `--no-check` skips it. The dry run needs only what a land needs. The overlap part needs `repo:<r>:drafts`; without that scope only that part is skipped (`pre-land: draft overlap not checked` on stderr) and the conflict stop still works. The check builds and tests nothing.
 
@@ -68,6 +68,8 @@ This repo is on graft, not git. Do not run git commit, git push or git pull.
 
 Setup (once per shell):
   export GRAFT_ENDPOINT=http://HOST:PORT
+  export GRAFT_AUTHOR_NAME="Name" GRAFT_AUTHOR_EMAIL="name@example"
+  export GRAFT_AUTHOR_KIND=agent
   g() { graft --token-file "$HOME/.config/graft/token" "$@"; }
 
 Loop:
