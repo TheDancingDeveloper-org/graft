@@ -16,7 +16,8 @@ pub(crate) const PAGE_DEFAULT: u32 = 100;
     name = "graft",
     about = "The graft command-line client.",
     disable_version_flag = true,
-    arg_required_else_help = true
+    arg_required_else_help = true,
+    after_help = "Server roles:\n  serve   Run the authoritative server\n  node    Run the host cache daemon\n  mirror  Import, follow, batch or export git repositories"
 )]
 pub(crate) struct Cli {
     #[command(flatten)]
@@ -126,9 +127,25 @@ pub(crate) enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run the authoritative server
+    #[command(hide = true)]
+    Serve(RoleArgs),
+    /// Run the host cache daemon
+    #[command(hide = true)]
+    Node(RoleArgs),
+    /// Import, follow, batch or export git repositories
+    #[command(hide = true)]
+    Mirror(RoleArgs),
     /// Commands designed but not built yet
     #[command(external_subcommand)]
     Planned(Vec<String>),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RoleArgs {
+    /// Arguments passed to the role
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub(crate) args: Vec<String>,
 }
 
 #[derive(Debug, Args)]

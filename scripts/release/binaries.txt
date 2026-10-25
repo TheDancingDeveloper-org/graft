@@ -1,7 +1,3 @@
 # Release binaries, one cargo package per line. The name after the colon is
-# the executable. WI-2447 will collapse graft-server, graft-node and
-# graft-mirror into subcommands of the graft CLI; update this list then.
+# the executable.
 graft-cli:graft
-graft-server:graft-server
-graft-node:graft-node
-graft-mirror:graft-mirror

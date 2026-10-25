@@ -20,6 +20,9 @@ workspace = true
 base64.workspace = true
 clap.workspace = true
 graft-client.workspace = true
+graft-mirror = { path = "../graft-mirror" }
+graft-node = { path = "../graft-node" }
+graft-server = { path = "../graft-server" }
 graft-store-fs.workspace = true
 graft-lsp.workspace = true
 graft-mcp.workspace = true

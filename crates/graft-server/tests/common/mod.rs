@@ -1,4 +1,4 @@
-//! Process-level harness: runs the `graft-server` binary as a child, talks
+//! Process-level harness: runs `graft serve` as a child, talks
 //! to it with the tonic clients generated in `graft-proto`, and speaks just
 //! enough HTTP/1.1 for the health endpoints and the JSON facade.
 
@@ -25,9 +25,30 @@ use tonic::transport::Channel;
 
 pub use graft_testkit::synth::{SynthSpec, generate};
 
-/// The server binary.
-pub fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_graft-server")
+/// The unified graft binary built in the workspace target directory.
+pub fn bin() -> PathBuf {
+    std::env::var_os("GRAFT_TEST_GRAFT_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .expect("current test executable")
+                .parent()
+                .and_then(Path::parent)
+                .expect("workspace target profile directory")
+                .join("graft")
+        })
+}
+
+pub fn command() -> Command {
+    let bin = bin();
+    assert!(
+        bin.is_file(),
+        "unified graft binary not found at {}; build graft-cli first or set GRAFT_TEST_GRAFT_BIN",
+        bin.display()
+    );
+    let mut command = Command::new(bin);
+    command.arg("serve");
+    command
 }
 
 /// `main` opted into decision D6 (`attested` on `ci/build` and `ci/test`,
@@ -79,10 +100,9 @@ impl Site {
     /// Starts the server and waits for it to listen.
     pub fn start(&self) -> Server {
         let started = Instant::now();
-        let mut child = Command::new(bin())
+        let mut child = command()
             .arg("--config")
             .arg(&self.config)
-            .arg("serve")
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -118,7 +138,7 @@ impl Site {
 
     /// Runs `graft-server admin <args>` against this site.
     pub fn admin(&self, args: &[&str]) -> Output {
-        Command::new(bin())
+        command()
             .arg("--config")
             .arg(&self.config)
             .arg("admin")
@@ -130,7 +150,7 @@ impl Site {
     /// Runs `graft-server admin <args>` with `stdin` on its standard input
     /// (how a token reaches `admin token revoke`, never through argv).
     pub fn admin_stdin(&self, args: &[&str], stdin: &str) -> Output {
-        let mut child = Command::new(bin())
+        let mut child = command()
             .arg("--config")
             .arg(&self.config)
             .arg("admin")

@@ -4,13 +4,35 @@
 mod common;
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use graft_node::NodeConfig;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_graft-node")
+fn bin() -> PathBuf {
+    std::env::var_os("GRAFT_TEST_GRAFT_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .expect("current test executable")
+                .parent()
+                .and_then(Path::parent)
+                .expect("workspace target profile directory")
+                .join("graft")
+        })
+}
+
+fn command() -> Command {
+    let bin = bin();
+    assert!(
+        bin.is_file(),
+        "unified graft binary not found at {}; build graft-cli first or set GRAFT_TEST_GRAFT_BIN",
+        bin.display()
+    );
+    let mut command = Command::new(bin);
+    command.arg("node");
+    command
 }
 
 #[test]
@@ -24,11 +46,7 @@ fn a_bad_config_exits_78() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("node.toml");
     std::fs::write(&path, "nonsense = true\n").unwrap();
-    let out = Command::new(bin())
-        .arg("--config")
-        .arg(&path)
-        .output()
-        .unwrap();
+    let out = command().arg("--config").arg(&path).output().unwrap();
     assert_eq!(out.status.code(), Some(78));
 }
 
@@ -44,7 +62,7 @@ fn starts_serves_metrics_and_stops_on_sigterm() {
     );
     std::fs::write(&path, text).unwrap();
     let started = Instant::now();
-    let mut child = Command::new(bin())
+    let mut child = command()
         .arg("--config")
         .arg(&path)
         .stdout(Stdio::piped())

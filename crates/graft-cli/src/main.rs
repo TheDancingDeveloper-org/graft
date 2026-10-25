@@ -47,6 +47,10 @@ pub(crate) enum Exit {
 }
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = legacy_role_entry(&args) {
+        return code;
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => return parse_failure(e),
@@ -55,12 +59,37 @@ fn main() -> ExitCode {
     if let Err(failure) = enter_directory(&cli.global) {
         return ExitCode::from(failure.report(json) as u8);
     }
+    if let Some(code) = role_entry(&cli.command) {
+        return code;
+    }
     let result = dispatch(&cli);
     let code = match result {
         Ok(()) => Exit::Ok,
         Err(failure) => failure.report(json),
     };
     ExitCode::from(code as u8)
+}
+
+fn legacy_role_entry(args: &[String]) -> Option<ExitCode> {
+    let executable = std::path::Path::new(args.first()?)
+        .file_name()
+        .and_then(|name| name.to_str())?;
+    let rest = || args.iter().skip(1).cloned().collect();
+    match executable {
+        "graft-server" => Some(graft_server::run(rest())),
+        "graft-node" => Some(graft_node::run(rest())),
+        "graft-mirror" => Some(graft_mirror::run(rest())),
+        _ => None,
+    }
+}
+
+fn role_entry(command: &Command) -> Option<ExitCode> {
+    match command {
+        Command::Serve(args) => Some(graft_server::run(args.args.clone())),
+        Command::Node(args) => Some(graft_node::run(args.args.clone())),
+        Command::Mirror(args) => Some(graft_mirror::run(args.args.clone())),
+        _ => None,
+    }
 }
 
 /// A command line clap refused. Help and version print as usual. A usage
@@ -131,6 +160,7 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
             Exit::Ok => Ok(()),
             code => Err(Failure::silent(code)),
         },
+        Command::Serve(_) | Command::Node(_) | Command::Mirror(_) => unreachable!("role command"),
         Command::Planned(args) => {
             let name = args.first().map_or("", String::as_str);
             Err(Failure::usage(format!("unknown command: {name}")))

@@ -441,10 +441,9 @@ fn sigterm_during_start_up_exits_clean_with_nothing_bound() {
     )
     .expect("write config");
 
-    let mut child = std::process::Command::new(common::bin())
+    let mut child = common::command()
         .arg("--config")
         .arg(&site.config)
-        .arg("serve")
         .env("GRAFT_TEST_HOLD_START_UP", "1")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -586,10 +585,9 @@ fn admin_commands_and_their_exit_codes() {
         assert!(out.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("chmod 600"), "{stderr}");
-        let out = std::process::Command::new(common::bin())
+        let out = common::command()
             .arg("--config")
             .arg(&site.config)
-            .arg("serve")
             .output()
             .expect("run");
         assert!(!out.status.success());
@@ -605,8 +603,8 @@ fn admin_commands_and_their_exit_codes() {
     assert_eq!(r.json()["refs"], serde_json::json!([]));
     drop(server);
 
-    let out = std::process::Command::new(common::bin())
-        .args(["--config", "/nonexistent/graft.toml", "serve"])
+    let out = common::command()
+        .args(["--config", "/nonexistent/graft.toml"])
         .output()
         .expect("run");
     assert_eq!(out.status.code(), Some(78));
