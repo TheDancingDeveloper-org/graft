@@ -333,21 +333,15 @@ impl Mirror {
         }
     }
 
-    /// Fetches `branches` from upstream into [`UPSTREAM_NS`], forced: the
-    /// copy always equals upstream, and follow decides what graft may take.
+    /// Fetches `branches` from the configured upstream into [`UPSTREAM_NS`],
+    /// forced: the copy always equals upstream, and follow decides what
+    /// graft may take.
     pub async fn fetch(&self, branches: &[&str]) -> Result<(), GitCliError> {
-        self.fetch_from(self.upstream.as_str(), branches).await
-    }
-
-    /// Fetches `branches` from `remote` instead of the configured upstream.
-    /// `ls-remote` still uses the configured upstream, so a test can make
-    /// only the fetch fail.
-    pub async fn fetch_from(&self, remote: &str, branches: &[&str]) -> Result<(), GitCliError> {
         let specs: Vec<String> = branches
             .iter()
             .map(|b| format!("+refs/heads/{b}:{}", Mirror::upstream_ref(b)))
             .collect();
-        let mut args = vec!["fetch", "-q", "--no-tags", remote];
+        let mut args = vec!["fetch", "-q", "--no-tags", self.upstream.as_str()];
         args.extend(specs.iter().map(String::as_str));
         ok(Some(&self.dir), &args).await?;
         Ok(())

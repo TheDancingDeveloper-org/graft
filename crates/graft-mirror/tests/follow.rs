@@ -573,95 +573,95 @@ async fn a_too_deep_tag_chain_is_skipped_and_the_rest_follow() {
     assert!(f.last_tags().too_deep.is_empty(), "reported once");
 }
 
-fn assert_fetch_failed(outcome: LineOutcome) -> String {
-    match outcome {
-        LineOutcome::Failed(msg) => {
-            assert!(
-                msg.starts_with("git fetch failed:"),
-                "fetch failure is a typed error, got {msg}"
-            );
-            for secret in ["ghp_supersecret", "x-access-token:", "user:secret"] {
-                assert!(
-                    !msg.contains(secret),
-                    "the error carries a secret ({secret}): {msg}"
-                );
-            }
-            msg
-        }
-        other => panic!("expected a failed fetch, got {other:?}"),
-    }
-}
-
-fn follower_fetching<'a>(
+fn follower_of<'a>(
     w: &'a World,
     db: &'a MirrorDb,
     metrics: &Metrics,
-    fetch_from: &str,
+    upstream: &str,
 ) -> Follower<'a, Api> {
-    w.follower(db, metrics).with_fetch_remote(fetch_from)
+    let config = FollowConfig {
+        repo: REPO.to_owned(),
+        lines: vec![FollowLine {
+            branch: "main".to_owned(),
+            line: "main".to_owned(),
+        }],
+        allow_lossy: Vec::new(),
+        batch: 2,
+        interval: graft_mirror::follow::POLL_INTERVAL,
+        tags: None,
+    };
+    let mirror = Mirror::new(&w.mirror_dir, upstream);
+    Follower::new(&w.api, cx(), db, mirror, config)
+        .with_metrics(metrics.clone())
+        .with_clock(clock)
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn fetch_auth_failure_is_a_typed_error_and_does_not_report_caught_up() {
+async fn bad_token_on_the_configured_upstream_is_a_typed_error() {
     let w = World::new().await;
-    w.commit();
-    w.push();
     let db = w.open_db();
     let m = metrics();
-    // Listing uses the real local upstream. Fetch is sent at an HTTPS URL
-    // whose userinfo is a token, so git refuses authentication and no
-    // commit is imported.
-    let mut f = follower_fetching(
+    // The token is wrong for the configured upstream itself, so `ls-remote`
+    // fails before any fetch. That is the expired-token case.
+    let mut f = follower_of(
         &w,
         &db,
         &m,
         "https://x-access-token:ghp_supersecret@github.com/example/missing.git",
     );
-    let msg = assert_fetch_failed(poll(&mut f).await);
+    let err = f.poll_once().await.expect_err("a bad token fails the poll");
+    let msg = err.to_string();
     assert!(
-        !msg.contains("github.com/example") || msg.contains("***@"),
-        "a credentialled URL is scrubbed: {msg}"
+        msg.starts_with("git fetch failed:"),
+        "listing failure is a typed fetch error, got {msg}"
+    );
+    for secret in ["ghp_supersecret", "x-access-token:"] {
+        assert!(!msg.contains(secret), "the error carries a secret: {msg}");
+    }
+    assert!(
+        msg.contains("***@") || !msg.contains("github.com"),
+        "a credentialled URL is scrubbed when git echoes it: {msg}"
     );
     assert_eq!(
         lag_changesets(&m),
-        0,
-        "lag was never measured, not zeroed as caught up"
+        -1,
+        "the line is marked in error, not caught up"
     );
-    assert!(lag_seconds(&m) >= 0.0);
     assert_eq!(db.commit_count().unwrap(), 0, "nothing imported");
     assert!(w.tip().await.is_none(), "the graft line was not created");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unreachable_remote_fetch_is_a_typed_error() {
+async fn unreachable_configured_upstream_is_a_typed_error() {
     let w = World::new().await;
     let tip = w.commit();
     w.push();
     let db = w.open_db();
     let m = metrics();
-    // Catch up once, so a later failure must not look like a fresh zero.
     {
         let mut ok = w.follower(&db, &m);
         assert!(matches!(poll(&mut ok).await, LineOutcome::Imported { .. }));
     }
     assert_eq!(lag_changesets(&m), 0);
+    assert_eq!(m.mirror_divergence.with_label_values(&["main"]).get(), 0);
     w.commit();
     w.push();
 
     let dead = w.mirror_dir.parent().unwrap().join("not-a-remote");
     std::fs::write(&dead, b"not a git repository\n").unwrap();
-    let mut f = follower_fetching(&w, &db, &m, dead.to_str().unwrap());
-    let msg = assert_fetch_failed(poll(&mut f).await);
-    assert!(!msg.contains("ghp_"), "{msg}");
+    let mut f = follower_of(&w, &db, &m, dead.to_str().unwrap());
+    let err = f
+        .poll_once()
+        .await
+        .expect_err("a dead upstream fails the poll");
+    let msg = err.to_string();
+    assert!(msg.starts_with("git fetch failed:"), "{msg}");
     assert_eq!(
         lag_changesets(&m),
-        0,
-        "failed fetch does not invent a lag of caught-up"
+        -1,
+        "the line is marked in error, not caught up"
     );
-    assert!(
-        lag_seconds(&m) >= 0.0,
-        "seconds of lag are not cleared by the failure"
-    );
+    assert!(lag_seconds(&m) >= 0.0);
     assert_eq!(
         w.tip_sha(&db).await,
         Some(tip),

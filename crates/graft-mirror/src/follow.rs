@@ -169,10 +169,6 @@ pub struct Follower<'a, A> {
     cx: CallContext,
     db: &'a MirrorDb,
     mirror: Mirror,
-    /// When set, `git fetch` uses this remote instead of the mirror's
-    /// upstream. `ls-remote` is unchanged. Tests use it to fail the fetch
-    /// after listing succeeds.
-    fetch_remote: Option<String>,
     config: FollowConfig,
     metrics: Option<Metrics>,
     clock: fn() -> i64,
@@ -205,7 +201,6 @@ where
             cx,
             db,
             mirror,
-            fetch_remote: None,
             config,
             metrics: None,
             clock: system_ms,
@@ -213,12 +208,6 @@ where
             seen_tags: HashMap::new(),
             last_tags: TagReport::default(),
         }
-    }
-
-    /// Fetches from `remote` instead of the configured upstream.
-    pub fn with_fetch_remote(mut self, remote: impl Into<String>) -> Self {
-        self.fetch_remote = Some(remote.into());
-        self
     }
 
     /// Exports lag and divergence to `metrics`.
@@ -275,13 +264,18 @@ where
         let heads = match self.mirror.ls_remote(&branches).await {
             Ok(heads) => heads,
             Err(e) => {
-                // Lag keeps counting while upstream is unreachable.
+                // Listing the configured upstream failed (a bad token, a
+                // dead host). That is the fetch failure an operator sees:
+                // a typed error, not a caught-up lag of 0. The changeset
+                // lag gauge is marked with its bounded error value (-1).
+                let err = MirrorError::Fetch(scrub_git(&e.to_string()));
                 for l in &self.config.lines {
+                    self.note_fetch_error(&l.line);
                     if let Ok(state) = self.db.line(&l.line) {
                         self.export_state(&l.line, &state);
                     }
                 }
-                return Err(e.into());
+                return Err(err);
             }
         };
         let mut out = Vec::with_capacity(heads.len());
@@ -484,14 +478,12 @@ where
             self.db.set_line(&l.line, &state)?;
         }
 
-        let fetched = match &self.fetch_remote {
-            Some(remote) => self.mirror.fetch_from(remote, &[l.branch.as_str()]).await,
-            None => self.mirror.fetch(&[l.branch.as_str()]).await,
-        };
+        let fetched = self.mirror.fetch(&[l.branch.as_str()]).await;
         if let Err(e) = fetched {
-            // Not caught up. Do not zero the changeset lag: it stays at the
-            // last measured value (unset until a fetch succeeds). Seconds of
-            // lag keep counting from behind_since_ms. The message is scrubbed.
+            self.note_fetch_error(&l.line);
+            // Not caught up. The changeset lag is the bounded error value
+            // (-1), not zero. Seconds of lag keep counting from
+            // behind_since_ms. The message is scrubbed.
             return Err(MirrorError::Fetch(scrub_git(&e.to_string())));
         }
         let repo = self.config.repo.clone();
@@ -599,6 +591,15 @@ where
             m.mirror_lag_changesets
                 .with_label_values(&[line])
                 .set(n as i64);
+        }
+    }
+
+    /// Marks `line` as failing its upstream fetch. `-1` is the bounded
+    /// error state: the line is not caught up, and the metric cannot be
+    /// mistaken for a measured lag of zero.
+    fn note_fetch_error(&self, line: &str) {
+        if let Some(m) = &self.metrics {
+            m.mirror_lag_changesets.with_label_values(&[line]).set(-1);
         }
     }
 
