@@ -33,10 +33,11 @@
 #   GRAFT_SECRETS_DIR       secrets directory (default /etc/graft)
 #   GRAFT_REMINT=1          mint a new mirror token even if the current one is fresh
 #   GRAFT_TOKEN_RENEW_DAYS  re-mint a token older than this (default 20; TTL is 30)
-#   GRAFT_REFS_WAIT         seconds to wait for rusttorrent's first ref (default 600);
-#                           the other followed repos are waited on too, but a
-#                           first import still running at the deadline is
-#                           only a warning
+#   GRAFT_REFS_WAIT         seconds each followed repo waits for its first ref
+#                           (default 600). A repo still in its first import at
+#                           its own deadline is a warning, not a failed deploy;
+#                           an error from the refs endpoint is logged and fails
+#                           the deploy.
 #   GRAFT_ATTESTER=1        run the trial attester (profile `attester`)
 #   GRAFT_ATTESTER_REPO     the repository it attests (default rusttorrent)
 #   GRAFT_ATTESTER_LINE     the line whose drafts it attests (default trial-1)
@@ -67,7 +68,6 @@ set -a
 . "$here/image.env"
 set +a
 
-repo=rusttorrent
 # Every repository the stack serves; creating one that exists is a no-op.
 repos=(rusttorrent graft-dev fluent2-egui vogt)
 # The followed repositories, one graft-mirror service each (trial 3):
@@ -326,36 +326,55 @@ log "recorded $GRAFT_IMAGE and its configs as the last good deploy"
 # The /v1 facade, authenticated with the mirror token. The token goes to curl
 # on stdin (-H @-), never in arguments, and is never printed.
 # Each repository is asked with its own mirror's token.
+# Prints the body on success. On a transport or HTTP error, prints curl's
+# message to stderr and returns curl's status, so a caller can tell "no refs
+# yet" (success, empty list) from an endpoint that is failing.
 refs() {
   as_root "cat /s/$2" \
     | sed 's/^/Authorization: Bearer /' \
     | curl -fsS -H @- "$base/v1/repos/$1/refs?limit=100"
 }
 
-# Every followed repository must have a ref. rusttorrent is the gate; the
-# others may still be in their first import (vogt is large), so a deadline
-# there is a warning and the mirror carries on in the background.
-deadline=$((SECONDS + refs_wait))
-for m in "${mirrors[@]}"; do
-  read -r svc mrepo tok _ <<<"$m"
-  log "health: $base/v1/repos/$mrepo/refs (waiting until ${refs_wait}s for a ref)"
+# Wait for one followed repository's first ref. The deadline is this repo's
+# own $refs_wait seconds, not a budget shared with the repos already checked:
+# a first import of a later repo (vogt is large) gets the full wait. A repo
+# that answers with an empty ref list is still importing; that is a warning
+# only when its own deadline passes. An error from the endpoint is different
+# and fails the deploy.
+wait_for_refs() {
+  local svc=$1 mrepo=$2 tok=$3
+  local deadline=$((SECONDS + refs_wait)) err rc
+  log "health: $base/v1/repos/$mrepo/refs (waiting up to ${refs_wait}s for a ref)"
   while :; do
-    if body=$(refs "$mrepo" "$tok"); then
+    err=$(mktemp)
+    if body=$(refs "$mrepo" "$tok" 2>"$err"); then
+      rc=0
+    else
+      rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
       count=$(printf '%s' "$body" | grep -o '"name"' | wc -l)
+      rm -f "$err"
       if [ "$count" -gt 0 ]; then
         log "ok: $mrepo has $count ref(s)"
-        break
+        return 0
       fi
+      log "$mrepo is importing (no refs yet)"
     else
-      log "/v1 refs request for $mrepo failed; retrying"
+      log "error: /v1 refs for $mrepo failed (curl exit $rc): $(tr '\n' ' ' <"$err")"
+      rm -f "$err"
+      die "$mrepo refs endpoint failed; not treating an endpoint error as a slow import (see: docker logs graft-dev-${svc#graft-})"
     fi
     if [ "$SECONDS" -ge "$deadline" ]; then
-      [ "$mrepo" = "$repo" ] \
-        && die "$mrepo has no refs after ${refs_wait}s (see: docker logs graft-dev-${svc#graft-})"
-      log "warning: $mrepo has no refs yet; its first import may still be running (see: docker logs graft-dev-${svc#graft-})"
-      break
+      log "warning: $mrepo has no refs after ${refs_wait}s; its first import may still be running (see: docker logs graft-dev-${svc#graft-})"
+      return 0
     fi
-    sleep 10
+    sleep "${GRAFT_REFS_POLL:-10}"
   done
+}
+
+for m in "${mirrors[@]}"; do
+  read -r svc mrepo tok _ <<<"$m"
+  wait_for_refs "$svc" "$mrepo" "$tok"
 done
 log "stack is up"
