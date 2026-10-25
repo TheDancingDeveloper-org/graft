@@ -9,55 +9,47 @@ history, and the server does the commit, history, diff, rebase and land.
 It is for agent fleets — many short sessions on one codebase — that need
 git-like commands without a branch or a pull request per change.
 
-**Status: pre-v0.1.0, phase 1 (a git alternative).** Import, clone, commit,
-sync, line-merge land and git export work today through the CLI, MCP and LSP.
-Local mode and release binaries are not shipped yet. Named server login,
-config and clone-by-URL are available in the CLI. What is delivered is in
-[docs/status.md](docs/status.md).
+**Status: pre-v0.1.0, phase 1 (a git alternative).** Clone, commit,
+sync, line-merge land, named-server login and git export work today through
+the CLI, MCP and LSP. `graft init` (local mode) and `graft serve --dev` are
+not in the binary yet. graft does not run builds, tests or checkers.
+What is delivered is in [docs/status.md](docs/status.md).
 
 ## Install
 
-> **lands in v0.1.0.** There is no GitHub release or container image yet.
-> The binary and container commands below use the locations that release will
-> publish. Until then, build from a checkout:
-> `cargo run -p graft-cli -- --help`.
-
-Release binaries (Linux x86_64 and aarch64; macOS Apple Silicon):
-
-Release CI builds and checksum-verifies all three target archives. There is no
-self-hosted Intel macOS runner, so v0.1.0 does not publish an
-`x86_64-apple-darwin` archive. The Rust
-test suite runs separately on the repository's self-hosted CI runner; the
-release matrix does not run target-specific tests from the packaged archives.
+There is no crates.io package and no published release yet. Build the CLI
+from this repository:
 
 ```sh
-curl -fsSL -o graft.tar.gz https://github.com/TheDancingDeveloper-org/graft/releases/download/v0.1.0/graft-x86_64-unknown-linux-musl.tar.gz
+cargo install --git https://github.com/TheDancingDeveloper-org/graft graft-cli
+```
+
+That installs the `graft` binary (clone, commit, sync, land, login, MCP).
+`graft-server`, `graft-node` and `graft-mirror` are separate workspace
+binaries; build them from a checkout with `cargo build -p graft-cli`.
+
+Release binaries and the container image are produced by the release
+workflow when a `v*` tag is pushed. They are not published yet. The
+locations that tag will use:
+
+```sh
+curl -fsSL -o graft.tar.gz https://github.com/TheDancingDeveloper-org/graft/releases/download/vX.Y.Z/graft-x86_64-unknown-linux-musl.tar.gz
 tar -xzf graft.tar.gz
 ./graft version
+
+docker run --rm ghcr.io/thedancingdeveloper-org/graft:vX.Y.Z version
 ```
 
-From crates.io:
-
-`cargo install graft-cli` is not available for v0.1.0. The CLI still depends
-on unpublished workspace crates through path dependencies, so this release
-ships binaries and the container image only. Publishing the dependency chain
-to crates.io is follow-up work.
-
-Container image:
-
-```sh
-docker run --rm ghcr.io/thedancingdeveloper-org/graft:v0.1.0 version
-```
-
-Today the workspace is four binaries (`graft`, `graft-server`, `graft-node`,
-`graft-mirror`). One binary that also serves, caches and mirrors is part of
-the same release.
+Archives are Linux x86_64, Linux aarch64 and macOS Apple Silicon. There is
+no Intel macOS archive. Do not `cargo install graft` or `graft-cli` from
+crates.io: those names are not published.
 
 ## Quick start: local
 
-> **lands in v0.1.0.** `graft init` does not exist yet. A local repository
-> will be a directory the CLI opens in-process: no server, no daemon, no
-> token. The commands below are the ones that mode will accept.
+`graft init` is specified and not built yet. When it lands, a local
+repository is a directory the CLI opens in-process: no server, no daemon,
+no token. The commands below are the ones that mode will accept. Until
+then, use the server quick start.
 
 ```sh
 graft init demo && cd demo
@@ -70,30 +62,32 @@ graft commit -m "add a line"
 graft land                       # moves the line by compare-and-swap
 ```
 
-From the second copy, edit a different region of `file.txt`, commit and land.
-The server-side line merge (merge3) keeps both edits. Overlapping edits exit
-3 with conflict markers in the file.
+From the second copy, edit a different region of `file.txt`, commit and
+land. Line merge (merge3) keeps both edits. A second land of an overlapping
+edit exits 3 with conflict markers in the file.
 
 ## Quick start: server
 
-> **lands in v0.1.0** for `graft serve --dev`. Clone by URL works today:
-> `graft clone graft://HOST:PORT/REPO`. The token comes from a matching
-> `graft login`, never from the URL. A bare repository name still uses the
-> default server ([docs/agents.md](docs/agents.md)).
+`graft serve --dev` is not built yet. Clone by URL works today against a
+server you already run: `graft clone graft://HOST:PORT/REPO`. The token
+comes from `graft login`, never from the URL.
 
 ```sh
-graft login dev --endpoint http://127.0.0.1:17888 < ~/.config/graft/token
-graft clone demo
-cd demo
+graft login dev
+graft clone graft://HOST:PORT/REPO
+cd REPO
 printf 'hello\n' > readme.txt
 graft commit -m "hello"
+graft sync
 graft land
 ```
 
-The future `--dev` mode will bind loopback, generate a signing key, write an
-admin token into the user config (never on stdout or the command line) and
-print the clone command. Today `graft login` reads the token from stdin (or
-`--token-file`), verifies the server, and stores a private token-file reference.
+`graft login` reads the token from stdin or `--token-file`, checks the
+server, and stores a private token-file reference. It never takes the token
+as an argument. When `graft serve --dev` lands it will bind loopback, write
+that token into the user config (never on stdout or the command line) and
+print the clone command. Running a server today is
+[docs/dev-stack.md](docs/dev-stack.md).
 
 ## Using it with agents
 
@@ -101,9 +95,15 @@ The agent loop is clone, edit, commit, sync, land. A conflict comes back in
 the files (exit 3), not as a pull request. The short guide, including the
 exit codes and what never to do, is [docs/agents.md](docs/agents.md).
 
-MCP is `graft mcp` on stdio. Inside a working copy it needs no flags
-(`claude mcp add graft -- graft mcp`). Codex and Cursor snippets, the tool
-list, and the server `/mcp` form are in [docs/agents.md](docs/agents.md).
+MCP is `graft mcp` on stdio. Inside a working copy it needs no flags:
+
+```sh
+claude mcp add graft -- graft mcp
+```
+
+Codex and Cursor snippets (`graft mcp --print-config codex` and
+`graft mcp --print-config cursor`), the tool list, and the server `/mcp`
+form are in [docs/agents.md](docs/agents.md).
 
 ## Migrating from git
 
@@ -116,9 +116,10 @@ Git stays in the mirror. Nothing else in graft speaks git.
 | Batch export | `graft-mirror pr-batch` | Deliver lands to GitHub as one pull request, one commit per land |
 | Full export | `graft-mirror export` | Write the history back out to git. This is the exit path |
 
-> **lands in v0.1.0.** `graft import <git-path>` into a local repository,
-> and `graft mirror …` as subcommands of the one binary. Until then the
-> commands are the `graft-mirror` binary.
+`graft import` and `graft mirror` as subcommands of the one binary are
+not built yet. Until then the commands are the `graft-mirror` binary,
+which is hidden behind `graft mirror` only when experimental commands are
+enabled. Build it with `cargo build -p graft-mirror`.
 
 ## How it compares
 
