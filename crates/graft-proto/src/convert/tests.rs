@@ -11,7 +11,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
 use super::WireError;
-use crate::error::{ApiError, ConflictPath};
+use crate::error::{ApiError, ConflictPath, MAX_STALE_PATHS, StaleBase};
 use crate::frame::Frame;
 use crate::pb;
 use crate::types::*;
@@ -249,6 +249,13 @@ fn api_error() -> impl Strategy<Value = ApiError> {
         any::<u64>().prop_map(|retry_after_ms| ApiError::Unavailable { retry_after_ms }),
         Just(ApiError::Unauthenticated),
         text().prop_map(|server| ApiError::IncompatibleProtocol { server }),
+        (cid(), prop::collection::vec(text(), 0..3), any::<bool>()).prop_map(
+            |(current_tip, paths, truncated)| ApiError::StaleBase(Box::new(StaleBase {
+                current_tip,
+                paths,
+                truncated,
+            }))
+        ),
         (
             prop::collection::vec(conflict_path(), 0..3),
             cid(),
@@ -781,6 +788,42 @@ fn rejects_unspecified_enums_and_missing_fields() {
     assert!(r.is_err());
     assert!(ChangesetSummary::try_from(pb::ChangesetSummary::default()).is_err());
     assert!(ApiError::try_from(pb::ApiError::default()).is_err());
+}
+
+#[test]
+fn stale_base_wire_details_are_bounded() {
+    let wire = pb::ApiError {
+        error: Some(pb::api_error::Error::Rejected(pb::api_error::Rejected {
+            policy: "stale-base".into(),
+            detail: "sync, then land again".into(),
+        })),
+        stale_base: Some(pb::api_error::StaleBase {
+            current_tip: Some(vec![1; 32]),
+            paths: vec!["p".into(); MAX_STALE_PATHS + 1],
+            truncated: Some(true),
+        }),
+    };
+    assert_eq!(
+        ApiError::try_from(wire),
+        Err(WireError {
+            field: "stale_base.paths",
+            reason: "too many paths",
+        })
+    );
+}
+
+#[test]
+fn stale_base_outbound_details_are_truncated() {
+    let wire = pb::ApiError::from(ApiError::StaleBase(Box::new(StaleBase {
+        current_tip: ChangesetId(ObjectId([1; 32])),
+        paths: (0..MAX_STALE_PATHS + 1)
+            .map(|index| format!("path-{index}"))
+            .collect(),
+        truncated: false,
+    })));
+    let details = wire.stale_base.expect("stale-base details");
+    assert_eq!(details.paths.len(), MAX_STALE_PATHS);
+    assert_eq!(details.truncated, Some(true));
 }
 
 #[test]
