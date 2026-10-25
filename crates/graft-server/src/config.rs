@@ -241,7 +241,7 @@ impl ServerConfig {
         Ok(config)
     }
 
-    fn check(&self) -> Result<(), ConfigError> {
+    pub(crate) fn check(&self) -> Result<(), ConfigError> {
         if !(0.0..=1.0).contains(&self.min_free_fraction) {
             return Err(ConfigError(
                 "min_free_fraction must be between 0 and 1".into(),
