@@ -101,8 +101,9 @@ The agent loop is clone, edit, commit, sync, land. A conflict comes back in
 the files (exit 3), not as a pull request. The short guide, including the
 exit codes and what never to do, is [docs/agents.md](docs/agents.md).
 
-MCP is `graft mcp` on stdio today. The HTTP `/mcp` endpoint and the tool
-list are in [docs/agents.md](docs/agents.md) (checkout-less agents).
+MCP is `graft mcp` on stdio. Inside a working copy it needs no flags
+(`claude mcp add graft -- graft mcp`). Codex and Cursor snippets, the tool
+list, and the server `/mcp` form are in [docs/agents.md](docs/agents.md).
 
 ## Migrating from git
 

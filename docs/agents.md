@@ -87,15 +87,59 @@ Exit 7: retry graft land a few times, then stop.
 Never print the token. Never pass it as an argument.
 ```
 
+## MCP
+
+`graft mcp` is the stdio server. Inside a working copy it needs no flags: it uses the named server recorded by `graft clone` (or the user config's `default_server`) and reads the token from that server's private token file. The token never appears in the registration command, in the MCP client's config, or on stdout.
+
+Register it once, from the working copy:
+
+```sh
+claude mcp add graft -- graft mcp
+```
+
+Codex (`config.toml`; `cwd` is the working copy):
+
+```toml
+[mcp_servers.graft]
+command = "graft"
+args = ["mcp"]
+cwd = "/path/to/working-copy"
+```
+
+Cursor (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "graft": {
+      "command": "graft",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Outside a working copy, pass `--server NAME` or `--endpoint URL` (and a token file or `GRAFT_TOKEN`). Do not put the token in the client's config.
+
+### Tools
+
+Read-only (`readOnlyHint`): `graft_log`, `graft_show`, `graft_diff`, `graft_blame`, `graft_read`, `graft_ls`, `graft_status` (working copy only), `graft_upstream`, `graft_draft_overlap` (needs `repo:<r>:drafts`), `graft_conflicts`.
+
+Writes: `graft_commit`, `graft_sync`, `graft_land`, `graft_revert`, `graft_workspace`, `graft_resolve`, `graft_line_create`, `graft_merge`, `graft_pick`, `graft_tag`.
+
+Open a workspace (`graft_workspace`) before write tools that name one. `graft_commit` can take inline file content, or `from_working_copy` on stdio. `graft_sync` moves the base to the tip. `graft_land` lands the stack. `graft_conflicts` returns paths and markers; `graft_resolve` rebases with the contents you supply.
+
+### Resources
+
+- `graft://{repo}/{changeset}` — changeset metadata and its patch.
+- `graft://{repo}/{changeset}/{path}` — one file at that changeset.
+
+Results are capped or paginated.
+
 ## Checkout-less agents (`/mcp`)
 
-An agent with no working copy talks to the server's `/mcp` endpoint (streamable HTTP) instead of the CLI. The same tools exist over stdio as `graft mcp`, which adds the working-copy tools when started inside a checkout.
+An agent with no working copy talks to the server's `/mcp` endpoint (streamable HTTP) with a bearer token, instead of the CLI. Send the token as the `Authorization` header. Do not put it in a URL, a config file the client stores, or a prompt.
 
-Open a workspace (`graft_workspace`), then:
-
-- Read: `graft_log`, `graft_show`, `graft_diff`, `graft_blame`, `graft_read`, `graft_ls`.
-- See others: `graft_upstream` (would your paths merge onto the tip?) and `graft_draft_overlap` (other workspaces' drafts on those paths; needs `repo:<r>:drafts`).
-- Write: `graft_commit` with inline file content, `graft_sync` to move the base to the tip, `graft_land` to land the stack.
-- Conflicts: `graft_conflicts` returns the paths and markers; `graft_resolve` rebases with the contents you supply. `graft_revert` and `graft_pick` add drafts.
+The same repository tools exist there. Working-copy tools (`graft_status`, and commit from the working copy) exist only on stdio inside a checkout.
 
 Results are capped. A token sent to `/mcp` follows the same rule: it is a credential, not something to print.
