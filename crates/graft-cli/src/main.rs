@@ -9,6 +9,7 @@ mod out;
 mod api;
 mod cli;
 mod cmd;
+mod config;
 mod conn;
 mod error;
 mod identity;
@@ -100,6 +101,9 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         ));
     }
     match &cli.command {
+        Command::Login(args) => cmd::login::run(g, args),
+        Command::Logout(args) => cmd::login::logout(g, args),
+        Command::Config(args) => cmd::config::run(g, args),
         Command::Clone(args) => cmd::clone::run(g, args),
         Command::Status(args) => cmd::status::run(g, args),
         Command::Diff(args) => cmd::diff::run(g, args),

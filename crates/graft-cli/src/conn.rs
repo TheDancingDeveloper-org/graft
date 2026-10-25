@@ -1,6 +1,6 @@
 //! Connecting to a server or node, finding the working copy, and the call
-//! context. The bearer token comes from `--token-file` or `GRAFT_TOKEN`, and
-//! is never printed or put in an argument.
+//! context. Credentials resolve from explicit overrides, environment, then a
+//! named user configuration. Tokens are never printed or put in an argument.
 
 use std::env;
 use std::fs;
@@ -13,7 +13,7 @@ use graft_client::workcopy::{
     Begun, DEFAULT_CACHE_BYTES, Recovered, WcConfig, WcInfo, WcState, WorkingCopy,
 };
 use graft_client::workspace::DEFAULT_LEASE_MS;
-use graft_client::{Endpoint, Remote, discover};
+use graft_client::{ENDPOINT_ENV, Endpoint, NODE_SOCKET, Remote};
 use graft_model::{ChangesetId, IdPrefix, ObjectKind};
 use graft_proto::ApiError;
 use graft_proto::api::RepoApi;
@@ -21,6 +21,7 @@ use graft_proto::context::{CallContext, Principal, PrincipalKind};
 use graft_proto::types::{ListRefs, Log, Page, ResolveRef, WorkspaceRef};
 
 use crate::cli::{DEFAULT_LINE, Global};
+use crate::config::UserConfig;
 use crate::error::Failure;
 
 /// The environment variable that carries the bearer token.
@@ -31,11 +32,18 @@ pub(crate) const TOKEN_ENV: &str = "GRAFT_TOKEN";
 pub(crate) struct Conn {
     pub(crate) remote: Remote,
     pub(crate) repo: String,
+    pub(crate) server: Option<String>,
     /// The line a short id is looked for on: the working copy's, else `main`.
     line: String,
     /// Changesets the working copy knows (base, head, an unfinished move),
     /// the first place a short id is looked for.
     known: Vec<ChangesetId>,
+}
+
+pub(crate) struct ResolvedSettings {
+    pub(crate) server: Option<String>,
+    pub(crate) endpoint: Endpoint,
+    pub(crate) token: Option<String>,
 }
 
 /// How many refs, and how many changesets of the line's recent history, a
@@ -75,12 +83,16 @@ pub(crate) fn working_copy_info() -> Result<Option<WcInfo>, Failure> {
 /// What [`connect`] and [`default_rev`] read of a working copy.
 pub(crate) trait WcView {
     fn config(&self) -> &WcConfig;
+    fn server(&self) -> Option<&str>;
     fn state(&self) -> &WcState;
 }
 
 impl WcView for WorkingCopy {
     fn config(&self) -> &WcConfig {
         WorkingCopy::config(self)
+    }
+    fn server(&self) -> Option<&str> {
+        WorkingCopy::server(self)
     }
     fn state(&self) -> &WcState {
         WorkingCopy::state(self)
@@ -90,6 +102,9 @@ impl WcView for WorkingCopy {
 impl WcView for WcInfo {
     fn config(&self) -> &WcConfig {
         WcInfo::config(self)
+    }
+    fn server(&self) -> Option<&str> {
+        WcInfo::server(self)
     }
     fn state(&self) -> &WcState {
         WcInfo::state(self)
@@ -125,9 +140,8 @@ pub(crate) fn call_context() -> CallContext {
     }
 }
 
-/// Connects. The endpoint is `--endpoint`, else `GRAFT_ENDPOINT`, the node
-/// socket, or the working copy's configured server, in that order. The
-/// repository is `--repo`, else the working copy's.
+/// Connects. Named credentials are used only when their server owns the
+/// resolved endpoint.
 pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn, Failure> {
     let repo = match (&g.repo, wc) {
         (Some(repo), _) => repo.clone(),
@@ -138,19 +152,10 @@ pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn
             ));
         }
     };
-    let endpoint = match &g.endpoint {
-        Some(text) => Endpoint::parse(text),
-        None => {
-            let configured = wc.and_then(|wc| wc.config().endpoint.clone());
-            discover(configured.as_deref()).ok_or_else(|| {
-                Failure::usage(
-                    "no endpoint: pass --endpoint, set GRAFT_ENDPOINT, or run inside a working copy",
-                )
-            })?
-        }
-    };
-    let remote = Remote::connect(endpoint).await?;
-    let remote = match read_token(g)? {
+    let user = crate::config::load()?;
+    let settings = resolve_settings(g, wc, &user)?;
+    let remote = Remote::connect(settings.endpoint).await?;
+    let remote = match settings.token {
         Some(token) => remote.with_token(token),
         None => remote,
     };
@@ -170,8 +175,93 @@ pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn
     Ok(Conn {
         remote,
         repo,
+        server: settings.server,
         line,
         known,
+    })
+}
+
+pub(crate) fn resolve_settings(
+    g: &Global,
+    wc: Option<&impl WcView>,
+    user: &UserConfig,
+) -> Result<ResolvedSettings, Failure> {
+    let endpoint_override = g.endpoint.as_deref().map(Endpoint::parse).or_else(|| {
+        env::var(ENDPOINT_ENV)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| Endpoint::parse(&value))
+    });
+    let token_override = read_token(g)?;
+    resolve_settings_from_sources(
+        wc.map(|view| (view.config(), view.server())),
+        user,
+        endpoint_override,
+        token_override,
+    )
+}
+
+fn resolve_settings_from_sources(
+    wc: Option<(&WcConfig, Option<&str>)>,
+    user: &UserConfig,
+    endpoint_override: Option<Endpoint>,
+    token_override: Option<String>,
+) -> Result<ResolvedSettings, Failure> {
+    let selected_server = wc
+        .and_then(|(_, server)| server)
+        .or(user.default_server.as_deref());
+    let named = selected_server.and_then(|name| user.servers.get(name));
+    let legacy_endpoint = wc
+        .filter(|(_, server)| server.is_none())
+        .and_then(|(config, _)| config.endpoint.as_deref())
+        .map(Endpoint::parse);
+    if endpoint_override.is_none()
+        && legacy_endpoint.is_none()
+        && selected_server.is_some()
+        && named.is_none()
+    {
+        let name = selected_server.unwrap_or_default();
+        return Err(Failure::new(
+            crate::Exit::Failure,
+            "config",
+            format!("server {name} is not configured; run `graft login {name} --endpoint URL`"),
+        ));
+    }
+    let named_endpoint = named.map(|server| Endpoint::parse(&server.endpoint));
+    let endpoint = endpoint_override
+        .clone()
+        .or_else(|| {
+            wc.and_then(|(_, server)| server)
+                .and(named_endpoint.clone())
+        })
+        .or_else(|| {
+            let socket = Path::new(NODE_SOCKET);
+            socket.exists().then(|| Endpoint::NodeSocket(socket.to_owned()))
+        })
+        .or(legacy_endpoint)
+        .or(named_endpoint.clone())
+        .ok_or_else(|| {
+            Failure::usage(
+                "no endpoint: pass --endpoint, set GRAFT_ENDPOINT, run `graft login`, or use a configured working copy",
+            )
+        })?;
+    let server = named_endpoint
+        .as_ref()
+        .filter(|named_endpoint| **named_endpoint == endpoint)
+        .and(selected_server)
+        .map(str::to_owned);
+    let token = match token_override {
+        Some(token) => Some(token),
+        None => server
+            .as_ref()
+            .and(named)
+            .map(|server| token_from_file(&server.token_file))
+            .transpose()?,
+    };
+    Ok(ResolvedSettings {
+        server,
+        endpoint,
+        token,
     })
 }
 
@@ -187,7 +277,7 @@ pub(crate) fn read_token(g: &Global) -> Result<Option<String>, Failure> {
         .filter(|t| !t.is_empty()))
 }
 
-fn token_from_file(path: &Path) -> Result<String, Failure> {
+pub(crate) fn token_from_file(path: &Path) -> Result<String, Failure> {
     let text = fs::read_to_string(path).map_err(|e| {
         Failure::new(
             crate::Exit::Failure,
@@ -411,6 +501,35 @@ pub(crate) fn repo_path(text: &str) -> Result<graft_model::RepoPath, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ServerConfig;
+
+    fn user_with_servers(dir: &Path) -> UserConfig {
+        let default_token = dir.join("default-token");
+        let working_token = dir.join("working-token");
+        fs::write(&default_token, "default-secret\n").unwrap();
+        fs::write(&working_token, "working-secret\n").unwrap();
+        UserConfig {
+            default_server: Some("default".to_owned()),
+            servers: [
+                (
+                    "default".to_owned(),
+                    ServerConfig {
+                        endpoint: "http://default.example".to_owned(),
+                        token_file: default_token,
+                    },
+                ),
+                (
+                    "working".to_owned(),
+                    ServerConfig {
+                        endpoint: "http://working.example".to_owned(),
+                        token_file: working_token,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
 
     #[test]
     fn token_file_is_trimmed_and_never_empty() {
@@ -425,5 +544,104 @@ mod tests {
     #[test]
     fn default_rev_is_main_outside_a_working_copy() {
         assert_eq!(default_rev(None::<&WcInfo>), "main");
+    }
+
+    #[test]
+    fn working_copy_server_precedes_the_user_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+        let wc = WcConfig::default();
+
+        let settings =
+            resolve_settings_from_sources(Some((&wc, Some("working"))), &user, None, None).unwrap();
+        assert_eq!(settings.server.as_deref(), Some("working"));
+        assert_eq!(settings.endpoint, Endpoint::parse("http://working.example"));
+        assert_eq!(settings.token.as_deref(), Some("working-secret"));
+    }
+
+    #[test]
+    fn user_default_is_used_outside_a_working_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+
+        let settings = resolve_settings_from_sources(None, &user, None, None).unwrap();
+        assert_eq!(settings.server.as_deref(), Some("default"));
+        assert_eq!(settings.endpoint, Endpoint::parse("http://default.example"));
+        assert_eq!(settings.token.as_deref(), Some("default-secret"));
+    }
+
+    #[test]
+    fn endpoint_override_does_not_reuse_an_unrelated_named_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+        let endpoint = Endpoint::parse("http://override.example");
+
+        let endpoint_only =
+            resolve_settings_from_sources(None, &user, Some(endpoint.clone()), None).unwrap();
+        assert_eq!(endpoint_only.endpoint, endpoint);
+        assert_eq!(endpoint_only.server, None);
+        assert_eq!(endpoint_only.token, None);
+
+        let token_only =
+            resolve_settings_from_sources(None, &user, None, Some("override-secret".to_owned()))
+                .unwrap();
+        assert_eq!(
+            token_only.endpoint,
+            Endpoint::parse("http://default.example")
+        );
+        assert_eq!(token_only.token.as_deref(), Some("override-secret"));
+    }
+
+    #[test]
+    fn endpoint_override_reuses_a_named_token_only_when_it_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+
+        let settings = resolve_settings_from_sources(
+            None,
+            &user,
+            Some(Endpoint::parse("http://default.example")),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(settings.server.as_deref(), Some("default"));
+        assert_eq!(settings.token.as_deref(), Some("default-secret"));
+    }
+
+    #[test]
+    fn legacy_working_copy_endpoint_precedes_the_user_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+        let wc = WcConfig {
+            endpoint: Some("http://legacy.example".to_owned()),
+            ..WcConfig::default()
+        };
+
+        let settings = resolve_settings_from_sources(Some((&wc, None)), &user, None, None).unwrap();
+
+        assert_eq!(settings.endpoint, Endpoint::parse("http://legacy.example"));
+        assert_eq!(settings.server, None);
+        assert_eq!(settings.token, None);
+    }
+
+    #[test]
+    fn full_overrides_bypass_a_missing_working_copy_server() {
+        let user = UserConfig::default();
+        let wc = WcConfig::default();
+
+        let settings = resolve_settings_from_sources(
+            Some((&wc, Some("removed"))),
+            &user,
+            Some(Endpoint::parse("http://override.example")),
+            Some("override-secret".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(settings.server, None);
+        assert_eq!(
+            settings.endpoint,
+            Endpoint::parse("http://override.example")
+        );
+        assert_eq!(settings.token.as_deref(), Some("override-secret"));
     }
 }

@@ -50,6 +50,12 @@ pub(crate) struct Global {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Store credentials for a named server, or list configured servers
+    Login(LoginArgs),
+    /// Remove a named server and its stored token
+    Logout(LogoutArgs),
+    /// Inspect user configuration
+    Config(ConfigArgs),
     /// Open a workspace and lay out a sparse working copy
     Clone(CloneArgs),
     /// Working-copy changes against the head draft, else the base (no server needed)
@@ -123,6 +129,33 @@ pub(crate) enum Command {
     /// Commands designed but not built yet
     #[command(external_subcommand)]
     Planned(Vec<String>),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LoginArgs {
+    /// Server name to store
+    pub(crate) name: Option<String>,
+    /// List configured servers without changing them
+    #[arg(long, conflicts_with = "name")]
+    pub(crate) list: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LogoutArgs {
+    /// Server name to remove
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ConfigArgs {
+    #[command(subcommand)]
+    pub(crate) command: ConfigCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ConfigCommand {
+    /// Print named servers and the effective selection; tokens are redacted
+    Show,
 }
 
 #[derive(Debug, Args)]
