@@ -743,6 +743,13 @@ message ApiError {
     bytes base = 3;
     bytes source = 4;
   }
+  // Details for a stale-base land refusal. The ordinary `Rejected` error is
+  // retained so older clients still receive a useful typed refusal.
+  message StaleBase {
+    optional bytes current_tip = 1;
+    repeated string paths = 2;
+    optional bool truncated = 3;
+  }
   oneof error {
     NotFound not_found = 1;
     Collected collected = 2;
@@ -764,6 +771,7 @@ message ApiError {
     IncompatibleProtocol incompatible_protocol = 18;
     MergeConflict merge_conflict = 19;
   }
+  optional StaleBase stale_base = 20;
 }
 
 // ---- services -------------------------------------------------------------
