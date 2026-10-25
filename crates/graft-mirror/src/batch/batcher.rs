@@ -26,8 +26,8 @@ use super::render::{BatchHeader, keep_with_reverts, land_commit, parse_commit, r
 use super::types::{
     Attested, BATCH, BRANCH_PREFIX, BatchCommit, BatchConfig, BatchLine, BatchOutcome, BatchRecord,
     BatchRun, BatchState, DEFAULT_DROP_REASON, Dropped, FETCH, FIELD_CHARS, LandLine,
-    MAX_ATTEST_PAGES, MAX_COMMITS, MAX_DROPS_LISTED, MAX_LANDS, MESSAGE_CHARS, PAGE, REVERTS_KEY,
-    SYNC_KEY, Stamp, TITLE_CHARS, config_err, git_time, is_sync, land_ident, short, system_ms,
+    MAX_ATTEST_PAGES, MAX_COMMITS, MAX_LANDS, MESSAGE_CHARS, PAGE, REVERTS_KEY, SYNC_KEY, Stamp,
+    TITLE_CHARS, config_err, git_time, is_sync, land_ident, short, system_ms,
 };
 
 /// Batches one integration line into squashed GitHub PRs.
@@ -119,16 +119,12 @@ where
         {
             conflict = Some(c);
         }
-        // Checked on every run, not only after this run's drops: a run that
-        // died or conflicted part way may have left reverts on the line that
-        // the open batch lacks.
         if let Some(mut rec) = open {
-            let stale = self.stale_drops(&rec).await?;
-            if stale.is_empty() || !self.supersede(&mut rec, &stale).await? {
-                run.outcome = conflict.unwrap_or(BatchOutcome::Waiting(rec));
-                return Ok(run);
+            if conflict.is_none() {
+                self.append_open(&mut rec).await?;
             }
-            run.settled = Some(rec);
+            run.outcome = conflict.unwrap_or(BatchOutcome::Waiting(rec));
+            return Ok(run);
         }
         if let Some(c) = conflict {
             run.outcome = c;
@@ -812,89 +808,6 @@ where
         Ok(Ok(()))
     }
 
-    /// The lands of open batch `rec` reverted on the line after its tip,
-    /// each with its revert: what makes the batch stale. Reads the lands
-    /// since the batch's tip, and the batch's own only when one of those is
-    /// a revert.
-    async fn stale_drops(
-        &mut self,
-        rec: &BatchRecord,
-    ) -> Result<Vec<(ChangesetId, ChangesetId)>, MirrorError> {
-        let tip = self.tip(&self.config.line.clone()).await?;
-        if tip == rec.tip {
-            return Ok(Vec::new());
-        }
-        let (newer, _) = self.lands(tip, rec.tip).await?;
-        let views = self.views(&newer).await?;
-        let mut reverts: Vec<(ChangesetId, ChangesetId)> = newer
-            .iter()
-            .filter_map(|id| {
-                let target = views.get(id)?.changeset.metadata.get(REVERTS_KEY)?;
-                Some((ChangesetId::parse(target).ok()?, *id))
-            })
-            .collect();
-        if reverts.is_empty() {
-            return Ok(reverts);
-        }
-        let (held, _) = self.lands(rec.tip, rec.start).await?;
-        let held: HashSet<ChangesetId> = held.into_iter().collect();
-        reverts.retain(|(land, _)| held.contains(land));
-        reverts.reverse();
-        Ok(reverts)
-    }
-
-    /// Closes an open batch whose lands changed under it (a land dropped),
-    /// with a comment saying so, and rejects it: the next batch is cut from
-    /// the same start. `false`, with nothing closed, when GitHub has it in
-    /// the merge queue or set to auto-merge, or it merged meanwhile: the
-    /// reverts then reach GitHub in the next batch.
-    async fn supersede(
-        &mut self,
-        rec: &mut BatchRecord,
-        dropped: &[(ChangesetId, ChangesetId)],
-    ) -> Result<bool, MirrorError> {
-        let Some(number) = rec.pr_number else {
-            return Err(config_err("an open batch has no PR"));
-        };
-        let pull = self.forge.get_pull(number).await?;
-        let busy = if pull.merged || !pull.open {
-            Some("merged or closed on GitHub since this run read it")
-        } else if self.forge.merging(&pull.node_id).await? {
-            Some("in GitHub's merge queue or set to auto-merge")
-        } else {
-            None
-        };
-        if let Some(why) = busy {
-            rec.detail =
-                format!("not superseded: {why}; the dropped lands' reverts go in the next batch");
-            self.db.put_batch(rec)?;
-            tracing::warn!(
-                line = %rec.line, batch = rec.number, pr = number,
-                "mirror batch: a stale batch is merging; left as it is"
-            );
-            return Ok(false);
-        }
-        let names: Vec<String> = dropped
-            .iter()
-            .take(MAX_DROPS_LISTED)
-            .map(|(l, _)| format!("`{}`", short(*l)))
-            .collect();
-        let detail = format!(
-            "superseded: land{} {}{} dropped from line {} (reverted); recut as a new batch",
-            if dropped.len() == 1 { "" } else { "s" },
-            names.join(", "),
-            if dropped.len() > MAX_DROPS_LISTED {
-                format!(" and {} more", dropped.len() - MAX_DROPS_LISTED)
-            } else {
-                String::new()
-            },
-            clean_text(&rec.line, FIELD_CHARS, false)
-        );
-        self.forge.close_pr(number, &detail).await?;
-        self.reject(rec, detail)?;
-        Ok(true)
-    }
-
     /// Builds and records the next batch: the land list, the cut, the
     /// squashed commit in the local mirror, then the record. `Ok(None)` when
     /// the line holds nothing the base lacks, `Err(NotDue)` when the batch
@@ -1062,6 +975,7 @@ where
                 uncut,
                 max_lands,
                 fallback: fallback.clone(),
+                appended: HashSet::new(),
             },
             &lands,
         );
@@ -1097,6 +1011,7 @@ where
             start: state.start,
             tip: cut,
             lands: lands.len() as u64,
+            initial_lands: lands.len() as u64,
             created_ms,
             branch,
             title,
@@ -1286,6 +1201,254 @@ where
         }
         if rec.state == BatchState::Open {
             self.observe(rec).await?;
+        }
+        Ok(())
+    }
+
+    /// Appends lands made after an open batch was cut (D30). The recorded
+    /// chain may lead the remote after a crash; in that case the same commits
+    /// are pushed again with a lease on the recorded prefix.
+    async fn append_open(&mut self, rec: &mut BatchRecord) -> Result<bool, MirrorError> {
+        let number = rec
+            .pr_number
+            .ok_or_else(|| config_err("an open batch has no PR"))?;
+        let pull = self.forge.get_pull(number).await?;
+        if pull.merged || !pull.open || self.forge.merging(&pull.node_id).await? {
+            return Ok(false);
+        }
+        let remote = GitSha::from_hex(&pull.head_sha)
+            .ok_or_else(|| config_err("GitHub returned a malformed batch head"))?;
+        let recorded = self.db.batch_commits(rec.number)?;
+        if recorded.is_empty() {
+            return Ok(false);
+        }
+        if remote != rec.squash_sha {
+            if !recorded.iter().any(|commit| commit.sha == remote) {
+                return Err(config_err(format!(
+                    "batch branch {} moved other than forward from its recorded commits",
+                    rec.branch
+                )));
+            }
+            // The database is ahead of GitHub: the push landed and the run
+            // died before the body was written, or the push itself did not.
+            // Re-push the recorded head with a lease, then refresh the body.
+            self.push_append(rec, remote).await?;
+        }
+        // GitHub's body can lag the database when a run dies after the
+        // push and before `update_pull`.
+        self.sync_body(rec, number, &pull.body).await?;
+
+        let tip = self.tip(&self.config.line.clone()).await?;
+        if tip == rec.tip {
+            return Ok(false);
+        }
+        let (ids, capped) = self.lands(tip, rec.tip).await?;
+        if capped {
+            return Ok(false);
+        }
+        let views = self.views(&ids).await?;
+        let mut expected = rec.tip;
+        for id in ids.iter().rev() {
+            let view = views
+                .get(id)
+                .ok_or_else(|| config_err(format!("changeset {id} is not in graft")))?;
+            if is_sync(&view.changeset.metadata) {
+                return Ok(false);
+            }
+            if view.changeset.parents.first().copied() != Some(expected) {
+                return Err(config_err(format!(
+                    "line {} moved other than forward from batch {} tip {}",
+                    rec.line, rec.number, rec.tip
+                )));
+            }
+            expected = *id;
+        }
+        if expected != tip {
+            return Err(config_err(format!(
+                "line {} moved other than forward from batch {} tip {}",
+                rec.line, rec.number, rec.tip
+            )));
+        }
+        let (new_lands, _) = self.describe(&ids, &views).await?;
+        let max_lands = self
+            .config
+            .max_lands
+            .unwrap_or(MAX_COMMITS)
+            .min(MAX_COMMITS);
+        if new_lands.is_empty() {
+            return Ok(false);
+        }
+        if rec.lands as usize + new_lands.len() > max_lands {
+            rec.detail = format!(
+                "not appended: {} more land(s) would pass the {} land cap",
+                new_lands.len(),
+                max_lands
+            );
+            self.db.put_batch(rec)?;
+            return Ok(false);
+        }
+
+        let tree = {
+            let cx = self.call("export-append");
+            let stamp = Stamp(rec.created_ms);
+            let repo = self.config.repo.clone();
+            let committer = self.config.committer.clone();
+            let mut exporter = Exporter::new(
+                self.api,
+                &cx,
+                self.db,
+                &repo,
+                &committer,
+                &stamp,
+                self.mirror.dir(),
+            )?;
+            let tip_sha = exporter.export_changeset(tip).await?;
+            self.mirror.commit_tree(tip_sha).await?
+        };
+        let mut appended = match self
+            .chain(
+                rec.number,
+                rec.tip,
+                rec.squash_sha,
+                tree,
+                rec.created_ms,
+                &new_lands,
+            )
+            .await?
+        {
+            Ok(commits) => commits,
+            Err(why) => {
+                rec.detail = format!("not appended: {why}");
+                self.db.put_batch(rec)?;
+                return Ok(false);
+            }
+        };
+        let offset = recorded.len() as u32;
+        for commit in &mut appended {
+            commit.seq += offset;
+        }
+
+        let old_head = rec.squash_sha;
+        rec.tip = tip;
+        rec.lands += appended.len() as u64;
+        rec.squash_sha = appended
+            .last()
+            .map(|commit| commit.sha)
+            .ok_or_else(|| config_err("an append built no commits"))?;
+        rec.body = self.body_for(rec).await?;
+        rec.detail = format!("recorded {} appended land(s)", appended.len());
+        self.db.extend_batch(rec, &appended)?;
+        self.push_append(rec, old_head).await?;
+        self.sync_body(rec, number, "").await?;
+        rec.detail = format!(
+            "waiting for review after appending {} land(s)",
+            appended.len()
+        );
+        self.db.put_batch(rec)?;
+        Ok(true)
+    }
+
+    fn drops_in(&self, lands: &[LandLine]) -> Result<Vec<Dropped>, MirrorError> {
+        let in_batch: HashMap<ChangesetId, ChangesetId> = lands
+            .iter()
+            .filter_map(|land| land.reverts.map(|target| (target, land.id)))
+            .collect();
+        let mut drops = Vec::new();
+        for land in lands.iter().rev() {
+            if let Some(revert) = in_batch.get(&land.id) {
+                let reason = self
+                    .db
+                    .batch_drop_reason(&self.config.line, land.id)?
+                    .map(|reason| clean_text(&reason, FIELD_CHARS, false))
+                    .unwrap_or_else(|| "reverted on the line".to_owned());
+                drops.push(Dropped {
+                    land: land.id,
+                    revert: *revert,
+                    reason,
+                });
+            }
+        }
+        Ok(drops)
+    }
+
+    /// Brings the PR body in line with the recorded lands. A run that died
+    /// after `extend_batch` (or after the push) left GitHub's body behind
+    /// the database; repeating this writes that body and nothing else.
+    async fn sync_body(
+        &mut self,
+        rec: &mut BatchRecord,
+        number: u64,
+        remote_body: &str,
+    ) -> Result<(), MirrorError> {
+        let body = self.body_for(rec).await?;
+        if rec.body != body {
+            rec.body = body.clone();
+            self.db.put_batch(rec)?;
+        }
+        if remote_body != body {
+            self.forge.update_pull(number, &body).await?;
+        }
+        Ok(())
+    }
+
+    /// The PR body for the lands the database already records, through
+    /// `rec.tip`.
+    async fn body_for(&mut self, rec: &BatchRecord) -> Result<String, MirrorError> {
+        let (ids, capped) = self.lands(rec.tip, rec.start).await?;
+        let views = self.views(&ids).await?;
+        let (lands, truncated) = self.describe(&ids, &views).await?;
+        let appended_count = lands.len().saturating_sub(rec.initial_lands as usize);
+        let appended: HashSet<ChangesetId> = lands
+            .iter()
+            .take(appended_count)
+            .map(|land| land.id)
+            .collect();
+        let drops = self.drops_in(&lands)?;
+        let max_lands = self
+            .config
+            .max_lands
+            .unwrap_or(MAX_COMMITS)
+            .min(MAX_COMMITS);
+        let (body, _) = render(
+            &BatchHeader {
+                number: rec.number,
+                line: rec.line.clone(),
+                branch: rec.base_branch.clone(),
+                base: rec.base,
+                base_sha: rec.base_sha,
+                start: rec.start,
+                tip: rec.tip,
+                capped,
+                truncated,
+                drops,
+                held: 0,
+                uncut: None,
+                max_lands,
+                fallback: None,
+                appended,
+            },
+            &lands,
+        );
+        Ok(body)
+    }
+
+    async fn push_append(&mut self, rec: &BatchRecord, lease: GitSha) -> Result<(), MirrorError> {
+        let token = if self.mirror.is_https() {
+            Some(self.forge.token().await?)
+        } else {
+            None
+        };
+        let bearer = token.as_ref().map(SecretToken::expose);
+        if self
+            .mirror
+            .push_lease(&rec.branch, rec.squash_sha, Some(lease), bearer)
+            .await?
+            == PushOutcome::Rejected
+        {
+            return Err(config_err(format!(
+                "batch branch {} did not fast-forward from leased head {lease}",
+                rec.branch
+            )));
         }
         Ok(())
     }

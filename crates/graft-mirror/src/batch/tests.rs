@@ -46,6 +46,7 @@ fn header(capped: bool) -> BatchHeader {
         uncut: None,
         max_lands: 0,
         fallback: Some("test".to_owned()),
+        appended: std::collections::HashSet::new(),
     }
 }
 
@@ -117,7 +118,7 @@ fn a_large_batch_fits_github_and_the_commit_lists_every_land() {
         "the commit lists every land in order"
     );
     // Cells are bounded and cannot break the table.
-    let row = land_row(&lands[0]);
+    let row = land_row(&lands[0], false);
     assert_eq!(row.matches(" | ").count(), 5, "{row}");
     assert!(row.contains("+32 more"));
     assert!(row.chars().count() < 2000, "{}", row.chars().count());

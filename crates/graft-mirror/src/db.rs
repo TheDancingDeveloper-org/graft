@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS batches (
     start BLOB NOT NULL,
     tip BLOB NOT NULL,
     lands INTEGER NOT NULL,
+    initial_lands INTEGER NOT NULL,
     created_ms INTEGER NOT NULL,
     branch TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -208,6 +209,17 @@ impl MirrorDb {
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         add_column(&conn, "batch_lines", "start_base", "BLOB")?;
         add_column(&conn, "batch_lines", "sync_batch", "INTEGER")?;
+        add_column(
+            &conn,
+            "batches",
+            "initial_lands",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute(
+            "UPDATE batches SET initial_lands = lands WHERE initial_lands = 0",
+            [],
+        )
+        .map_err(db_err)?;
         Ok(MirrorDb {
             conn: Mutex::new(conn),
             path: path.to_owned(),
@@ -703,6 +715,28 @@ impl MirrorDb {
         write_batch(&self.conn(), rec)
     }
 
+    /// Extends batch `rec` and records its new per-land commits atomically.
+    pub fn extend_batch(&self, rec: &BatchRecord, commits: &[BatchCommit]) -> Result<(), GitError> {
+        let mut conn = self.conn();
+        let txn = conn.transaction().map_err(db_err)?;
+        write_batch(&txn, rec)?;
+        for c in commits {
+            txn.execute(
+                "INSERT INTO batch_commits (batch, seq, land, sha, merged_sha)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    rec.number as i64,
+                    c.seq as i64,
+                    &c.land.0.0[..],
+                    &c.sha.0[..],
+                    c.merged.map(|s| s.0.to_vec()),
+                ],
+            )
+            .map_err(db_err)?;
+        }
+        txn.commit().map_err(db_err)
+    }
+
     /// Records batch `rec` as merged, the line state the next batch
     /// starts from, and where each of `commits` merged, in one transaction.
     pub fn settle_batch(
@@ -747,8 +781,8 @@ impl MirrorDb {
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT number, line, base_branch, base, base_sha, start, tip, lands,
-                        created_ms, branch, title, body, squash_sha, pr_number, pr_url,
-                        state, detail, merge_sha, merged
+                        initial_lands, created_ms, branch, title, body, squash_sha, pr_number,
+                        pr_url, state, detail, merge_sha, merged
                  FROM batches {filter}"
             ))
             .map_err(db_err)?;
@@ -763,17 +797,18 @@ impl MirrorDb {
                     start: r.get(5)?,
                     tip: r.get(6)?,
                     lands: r.get(7)?,
-                    created_ms: r.get(8)?,
-                    branch: r.get(9)?,
-                    title: r.get(10)?,
-                    body: r.get(11)?,
-                    squash_sha: r.get(12)?,
-                    pr_number: r.get(13)?,
-                    pr_url: r.get(14)?,
-                    state: r.get(15)?,
-                    detail: r.get(16)?,
-                    merge_sha: r.get(17)?,
-                    merged: r.get(18)?,
+                    initial_lands: r.get(8)?,
+                    created_ms: r.get(9)?,
+                    branch: r.get(10)?,
+                    title: r.get(11)?,
+                    body: r.get(12)?,
+                    squash_sha: r.get(13)?,
+                    pr_number: r.get(14)?,
+                    pr_url: r.get(15)?,
+                    state: r.get(16)?,
+                    detail: r.get(17)?,
+                    merge_sha: r.get(18)?,
+                    merged: r.get(19)?,
                 })
             })
             .map_err(db_err)?;
@@ -972,14 +1007,15 @@ fn add_column(conn: &Connection, table: &str, column: &str, ty: &str) -> Result<
 fn write_batch(conn: &Connection, rec: &BatchRecord) -> Result<(), GitError> {
     conn.execute(
         "INSERT INTO batches (number, line, base_branch, base, base_sha, start, tip, lands,
-             created_ms, branch, title, body, squash_sha, pr_number, pr_url, state, detail,
-             merge_sha, merged)
+             initial_lands, created_ms, branch, title, body, squash_sha, pr_number, pr_url, state,
+             detail, merge_sha, merged)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-             ?18, ?19)
+             ?18, ?19, ?20)
          ON CONFLICT (number) DO UPDATE SET line = ?2, base_branch = ?3, base = ?4,
-             base_sha = ?5, start = ?6, tip = ?7, lands = ?8, created_ms = ?9, branch = ?10,
-             title = ?11, body = ?12, squash_sha = ?13, pr_number = ?14, pr_url = ?15,
-             state = ?16, detail = ?17, merge_sha = ?18, merged = ?19",
+             base_sha = ?5, start = ?6, tip = ?7, lands = ?8, initial_lands = ?9,
+             created_ms = ?10, branch = ?11, title = ?12, body = ?13, squash_sha = ?14,
+             pr_number = ?15, pr_url = ?16, state = ?17, detail = ?18, merge_sha = ?19,
+             merged = ?20",
         params![
             rec.number as i64,
             rec.line,
@@ -989,6 +1025,7 @@ fn write_batch(conn: &Connection, rec: &BatchRecord) -> Result<(), GitError> {
             &rec.start.0.0[..],
             &rec.tip.0.0[..],
             rec.lands as i64,
+            rec.initial_lands as i64,
             rec.created_ms,
             rec.branch,
             rec.title,
@@ -1016,6 +1053,7 @@ struct BatchRow {
     start: Vec<u8>,
     tip: Vec<u8>,
     lands: i64,
+    initial_lands: i64,
     created_ms: i64,
     branch: String,
     title: String,
@@ -1042,6 +1080,7 @@ impl BatchRow {
             start: id(self.start)?,
             tip: id(self.tip)?,
             lands: self.lands as u64,
+            initial_lands: self.initial_lands as u64,
             created_ms: self.created_ms,
             branch: self.branch,
             title: self.title,
