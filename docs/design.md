@@ -310,8 +310,14 @@ Canonical payload: `u8 version(1)`, `u32 n ‖ parents`, `root(32)`,
 7. the result is a well-formed tree, with no path that is both a file and a
    directory;
 8. the change count is within the limit (100,000 by default);
-9. a changeset with no changes is allowed only with more than one parent
-   (imported history).
+9. a changeset with no changes is allowed only with more than one parent,
+   or — for a git import only ([D33](decisions.md#d33-empty-imported-changesets)) —
+   with fewer than two parents (a single parent or none) when metadata carries
+   `mirror.git-commit` ([D19](decisions.md#d19-import-identity)). The native
+   write boundary rejects any `mirror.*` key, so a native client cannot set
+   `mirror.git-commit` and a native empty changeset is still rejected. The
+   encoding is unchanged, and the golden vectors for native changesets are
+   unchanged.
 
 ### 4.6 Refs and lines
 

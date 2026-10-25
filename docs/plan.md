@@ -70,8 +70,8 @@ Delivered on 2026-10-23 and 2026-10-24 (#112 through #170), all done:
 - WI-2345 race/fault harness and planted bugs (#133, #136, #139, #161);
   WI-2346 merge differential (#144); WI-2347 hostile git (#146);
   WI-2348 hostile API clients (#154).
-- WI-2341 read paths: log and sync faster (#138); bar is "not slower than
-  git", 2x is later (#169).
+- WI-2341 read paths: log and sync faster (#138); the medians are the
+  no-regression floor (D31). 2x faster than git is a later phase.
 - WI-2342 GitHub tags as fixed refs (#141); WI-2357 tag objects kept (#160);
   WI-2370 follow keeps tag objects (#167); WI-2358 non-commit tags skipped
   and reported (#165).
@@ -87,8 +87,8 @@ What remains:
 
 | Item | What |
 | --- | --- |
-| WI-2341 | read-path bench re-run on graft-dev (10k `sync`); blocked, results pending |
-| WI-2400 | read-path parity: `log` and `status` not slower than git |
+| WI-2341 | done: read-path medians are the D31 no-regression floor |
+| WI-2400 | wont_do: read-path parity with git is a later phase (D31) |
 | WI-2314 | CI OOM flake: quarantined (#91); remove the quarantine after a day with `oom_kill` at 0 |
 | WI-2329 | review leftovers (p4) |
 | WI-2366 | embedded single-binary mode: a future phase (p4) |
@@ -516,36 +516,49 @@ through git and GitHub.
 
 ### Phase 1 exit and kill criteria
 
-> These criteria were written for the read pilot. D22 redefines phase 1 as
-> the git alternative. They stay as targets, and the `bench/` harness now
-> measures phase 1 against git.
+> Restated by [D31](decisions.md#d31-phase-1-measures-agent-friction-not-read-latency)
+> (operator decision, 2026-10-25). The phase-1 target is minimal agent
+> friction and multi-session building without conflict churn. Read-path
+> speed is a no-regression floor (the WI-2341 medians, enforced by bench
+> smoke in the merge queue) plus rule 2 (every operation O(change), never
+> O(history)). 2× faster than git is a later-phase target, not a phase-1
+> criterion. The read-pilot budgets (D18, D20) no longer gate phase 1.
+> These criteria do not start phase 2: phase 2 still starts only with the
+> graft-primary authority switch (D22).
 
-**Superseded by [D20](decisions.md#d20-no-pilot-period):** there is no
-pilot period, and G1.18 is dropped. These criteria are targets that the G1.16
-harness reports on. They don't gate phase 2.
+graft does not remove conflicts on registration lists, moves or lockfiles.
+It reduces them through line merge, and surfaces the rest in the agent's own
+session instead of as a DIRTY PR or a queue ejection hours later.
 
-**Exit (all must hold):**
+**Exit (measured on real work; each names its evidence):**
 
-1. Fidelity: 100% of rustTorrent commits pass the import fidelity invariant,
-   and every snapshot matches `git checkout`.
-2. Durability: zero acknowledged writes lost across 100 `kill -9` restarts.
-   Restore from backup is rehearsed.
-3. Follow lag: p95 under 60 s over 7 days. No undetected divergence.
-4. Correctness: `log`, `diff` and `blame` agree with git on the sampled sets.
-5. Performance, on Node B: sparse clone p50 at most 50 ms, `log --path` p50 at
-   most 10 ms, `blame` cached p50 at most 10 ms, and full clone p50 at most
-   150 ms.
+1. Clean-merge rate on concurrent same-file lands. Evidence: trial 3 and the
+   WI-2338 real-PR replay.
+2. Attempts to land after a conflict (retries until the land succeeds).
+   Evidence: trial session logs and the adversarial harness (graft-harness).
+3. CI runs per landed change. Evidence: the batch PR's check runs, counted
+   per land, from trial 3.
+4. Land-to-main latency. Evidence: trial 3 (batch PR open to merged) and the
+   `bench/` land timings (WI-2294).
+5. Fix-forwards and recuts per batch. Evidence: trial 3 batch history; D30
+   is what should drive recuts down.
+6. Commands from clone to a landed change, on the happy path. Evidence: the
+   agent guide exercised in a trial, counted.
+7. Steps for a new session to become productive. Evidence: the same trial,
+   counted from the brief to the first successful land.
 
 **Kill or rethink (any one):**
 
-- Agents' read paths on graft (`log`, `status`, `sync`) are slower than the
-  git equivalents they replace, end to end. This is the phase-1 bar
-  (operator decision, 2026-10-24); 2× faster than git is a later-phase
-  target.
+- Any lost or duplicated land, any line moving backwards, or any reachable
+  object collected. Evidence: the correctness smoke in the merge queue and
+  `fsck` on the trial repositories.
 - Agents do not use it unprompted after a week, according to the session
   logs.
 - Operating it costs more than half a day a week of operator or oversight
   time.
+- The conflict rate on real overlapping work is not lower than the
+  merge-queue ejection rate for the same repositories. Evidence: trial 3
+  against the queue's ejection history for those repos.
 
 ---
 
