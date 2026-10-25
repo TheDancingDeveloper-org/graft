@@ -85,6 +85,8 @@ pub struct Pull {
     pub merge_commit: Option<String>,
     /// The head commit of its branch (40-hex).
     pub head_sha: String,
+    /// The PR body, as GitHub currently stores it.
+    pub body: String,
 }
 
 /// A PR to open.
@@ -511,6 +513,8 @@ struct RawPull {
     #[serde(default)]
     merge_commit_sha: Option<String>,
     head: RawHead,
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -552,6 +556,7 @@ fn pull_from(v: Value) -> Result<Pull, ForgeError> {
         merged: raw.merged,
         merge_commit: raw.merge_commit_sha,
         head_sha: raw.head.sha,
+        body: raw.body.unwrap_or_default(),
     })
 }
 

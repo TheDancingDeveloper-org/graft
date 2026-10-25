@@ -70,6 +70,7 @@ impl FakeGitHub {
             merged: pr.merged.is_some(),
             merge_commit: pr.merged.clone(),
             head_sha: support::branch(&self.upstream, &pr.new.head).unwrap_or_default(),
+            body: pr.new.body.clone(),
         };
         let mut race = self.race_push.lock().unwrap();
         if let Some((reads, _, _)) = race.as_mut()
@@ -83,6 +84,10 @@ impl FakeGitHub {
             );
         }
         pull
+    }
+
+    fn prs_mut(&self) -> std::sync::MutexGuard<'_, Vec<FakePr>> {
+        self.prs.lock().unwrap()
     }
 
     fn prs(&self) -> Vec<FakePr> {
@@ -655,6 +660,102 @@ async fn a_line_rewind_is_refused_instead_of_appended() {
         support::branch(&w.upstream, &rec.branch).unwrap(),
         rec.squash_sha.to_hex()
     );
+}
+
+#[tokio::test]
+async fn a_batch_github_is_merging_is_not_appended() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    let head = support::branch(&w.upstream, &first.branch).unwrap();
+    let body = w.github.prs()[0].new.body.clone();
+    w.github
+        .merging
+        .lock()
+        .unwrap()
+        .push(first.pr_number.unwrap());
+    let extra = w.land(&[("b.txt", "b1\n")], "review fix", 2).await;
+
+    let run = w.batcher().run().await.unwrap();
+    // One open batch per line: while GitHub is merging it, the next land
+    // waits. It is not appended, and it is not cut into a second PR.
+    assert!(run.settled.is_none(), "a merging batch is not settled");
+    let BatchOutcome::Waiting(rec) = run.outcome else {
+        panic!("expected to wait, got {:?}", run.outcome)
+    };
+    assert_eq!(rec.number, first.number);
+    assert_eq!(rec.lands, first.lands);
+    assert_eq!(w.github.prs().len(), 1);
+    assert_eq!(support::branch(&w.upstream, &first.branch).unwrap(), head);
+    assert_eq!(w.github.prs()[0].new.body, body);
+    assert!(!w.github.prs()[0].new.body.contains(&short(extra)));
+    assert_eq!(w.db.batch_commits(first.number).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_merged_batch_is_not_appended_and_the_next_land_starts_a_batch() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    w.github.squash_merge(first.pr_number.unwrap());
+    let extra = w.land(&[("b.txt", "b1\n")], "after merge", 2).await;
+
+    let run = w.batcher().run().await.unwrap();
+    assert_eq!(run.settled.unwrap().state, BatchState::Merged);
+    let rec = opened(run.outcome);
+    assert_eq!(rec.number, first.number + 1);
+    assert_eq!(rec.lands, 1);
+    assert!(w.github.prs()[1].new.body.contains(&short(extra)));
+    assert!(!w.github.prs()[0].new.body.contains("(appended)"));
+}
+
+#[tokio::test]
+async fn a_crash_after_the_record_re_pushes_with_the_lease_and_refreshes_the_body() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    let stale_body = w.github.prs()[0].new.body.clone();
+    let extra = w.land(&[("b.txt", "b1\n")], "review fix", 2).await;
+    let run = w.batcher().run().await.unwrap();
+    let BatchOutcome::Waiting(rec) = run.outcome else {
+        panic!("expected the append to wait")
+    };
+    // The database and the branch head moved; the PR body did not, as if
+    // the run died after the push.
+    let head = rec.squash_sha.to_hex();
+    git(
+        &w.upstream,
+        &[
+            "update-ref",
+            &format!("refs/heads/{}", rec.branch),
+            &first.squash_sha.to_hex(),
+        ],
+    );
+    {
+        let mut prs = w.github.prs_mut();
+        prs[0].new.body = stale_body.clone();
+    }
+    assert_ne!(support::branch(&w.upstream, &rec.branch).unwrap(), head);
+
+    let again = w.batcher().run().await.unwrap();
+    let BatchOutcome::Waiting(rec) = again.outcome else {
+        panic!("expected to wait, got {:?}", again.outcome)
+    };
+    assert_eq!(rec.lands, first.lands + 1);
+    assert_eq!(support::branch(&w.upstream, &rec.branch).unwrap(), head);
+    let body = &w.github.prs()[0].new.body;
+    assert!(
+        body.contains(&format!("{} (appended)", short(extra))),
+        "{body}"
+    );
+    assert_eq!(w.github.prs().len(), 1);
+    // A second run with the body already current pushes nothing new.
+    let third = w.batcher().run().await.unwrap();
+    assert!(matches!(third.outcome, BatchOutcome::Waiting(_)));
+    assert_eq!(support::branch(&w.upstream, &rec.branch).unwrap(), head);
 }
 
 #[tokio::test]

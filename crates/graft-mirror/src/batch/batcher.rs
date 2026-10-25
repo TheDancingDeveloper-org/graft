@@ -1229,9 +1229,14 @@ where
                     rec.branch
                 )));
             }
+            // The database is ahead of GitHub: the push landed and the run
+            // died before the body was written, or the push itself did not.
+            // Re-push the recorded head with a lease, then refresh the body.
             self.push_append(rec, remote).await?;
-            self.forge.update_pull(number, &rec.body).await?;
         }
+        // GitHub's body can lag the database when a run dies after the
+        // push and before `update_pull`.
+        self.sync_body(rec, number, &pull.body).await?;
 
         let tip = self.tip(&self.config.line.clone()).await?;
         if tip == rec.tip {
@@ -1270,7 +1275,16 @@ where
             .max_lands
             .unwrap_or(MAX_COMMITS)
             .min(MAX_COMMITS);
-        if new_lands.is_empty() || rec.lands as usize + new_lands.len() > max_lands {
+        if new_lands.is_empty() {
+            return Ok(false);
+        }
+        if rec.lands as usize + new_lands.len() > max_lands {
+            rec.detail = format!(
+                "not appended: {} more land(s) would pass the {} land cap",
+                new_lands.len(),
+                max_lands
+            );
+            self.db.put_batch(rec)?;
             return Ok(false);
         }
 
@@ -1314,48 +1328,18 @@ where
             commit.seq += offset;
         }
 
-        let (all_ids, capped) = self.lands(tip, rec.start).await?;
-        let all_views = self.views(&all_ids).await?;
-        let (all_lands, truncated) = self.describe(&all_ids, &all_views).await?;
-        let appended_count = all_lands.len().saturating_sub(rec.initial_lands as usize);
-        let appended_ids: HashSet<ChangesetId> = all_lands
-            .iter()
-            .take(appended_count)
-            .map(|land| land.id)
-            .collect();
-        let drops = self.drops_in(&all_lands)?;
-        let (body, _) = render(
-            &BatchHeader {
-                number: rec.number,
-                line: rec.line.clone(),
-                branch: rec.base_branch.clone(),
-                base: rec.base,
-                base_sha: rec.base_sha,
-                start: rec.start,
-                tip,
-                capped,
-                truncated,
-                drops,
-                held: 0,
-                uncut: None,
-                max_lands,
-                fallback: None,
-                appended: appended_ids,
-            },
-            &all_lands,
-        );
         let old_head = rec.squash_sha;
         rec.tip = tip;
-        rec.lands = all_lands.len() as u64;
-        rec.body = body;
+        rec.lands += appended.len() as u64;
         rec.squash_sha = appended
             .last()
             .map(|commit| commit.sha)
             .ok_or_else(|| config_err("an append built no commits"))?;
+        rec.body = self.body_for(rec).await?;
         rec.detail = format!("recorded {} appended land(s)", appended.len());
         self.db.extend_batch(rec, &appended)?;
         self.push_append(rec, old_head).await?;
-        self.forge.update_pull(number, &rec.body).await?;
+        self.sync_body(rec, number, "").await?;
         rec.detail = format!(
             "waiting for review after appending {} land(s)",
             appended.len()
@@ -1385,6 +1369,67 @@ where
             }
         }
         Ok(drops)
+    }
+
+    /// Brings the PR body in line with the recorded lands. A run that died
+    /// after `extend_batch` (or after the push) left GitHub's body behind
+    /// the database; repeating this writes that body and nothing else.
+    async fn sync_body(
+        &mut self,
+        rec: &mut BatchRecord,
+        number: u64,
+        remote_body: &str,
+    ) -> Result<(), MirrorError> {
+        let body = self.body_for(rec).await?;
+        if rec.body != body {
+            rec.body = body.clone();
+            self.db.put_batch(rec)?;
+        }
+        if remote_body != body {
+            self.forge.update_pull(number, &body).await?;
+        }
+        Ok(())
+    }
+
+    /// The PR body for the lands the database already records, through
+    /// `rec.tip`.
+    async fn body_for(&mut self, rec: &BatchRecord) -> Result<String, MirrorError> {
+        let (ids, capped) = self.lands(rec.tip, rec.start).await?;
+        let views = self.views(&ids).await?;
+        let (lands, truncated) = self.describe(&ids, &views).await?;
+        let appended_count = lands.len().saturating_sub(rec.initial_lands as usize);
+        let appended: HashSet<ChangesetId> = lands
+            .iter()
+            .take(appended_count)
+            .map(|land| land.id)
+            .collect();
+        let drops = self.drops_in(&lands)?;
+        let max_lands = self
+            .config
+            .max_lands
+            .unwrap_or(MAX_COMMITS)
+            .min(MAX_COMMITS);
+        let (body, _) = render(
+            &BatchHeader {
+                number: rec.number,
+                line: rec.line.clone(),
+                branch: rec.base_branch.clone(),
+                base: rec.base,
+                base_sha: rec.base_sha,
+                start: rec.start,
+                tip: rec.tip,
+                capped,
+                truncated,
+                drops,
+                held: 0,
+                uncut: None,
+                max_lands,
+                fallback: None,
+                appended,
+            },
+            &lands,
+        );
+        Ok(body)
     }
 
     async fn push_append(&mut self, rec: &BatchRecord, lease: GitSha) -> Result<(), MirrorError> {
