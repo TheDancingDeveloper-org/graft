@@ -254,6 +254,7 @@ pub struct UpdateStats {
 pub struct WcInfo {
     root: PathBuf,
     config: WcConfig,
+    server: Option<String>,
     state: WcState,
 }
 
@@ -268,6 +269,11 @@ impl WcInfo {
         &self.config
     }
 
+    /// Named server in the user's config, when the clone selected one.
+    pub fn server(&self) -> Option<&str> {
+        self.server.as_deref()
+    }
+
     /// `.graft/state`.
     pub fn state(&self) -> &WcState {
         &self.state
@@ -279,6 +285,7 @@ impl WcInfo {
 pub struct WorkingCopy {
     root: PathBuf,
     config: WcConfig,
+    server: Option<String>,
     state: WcState,
     sparse: Sparse,
     index: Index,
@@ -338,6 +345,7 @@ impl WorkingCopy {
         let mut wc = Self {
             root: root.to_owned(),
             config,
+            server: None,
             state,
             sparse,
             index: Index::default(),
@@ -361,18 +369,19 @@ impl WorkingCopy {
     pub fn open_info(path: &Path) -> Result<WcInfo> {
         let root = find_root(path)?;
         let dir = root.join(GRAFT_DIR);
-        let config = parse_config(&fs::read_to_string(dir.join(CONFIG_FILE))?)?;
+        let (config, server) = parse_config(&fs::read_to_string(dir.join(CONFIG_FILE))?)?;
         let state = parse_state(&fs::read_to_string(dir.join(STATE_FILE))?)?;
         Ok(WcInfo {
             root,
             config,
+            server,
             state,
         })
     }
 
     fn load(root: &Path) -> Result<Self> {
         let dir = root.join(GRAFT_DIR);
-        let config = parse_config(&fs::read_to_string(dir.join(CONFIG_FILE))?)?;
+        let (config, server) = parse_config(&fs::read_to_string(dir.join(CONFIG_FILE))?)?;
         let state = parse_state(&fs::read_to_string(dir.join(STATE_FILE))?)?;
         let sparse = Sparse::parse(&fs::read_to_string(dir.join(SPARSE_FILE))?)
             .map_err(|e| Error::State(format!("sparse: {e}")))?;
@@ -382,6 +391,7 @@ impl WorkingCopy {
         Ok(Self {
             root: root.to_owned(),
             config,
+            server,
             state,
             sparse,
             index,
@@ -396,6 +406,11 @@ impl WorkingCopy {
     /// `.graft/config`.
     pub fn config(&self) -> &WcConfig {
         &self.config
+    }
+
+    /// Named server in the user's config, when the clone selected one.
+    pub fn server(&self) -> Option<&str> {
+        self.server.as_deref()
     }
 
     /// `.graft/state`.
@@ -962,8 +977,21 @@ impl WorkingCopy {
         Ok(())
     }
 
+    /// Records the named server this working copy was cloned from.
+    pub fn set_server(&mut self, name: Option<String>) -> Result<()> {
+        self.server = name;
+        write_atomic(
+            &self.root.join(GRAFT_DIR).join(CONFIG_FILE),
+            self.config_text().as_bytes(),
+        )?;
+        Ok(())
+    }
+
     fn config_text(&self) -> String {
         let mut s = format!("repo = {}\n", self.config.repo);
+        if let Some(server) = &self.server {
+            s.push_str(&format!("server = {server}\n"));
+        }
         if let Some(e) = &self.config.endpoint {
             s.push_str(&format!("endpoint = {e}\n"));
         }
@@ -1369,16 +1397,19 @@ fn pairs(text: &str) -> Result<BTreeMap<&str, &str>> {
     Ok(out)
 }
 
-fn parse_config(text: &str) -> Result<WcConfig> {
+fn parse_config(text: &str) -> Result<(WcConfig, Option<String>)> {
     let kv = pairs(text)?;
-    Ok(WcConfig {
-        repo: kv
-            .get("repo")
-            .ok_or_else(|| Error::State("config has no repo".to_owned()))?
-            .to_string(),
-        endpoint: kv.get("endpoint").map(|s| s.to_string()),
-        workspace: kv.get("workspace").map(|s| s.to_string()),
-    })
+    Ok((
+        WcConfig {
+            repo: kv
+                .get("repo")
+                .ok_or_else(|| Error::State("config has no repo".to_owned()))?
+                .to_string(),
+            endpoint: kv.get("endpoint").map(|s| s.to_string()),
+            workspace: kv.get("workspace").map(|s| s.to_string()),
+        },
+        kv.get("server").map(|s| s.to_string()),
+    ))
 }
 
 fn parse_state(text: &str) -> Result<WcState> {
@@ -1606,6 +1637,7 @@ mod tests {
         let sparse = Sparse::new([RepoPath::new("a b/c").unwrap()], true);
         let mut wc =
             WorkingCopy::init(dir.path(), config.clone(), state.clone(), sparse.clone()).unwrap();
+        wc.set_server(Some("dev".into())).unwrap();
         wc.index.entries.insert(
             RepoPath::new("a b/c/odd\nname").unwrap(),
             IndexEntry {
@@ -1618,6 +1650,7 @@ mod tests {
 
         let opened = WorkingCopy::open(&dir.path().join("a b")).unwrap();
         assert_eq!(opened.config(), &config);
+        assert_eq!(opened.server(), Some("dev"));
         assert_eq!(opened.state(), &state);
         assert_eq!(opened.index(), wc.index());
         let info = WorkingCopy::open_info(&dir.path().join("a b")).unwrap();
@@ -1625,6 +1658,7 @@ mod tests {
             (info.root(), info.config(), info.state()),
             (dir.path(), &config, &state)
         );
+        assert_eq!(info.server(), Some("dev"));
         wc.state.moving = Some(Moving {
             base,
             head: None,

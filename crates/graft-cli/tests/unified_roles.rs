@@ -43,7 +43,7 @@ impl Running {
         Self { child, stdout }
     }
 
-    fn wait_for_addr(&mut self, prefix: &str) -> SocketAddr {
+    fn wait_for_line(&mut self, prefix: &str) -> String {
         let mut line = String::new();
         loop {
             line.clear();
@@ -51,10 +51,19 @@ impl Running {
                 self.stdout.read_line(&mut line).expect("read role stdout") > 0,
                 "role exited before printing {prefix:?}"
             );
-            if let Some(addr) = line.trim().strip_prefix(prefix) {
-                return addr.parse().expect("role address");
+            if let Some(value) = line.trim().strip_prefix(prefix) {
+                return value
+                    .trim_matches(|c: char| c == '"' || c == '\'')
+                    .to_owned();
             }
         }
+    }
+
+    fn wait_for_addr(&mut self, prefix: &str) -> SocketAddr {
+        let value = self.wait_for_line(prefix);
+        value
+            .parse()
+            .unwrap_or_else(|err| panic!("role address {value:?}: {err}"))
     }
 }
 
@@ -235,5 +244,9 @@ fn one_binary_starts_every_role() {
             dir.path().join("node.toml").to_str().unwrap(),
         ],
     );
-    node.wait_for_addr("graft-node listening on ");
+    let socket = node.wait_for_line("graft-node listening on ");
+    assert!(
+        Path::new(&socket).exists(),
+        "node socket was not created at {socket}"
+    );
 }

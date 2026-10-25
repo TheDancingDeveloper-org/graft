@@ -450,6 +450,34 @@ fn the_token_never_reaches_the_output() {
 }
 
 #[test]
+fn named_server_config_connects_mcp_without_overrides() {
+    let s = serve();
+    let home = scratch();
+    let config_path = home.path().join("config.toml");
+    let config_path_text = config_path.to_string_lossy();
+    let token = "mcp-login-secret";
+
+    graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["login", "dev", "--endpoint", &s.url])
+        .write_stdin(token)
+        .assert()
+        .success();
+    graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["clone", REPO, "app"])
+        .assert()
+        .success();
+
+    let app = home.path().join("app");
+    let mut mcp = Mcp::start(&app, &[], &[("GRAFT_CONFIG", &config_path_text)]);
+    let log = mcp.ok("graft_log", json!({"repo": REPO, "from": "main"}));
+    assert!(!log.to_string().contains(token));
+    let stderr = mcp.finish();
+    assert!(!stderr.contains(token), "{stderr}");
+}
+
+#[test]
 fn without_an_endpoint_it_is_a_usage_error() {
     let dir = scratch();
     let out = graft(dir.path())

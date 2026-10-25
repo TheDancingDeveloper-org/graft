@@ -115,6 +115,9 @@ fn help_is_public_facing_for_every_command() {
         &["ci", "exchange"],
         &["api"],
         &["version"],
+        &["login"],
+        &["logout"],
+        &["config"],
         &["mcp"],
         &["lsp"],
         &["serve"],
@@ -781,4 +784,138 @@ fn line_create_and_list_json_and_human() {
     let err = json_out(again.get_output());
     assert_valid("error", &err);
     assert_eq!(err["error"]["kind"], json!("ref_conflict"));
+}
+
+#[test]
+fn login_persists_named_server_and_clone_uses_it_without_overrides() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let served = serve();
+    let home = scratch();
+    let config_path = home.path().join("config.toml");
+    let token = "login-test-secret";
+
+    let login = graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["login", "dev", "--endpoint", &served.url])
+        .write_stdin(format!("{token}\n"))
+        .assert()
+        .success();
+    assert!(!text(login.get_output()).contains(token));
+
+    let config_text = fs::read_to_string(&config_path).unwrap();
+    assert!(config_text.contains("default_server = \"dev\""));
+    assert!(config_text.contains(&served.url));
+    assert!(!config_text.contains(token));
+    assert_eq!(
+        fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let parsed: toml::Value = toml::from_str(&config_text).unwrap();
+    let token_path = Path::new(parsed["servers"]["dev"]["token_file"].as_str().unwrap());
+    assert_eq!(fs::read_to_string(token_path).unwrap().trim(), token);
+    assert_eq!(
+        fs::metadata(token_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let clone_root = home.path().join("fresh");
+    fs::create_dir(&clone_root).unwrap();
+    graft(&clone_root)
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["clone", REPO, "app"])
+        .assert()
+        .success();
+    let working_config = fs::read_to_string(clone_root.join("app/.graft/config")).unwrap();
+    assert!(working_config.contains("server = dev"));
+    assert!(!working_config.contains("endpoint ="));
+
+    let show = graft(&clone_root.join("app"))
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["--json", "config", "show"])
+        .assert()
+        .success();
+    let output = text(show.get_output());
+    assert!(output.contains("<redacted>"));
+    assert!(!output.contains(token));
+
+    graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["logout", "dev"])
+        .assert()
+        .success();
+    assert!(!token_path.exists());
+}
+
+#[test]
+fn endpoint_override_clone_records_the_override_not_the_default_server() {
+    let default_server = serve();
+    let override_server = serve();
+    let home = scratch();
+    let config_path = home.path().join("config.toml");
+    let token_path = home.path().join("override-token");
+    fs::write(&token_path, "override-secret\n").unwrap();
+
+    graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["login", "dev", "--endpoint", &default_server.url])
+        .write_stdin("default-secret")
+        .assert()
+        .success();
+    graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .arg("--endpoint")
+        .arg(&override_server.url)
+        .arg("--token-file")
+        .arg(&token_path)
+        .args(["clone", REPO, "app"])
+        .assert()
+        .success();
+
+    let working_config = fs::read_to_string(home.path().join("app/.graft/config")).unwrap();
+    assert!(working_config.contains(&format!("endpoint = {}", override_server.url)));
+    assert!(!working_config.contains("server = dev"));
+}
+
+#[test]
+fn explicit_connection_overrides_a_missing_working_copy_server() {
+    let served = serve();
+    let dir = scratch();
+    let app = clone_app(&served, dir.path(), &[]);
+    let token_path = dir.path().join("override-token");
+    fs::write(&token_path, "override-token\n").unwrap();
+    let path = app.join(".graft/config");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("{text}server = removed\n")).unwrap();
+
+    graft(&app)
+        .arg("--endpoint")
+        .arg(&served.url)
+        .arg("--token-file")
+        .arg(&token_path)
+        .args(["status", "--upstream"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn login_json_never_prints_the_token() {
+    let served = serve();
+    let dir = scratch();
+    let token = "json-login-secret";
+    let output = graft(dir.path())
+        .args(["--json", "login", "dev", "--endpoint", &served.url])
+        .write_stdin(token)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!combined.contains(token));
+    assert!(combined.contains("<redacted>"));
 }

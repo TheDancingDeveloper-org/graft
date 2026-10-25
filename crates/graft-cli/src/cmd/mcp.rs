@@ -20,7 +20,7 @@ use graft_client::workcopy::{
     CommitLimits, CommitOptions, DEFAULT_CACHE_BYTES, LandOptions, LandOutcome, WorkingCopy,
 };
 use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat};
-use graft_client::{Endpoint, Error as ClientError, Remote, discover};
+use graft_client::{Error as ClientError, Remote};
 use graft_mcp::{
     McpServer, WorkingCopyCommit, WorkingCopyError, WorkingCopyFuture, WorkingCopyLand,
     WorkingCopySync, WorkingCopyTools, WorkingCopyUpstream,
@@ -33,7 +33,7 @@ use tokio::sync::Mutex;
 
 use crate::cli::Global;
 use crate::cmd::status::{change_json, upstream_json};
-use crate::conn::{call_context, read_token, runtime, working_copy};
+use crate::conn::{call_context, resolve_settings, runtime, working_copy};
 use crate::error::Failure;
 use crate::identity;
 use crate::render;
@@ -63,19 +63,10 @@ pub(crate) fn run(g: &Global) -> Result<(), Failure> {
 /// Connects to the endpoint the other commands would use. Unlike them it
 /// needs no repository: every tool names its own.
 async fn connect(g: &Global, wc: Option<&WorkingCopy>) -> Result<Remote, Failure> {
-    let endpoint = match &g.endpoint {
-        Some(text) => Endpoint::parse(text),
-        None => {
-            let configured = wc.and_then(|wc| wc.config().endpoint.clone());
-            discover(configured.as_deref()).ok_or_else(|| {
-                Failure::usage(
-                    "no endpoint: pass --endpoint, set GRAFT_ENDPOINT, or run inside a working copy",
-                )
-            })?
-        }
-    };
-    let remote = Remote::connect(endpoint).await?;
-    Ok(match read_token(g)? {
+    let user = crate::config::load()?;
+    let settings = resolve_settings(g, wc, &user)?;
+    let remote = Remote::connect(settings.endpoint).await?;
+    Ok(match settings.token {
         Some(token) => remote.with_token(token),
         None => remote,
     })
