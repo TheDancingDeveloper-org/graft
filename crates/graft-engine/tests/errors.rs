@@ -247,6 +247,14 @@ fn invalid_change() {
         rule(block_on(f.engine.create_changeset(&repo.cx, reserved))),
         "reserved-metadata"
     );
+    let mut reserved = commit_req("r", vec![a], vec![put("y", b"b")]);
+    reserved
+        .metadata
+        .insert("mirror.git-commit".to_owned(), "0".repeat(40));
+    assert_eq!(
+        rule(block_on(f.engine.create_changeset(&repo.cx, reserved))),
+        "reserved-metadata"
+    );
 
     // An import whose root does not match its changes.
     let mut wrong = repo.changeset(a).changeset;

@@ -27,7 +27,7 @@ use super::types::{
     Attested, BATCH, BRANCH_PREFIX, BatchCommit, BatchConfig, BatchLine, BatchOutcome, BatchRecord,
     BatchRun, BatchState, DEFAULT_DROP_REASON, Dropped, FETCH, FIELD_CHARS, LandLine,
     MAX_ATTEST_PAGES, MAX_COMMITS, MAX_LANDS, MESSAGE_CHARS, PAGE, REVERTS_KEY, SYNC_KEY, Stamp,
-    TITLE_CHARS, config_err, git_time, is_sync, land_ident, short, system_ms,
+    TITLE_CHARS, config_err, git_time, is_sync, land_ident, short, sync_base, system_ms,
 };
 
 /// Batches one integration line into squashed GitHub PRs.
@@ -864,7 +864,7 @@ where
                 let held_base = ids[pos..]
                     .iter()
                     .filter_map(|i| views.get(i))
-                    .find_map(|v| v.changeset.metadata.get(SYNC_KEY))
+                    .find_map(|v| sync_base(&v.changeset.metadata))
                     .and_then(|b| ChangesetId::parse(b).ok())
                     .or(state.start_base);
                 match held_base {

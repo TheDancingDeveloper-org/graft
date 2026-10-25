@@ -470,33 +470,28 @@ fn octopus_merges_and_several_roots_round_trip() {
     );
 }
 
-/// A commit with no change against its single parent, or a root commit with
-/// git's empty tree, is refused (validity rule 9, `empty-changeset`), with
-/// nothing imported.
+/// A root commit with git's empty tree, and a commit with no change against
+/// its single parent, import (D33) and round-trip. Native empty changesets
+/// stay refused in graft-model; this harness only sees git.
 #[test]
-fn empty_commits_are_a_typed_refusal() {
+fn empty_commits_import_and_round_trip() {
     let mut git = Git::init("empty-root");
     let root = git.commit_tree(EMPTY_TREE, &[], "empty root");
     git.set_ref("refs/heads/main", &root);
-    assert_refused(
-        &git.git_dir(),
-        |e| matches!(e, GitError::Unrepresentable(u) if u.len() == 1 && u[0].reason == "empty-changeset"),
-    );
+    let imported = assert_round_trips(&git.git_dir());
+    assert_eq!(imported.outcome.report.commits, 1);
 
     let mut git = Git::init("empty");
     git.write("a", b"a\n");
     git.commit("a");
-    let empty = git.commit("nothing changed");
+    git.commit("nothing changed");
     git.write("b", b"b\n");
     git.commit("after");
-    let err = assert_refused(
-        &git.git_dir(),
-        |e| matches!(e, GitError::Unrepresentable(u) if u.iter().all(|c| c.reason == "empty-changeset")),
+    let imported = assert_round_trips(&git.git_dir());
+    assert_eq!(
+        imported.outcome.report.commits,
+        commits(&git.git_dir()).len() as u64
     );
-    let GitError::Unrepresentable(u) = err else {
-        unreachable!()
-    };
-    assert_eq!(u[0].commit.to_hex(), empty);
 }
 
 /// A shallow clone: the oldest commit names a parent the repository does

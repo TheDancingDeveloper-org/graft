@@ -139,6 +139,15 @@ impl World {
         GitSha::from_hex(&git(&self.work, &["rev-parse", "HEAD"])).unwrap()
     }
 
+    /// Commits without changing the tree and returns the sha.
+    fn empty_commit(&self, message: &str) -> GitSha {
+        git(
+            &self.work,
+            &["commit", "-q", "--allow-empty", "-m", message],
+        );
+        GitSha::from_hex(&git(&self.work, &["rev-parse", "HEAD"])).unwrap()
+    }
+
     fn push(&self) {
         git(&self.work, &["push", "-q", "origin", "main"]);
     }
@@ -178,6 +187,26 @@ impl World {
         let tip = self.tip().await?;
         db.sha_of(tip).unwrap()
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn follow_imports_empty_root_and_four_empty_single_parent_commits() {
+    let w = World::new().await;
+    w.empty_commit("empty root");
+    for n in 1..=4 {
+        w.empty_commit(&format!("empty {n}"));
+    }
+    w.push();
+
+    let db = w.open_db();
+    let metrics = metrics();
+    let mut follower = w.follower(&db, &metrics);
+    match poll(&mut follower).await {
+        LineOutcome::Imported { commits, .. } => assert_eq!(commits, 5),
+        other => panic!("expected an import, got {other:?}"),
+    }
+    assert_eq!(db.commit_count().unwrap(), 5);
+    assert!(w.tip().await.is_some(), "follow created the graft line");
 }
 
 fn metrics() -> Metrics {
