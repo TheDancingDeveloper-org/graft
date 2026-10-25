@@ -1,0 +1,1 @@
+- graft-proto: add backward-compatible typed stale-base land refusal details with the current line tip, a bounded path list, and an explicit truncation flag.

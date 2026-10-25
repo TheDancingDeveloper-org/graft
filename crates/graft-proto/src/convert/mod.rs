@@ -13,7 +13,7 @@ use graft_model::{
     Timestamp, TreeId,
 };
 
-use crate::error::{ApiError, ConflictPath, MergeConflict};
+use crate::error::{ApiError, ConflictPath, MAX_STALE_PATHS, MergeConflict, StaleBase};
 use crate::frame::Frame;
 use crate::pb;
 use crate::types::*;
@@ -1750,6 +1750,20 @@ impl TryFrom<pb::ConflictPath> for ConflictPath {
 impl From<ApiError> for pb::ApiError {
     fn from(e: ApiError) -> Self {
         use pb::api_error::{self as w, Error as E};
+        if let ApiError::StaleBase(e) = e {
+            let truncated = e.truncated || e.paths.len() > MAX_STALE_PATHS;
+            return pb::ApiError {
+                error: Some(E::Rejected(w::Rejected {
+                    policy: "stale-base".to_owned(),
+                    detail: "base is behind the current line tip; sync, then land again".to_owned(),
+                })),
+                stale_base: Some(w::StaleBase {
+                    current_tip: Some(cb(e.current_tip)),
+                    paths: e.paths.into_iter().take(MAX_STALE_PATHS).collect(),
+                    truncated: Some(truncated),
+                }),
+            };
+        }
         pb::ApiError {
             error: Some(match e {
                 ApiError::NotFound { what } => E::NotFound(w::NotFound { what }),
@@ -1802,7 +1816,9 @@ impl From<ApiError> for pb::ApiError {
                     base: cb(m.base),
                     source: cb(m.source),
                 }),
+                ApiError::StaleBase(_) => unreachable!("handled above"),
             }),
+            stale_base: None,
         }
     }
 }
@@ -1811,6 +1827,19 @@ impl TryFrom<pb::ApiError> for ApiError {
     type Error = WireError;
     fn try_from(e: pb::ApiError) -> R<Self> {
         use pb::api_error::Error as E;
+        if let Some(stale) = e.stale_base {
+            if stale.paths.len() > MAX_STALE_PATHS {
+                return Err(bad("stale_base.paths", "too many paths"));
+            }
+            return Ok(ApiError::StaleBase(Box::new(StaleBase {
+                current_tip: cid(
+                    req(stale.current_tip, "stale_base.current_tip")?,
+                    "stale_base.current_tip",
+                )?,
+                paths: stale.paths,
+                truncated: req(stale.truncated, "stale_base.truncated")?,
+            })));
+        }
         Ok(match req(e.error, "error")? {
             E::NotFound(e) => ApiError::NotFound { what: e.what },
             E::Collected(e) => ApiError::Collected {

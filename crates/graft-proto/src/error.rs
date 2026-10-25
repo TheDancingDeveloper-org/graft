@@ -32,6 +32,24 @@ pub struct MergeConflict {
     pub source: ChangesetId,
 }
 
+/// How many paths a stale-base refusal names before truncating.
+pub const MAX_STALE_PATHS: usize = 64;
+
+/// A land whose base is behind the line tip (WI-2441).
+///
+/// Ids and path strings only: no file contents and no tokens. `paths` is
+/// capped at [`MAX_STALE_PATHS`]; `truncated` is set when the server held
+/// more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleBase {
+    /// The line's current tip.
+    pub current_tip: ChangesetId,
+    /// Paths that changed between the client's base and `current_tip`.
+    pub paths: Vec<String>,
+    /// Whether `paths` was cut at [`MAX_STALE_PATHS`].
+    pub truncated: bool,
+}
+
 /// Every error an API operation can return.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -142,6 +160,9 @@ pub enum ApiError {
         /// The server's version, as `major.minor`.
         server: String,
     },
+    /// The client's base is behind the line tip. Sync, then land again.
+    /// Boxed so the error stays as small as the other variants.
+    StaleBase(Box<StaleBase>),
 }
 
 impl ApiError {
@@ -185,7 +206,8 @@ impl ApiError {
             ApiError::RefConflict { .. }
             | ApiError::Conflict { .. }
             | ApiError::MergeConflict(_)
-            | ApiError::Contended { .. } => Code::Aborted,
+            | ApiError::Contended { .. }
+            | ApiError::StaleBase(_) => Code::Aborted,
             ApiError::PermissionDenied { .. } => Code::PermissionDenied,
             ApiError::LimitExceeded { .. } => Code::ResourceExhausted,
             ApiError::CorruptObject { .. } => Code::DataLoss,
@@ -258,6 +280,11 @@ impl fmt::Display for ApiError {
             ApiError::IncompatibleProtocol { server } => {
                 write!(f, "incompatible protocol; server speaks {server}")
             }
+            ApiError::StaleBase(e) => write!(
+                f,
+                "base is behind line tip {}; sync, then land again",
+                e.current_tip
+            ),
         }
     }
 }
