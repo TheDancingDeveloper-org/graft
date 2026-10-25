@@ -1,0 +1,13 @@
+---
+source: crates/graft-cli/tests/mcp.rs
+assertion_line: 509
+expression: inside_text
+---
+{
+  "mcpServers": {
+    "graft": {
+      "command": "graft",
+      "args": ["mcp"]
+    }
+  }
+}

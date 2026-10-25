@@ -1,0 +1,9 @@
+---
+source: crates/graft-cli/tests/mcp.rs
+assertion_line: 519
+expression: text
+---
+[mcp_servers.graft]
+command = "graft"
+args = ["-C", "/work", "mcp"]
+cwd = "/work"
