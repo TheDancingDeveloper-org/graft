@@ -566,6 +566,7 @@ fn api_lists_every_operation_and_how_it_is_surfaced() {
     let out = graft(dir.path()).args(["api", "--list"]).assert().success();
     let value = json_out(out.get_output());
     assert_valid("api-list", &value);
+    assert_no_internal_references(&["api", "--list"], &value.to_string());
     insta::assert_json_snapshot!("api_list_json", value);
     assert_eq!(value.as_array().map(Vec::len), Some(33));
 }

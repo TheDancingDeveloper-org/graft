@@ -338,13 +338,7 @@ impl WorkingCopyTools for Served {
                     "files_updated": update.changed,
                     "recovered": recovered,
                 }),
-                LandOutcome::Queued { pr_url } => json!({
-                    "outcome": "queued",
-                    "line": line,
-                    "pr_url": pr_url,
-                    "detail": "handed to the PR bridge; the drafts land when the pull request merges",
-                    "recovered": recovered,
-                }),
+                LandOutcome::Queued { pr_url } => queued_land(line, pr_url, recovered),
                 _ => json!({"outcome": "unknown", "line": line}),
             };
             Ok(Some(value))
@@ -418,4 +412,31 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+fn queued_land(line: String, url: String, recovered: Value) -> Value {
+    json!({
+        "outcome": "queued",
+        "line": line,
+        "pr_url": url,
+        "detail": "queued for land; the drafts land when the queued operation completes",
+        "recovered": recovered,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queued_land_output_is_public_facing() {
+        let value = queued_land(
+            "main".into(),
+            "https://example.test/change".into(),
+            json!(null),
+        );
+        let output = value.to_string().to_ascii_lowercase();
+        assert!(!output.contains("pr bridge"));
+        assert!(!output.contains("pull request"));
+    }
 }

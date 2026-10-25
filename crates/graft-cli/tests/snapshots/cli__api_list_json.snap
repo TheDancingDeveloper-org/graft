@@ -210,28 +210,28 @@ expression: value
   {
     "api": "AdminApi",
     "command": null,
-    "excluded": "admin; graft-server admin subcommands (G1.12)",
+    "excluded": "server administration only",
     "op": "create_repo",
     "raw": false
   },
   {
     "api": "AdminApi",
     "command": null,
-    "excluded": "admin; graft-server admin subcommands (G1.12)",
+    "excluded": "server administration only",
     "op": "import_changesets",
     "raw": false
   },
   {
     "api": "AdminApi",
     "command": null,
-    "excluded": "admin; graft-server admin subcommands (G1.12)",
+    "excluded": "server administration only",
     "op": "gc",
     "raw": false
   },
   {
     "api": "AdminApi",
     "command": null,
-    "excluded": "admin; graft-server admin subcommands (G1.12)",
+    "excluded": "server administration only",
     "op": "mint_token",
     "raw": false
   }

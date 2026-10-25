@@ -45,9 +45,6 @@ pub(crate) enum Exit {
     Unavailable = 7,
 }
 
-/// Commands that are designed but not built yet (`docs/plan.md`).
-const PLANNED: &[&str] = &[];
-
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -132,13 +129,7 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         },
         Command::Planned(args) => {
             let name = args.first().map_or("", String::as_str);
-            if PLANNED.contains(&name) {
-                Err(Failure::usage(format!(
-                    "graft {name}: not implemented yet (see docs/plan.md)"
-                )))
-            } else {
-                Err(Failure::usage(format!("unknown command: {name}")))
-            }
+            Err(Failure::usage(format!("unknown command: {name}")))
         }
     }
 }
