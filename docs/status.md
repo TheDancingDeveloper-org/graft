@@ -107,11 +107,13 @@ so neither it nor the 56 s end-to-end figure is comparable with fast-import's
 1 s, which runs locally with no server. The rest is SQLite commits (WI-2323).
 Creating a line now writes one fork row, not a copy of its history (#107).
 
-### Read paths against the kill criterion (WI-2341)
+### Read-path floor (WI-2341, D31)
 
-The phase-1 kill criterion asks for read paths (`log`, `status`, `sync`)
-that are not slower than git; 2x faster than git is a later-phase target
-(operator decision, 2026-10-24). On graft-dev (p50 ms, graft / git) after WI-2341:
+Read-path speed is a no-regression floor, not a phase-1 target (D31,
+2026-10-25). No read path may be slower than the twelve-run medians below,
+and every operation stays O(change) (rule 2). 2× faster than git is a
+later-phase target. On graft-dev (p50 ms, graft / git) after WI-2341, and
+the twelve-run medians in parentheses where they differ:
 
 | | 1k | 10k |
 | --- | ---: | ---: |
@@ -128,9 +130,10 @@ lstat floor plus index parsing, about 2x git at 10k. sync at 1k is now
 3.5x faster than git, but the 10k run needs repeating: see
 `changes/WI-2341.md`. Its floor is two fsynced state files.
 
-Against the phase-1 bar, `log -50` (about 1.6x) and `status` at 10k
-(about 1.9x) are still slower than git; that gap is WI-2400. The 10k
-`log` and import baseline is WI-2304 (#116); 100k is deferred.
+These medians are the floor. Closing the remaining gap to git (about
+1.6× on `log -50`, about 1.9× on `status` at 10k) is a later phase;
+WI-2400 is wont_do. The `.graft/index` fsync stays. The 10k `log` and
+import baseline is WI-2304 (#116); 100k is deferred.
 
 ### Git flow (branching bench, seed 2362, after WI-2372)
 
@@ -148,8 +151,8 @@ Vogt is the source of truth.
 
 | Item | What |
 | --- | --- |
-| WI-2341 | read-path re-run on graft-dev (the 10k `sync` figure); blocked, results pending |
-| WI-2400 | read-path parity: `log`, `status` and `sync` not slower than git; blocked |
+| WI-2341 | done: twelve-run medians are the D31 floor |
+| WI-2400 | wont_do: parity with git is a later phase (D31) |
 | WI-2314 | CI `test` job OOM flake: quarantined (#91); lift the quarantine once `oom_kill` stays at 0 for a day after the Node B memory fix |
 | WI-2329 | review leftovers, p4 |
 

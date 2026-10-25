@@ -919,3 +919,23 @@ Rejected:
   breaks the lease rule and the determinism of D26.
 - An opt-in `pr-batch --append`: a fix-forward that needs a flag gets
   forgotten; appending is the default and `--no-append` turns it off.
+
+
+## D31. Phase 1 measures agent friction, not read latency
+
+**Status:** accepted (operator decision, 2026-10-25, review [WI-2445](https://github.com)).
+
+**The phase-1 MVP target is minimal agent friction and multi-session building without conflict churn.** Speed is not that target. It is two guards:
+
+1. **No regression.** No read path (`log`, `status`, `sync`) is slower than the medians recorded by WI-2341 on 2026-10-24 (bench smoke in the merge queue). Those medians, graft / git, p50 ms: at 1k, `log -50` 3.3 / 2.0, `status` 4.1 / 3.2, `sync` 54.6 / 23.4; at 10k, `log -50` 3.4 / 1.9, `status` 13.3 / 6.5, `sync` 70.6 / 29.1.
+2. **Rule 2.** Every operation is O(change), never O(history). A query that scans the journal or every changeset is a bug even when it is fast.
+
+**2× faster than git is a later-phase target**, not a phase-1 exit or kill criterion. WI-2400 (read-path parity with git) is `wont_do`; the floor above replaces it. WI-2341 is done: its medians are the floor, and its open question is answered.
+
+**The `.graft/index` fsync stays.** Dropping it would trade durability for milliseconds, and the gaps against git are 1–40 ms per command. The estate's cost was conflict churn, not latency.
+
+**Why the old bar is withdrawn.** The earlier read-path parity bar, and the 2× kill criterion, were inherited from the read pilot ([D18](#d18-read-pilot-first), [D20](#d20-no-pilot-period)). Phase 1 is the git alternative ([D22](#d22-phase-1-is-a-git-alternative)), and its success is whether concurrent sessions land without churn. Exit and kill criteria are restated in [plan.md](plan.md#phase-1-exit-and-kill-criteria).
+
+**Unchanged.** D22 stands. Phase 2 (CI, D25) still starts only with the graft-primary authority switch. graft runs no build, test, check or checker anywhere in phase 1.
+
+**Wording.** graft does not remove conflicts on registration lists, moves or lockfiles. It reduces conflicts through line merge, and surfaces the rest in the agent's own session instead of as a DIRTY PR or a queue ejection hours later.
