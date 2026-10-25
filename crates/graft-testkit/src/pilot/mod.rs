@@ -1183,7 +1183,7 @@ fn report(cfg: &PilotConfig, shape: &Shape, o: &PilotOutcome) -> String {
 
     let _ = writeln!(
         r,
-        "## Budgets (exit criterion 5) and the 2× kill criterion\n"
+        "## Budgets (exit criterion 5) and the later-phase 2× target\n"
     );
     let _ = writeln!(
         r,
