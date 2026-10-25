@@ -1392,3 +1392,35 @@ fn the_vogt_session_survives_a_client_sync_rebase_of_a_pending_draft() {
     assert_eq!(meta["vogt.session"], json!("ses_trial"));
     assert_eq!(meta["vogt.work_item"], json!("WI-1"));
 }
+
+/// WI-2439: a changeset that has just landed shows by its full id and by
+/// the short id the CLI prints, from the clone that landed it and from
+/// another clone after a later land.
+#[test]
+fn a_landed_changeset_shows_by_full_and_short_id() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let (app, _) = with_draft(&s, dir.path(), None);
+    let landed = json_run(&app, &["land"])["landed"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let short = &landed[..13];
+    assert!(stdout(&run(&app, &["log"])).contains(short));
+    for rev in [landed.as_str(), short] {
+        let shown = json_run(&app, &["show", rev]);
+        assert_eq!(shown["id"], json!(landed), "{rev}");
+    }
+    let other_dir = scratch();
+    let other = clone_app(&s, other_dir.path());
+    fs::write(other.join("docs/guide.md"), "theirs\n").unwrap();
+    run(&other, &["commit", "-m", "theirs"]).success();
+    run(&other, &["land"]).success();
+    assert_eq!(json_run(&other, &["show", short])["id"], json!(landed));
+    let missing = format!("c{}", "0".repeat(12));
+    let failed = wc_cmd(&app)
+        .args(["--json", "show", &missing])
+        .assert()
+        .failure();
+    assert_eq!(error_of(&failed)["kind"], json!("not_found"));
+}
