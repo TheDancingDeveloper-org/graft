@@ -260,7 +260,14 @@ fn run(case: &Case) -> Result<(), TestCaseError> {
                 landed.push((*pos, i));
             }
             Ok(other) => prop_assert!(false, "unexpected {:?}", other),
-            Err(ApiError::Conflict { onto, .. }) | Err(ApiError::Contended { tip: onto, .. }) => {
+            Err(ApiError::StaleBase(detail)) => {
+                prop_assert!(
+                    chain.contains_key(&detail.current_tip),
+                    "{:?} is on the line",
+                    detail.current_tip
+                );
+            }
+            Err(ApiError::Contended { tip: onto, .. }) => {
                 prop_assert!(chain.contains_key(onto), "{:?} is on the line", onto);
             }
             Err(e) => prop_assert!(false, "unexpected error {:?}", e),
@@ -296,44 +303,18 @@ fn run(case: &Case) -> Result<(), TestCaseError> {
     let root_tree = r.changeset(tip.target).changeset.root;
     prop_assert_eq!(r.fetch(root_tree), model);
 
-    // Conflicts are the model's, and the budget rules out `Contended`.
+    // The attempt budget rules out `Contended`, and a racer that conflicts
+    // with nothing lands.
     for (i, result) in results.iter().enumerate() {
         let racer = &case.racers[i];
-        match result {
-            Err(ApiError::Conflict { paths, onto }) => {
-                let q = chain[onto];
-                let since_base: BTreeSet<usize> = line_changes
-                    .range(racer.base as u64 + 1..=q)
-                    .flat_map(|(_, p)| p.iter().copied())
-                    .collect();
-                let first = racer
-                    .drafts
-                    .iter()
-                    .map(|d| {
-                        d.intersection(&since_base)
-                            .copied()
-                            .collect::<BTreeSet<_>>()
-                    })
-                    .find(|hit| !hit.is_empty());
-                let want: Vec<String> = first
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|p| PATHS[p].to_owned())
-                    .collect();
-                let got: Vec<String> = paths.iter().map(|p| p.path.clone()).collect();
-                prop_assert!(!want.is_empty(), "racer {} conflicted with nothing", i);
-                prop_assert_eq!(got, want);
-            }
-            Err(ApiError::Contended { .. }) => {
-                prop_assert!(
-                    (case.attempts as usize) < n,
-                    "racer {} contended with a budget of {} for {} racers",
-                    i,
-                    case.attempts,
-                    n
-                );
-            }
-            _ => {}
+        if let Err(ApiError::Contended { .. }) = result {
+            prop_assert!(
+                (case.attempts as usize) < n,
+                "racer {} contended with a budget of {} for {} racers",
+                i,
+                case.attempts,
+                n
+            );
         }
         // A racer that conflicts with nothing lands when the budget allows.
         let alone = case

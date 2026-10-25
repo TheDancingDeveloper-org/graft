@@ -55,6 +55,7 @@ use std::time::Duration;
 
 use graft_auth::oidc::pinned_changeset;
 use graft_model::{Changeset, ChangesetId, ObjectId, ObjectKind, RepoPath};
+use graft_proto::error::{MAX_STALE_PATHS, StaleBase};
 use graft_proto::types::{Attest, Land, Landed};
 use graft_proto::{ApiError, CallContext, PrincipalKind};
 use graft_store::{
@@ -819,7 +820,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         )],
                     };
                     self.meta.commit(repo, txn).await.map_err(errors::store)?;
-                    return Err(ApiError::Conflict { paths, onto: tip });
+                    let truncated = paths.len() > MAX_STALE_PATHS;
+                    let paths = paths
+                        .into_iter()
+                        .take(MAX_STALE_PATHS)
+                        .map(|path| path.path)
+                        .collect();
+                    return Err(ApiError::StaleBase(Box::new(StaleBase {
+                        current_tip: tip,
+                        paths,
+                        truncated,
+                    })));
                 }
                 Err(e) => return Err(e),
             };

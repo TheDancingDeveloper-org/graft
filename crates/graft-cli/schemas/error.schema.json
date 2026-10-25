@@ -26,6 +26,21 @@
           "type": "string",
           "pattern": "^[a-z][0-9a-f]{64}$"
         },
+        "current_tip": {
+          "description": "A stale base: the line tip to sync onto.",
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$"
+        },
+        "paths": {
+          "description": "A stale base: paths to re-sync, at most 64, never file contents.",
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 64
+        },
+        "truncated": {
+          "description": "A stale base: true when more paths were omitted.",
+          "type": "boolean"
+        },
         "base": {
           "description": "A line merge conflict (D29): the merge base.",
           "type": "string",

@@ -1,5 +1,6 @@
 ---
 source: crates/graft-cli/tests/land.rs
+assertion_line: 290
 expression: table
 ---
 == landed (land )
@@ -79,25 +80,67 @@ json:
 }
 
 == conflict with a racing land (land )
+exit 5
+stdout:
+
+stderr:
+graft: base is behind line tip ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08; sync, then land again
+  changed README.md
+  run `graft sync`, then `graft land`
+
+json:
+{
+  "error": {
+    "current_tip": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
+    "kind": "stale_base",
+    "message": "base is behind line tip ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08; sync, then land again",
+    "paths": [
+      "README.md"
+    ],
+    "preflight": {
+      "both_changed_truncated": false,
+      "checked": true,
+      "conflicts": [],
+      "conflicts_truncated": false,
+      "drafts": {
+        "checked": true,
+        "overlaps": [],
+        "skipped": null,
+        "truncated": false
+      },
+      "merges_cleanly": [],
+      "pre_land_check": {
+        "overlap": "ran",
+        "rebase": "not_needed"
+      },
+      "preview_skipped": null,
+      "stop": false,
+      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
+    },
+    "truncated": false
+  }
+}
+
+== conflict with --sync: the conflicts are written (land --sync)
 exit 3
 stdout:
 
 stderr:
-graft: 1 paths conflict onto ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08
-  conflict README.md
-  nothing changed: run `graft sync` (or `graft land --sync`) to write the conflicts into the files
+graft: 1 file conflicts with ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08
+  markers  README.md
+  edit the files (and delete any .graft-conflict sidecar), then `graft commit` and `graft land`
 
 json:
 {
   "error": {
     "conflicts": [
       {
-        "mode": null,
+        "mode": "markers",
         "path": "README.md"
       }
     ],
-    "kind": "conflict",
-    "message": "1 paths conflict onto ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
+    "kind": "conflicted",
+    "message": "1 file conflicts with ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
     "onto": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
     "preflight": {
       "both_changed_truncated": false,
@@ -122,30 +165,6 @@ json:
   }
 }
 
-== conflict with --sync: the conflicts are written (land --sync)
-exit 3
-stdout:
-
-stderr:
-graft: 1 file conflicts with ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08
-  markers  README.md
-  edit the files (and delete any .graft-conflict sidecar), then `graft commit` and `graft land`
-
-json:
-{
-  "error": {
-    "conflicts": [
-      {
-        "mode": "markers",
-        "path": "README.md"
-      }
-    ],
-    "kind": "conflicted",
-    "message": "1 file conflicts with ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08",
-    "onto": "ca0cdafcd1a3d1452dd4dc11a5466a55c2681e6214088cf9b484adfae895a1c08"
-  }
-}
-
 == contended past the wait (land --wait 0)
 exit 4
 stdout:
@@ -158,27 +177,7 @@ json:
 {
   "error": {
     "kind": "contended",
-    "message": "line main is contended",
-    "preflight": {
-      "both_changed_truncated": false,
-      "checked": true,
-      "conflicts": [],
-      "conflicts_truncated": false,
-      "drafts": {
-        "checked": true,
-        "overlaps": [],
-        "skipped": null,
-        "truncated": false
-      },
-      "merges_cleanly": [],
-      "pre_land_check": {
-        "overlap": "ran",
-        "rebase": "not_needed"
-      },
-      "preview_skipped": null,
-      "stop": false,
-      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
-    }
+    "message": "line main is contended"
   }
 }
 
@@ -255,26 +254,6 @@ json:
 {
   "error": {
     "kind": "unavailable",
-    "message": "unavailable; retry after 0 ms",
-    "preflight": {
-      "both_changed_truncated": false,
-      "checked": true,
-      "conflicts": [],
-      "conflicts_truncated": false,
-      "drafts": {
-        "checked": true,
-        "overlaps": [],
-        "skipped": null,
-        "truncated": false
-      },
-      "merges_cleanly": [],
-      "pre_land_check": {
-        "overlap": "ran",
-        "rebase": "not_needed"
-      },
-      "preview_skipped": null,
-      "stop": false,
-      "tip": "ce2a2795a650d66a2e553713e521dc4caacbc23b252551ae3c908a8f291732b7e"
-    }
+    "message": "unavailable; retry after 0 ms"
   }
 }

@@ -350,16 +350,14 @@ fn after_a_conflict_sync_writes_markers_and_edit_commit_land_succeeds() {
     s.repo
         .race(put("src/lib.rs", "fn a() { 2 }\nfn b() {}\nfn c() {}\n"));
 
-    // Land: 3, and nothing changes.
-    let a = wc_cmd(&app).args(["--json", "land"]).assert().code(3);
+    // Land: 5, a stale base, and nothing changes.
+    let a = wc_cmd(&app).args(["--json", "land"]).assert().code(5);
     let error = error_of(&a);
-    assert_eq!(error["kind"], json!("conflict"));
-    assert_eq!(
-        error["conflicts"],
-        json!([{"path": "src/lib.rs", "mode": null}])
-    );
+    assert_eq!(error["kind"], json!("stale_base"));
+    assert_eq!(error["paths"], json!(["src/lib.rs"]));
+    assert_eq!(error["truncated"], json!(false));
     let tip = s.rt.block_on(s.repo.tip());
-    assert_eq!(error["onto"], json!(tip.to_string()));
+    assert_eq!(error["current_tip"], json!(tip.to_string()));
     let status = json_run(&app, &["status"]);
     assert_eq!(status["head"], json!(head.to_string()));
     assert_eq!(status["clean"], json!(true));
@@ -910,7 +908,7 @@ fn line_create_then_list_then_land_on_the_new_line() {
 }
 
 /// D27: the pre-land check stops a land on a real conflict without sending
-/// it, and `--no-check` sends it, so the server's land reports the conflict.
+/// it, and `--no-check` sends it, so the server's land reports the stale base.
 #[test]
 fn the_pre_land_check_stops_a_real_conflict_and_no_check_skips_it() {
     let s = serve(Policy::Direct);
@@ -936,9 +934,12 @@ fn the_pre_land_check_stops_a_real_conflict_and_no_check_skips_it() {
     let a = wc_cmd(&app)
         .args(["--json", "land", "--no-check"])
         .assert()
-        .code(3);
+        .code(5);
     let error = error_of(&a);
-    assert_eq!(error["kind"], json!("conflict"));
+    assert_eq!(error["kind"], json!("stale_base"));
+    assert_eq!(error["current_tip"], json!(tip.to_string()));
+    assert_eq!(error["paths"], json!(["src/lib.rs"]));
+    assert_eq!(error["truncated"], json!(false));
     assert_eq!(error["preflight"], json!({"checked": false}));
     assert_eq!(s.rt.block_on(s.repo.tip()), tip);
 }
@@ -1323,7 +1324,7 @@ fn the_vogt_session_survives_land_and_a_conflicting_sync() {
     in_session(&["commit", "-m", "two"]);
     s.repo
         .race(put("src/lib.rs", "fn a() { 2 }\nfn b() {}\nfn c() {}\n"));
-    run(&app, &["land"]).code(3);
+    run(&app, &["land"]).code(5);
     run(&app, &["sync"]).code(3);
     fs::write(
         app.join("src/lib.rs"),

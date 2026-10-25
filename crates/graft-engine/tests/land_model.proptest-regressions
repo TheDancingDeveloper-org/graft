@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 02241075efd0e09a62603728c04f25343d34692fc5a9bc0405fa9271eb208f9e # shrinks to case = Case { pre: [], racers: [Racer { base: 0, drafts: [{1}] }, Racer { base: 0, drafts: [{1}] }], attempts: 2, schedule: [0] }
+cc d9cd83e84ae2be625a065882e28d48c7a3bd189d79fcdbdb28928f076004d0b4 # shrinks to case = Case { pre: [], racers: [Racer { base: 0, drafts: [{0, 1}] }, Racer { base: 0, drafts: [{0}] }], attempts: 2, schedule: [20] }
+cc 0d65968f18befe7ce1ee9180b444d17a0e1001634a31f4613c0838c4edf337d5 # shrinks to case = Case { pre: [{1}], racers: [Racer { base: 0, drafts: [{2}, {3}] }, Racer { base: 0, drafts: [{3}, {2}] }], attempts: 2, schedule: [0] }
