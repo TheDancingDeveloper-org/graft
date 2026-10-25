@@ -217,7 +217,10 @@ fn clone_human_and_json() {
         .success();
     let value = json_out(out.get_output());
     assert_valid("clone", &value);
-    insta::assert_json_snapshot!("clone_json", value);
+    assert_eq!(value["endpoint"], json!(s.url));
+    let mut stable = value.clone();
+    stable["endpoint"] = json!("http://127.0.0.1:9");
+    insta::assert_json_snapshot!("clone_json", stable);
     assert_eq!(value["base"], json!(s.commits.third.to_string()));
     assert_eq!(value["files"], json!(4));
 }
@@ -834,6 +837,45 @@ fn login_persists_named_server_and_clone_uses_it_without_overrides() {
         .assert()
         .success();
     assert!(!token_path.exists());
+}
+
+#[test]
+fn clone_by_url_uses_the_matching_named_server() {
+    let served = serve();
+    let home = scratch();
+    let config_path = home.path().join("config.toml");
+    graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["login", "dev", "--endpoint", &served.url])
+        .write_stdin("url-clone-secret\n")
+        .assert()
+        .success();
+    let host = served
+        .url
+        .strip_prefix("http://")
+        .expect("testkit serves http");
+    let clone_root = home.path().join("fresh");
+    fs::create_dir(&clone_root).unwrap();
+    let url = format!("graft://{host}/{REPO}?line=main");
+    let out = graft(&clone_root)
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["--json", "clone", &url, "app"])
+        .assert()
+        .success();
+    let value = json_out(out.get_output());
+    assert_eq!(value["repo"], json!(REPO));
+    assert_eq!(value["endpoint"], json!(served.url));
+    assert_eq!(value["line"], json!("main"));
+    let working_config = fs::read_to_string(clone_root.join("app/.graft/config")).unwrap();
+    assert!(working_config.contains("server = dev"));
+    assert!(!working_config.contains("url-clone-secret"));
+
+    let bad = graft(&clone_root)
+        .args(["clone", "graft://token@host/repo"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8_lossy(&bad.get_output().stderr);
+    assert!(err.contains("userinfo"), "{err}");
 }
 
 #[test]

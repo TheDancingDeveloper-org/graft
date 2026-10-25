@@ -959,7 +959,13 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         cx: &CallContext,
         args: WorkspaceArgs,
     ) -> Result<CallToolResult, ToolError> {
-        check_name("repo", &args.repo)?;
+        let repo = repo_from_arg(&args.repo)?;
+        check_name("repo", &repo)?;
+        if args.action != WorkspaceAction::Open
+            && (args.repo.starts_with("graft://") || args.repo.starts_with("grafts://"))
+        {
+            return Err(invalid("a graft URL is accepted only when action is open"));
+        }
         if let Some(name) = &args.name {
             check_name("name", name)?;
         }
@@ -998,11 +1004,11 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
                     .ok_or_else(|| invalid("`line` is required to open a workspace"))?;
                 check_name("line", &line)?;
                 let at = match &args.at {
-                    Some(rev) => Some(self.resolve(cx, &args.repo, rev).await?),
+                    Some(rev) => Some(self.resolve(cx, &repo, rev).await?),
                     None => None,
                 };
                 let req = OpenWorkspace {
-                    repo: args.repo.clone(),
+                    repo: repo.clone(),
                     name: args.name.clone(),
                     line,
                     at,
@@ -1010,21 +1016,17 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
                 };
                 self.api.open_workspace(cx, req).await
             }
-            WorkspaceAction::Get => {
-                self.api
-                    .get_workspace(cx, ws_ref(&args.repo, &named()?))
-                    .await
-            }
+            WorkspaceAction::Get => self.api.get_workspace(cx, ws_ref(&repo, &named()?)).await,
             WorkspaceAction::Renew => {
                 self.api
-                    .renew_lease(cx, ws_ref(&args.repo, &named()?), lease_ms)
+                    .renew_lease(cx, ws_ref(&repo, &named()?), lease_ms)
                     .await
             }
             WorkspaceAction::Close => {
                 let name = named()?;
                 let keep = args.keep_drafts.unwrap_or(true);
                 self.api
-                    .close_workspace(cx, ws_ref(&args.repo, &name), keep)
+                    .close_workspace(cx, ws_ref(&repo, &name), keep)
                     .await
                     .map_err(ToolError::Api)?;
                 let (name, _) = clip(&name, FIELD_MAX_BYTES);
@@ -1313,6 +1315,44 @@ fn merge_mode(arg: Option<MergeArg>) -> MergeMode {
     }
 }
 
+/// `graft_workspace` accepts a repository name or `graft://host[:port]/repo`.
+/// The endpoint is not used: the MCP server is already connected. Userinfo is
+/// refused so a token is not accepted in the URL.
+fn repo_from_arg(value: &str) -> Result<String, ToolError> {
+    if !(value.starts_with("graft://") || value.starts_with("grafts://")) {
+        if value.contains("://") {
+            return Err(invalid(
+                "expected a repository name or graft://host[:port]/repo",
+            ));
+        }
+        return Ok(value.to_owned());
+    }
+    let (tls, rest) = if let Some(rest) = value.strip_prefix("grafts://") {
+        (true, rest)
+    } else {
+        (false, value.strip_prefix("graft://").unwrap_or(value))
+    };
+    let _ = tls;
+    if rest.contains('@') {
+        return Err(invalid(
+            "a graft URL must not carry userinfo; configure the server token separately",
+        ));
+    }
+    let Some((authority, after)) = rest.split_once('/') else {
+        return Err(invalid("expected graft://host[:port]/repo"));
+    };
+    if authority.is_empty() || after.is_empty() {
+        return Err(invalid("expected graft://host[:port]/repo"));
+    }
+    let path = after.split(['?', '#']).next().unwrap_or(after);
+    if path.is_empty() || path.contains('/') {
+        return Err(invalid(
+            "repository name in a graft URL must be a single path segment",
+        ));
+    }
+    Ok(path.to_owned())
+}
+
 fn invalid(message: &str) -> ToolError {
     ToolError::Invalid(message.to_owned())
 }
@@ -1593,6 +1633,17 @@ mod tests {
 
     fn err_kind(e: ToolError) -> Value {
         e.into_result().structured_content.unwrap()["kind"].clone()
+    }
+
+    #[test]
+    fn workspace_repo_accepts_a_graft_url() {
+        assert_eq!(
+            repo_from_arg("graft://graft-dev:17888/rusttorrent").unwrap(),
+            "rusttorrent"
+        );
+        assert_eq!(repo_from_arg("grafts://[2001:db8::1]/app").unwrap(), "app");
+        assert!(repo_from_arg("graft://token@host/repo").is_err());
+        assert!(repo_from_arg("http://host/repo").is_err());
     }
 
     #[test]

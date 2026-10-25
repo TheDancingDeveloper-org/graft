@@ -47,6 +47,134 @@ pub enum Endpoint {
     Server(String),
 }
 
+/// A `graft://` or `grafts://` repository URL: endpoint plus repository.
+///
+/// `graft://host[:port]/repo` is plain HTTP; `grafts://` is TLS. An optional
+/// `?line=` selects the line. Userinfo is rejected so a token cannot hide in
+/// the URL. `unix:` sockets are not this form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoUrl {
+    /// `http://host[:port]` or `https://host[:port]`.
+    pub endpoint: String,
+    /// Repository name, one path segment.
+    pub repo: String,
+    /// Line from `?line=`, when the URL named one.
+    pub line: Option<String>,
+}
+
+impl RepoUrl {
+    /// Parses a clone URL. `Err` is one line of usage text.
+    pub fn parse(input: &str) -> std::result::Result<Self, String> {
+        let s = input.trim();
+        let (tls, rest) = if let Some(rest) = s.strip_prefix("grafts://") {
+            (true, rest)
+        } else if let Some(rest) = s.strip_prefix("graft://") {
+            (false, rest)
+        } else {
+            return Err("expected graft://host[:port]/repo or grafts://host[:port]/repo".into());
+        };
+        if rest.contains('@') {
+            return Err(
+                "a graft URL must not carry userinfo; pass the token with --token-file or graft login"
+                    .into(),
+            );
+        }
+        let (authority, after) = match rest.split_once('/') {
+            Some((authority, after)) if !authority.is_empty() && !after.is_empty() => {
+                (authority, after)
+            }
+            _ => {
+                return Err("expected graft://host[:port]/repo".into());
+            }
+        };
+        let (path, query) = after
+            .split_once('?')
+            .map(|(path, query)| (path, Some(query)))
+            .unwrap_or((after, None));
+        if path.is_empty()
+            || path.contains('/')
+            || path.contains('#')
+            || path.chars().any(char::is_control)
+            || path.chars().any(char::is_whitespace)
+        {
+            return Err("repository name in a graft URL must be a single path segment".into());
+        }
+        validate_authority(authority)?;
+        let mut line = None;
+        if let Some(query) = query {
+            if query.is_empty() {
+                return Err("a graft URL query must be line=<name>".into());
+            }
+            for pair in query.split('&') {
+                let Some((key, value)) = pair.split_once('=') else {
+                    return Err("a graft URL query must be line=<name>".into());
+                };
+                if key != "line" || value.is_empty() || line.is_some() {
+                    return Err("a graft URL query must be line=<name>".into());
+                }
+                if value.chars().any(char::is_control) || value.contains('/') {
+                    return Err("line name in a graft URL is not valid".into());
+                }
+                line = Some(value.to_owned());
+            }
+        }
+        let scheme = if tls { "https" } else { "http" };
+        Ok(RepoUrl {
+            endpoint: format!("{scheme}://{authority}"),
+            repo: path.to_owned(),
+            line,
+        })
+    }
+}
+
+/// Host, optional port, including `[IPv6]`.
+fn validate_authority(authority: &str) -> std::result::Result<(), String> {
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, after)) = rest.split_once(']') else {
+            return Err("IPv6 host in a graft URL must be [addr][:port]".into());
+        };
+        if host.is_empty() || host.contains('[') {
+            return Err("IPv6 host in a graft URL must be [addr][:port]".into());
+        }
+        let port = if let Some(port) = after.strip_prefix(':') {
+            if port.is_empty() {
+                return Err("graft URL is missing a port after ':'".into());
+            }
+            Some(port)
+        } else if after.is_empty() {
+            None
+        } else {
+            return Err("expected graft://[ipv6][:port]/repo".into());
+        };
+        (host, port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.is_empty() {
+            return Err("graft URL is missing a host".into());
+        }
+        if port.is_empty() {
+            return Err("graft URL is missing a port after ':'".into());
+        }
+        (host, Some(port))
+    } else {
+        (authority, None)
+    };
+    if host
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '/')
+    {
+        return Err("graft URL host is not valid".into());
+    }
+    if let Some(port) = port {
+        let value: u16 = port
+            .parse()
+            .map_err(|_| "graft URL port must be 1 to 65535".to_owned())?;
+        if value == 0 {
+            return Err("graft URL port must be 1 to 65535".into());
+        }
+    }
+    Ok(())
+}
+
 impl Endpoint {
     /// Parses the text form: `unix:<path>` or an absolute path is a socket,
     /// anything else is a server URL.
@@ -279,6 +407,36 @@ mod tests {
             Endpoint::parse("http://graft:7070"),
             Endpoint::Server("http://graft:7070".into())
         );
+    }
+
+    #[test]
+    fn repo_url_carries_endpoint_repo_and_line() {
+        let url = RepoUrl::parse("graft://graft-dev:17888/rusttorrent?line=trial").unwrap();
+        assert_eq!(url.endpoint, "http://graft-dev:17888");
+        assert_eq!(url.repo, "rusttorrent");
+        assert_eq!(url.line.as_deref(), Some("trial"));
+
+        let tls = RepoUrl::parse("grafts://example.test/app").unwrap();
+        assert_eq!(tls.endpoint, "https://example.test");
+        assert_eq!(tls.repo, "app");
+        assert_eq!(tls.line, None);
+
+        let v6 = RepoUrl::parse("graft://[2001:db8::1]/repo").unwrap();
+        assert_eq!(v6.endpoint, "http://[2001:db8::1]");
+        let v6_port = RepoUrl::parse("graft://[2001:db8::1]:17888/repo").unwrap();
+        assert_eq!(v6_port.endpoint, "http://[2001:db8::1]:17888");
+    }
+
+    #[test]
+    fn repo_url_rejects_userinfo_and_a_bad_port() {
+        let userinfo = RepoUrl::parse("graft://token@host/repo").unwrap_err();
+        assert!(userinfo.contains("userinfo"), "{userinfo}");
+        let port = RepoUrl::parse("graft://host:/repo").unwrap_err();
+        assert!(port.contains("port"), "{port}");
+        assert!(RepoUrl::parse("http://host/repo").is_err());
+        assert!(RepoUrl::parse("graft://host").is_err());
+        assert!(RepoUrl::parse("unix:/run/graft.sock").is_err());
+        assert!(RepoUrl::parse("graft://[::1").is_err());
     }
 
     #[test]

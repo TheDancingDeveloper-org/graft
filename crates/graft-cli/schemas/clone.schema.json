@@ -7,6 +7,7 @@
     "line",
     "base",
     "dir",
+    "endpoint",
     "files",
     "fetch"
   ],
@@ -25,6 +26,10 @@
     },
     "dir": {
       "type": "string"
+    },
+    "endpoint": {
+      "type": "string",
+      "description": "The resolved server endpoint, with no credentials."
     },
     "files": {
       "type": "integer",
