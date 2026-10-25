@@ -14,10 +14,11 @@ use graft_client::workcopy::{
 };
 use graft_client::workspace::DEFAULT_LEASE_MS;
 use graft_client::{Endpoint, Remote, discover};
-use graft_model::ChangesetId;
+use graft_model::{ChangesetId, IdPrefix, ObjectKind};
+use graft_proto::ApiError;
 use graft_proto::api::RepoApi;
 use graft_proto::context::{CallContext, Principal, PrincipalKind};
-use graft_proto::types::{ResolveRef, WorkspaceRef};
+use graft_proto::types::{ListRefs, Log, Page, ResolveRef, WorkspaceRef};
 
 use crate::cli::{DEFAULT_LINE, Global};
 use crate::error::Failure;
@@ -30,7 +31,18 @@ pub(crate) const TOKEN_ENV: &str = "GRAFT_TOKEN";
 pub(crate) struct Conn {
     pub(crate) remote: Remote,
     pub(crate) repo: String,
+    /// The line a short id is looked for on: the working copy's, else `main`.
+    line: String,
+    /// Changesets the working copy knows (base, head, an unfinished move),
+    /// the first place a short id is looked for.
+    known: Vec<ChangesetId>,
 }
+
+/// How many refs, and how many changesets of the line's recent history, a
+/// short id is matched against. Prefix resolution is bounded: an id older
+/// than this needs its full form.
+const PREFIX_REFS: u32 = 256;
+const PREFIX_HISTORY: u32 = 512;
 
 /// A single-threaded runtime: the CLI makes one call at a time.
 pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, Failure> {
@@ -142,7 +154,25 @@ pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn
         Some(token) => remote.with_token(token),
         None => remote,
     };
-    Ok(Conn { remote, repo })
+    let (line, known) = match wc {
+        Some(wc) => {
+            let st = wc.state();
+            let mut known = vec![st.base];
+            known.extend(st.head);
+            if let Some(m) = &st.moving {
+                known.push(m.base);
+                known.extend(m.head);
+            }
+            (st.line.clone(), known)
+        }
+        None => (DEFAULT_LINE.to_owned(), Vec::new()),
+    };
+    Ok(Conn {
+        remote,
+        repo,
+        line,
+        known,
+    })
 }
 
 /// The bearer token from `--token-file`, else `GRAFT_TOKEN`. Surrounding
@@ -181,7 +211,8 @@ fn token_from_file(path: &Path) -> Result<String, Failure> {
 }
 
 impl Conn {
-    /// Resolves a changeset id or a ref name to a changeset id.
+    /// Resolves a changeset id, a short id (as the CLI prints them) or a
+    /// ref name to a changeset id.
     pub(crate) async fn resolve(
         &self,
         cx: &CallContext,
@@ -190,7 +221,7 @@ impl Conn {
         if let Ok(id) = ChangesetId::parse(rev) {
             return Ok(id);
         }
-        let view = self
+        let found = self
             .remote
             .resolve_ref(
                 cx,
@@ -199,8 +230,75 @@ impl Conn {
                     name: rev.to_owned(),
                 },
             )
+            .await;
+        match (found, IdPrefix::parse(rev)) {
+            (Ok(view), _) => Ok(view.target),
+            (Err(ApiError::NotFound { .. }), Ok(prefix))
+                if prefix.kind() == ObjectKind::Changeset =>
+            {
+                self.resolve_prefix(cx, &prefix).await
+            }
+            (Err(e), _) => Err(e.into()),
+        }
+    }
+
+    /// Resolves a short changeset id against what the working copy knows,
+    /// the refs' targets, and the recent history of the line: a bounded
+    /// set, never the whole history.
+    async fn resolve_prefix(
+        &self,
+        cx: &CallContext,
+        prefix: &IdPrefix,
+    ) -> Result<ChangesetId, Failure> {
+        let mut candidates = self.known.clone();
+        let refs = self
+            .remote
+            .list_refs(
+                cx,
+                ListRefs {
+                    repo: self.repo.clone(),
+                    prefix: None,
+                    page: Page {
+                        limit: PREFIX_REFS,
+                        token: None,
+                    },
+                },
+            )
             .await?;
-        Ok(view.target)
+        let head = refs.iter().find(|r| r.name == self.line).map(|r| r.target);
+        candidates.extend(refs.iter().map(|r| r.target));
+        if let Some(from) = head {
+            let history = self
+                .remote
+                .log(
+                    cx,
+                    Log {
+                        repo: self.repo.clone(),
+                        from,
+                        until: None,
+                        paths: Vec::new(),
+                        page: Page {
+                            limit: PREFIX_HISTORY,
+                            token: None,
+                        },
+                    },
+                )
+                .await?;
+            candidates.extend(history.changesets.iter().map(|c| c.id));
+        }
+        candidates.sort();
+        candidates.dedup();
+        let mut matches = candidates.into_iter().filter(|id| prefix.matches(&id.0));
+        match (matches.next(), matches.next()) {
+            (Some(id), None) => Ok(id),
+            (Some(_), Some(_)) => Err(Failure::usage(format!(
+                "the short id {prefix} is ambiguous; give more of it"
+            ))),
+            (None, _) => Err(ApiError::NotFound {
+                what: format!("changeset {prefix}"),
+            }
+            .into()),
+        }
     }
 }
 
