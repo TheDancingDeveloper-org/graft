@@ -16,6 +16,17 @@ and starts from a clean slate, in Rust.
 > checks in the land path are built but switched off (phase 2). What is
 > delivered, and what is next, is in [docs/status.md](docs/status.md).
 
+## Bench
+
+![graft against git](docs/guide/bench.svg)
+
+One chart from the committed result files: clone, sparse clone, log,
+`log --path`, blame, status, sync and concurrent lands at 1,000 and
+10,000 commits, plus the real-PR replay and the branching-strategy runs.
+How it was measured, and what is not on the chart, is in
+[docs/guide/benchmarks.md](docs/guide/benchmarks.md).
+
+
 ## The idea in six lines
 
 - **The server computes.** Commits, history, diff, blame, rebase and landing

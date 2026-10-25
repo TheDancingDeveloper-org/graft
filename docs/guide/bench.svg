@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 560" width="920" height="560" role="img">
+<title>graft against git, recorded bench</title>
+<style>
+  svg { background: transparent; }
+  .h { font: 600 14px ui-sans-serif, system-ui, sans-serif; fill: #1c1917; }
+  .sub { font: 12px ui-sans-serif, system-ui, sans-serif; fill: #44403c; }
+  .lab { font: 11px ui-sans-serif, system-ui, sans-serif; fill: #44403c; }
+  .g { fill: #0f766e; } .t { fill: #a8a29e; }
+  .box { fill: none; stroke: #d6d3d1; }
+  @media (prefers-color-scheme: dark) {
+    .h { fill: #fafaf9; } .sub, .lab { fill: #d6d3d1; }
+    .g { fill: #2dd4bf; } .t { fill: #78716c; } .box { stroke: #44403c; }
+  }
+</style>
+<text x="24" y="28" class="h">graft vs git, p50 ms (lower is faster)</text>
+<text x="24" y="48" class="sub">teal graft, grey git. 1k: vogt-prod, seed 2294, 5 iterations. 10k: graft-dev, seed 2294, 5 iterations. Fresh CLI process per step.</text>
+<rect x="16" y="64" width="888" height="250" rx="8" class="box"/>
+<text x="32" y="88" class="h">1,000 commits</text>
+<rect x="32.0" y="219.7" width="14.0" height="56.3" class="g"/>
+<rect x="48.0" y="159.0" width="14.0" height="117.0" class="t"/>
+<text x="46.0" y="290" class="lab" text-anchor="middle">clone</text>
+<rect x="79.6" y="260.0" width="14.0" height="16.0" class="g"/>
+<rect x="95.6" y="208.4" width="14.0" height="67.6" class="t"/>
+<text x="93.6" y="290" class="lab" text-anchor="middle">sparse</text>
+<rect x="127.1" y="272.8" width="14.0" height="3.2" class="g"/>
+<rect x="143.1" y="274.6" width="14.0" height="1.4" class="t"/>
+<text x="141.1" y="290" class="lab" text-anchor="middle">log -50</text>
+<rect x="174.7" y="273.5" width="14.0" height="2.5" class="g"/>
+<rect x="190.7" y="271.5" width="14.0" height="4.5" class="t"/>
+<text x="188.7" y="290" class="lab" text-anchor="middle">log --path</text>
+<rect x="222.2" y="273.1" width="14.0" height="2.9" class="g"/>
+<rect x="238.2" y="270.5" width="14.0" height="5.5" class="t"/>
+<text x="236.2" y="290" class="lab" text-anchor="middle">blame</text>
+<rect x="269.8" y="273.2" width="14.0" height="2.8" class="g"/>
+<rect x="285.8" y="274.1" width="14.0" height="1.9" class="t"/>
+<text x="283.8" y="290" class="lab" text-anchor="middle">status</text>
+<rect x="317.3" y="260.4" width="14.0" height="15.6" class="g"/>
+<rect x="333.3" y="255.9" width="14.0" height="20.1" class="t"/>
+<text x="331.3" y="290" class="lab" text-anchor="middle">sync</text>
+<rect x="364.9" y="185.3" width="14.0" height="90.7" class="g"/>
+<rect x="380.9" y="234.7" width="14.0" height="41.3" class="t"/>
+<text x="378.9" y="290" class="lab" text-anchor="middle">clean lands</text>
+<rect x="412.4" y="96.0" width="14.0" height="180.0" class="g"/>
+<rect x="428.4" y="236.5" width="14.0" height="39.5" class="t"/>
+<text x="426.4" y="290" class="lab" text-anchor="middle">same-file</text>
+<text x="480" y="88" class="h">10,000 commits</text>
+<rect x="480.0" y="224.7" width="14.0" height="51.3" class="g"/>
+<rect x="496.0" y="96.0" width="14.0" height="180.0" class="t"/>
+<text x="494.0" y="290" class="lab" text-anchor="middle">clone</text>
+<rect x="527.6" y="270.3" width="14.0" height="5.7" class="g"/>
+<rect x="543.6" y="201.1" width="14.0" height="74.9" class="t"/>
+<text x="541.6" y="290" class="lab" text-anchor="middle">sparse</text>
+<rect x="575.1" y="275.0" width="14.0" height="1.0" class="g"/>
+<rect x="591.1" y="275.0" width="14.0" height="1.0" class="t"/>
+<text x="589.1" y="290" class="lab" text-anchor="middle">log -50</text>
+<rect x="622.7" y="275.0" width="14.0" height="1.0" class="g"/>
+<rect x="638.7" y="274.9" width="14.0" height="1.1" class="t"/>
+<text x="636.7" y="290" class="lab" text-anchor="middle">log --path</text>
+<rect x="670.2" y="272.1" width="14.0" height="3.9" class="g"/>
+<rect x="686.2" y="261.8" width="14.0" height="14.2" class="t"/>
+<text x="684.2" y="290" class="lab" text-anchor="middle">blame</text>
+<rect x="717.8" y="274.2" width="14.0" height="1.8" class="g"/>
+<rect x="733.8" y="275.0" width="14.0" height="1.0" class="t"/>
+<text x="731.8" y="290" class="lab" text-anchor="middle">status</text>
+<rect x="765.3" y="269.7" width="14.0" height="6.3" class="g"/>
+<rect x="781.3" y="272.2" width="14.0" height="3.8" class="t"/>
+<text x="779.3" y="290" class="lab" text-anchor="middle">sync</text>
+<rect x="812.9" y="244.1" width="14.0" height="31.9" class="g"/>
+<rect x="828.9" y="227.2" width="14.0" height="48.8" class="t"/>
+<text x="826.9" y="290" class="lab" text-anchor="middle">clean lands</text>
+<rect x="860.4" y="245.5" width="14.0" height="30.5" class="g"/>
+<rect x="876.4" y="233.8" width="14.0" height="42.2" class="t"/>
+<text x="874.4" y="290" class="lab" text-anchor="middle">same-file</text>
+<text x="32" y="300" class="sub">5/9 ops faster than git; ratio 0.24–4.56 at 1k. 6/9 ops faster than git; ratio 0.08–4.07 at 10k. Same-file is the merge3 concurrent scenario.</text>
+<rect x="16" y="320" width="430" height="210" rx="8" class="box"/>
+<text x="32" y="344" class="h">Real-PR replay</text>
+<text x="32" y="368" class="sub">115 PRs, 5 cases. Clean merges graft 58 / git 58. Conflicts graft 47 / git 47. Matched outcomes: yes.</text>
+<text x="32" y="392" class="sub">Source: bench/results/2026-10-24-real-prs/results.json. Both tools agreed on every case (graft-only and git-only clean are 0).</text>
+<text x="32" y="418" class="lab">rdpapp-split: 9 PRs, clean 1=1, conflicts 8=8, rt 17/19</text>
+<text x="32" y="434" class="lab">rdpapp-stack: 11 PRs, clean 0=0, conflicts 1=1, rt 2/2</text>
+<text x="32" y="450" class="lab">fluent2-registration: 34 PRs, clean 18=18, conflicts 16=16, rt 50/64</text>
+<text x="32" y="466" class="lab">rusttorrent-qbit: 4 PRs, clean 0=0, conflicts 4=4, rt 8/8</text>
+<text x="32" y="482" class="lab">graft-merge-back: 57 PRs, clean 39=39, conflicts 18=18, rt 75/153</text>
+<rect x="462" y="320" width="442" height="210" rx="8" class="box"/>
+<text x="478" y="344" class="h">Branching strategies</text>
+<text x="478" y="368" class="sub">Round trips and conflict blocks, graft-tracked / git. Seed 2362. File predates merge points (see docs/status.md).</text>
+<text x="478" y="400" class="lab">trunk: round trips 85 / 60, conflict blocks 4 / 5</text>
+<text x="478" y="420" class="lab">gitflow: round trips 293 / 154, conflict blocks 29 / 18</text>
+<text x="478" y="440" class="lab">release: round trips 173 / 106, conflict blocks 11 / 11</text>
+<text x="24" y="548" class="sub">Not on this chart: the WI-2341 twelve-run read-path medians (D31 floor). They are in docs/status.md and docs/decisions.md only, not in a results file.</text>
+</svg>
+
