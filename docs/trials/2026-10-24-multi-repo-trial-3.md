@@ -4,7 +4,7 @@ WI-2418. Codex worker sessions (gpt-5.6-sol through LiteLLM to Clawbay) delivere
 
 D22 applied throughout: graft ran no build, test or check. Midway the operator also removed builds from the workers (static checks only: `cargo fmt`, `cargo check`, tsc and lint), so each repo's CI on the batch PR was the only build and test gate.
 
-**Result:** 20 of 22 items landed through graft in about 3 hours, with 3 fix-forwards. The other 2 were already on `rust-core`. Line merge took every same-file overlap on rustTorrent and fluent2-egui. On vogt, two real conflicts stopped the land (exit 3) and the workers resolved them. Every land passed the D27 pre-land check, and nothing was lost or mis-attributed. rustTorrent and fluent2-egui batches merged with per-land commits. The vogt batch is open and parked: it fails vogt's own CI, which is outside this trial (see Scope).
+**Result:** 20 of 22 items landed through graft between 22:10Z and 01:10Z, with 4 fix-forwards. The other 2 were already on `rust-core`. Line merge took every same-file overlap on rustTorrent and fluent2-egui. On vogt, two real conflicts stopped the land (exit 3) and the workers resolved them. Every land passed the D27 pre-land check, and nothing was lost or mis-attributed. rustTorrent and fluent2-egui batches merged with per-land commits. The vogt batch is open and parked: it fails vogt's own CI, which is outside this trial (see Scope).
 
 ## Scope
 
@@ -16,7 +16,7 @@ graft is a git replacement, so the trial judges source control only: lines, sync
 | --- | --- |
 | Server | graft-dev at graft main 21685fa (#182), with mirrors for rusttorrent (`main`), fluent2-egui (`main`) and vogt (graft line `rust-core`) (#181). All three at lag 0 before the first land |
 | Lines | `trial-3` per repo, forked from the followed base (#182 scripts: `GRAFT_TRIAL_REPO`, `GRAFT_TRIAL_BASE`) |
-| Workers | Codex, gpt-5.6-sol through LiteLLM to Clawbay, up to 6 at once; 3 fix-forwards on Claude Opus. Tokens session-bound, with the drafts scope so the full D27 pre-land check runs (WI-2417, #182) |
+| Workers | Codex, gpt-5.6-sol through LiteLLM to Clawbay, up to 6 at once; 4 fix-forwards on Claude Opus. Tokens session-bound, with the drafts scope so the full D27 pre-land check runs (WI-2417, #182) |
 | CLI | built from main with `.gitignore` support (WI-2411), the stale-conflict fix (WI-2413) and attribution fixes (WI-2412, WI-2414) |
 | GitHub | D28 rulesets on all three repos (pull_request rule plus admin bypass); fluent2's merge queue switched from SQUASH to REBASE so per-land commits survive |
 | Items | 22 approved: rustTorrent 8, fluent2-egui 6 (3 raised for the trial), vogt port 8 |
@@ -41,18 +41,18 @@ graft is a git replacement, so the trial judges source control only: lines, sync
 
 ### vogt Rust port (`rust-core`)
 
-- 6 item lands between 22:3x and 01:0xZ, plus 1 fix-forward (c63a12e). 2 conflicts (exit 3), both resolved by the worker and landed on the next try: WI-2026 against WI-2022 in the session reads, and WI-2142 against the operation registry (it also renumbered its migration). 0 pre-land stops.
+- 6 item lands, plus 2 fix-forwards (c63a12e for the review, cd946ad for CI). 2 conflicts (exit 3), both resolved by the worker and landed on the next try: WI-2026 against WI-2022 in the session reads, and WI-2142 against the operation registry (it also renumbered its migration). 0 pre-land stops.
 - 2 items (WI-1778, WI-1779) were already on `rust-core`; the review confirmed it and they were closed.
 - One session hit its 90-minute budget, hibernated, and resumed with its context.
 - Batch #1190 (base `rust-core`, 6 commits): review and CI both rejected it. Closed; fix-forward landed; recut as #1191 (7 commits, the first 6 patch-identical). Review clean.
-- #1191 still fails vogt's CI. Python and Rust config generators disagree, a migration freeze list wasn't updated, and Rust CLI tests fail. Live Playwright fails on the `rust-core` base too. By operator decision the PR is parked open for the port's owners rather than fixed inside the trial. graft's part (lines, lands, conflicts, batch PR against a non-main base) worked.
+- #1191 still fails vogt's CI. Python and Rust config generators disagree, a migration freeze list wasn't updated, and Rust CLI tests fail. Live Playwright fails on the `rust-core` base too. A second fix-forward (cd946ad) landed on the line after the recut, so #1191 doesn't carry it. By operator decision the PR is parked open for the port's owners rather than fixed inside the trial. graft's part (lines, lands, conflicts, batch PR against a non-main base) worked.
 
 ## Measurements
 
 | | rustTorrent | fluent2-egui | vogt | all |
 | --- | ---: | ---: | ---: | ---: |
 | Item lands | 8 | 6 | 6 | 20 |
-| Fix-forwards | 1 | 1 | 1 | 3 |
+| Fix-forwards | 1 | 1 | 2 | 4 |
 | Conflicts (exit 3) | 0 | 0 | 2 | 2 |
 | Pre-land check stops | 0 | 0 | 0 | 0 |
 | Batch PRs (rejected, merged) | 2 (1, 1) | 2 (1, 1) | 2 (1, 0; 1 parked) | 6 (3, 2; 1 parked) |
@@ -76,8 +76,8 @@ graft is a git replacement, so the trial judges source control only: lines, sync
 | | per-PR baseline (fit assessment §3) | trial 1 | trial 2 | trial 3 |
 | --- | --- | --- | --- | --- |
 | Repos | 1 per PR | rustTorrent | rustTorrent | 3 (one on a non-main base) |
-| Agents | per PR | 4 Opus, sequential | up to 4 Opus | up to 6 Codex (gpt-5.6-sol) plus 3 Opus fixes |
-| Lands | | 4 | 7 plus 2 fixes | 20 plus 3 fixes |
+| Agents | per PR | 4 Opus, sequential | up to 4 Opus | up to 6 Codex (gpt-5.6-sol) plus 4 Opus fixes |
+| Lands | | 4 | 7 plus 2 fixes | 20 plus 4 fixes |
 | Conflicts | queue conflicts 4 of 55 (rT) | 0 | 2 | 2 |
 | Batch merge (open to merge) | rT PR p50 1.6 h | 17.3 h | 15.4 min | 14–15 min |
 | Rejected batches | | 0 | 1 (CI) | 3 (review or CI), plus 1 parked |
