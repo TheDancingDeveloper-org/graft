@@ -302,8 +302,13 @@ fn stat_of(files: &[graft_proto::types::FileDiff]) -> Vec<StatRow> {
 fn patch_lines(patch: &str) -> (u32, u32) {
     let mut added = 0u32;
     let mut removed = 0u32;
+    let mut in_hunk = false;
     for line in patch.lines() {
-        if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk {
             continue;
         }
         if line.starts_with('+') {
@@ -383,7 +388,7 @@ mod tests {
     use graft_model::{Change, EntryKind, ObjectId, RepoPath};
     use graft_proto::types::FileDiff;
 
-    use super::{diff_lines, stat_of};
+    use super::{diff_lines, patch_lines, stat_of};
 
     #[test]
     fn line_diff_counts_a_move() {
@@ -393,6 +398,12 @@ mod tests {
     #[test]
     fn line_diff_aligns_repeated_lines() {
         assert_eq!(diff_lines("same\nold\nsame\n", "same\nnew\nsame\n"), (1, 1));
+    }
+
+    #[test]
+    fn patch_lines_counts_removed_content_that_starts_with_header_marker() {
+        let patch = "--- a/frontmatter.md\n+++ b/frontmatter.md\n@@ -1 +0,0 @@\n----\n";
+        assert_eq!(patch_lines(patch), (0, 1));
     }
 
     #[test]
