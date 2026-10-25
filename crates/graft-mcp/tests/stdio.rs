@@ -4,7 +4,7 @@ mod support;
 
 use std::collections::BTreeSet;
 
-use graft_mcp::TOOLS;
+use graft_mcp::{TOOLS, ToolBound};
 use serde_json::json;
 use support::{Fake, call, cid, connect};
 
@@ -21,6 +21,10 @@ async fn the_handshake_and_tool_list_match_the_design() {
     for tool in &tools {
         let annotations = tool.annotations.as_ref().expect("annotations");
         let spec = TOOLS.iter().find(|t| t.name == tool.name).unwrap();
+        assert!(matches!(
+            spec.bound,
+            ToolBound::Paginated | ToolBound::Capped
+        ));
         assert_eq!(
             annotations.read_only_hint,
             Some(spec.read_only),
