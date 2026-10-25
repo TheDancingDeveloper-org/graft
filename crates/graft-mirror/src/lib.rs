@@ -61,7 +61,10 @@ pub mod server;
 pub mod text;
 
 pub use db::MirrorDb;
+pub use entry::run;
 pub use git::{GitCliError, Mirror};
+
+mod entry;
 
 /// A mirror failure.
 #[derive(Debug)]

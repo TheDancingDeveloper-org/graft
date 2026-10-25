@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.12
-# One image for the graft binaries (graft, graft-server, graft-node,
-# graft-mirror). Used by the dev stack in compose.yaml; see docs/dev-stack.md.
+# One image for the graft binary. Legacy role names are symlinks for the dev
+# stack and one compatibility release; see docs/dev-stack.md.
 #
 # Stages: builder (rust, sccache) -> runtime (debian trixie-slim, git and
 # ca-certificates, non-root user).
@@ -53,12 +53,10 @@ RUN --mount=type=cache,id=graft-cargo-registry,target=/usr/local/cargo/registry,
     else \
       echo "sccache: off (no bucket, no credentials, or server did not start)"; \
     fi; \
-    cargo build --release --locked \
-      -p graft-cli -p graft-server -p graft-node -p graft-mirror; \
+    cargo build --release --locked -p graft-cli; \
     if [ -n "${RUSTC_WRAPPER:-}" ]; then sccache --show-stats; sccache --stop-server; fi; \
     mkdir -p /out; \
-    cp target/release/graft target/release/graft-server \
-       target/release/graft-node target/release/graft-mirror /out/
+    cp target/release/graft /out/
 
 FROM debian:${DEBIAN_VERSION}-slim AS runtime
 RUN apt-get update \
@@ -81,11 +79,10 @@ RUN groupadd --system --gid 10001 graft \
 COPY docker/dev/server.toml /etc/graft/server.toml
 COPY docker/dev/mirror /etc/graft-dev/mirror
 
-COPY --from=builder /out/graft \
-     /out/graft-server \
-     /out/graft-node \
-     /out/graft-mirror \
-     /usr/local/bin/
+COPY --from=builder /out/graft /usr/local/bin/
+RUN ln -s graft /usr/local/bin/graft-server \
+ && ln -s graft /usr/local/bin/graft-node \
+ && ln -s graft /usr/local/bin/graft-mirror
 
 ENV PATH=/opt/graft-dev/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
