@@ -116,8 +116,13 @@ If the pilot does not beat git on the paths agents use, we stop.
   not store git objects, and does not reproduce git behaviour. Command names
   follow git where the meaning is the same, as a familiar starting point. They
   are not a target. See [what we drop](#what-graft-drops-from-git).
-- **Offline-first use.** Clients are online. A client keeps a bounded cache,
-  not a replica. Reading cached objects offline works; writing does not.
+- **Offline-first use of a remote repository.** A working copy of a remote
+  server keeps a bounded cache, not a replica. Reading cached objects offline
+  works; writing does not. A *local repository* is the exception
+  ([§5.4](#54-local-repositories), [D32](decisions.md#d32-local-repositories)):
+  the engine runs in the `graft` process, so there is no server to be offline
+  from. That is single-user and on one machine. It is not a replica of a
+  remote repository, and it does not write while disconnected from one.
 - **Branch-heavy workflows.** There are no long-lived feature branches. A
   stack of drafts covers what feature branches are used for.
 - **Full-DAG history and blame.** Log and blame follow the first parent of a
@@ -135,7 +140,7 @@ If the pilot does not beat git on the paths agents use, we stop.
 | git concept | graft |
 | --- | --- |
 | Staging area / index | None. `commit` records the working copy's changes in the slice, or the paths you name |
-| Local history, local commits | None. A commit is created on the server and is visible at once |
+| Local history, local commits | None on a remote repository: a commit is created on the server and is visible at once. A local repository ([§5.4](#54-local-repositories)) is the whole repository in a directory, not a private history beside a remote |
 | Branches for work in progress | Drafts, held by a workspace with a lease |
 | push / pull / fetch negotiation | `land` (server rebase plus CAS) and `sync` (move the base); fetch names objects |
 | Remotes | One server endpoint per repository (or the node daemon in front of it) |
@@ -538,6 +543,67 @@ without touching the same files ([plan.md](plan.md#crate-ownership-and-paralleli
 | `graft-git` | lib | git import, export, and id mapping. The only crate that knows git | model, proto |
 | `graft-mirror` | bin | follow, batch PR export (D21), export mirror, authority switch (the per-land PR bridge was removed under D21/D22) | git, proto, client, telemetry |
 | `graft-testkit` | lib (dev only) | fake clock, synthetic repos, crash harness, pilot harness | model, store, proto |
+
+### 5.4 Local repositories
+
+A local repository is a repository whose storage is a directory on the
+machine that runs `graft`, opened by the same process. Decision
+[D32](decisions.md#d32-local-repositories). It exists so one binary can be
+tried with no server, no node daemon, no mirror and no token. It is not a
+second engine and not a cache of a remote.
+
+**Where it lives.** `graft init [DIR]` creates two things:
+
+- the repository directory, at `DIR/.graft/repo`: SQLite metadata
+  (`meta.sqlite`, the same schema and migrations as the server) and the
+  filesystem object tree (`objects/`, the same frames as
+  `graft-store-fs`). One repository, one directory. `DIR` defaults to the
+  current directory. The repository name is `--repo`, defaulting to the
+  directory's name. There is no `--bare` form.
+- the working copy in `DIR`, whose configured server is the literal
+  `local:<path-to-repo>`. A second working copy is `graft clone
+  <path-to-repo>` (or `graft clone <working-copy>`, which reads that
+  config). Clone of a local path never contacts the network.
+
+**How the CLI opens it.** When the working copy's server is `local:…`, the
+CLI constructs `graft-engine`'s in-process `RepoApi` over `graft-store-sqlite`
+and `graft-store-fs`, the same wiring the server uses, and passes that trait
+object to the commands. No HTTP, no socket, no token. The process takes an
+exclusive lock file (`repo.lock`, `flock`) for the life of the command; a
+second process exits with a typed busy error instead of opening the store.
+That includes a long-running `graft mcp` stdio session: while it holds
+the lock, every other command on this repository exits busy.
+One process at a time is the whole concurrency story: there are no leases to
+renew across processes, and the single local principal is implicit (no auth
+crate on this path).
+
+**What is unchanged.** CAS lands, one transaction per logical write, the
+journal, objects durable before metadata names them, id-pruned diffs, GC off
+by default, typed errors, bounded responses. A conflicting land still exits
+3 and is resolved by the client. `kill -9` during a land loses no
+acknowledged write, because durability is the store's, not the transport's.
+Commit, sync, land, log, diff, blame, stack, revert, pick, tag and line all
+go through that in-process API. `graft import <git-path>` and `graft mirror
+export` use the same API, so a local repository imports and exports without
+a server.
+
+**Attaching to a server later.** The working copy's server value is the only
+switch. Changing it from `local:…` to an endpoint makes the next command use
+the remote client, which still needs a server, a token and a clone of that
+remote. Nothing in this design copies a local repository onto a server.
+`graft push-to-server` (promote a local repository to a remote, history
+intact) is a follow-up, not part of this item.
+
+**Out of scope locally.**
+
+- No node daemon and no local object cache in front of the repo: the process
+  is the server.
+- No HTTP server and no `/mcp` HTTP. `graft mcp` over stdio does work: it is
+  the same trait object the CLI holds.
+- No tokens, no ACL, no multi-user, no two processes in one repository.
+- No offline writes against a *remote* repository. The offline-first
+  non-goal stands for those.
+- No GC on by default, same as the server.
 
 ## 6. Storage
 
