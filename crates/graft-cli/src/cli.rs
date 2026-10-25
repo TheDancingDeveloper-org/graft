@@ -40,6 +40,9 @@ pub(crate) struct Global {
     /// File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument.
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) token_file: Option<PathBuf>,
+    /// Run as if started in this directory, like `git -C`
+    #[arg(short = 'C', long = "directory", global = true, value_name = "DIR")]
+    pub(crate) directory: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -176,6 +179,9 @@ pub(crate) struct DiffArgs {
     /// Resume token from a previous page
     #[arg(long, value_name = "TOKEN")]
     pub(crate) cursor: Option<String>,
+    /// Per-file added and removed line counts, and a summary
+    #[arg(long)]
+    pub(crate) stat: bool,
 }
 
 #[derive(Debug, Args)]

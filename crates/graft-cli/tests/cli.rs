@@ -7,6 +7,7 @@ mod support;
 use std::fs;
 use std::path::Path;
 
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use serde_json::{Value, json};
 use support::*;
@@ -196,6 +197,73 @@ fn diff_of_one_changeset_is_a_usage_error() {
     run_on(&s, &["diff", "main"])
         .code(2)
         .stderr(contains("give two changesets"));
+}
+
+#[test]
+fn diff_stat_counts_added_and_removed_lines() {
+    let s = serve();
+    let from = s.commits.first.to_string();
+    let to = s.commits.third.to_string();
+    let out = run_on(&s, &["diff", "--stat", &from, &to]).success();
+    let text = text(out.get_output());
+    assert!(text.contains("src/lib.rs"), "{text}");
+    assert!(text.contains("file"), "{text}");
+
+    let out = run_on(&s, &["--json", "diff", "--stat", &from, &to]).success();
+    let value = json_out(out.get_output());
+    assert!(value.get("stat").is_some(), "{value}");
+}
+
+#[test]
+fn diff_stat_of_the_working_copy_counts_an_edit() {
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path(), &[]);
+    fs::write(app.join("README.md"), "edited\n").unwrap();
+    let out = graft(&app).args(["diff", "--stat"]).assert().success();
+    let text = text(out.get_output());
+    assert!(text.contains("README.md |     2 +1     -1"), "{text}");
+    assert!(text.contains("1 file, 1 insertion, 1 deletion"), "{text}");
+}
+
+#[test]
+fn diff_stat_marks_oversized_working_copy_files_truncated() {
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path(), &[]);
+    fs::write(app.join("README.md"), vec![b'x'; 64 * 1024 + 1]).unwrap();
+    graft(&app)
+        .args(["diff", "--stat"])
+        .assert()
+        .success()
+        .stdout(contains("README.md | ? (truncated)"));
+}
+
+#[test]
+fn dash_c_runs_in_the_named_directory() {
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path(), &[]);
+    let elsewhere = scratch();
+    graft(elsewhere.path())
+        .args(["-C", app.to_str().unwrap(), "status"])
+        .assert()
+        .success()
+        .stdout(contains("README.md").not());
+    fs::write(app.join("README.md"), "edited\n").unwrap();
+    graft(elsewhere.path())
+        .args(["-C", app.to_str().unwrap(), "status"])
+        .assert()
+        .success()
+        .stdout(contains("README.md"));
+}
+
+#[test]
+fn dash_c_of_a_missing_directory_fails() {
+    let s = serve();
+    run_on(&s, &["-C", "/no/such/graft/dir", "status"])
+        .code(1)
+        .stderr(contains("cannot enter"));
 }
 
 #[test]
