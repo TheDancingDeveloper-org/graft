@@ -163,6 +163,35 @@ where
         }
     }
 
+    /// Lands an approved PR's drafts.
+    pub(crate) async fn land(&mut self, rec: &mut PrImport) -> Result<(), MirrorError> {
+        let cx = self.call("land", rec.number);
+        let landed = match self
+            .lander
+            .land(&cx, &self.repo, &self.line.line, rec.head)
+            .await
+        {
+            Ok(landed) => landed,
+            Err(e) if held_land_refusal(&e) => {
+                // Stays held: a stale base (the line moved and the land
+                // conflicts) is the same refusal as a conflict. The author
+                // can rebase or fix it, and a new head is imported then.
+                hold_refused_land(self.db, rec, &e)?;
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        rec.landed = Some(landed);
+        rec.state = ImportState::Landed;
+        rec.detail = format!("landed as {landed}");
+        self.db.put_pr_import(rec)?;
+        tracing::info!(repo = %self.repo, pr = rec.number, landed = %landed, "mirror PR landed");
+        match self.api.close_workspace(&cx, self.wref(rec), false).await {
+            Ok(()) | Err(ApiError::NotFound { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// One poll: imports, renews, lands and closes as far as each PR goes.
     /// A PR whose step fails stays where it was and is retried next poll.
     /// Returns the records of the PRs this poll touched.
@@ -346,35 +375,6 @@ where
         }
     }
 
-    /// Lands an approved PR's drafts.
-    async fn land(&mut self, rec: &mut PrImport) -> Result<(), MirrorError> {
-        let cx = self.call("land", rec.number);
-        let landed = match self
-            .lander
-            .land(&cx, &self.repo, &self.line.line, rec.head)
-            .await
-        {
-            Ok(landed) => landed,
-            Err(e @ (ApiError::Conflict { .. } | ApiError::Rejected { .. })) => {
-                // Stays held: the author can rebase or fix it, and a new head
-                // is imported then.
-                rec.detail = clean_text(&format!("land refused: {e:?}"), 500, false);
-                self.db.put_pr_import(rec)?;
-                return Ok(());
-            }
-            Err(e) => return Err(e.into()),
-        };
-        rec.landed = Some(landed);
-        rec.state = ImportState::Landed;
-        rec.detail = format!("landed as {landed}");
-        self.db.put_pr_import(rec)?;
-        tracing::info!(repo = %self.repo, pr = rec.number, landed = %landed, "mirror PR landed");
-        match self.api.close_workspace(&cx, self.wref(rec), false).await {
-            Ok(()) | Err(ApiError::NotFound { .. }) => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    }
-
     /// Once export has pushed the landed changeset, closes the PR (unless
     /// GitHub merged it already, seeing its own commits on the branch).
     async fn finish(&mut self, rec: &mut PrImport) -> Result<(), MirrorError> {
@@ -445,6 +445,21 @@ where
     }
 }
 
+/// A conflicting, stale or rejected land leaves the PR held, with the
+/// refusal recorded, instead of failing the poll.
+fn held_land_refusal(e: &ApiError) -> bool {
+    matches!(
+        e,
+        ApiError::Conflict { .. } | ApiError::StaleBase(_) | ApiError::Rejected { .. }
+    )
+}
+
+fn hold_refused_land(db: &MirrorDb, rec: &mut PrImport, e: &ApiError) -> Result<(), MirrorError> {
+    rec.detail = clean_text(&format!("land refused: {e:?}"), 500, false);
+    db.put_pr_import(rec)?;
+    Ok(())
+}
+
 /// Whether graft refused the PR's content itself (not a passing failure).
 fn refusal(e: &ApiError) -> bool {
     matches!(
@@ -454,4 +469,47 @@ fn refusal(e: &ApiError) -> bool {
             | ApiError::InvalidChange { .. }
             | ApiError::UnknownParent { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use graft_model::ObjectId;
+    use graft_proto::error::StaleBase;
+
+    use super::*;
+
+    /// A land that conflicts because the line moved (`StaleBase`) holds the
+    /// PR instead of failing the poll (WI-2441).
+    #[test]
+    fn a_stale_base_keeps_the_imported_pr_held() {
+        let err = ApiError::StaleBase(Box::new(StaleBase {
+            current_tip: ChangesetId(ObjectId([7; 32])),
+            paths: vec!["src/lib.rs".to_owned()],
+            truncated: false,
+        }));
+        assert!(held_land_refusal(&err));
+        let dir = std::env::temp_dir().join(format!("graft-mirror-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = MirrorDb::open(&dir.join("mirror.db")).unwrap();
+        let mut rec = PrImport {
+            number: 7,
+            head_sha: GitSha::from_hex("0123456789abcdef0123456789abcdef01234567").unwrap(),
+            workspace: pr_workspace(7),
+            head: ChangesetId(ObjectId([1; 32])),
+            state: ImportState::Held,
+            detail: String::new(),
+            landed: None,
+        };
+        hold_refused_land(&db, &mut rec, &err).unwrap();
+        assert_eq!(rec.state, ImportState::Held);
+        assert!(rec.landed.is_none());
+        assert!(rec.detail.contains("StaleBase"), "{}", rec.detail);
+        assert!(rec.detail.contains("src/lib.rs"), "{}", rec.detail);
+        let stored = db.pr_import(7).unwrap().unwrap();
+        assert_eq!(stored.state, ImportState::Held);
+        assert_eq!(stored.detail, rec.detail);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
