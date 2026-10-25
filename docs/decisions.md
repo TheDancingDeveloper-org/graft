@@ -1058,11 +1058,32 @@ carries `mirror.git-commit`. The canonical encoding does not change.
 Existing golden vectors are unchanged. The code PR that implements this
 adds one new golden vector for the canonical root; this decision does not.
 
-- **Fixed content.** Parents empty, changes empty, root the empty-repository
-  root tree, author the fixed empty identity (empty name, empty email, kind
-  `bot`), `authored_at` the epoch (`0` ms, offset `0`), message empty,
-  metadata empty. A second parentless empty changeset, or this shape with
-  any field different, is not the canonical root and stays rejected.
+- **Fixed content.** Parents empty, changes empty, root the empty tree,
+  author the fixed empty identity (empty name, empty email, kind `bot`),
+  `authored_at` the epoch (`0` ms, offset `0`), message empty, metadata
+  empty. The empty tree is the tree of no entries
+  ([design.md §4.4](design.md#44-trees)): canonical payload the version byte
+  alone, id `Tree::default().id()` =
+  `td0a89364d3af4e3469f3f4f545b3fb47ef2c72f9f2daddeedbd1821d18a4234a`, the
+  value `golden_empty_tree_id` already pins and the value `empty_tree()`
+  returns in `graft-engine` (`source`) and `graft-client` (`fetch`). A
+  second parentless empty changeset, or this shape with any field
+  different, is not the canonical root and stays rejected.
+- **Git export skips this changeset**
+  ([design.md §11.2](design.md#112-export)). It is never written as a git
+  commit. Its children export as parentless git root commits, so export
+  never emits `author <> 0 +0000` and never needs a land record the root
+  does not have. No other changeset is omitted.
+- **Git import does not start at this root.** An imported repository keeps
+  its imported roots. Import does not insert the canonical root above them.
+  D33's exception for empty imported changesets is unchanged.
+- **Round trip.** Import of a repository that was exported from `graft init`
+  does not restore the canonical root as a parent. The first real commits
+  come back as imported roots. That loses no file content and no message:
+  the skipped changeset has an empty tree and an empty message. Re-import
+  does not special-case them back onto the canonical root. `export(import(c))`
+  for a commit that was imported from git is unchanged, because those
+  histories never contained this changeset.
 - **`graft init` (D32).** Creating a local repository writes this one
   changeset and points the line at it. The working copy's first commit is a
   child of that root. Two repositories created by `graft init` share the
