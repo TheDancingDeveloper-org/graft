@@ -1877,6 +1877,7 @@ dependencies = [
  "graft-model",
  "graft-proto",
  "graft-store",
+ "graft-store-fs",
  "graft-telemetry",
  "graft-testkit",
  "insta",
