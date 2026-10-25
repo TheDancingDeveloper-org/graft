@@ -13,6 +13,7 @@ pub mod convert;
 pub mod error;
 pub mod frame;
 pub mod pb;
+pub mod repo_url;
 pub mod types;
 pub mod version;
 
@@ -21,4 +22,5 @@ pub use context::{CallContext, Principal, PrincipalKind};
 pub use convert::WireError;
 pub use error::ApiError;
 pub use frame::{Codec, Frame, FrameError};
+pub use repo_url::RepoUrl;
 pub use version::{PROTOCOL_VERSION, ProtocolVersion, VERSION_HEADER};

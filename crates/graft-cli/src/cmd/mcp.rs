@@ -47,7 +47,8 @@ pub(crate) fn run(g: &Global) -> Result<(), Failure> {
     runtime()?.block_on(async {
         let remote = Arc::new(connect(g, wc.as_ref()).await?);
         let principal = call_context().principal;
-        let mut server = McpServer::new(Arc::clone(&remote), principal);
+        let mut server = McpServer::new(Arc::clone(&remote), principal)
+            .with_endpoint(remote.endpoint().to_string());
         if let Some(wc) = wc {
             server = server.with_working_copy(Arc::new(Served {
                 repo: wc.config().repo.clone(),

@@ -49,6 +49,10 @@ pub enum Endpoint {
     Server(String),
 }
 
+/// A `graft://` or `grafts://` repository URL. The parser lives in
+/// `graft-proto` so the CLI and MCP accept the same URLs.
+pub use graft_proto::RepoUrl;
+
 impl Endpoint {
     /// Parses the text form: `unix:<path>` or an absolute path is a socket,
     /// anything else is a server URL.
