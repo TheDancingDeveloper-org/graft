@@ -1,0 +1,273 @@
+name: release
+
+# A tag is never the first run of this build.
+# - pull_request: dry run when the workflow or its scripts change
+# - schedule: nightly dry run on main
+# - workflow_dispatch: dry_run input (default true) builds without publishing
+# - push of v*: publish binaries, checksums, the GHCR image and the GitHub release
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release/**
+      - docker/Dockerfile
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build without publishing
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # One list: scripts/release/binaries.txt (package:executable).
+  # WI-2447 collapses the extra binaries into `graft` subcommands; edit that file.
+
+jobs:
+  runner-policy:
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: every job names a self-hosted runner
+        run: |
+          set -euo pipefail
+          bad=0
+          # Built from parts: the literal two-brace sequence is an Actions
+          # expression anywhere in a workflow file, even inside `run:`.
+          # shellcheck disable=SC2016
+          expr_open='${'"{"
+          while IFS=: read -r file number line; do
+            case "$line" in
+              *self-hosted*|*"[graft-dev]"*) ;;
+              *)
+                echo "::error file=$file,line=$number::job does not name a self-hosted runner"
+                bad=1
+                ;;
+            esac
+            case "$line" in
+              *"$expr_open"*)
+                echo "::error file=$file,line=$number::dynamic runner selection is not allowed"
+                bad=1
+                ;;
+            esac
+          done < <(grep -RnE '^[[:space:]]*runs-on:' .github/workflows \
+                     --include='*.yml' --include='*.yaml')
+          [ "$bad" -eq 0 ]
+
+  dry-run:
+    # Fast script validation. The image and release-assembly jobs below also
+    # run without publishing, so a tag is never their first execution.
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.dry_run)
+    runs-on: [self-hosted]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: |
+          set -eu
+          for script in scripts/release/*.sh; do
+            sh -n "$script"
+          done
+          test -s scripts/release/binaries.txt
+          grep -q '^graft-cli:graft$' scripts/release/binaries.txt
+      - name: Assemble changelog into a temp tree
+        run: |
+          set -eu
+          version=0.0.0-dry-run
+          scripts/release/changelog.sh "$version"
+          scripts/release/release-notes.sh "$version" release-notes.md
+          grep -q "^## $version " release-notes.md
+          test -f changes/README.md
+          test -z "$(find changes -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit)"
+          git checkout -- changes
+          git checkout -- CHANGELOG.md 2>/dev/null || git clean -f -- CHANGELOG.md >/dev/null
+          rm -f release-notes.md
+
+
+  binaries-linux-x86_64:
+    name: binaries (x86_64-unknown-linux-musl)
+    runs-on: [self-hosted]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build static archive
+        run: scripts/release/build-archive.sh x86_64-unknown-linux-musl cross
+      - name: Verify checksum
+        run: sha256sum -c graft-x86_64-unknown-linux-musl.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: graft-x86_64-unknown-linux-musl
+          path: |
+            graft-x86_64-unknown-linux-musl.tar.gz
+            graft-x86_64-unknown-linux-musl.tar.gz.sha256
+
+  binaries-linux-aarch64:
+    name: binaries (aarch64-unknown-linux-musl)
+    runs-on: [self-hosted]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build static archive
+        run: scripts/release/build-archive.sh aarch64-unknown-linux-musl cross
+      - name: Verify checksum
+        run: sha256sum -c graft-aarch64-unknown-linux-musl.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: graft-aarch64-unknown-linux-musl
+          path: |
+            graft-aarch64-unknown-linux-musl.tar.gz
+            graft-aarch64-unknown-linux-musl.tar.gz.sha256
+
+  binaries-macos-x86_64:
+    name: binaries (x86_64-apple-darwin)
+    runs-on: [self-hosted, macos]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Build archive
+        run: scripts/release/build-archive.sh x86_64-apple-darwin cargo
+      - name: Verify checksum
+        run: shasum -a 256 -c graft-x86_64-apple-darwin.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: graft-x86_64-apple-darwin
+          path: |
+            graft-x86_64-apple-darwin.tar.gz
+            graft-x86_64-apple-darwin.tar.gz.sha256
+
+  binaries-macos-aarch64:
+    name: binaries (aarch64-apple-darwin)
+    runs-on: [self-hosted, macos]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Build archive
+        run: scripts/release/build-archive.sh aarch64-apple-darwin cargo
+      - name: Verify checksum
+        run: shasum -a 256 -c graft-aarch64-apple-darwin.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: graft-aarch64-apple-darwin
+          path: |
+            graft-aarch64-apple-darwin.tar.gz
+            graft-aarch64-apple-darwin.tar.gz.sha256
+
+  # Same image as image.yml (docker/Dockerfile, ghcr.io/<owner>/graft).
+  # Called from here on a version tag so the release and the image share a SHA.
+  # image.yml itself still builds on its own tag and dispatch triggers.
+  image:
+    needs: [binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-x86_64, binaries-macos-aarch64]
+    runs-on: [self-hosted, docker]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove a stale builder
+        run: docker buildx rm --keep-state graft-image 2>/dev/null || true
+      - uses: docker/setup-buildx-action@v3
+        with:
+          name: graft-image
+          keep-state: true
+      - name: Image references
+        id: ref
+        run: |
+          set -eu
+          owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/$owner/graft"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "tags=$image:sha-$GITHUB_SHA,$image:$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=$image:dry-run-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.ref.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  release-assembly:
+    needs: [binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-x86_64, binaries-macos-aarch64, image]
+    runs-on: [self-hosted]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: graft-*
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: |
+          set -eu
+          cd artifacts
+          sha256sum -c ./*.sha256
+          sha256sum ./*.tar.gz > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Changelog section
+        run: |
+          set -eu
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version=${GITHUB_REF_NAME#v}
+          else
+            version=0.0.0-dry-run
+            scripts/release/changelog.sh "$version"
+          fi
+          scripts/release/release-notes.sh "$version" release-notes.md
+      - name: GitHub release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            artifacts/*.tar.gz artifacts/SHA256SUMS
