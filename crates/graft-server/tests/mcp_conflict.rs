@@ -95,16 +95,21 @@ async fn play(name: &str, case: Case) -> Outcome {
         "{stopped}"
     );
 
-    // Sent without the check, B's land conflicts on the server, with ids only.
+    // Sent without the check, B's land is a stale base: the current tip and
+    // the changed paths, never file contents. Side ids stay on graft_conflicts.
     let conflict_error = b.err(
         "graft_land",
         json!({"repo": "r", "workspace": "wb", "check": false}),
     );
-    assert_eq!(conflict_error["kind"], "conflict", "{conflict_error}");
+    assert_eq!(conflict_error["kind"], "stale_base", "{conflict_error}");
     assert_eq!(conflict_error["paths"], json!([case.path]));
-    assert_eq!(conflict_error["onto"], onto.as_str());
+    assert_eq!(conflict_error["current_tip"], onto.as_str());
+    assert_eq!(conflict_error["truncated"], false);
     assert_eq!(conflict_error["retryable"], false);
-    assert_eq!(conflict_error["sides"][0]["path"], case.path);
+    assert_eq!(
+        conflict_error["guidance"],
+        "run graft_sync, then graft_land"
+    );
 
     // B reads the conflict ...
     let conflicts = b.ok("graft_conflicts", json!({"repo": "r", "workspace": "wb"}));
@@ -118,13 +123,13 @@ async fn play(name: &str, case: Case) -> Outcome {
     );
     let side = &conflicts["paths"][0];
     assert_eq!(side["path"], case.path);
-    // The error and the conflict view name the same ids.
-    for k in ["base", "ours", "theirs"] {
-        assert_eq!(
-            conflict_error["sides"][0][k], side[k]["id"],
-            "{k}: {conflict_error} vs {side}"
-        );
-    }
+    // Side ids live on the conflict view. The stale-base error names the
+    // path and the tip, never those ids or file contents.
+    assert!(
+        side["base"].get("id").is_some() || side["base"].is_null(),
+        "{side}"
+    );
+    assert!(!conflict_error.to_string().contains("content"));
 
     // ... resolves it against `onto`, under CAS on its head ...
     let mut resolution = case.resolution;
@@ -272,7 +277,9 @@ async fn mcp_only_agent_resolves_modify_delete_by_deleting() {
     assert_eq!(side["ours"], Value::Null, "{side}");
     assert_eq!(side["markers"], Value::Null);
     assert_eq!(side["reason"], "clash");
-    assert_eq!(o.conflict_error["sides"][0]["ours"], Value::Null);
+    assert_eq!(side["ours"], Value::Null);
+    assert_eq!(o.conflict_error["kind"], "stale_base");
+    assert!(!o.conflict_error.to_string().contains("ours"));
     // The oracle: the path is gone from `main`.
     let e = o.agent.err(
         "graft_read",

@@ -135,7 +135,7 @@ fn disjoint_racers_all_land() {
 }
 
 /// Concurrent lands on the same lines of one file: exactly one lands, and
-/// every other gets a `Conflict` (none is left `Contended`), whether the
+/// every other gets a stale-base refusal (none is left `Contended`), whether the
 /// rebase merges by file or by line.
 #[test]
 fn same_lines_racers_conflict_but_one() {
@@ -167,12 +167,12 @@ fn same_lines(merge: MergeMode) {
     for result in &results {
         match result {
             Ok(_) => {}
-            Err(ApiError::Conflict { paths, onto }) => {
-                assert_eq!(*onto, winner);
-                let paths: Vec<&str> = paths.iter().map(|p| p.path.as_str()).collect();
-                assert_eq!(paths, ["a"]);
+            Err(ApiError::StaleBase(detail)) => {
+                assert_eq!(detail.current_tip, winner);
+                assert_eq!(detail.paths, ["a"]);
+                assert!(!detail.truncated);
             }
-            other => panic!("expected Conflict, got {other:?}"),
+            other => panic!("expected StaleBase, got {other:?}"),
         }
     }
     let line = tip(&r);

@@ -156,7 +156,7 @@ pub fn check(plan: &Plan, out: &Outcome) -> Report {
             Op::GaveUp { .. } => report.gave_up += 1,
             Op::Gc(Ok(())) => report.gc_passes += 1,
             Op::Land {
-                result: Err(ApiError::Conflict { .. }),
+                result: Err(ApiError::Conflict { .. } | ApiError::StaleBase(_)),
                 ..
             } => report.conflicts += 1,
             Op::Stuck => report.fail(
@@ -400,17 +400,24 @@ fn check_lands(
         })
         .collect();
     for op in &out.history {
-        let Op::Land {
-            client,
-            intent,
-            head,
-            result: Err(ApiError::Conflict { onto, .. }),
-            ..
-        } = op
-        else {
-            continue;
+        let (client, intent, head, onto) = match op {
+            Op::Land {
+                client,
+                intent,
+                head,
+                result: Err(ApiError::Conflict { onto, .. }),
+                ..
+            } => (*client, *intent, *head, *onto),
+            Op::Land {
+                client,
+                intent,
+                head,
+                result: Err(ApiError::StaleBase(stale)),
+                ..
+            } => (*client, *intent, *head, stale.current_tip),
+            _ => continue,
         };
-        let (Some(base), Some(&to)) = (parents.get(head), on_chain.get(onto)) else {
+        let (Some(base), Some(&to)) = (parents.get(&head), on_chain.get(&onto)) else {
             continue;
         };
         let from = if *base == out.root {
@@ -418,12 +425,12 @@ fn check_lands(
         } else {
             on_chain.get(base).copied().unwrap_or(0)
         };
-        let mine = &plan.clients[*client][*intent];
+        let mine = &plan.clients[client][intent];
         let real = chain[from..to].iter().any(|c| {
             origin.get(c).is_some_and(|&(oc, oi)| {
                 let theirs = &plan.clients[oc][oi];
                 theirs.regions.iter().any(|r| mine.regions.contains(r))
-                    || (oc == *client && theirs.private && mine.private)
+                    || (oc == client && theirs.private && mine.private)
             })
         });
         if !real {
@@ -702,7 +709,7 @@ fn check_stranded(
             }
         }
         let mut synced = run_local(engine.sync(&cx, wref.clone(), None));
-        if let Err(ApiError::Conflict { .. }) = synced {
+        if let Err(ApiError::Conflict { .. } | ApiError::StaleBase(_)) = synced {
             // A conflict is an answer, not a dead end: drop the stack and
             // the workspace must move.
             let head = run_local(engine.get_workspace(&cx, wref.clone()))

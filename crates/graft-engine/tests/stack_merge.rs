@@ -297,6 +297,7 @@ fn landed(result: ApiResult<Landed>) -> (ChangesetId, Vec<String>) {
 fn conflict_paths<T: std::fmt::Debug>(result: ApiResult<T>) -> Vec<String> {
     match result {
         Err(ApiError::Conflict { paths, .. }) => paths.into_iter().map(|p| p.path).collect(),
+        Err(ApiError::StaleBase(detail)) => detail.paths,
         other => panic!("expected a conflict, got {other:?}"),
     }
 }

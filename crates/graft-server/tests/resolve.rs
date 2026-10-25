@@ -112,10 +112,16 @@ async fn a_conflict_resolves_over_grpc_and_lands() {
     let draft = commit_in(&mut al, Some("w"), root, OURS).await;
     let other = commit_in(&mut a, None, root, THEIRS).await;
     let onto = land(&mut a, other).await.expect("land theirs");
-    assert!(matches!(
-        land(&mut al, draft).await,
-        Err(ApiError::Conflict { .. })
-    ));
+    // An unchecked land of a draft behind the tip is a stale base: the
+    // current tip and the path, never the side object ids.
+    match land(&mut al, draft).await {
+        Err(ApiError::StaleBase(detail)) => {
+            assert_eq!(detail.current_tip, onto);
+            assert_eq!(detail.paths, vec!["f.txt".to_owned()]);
+            assert!(!detail.truncated);
+        }
+        other => panic!("expected StaleBase, got {other:?}"),
+    }
 
     let req = GetConflicts {
         workspace: wref("w"),
