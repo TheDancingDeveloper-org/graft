@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Follow a GitHub repository on graft-dev, create an integration line and put
-# its Vogt issuer token in Infisical without printing or passing it in argv.
+# Follow a GitHub repository on graft-dev and create an integration line.
+# Session tokens are minted separately, one per session, and are never stored
+# for sessions to share.
 #
 # Usage: deploy/onboard-repo.sh [--dry-run] OWNER/REPO BASE [LINE]
+#        deploy/onboard-repo.sh --mint-session OWNER/REPO SESSION [--work-item WI-N] [--ttl SECS]
 set -euo pipefail
 umask 077
 
@@ -17,12 +19,36 @@ usage() {
 log() { printf 'onboard-repo: %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
+mint_session=
+work_item=
+ttl=86400
 if [[ ${1:-} == --dry-run ]]; then dry_run=1; shift; fi
+if [[ ${1:-} == --mint-session ]]; then mint_session=1; shift; fi
 [[ ${1:-} != -h && ${1:-} != --help ]] || usage
-[[ $# -ge 2 && $# -le 3 ]] || usage
-owner_repo=$1
-base=$2
-line=${3:-trial-1}
+if [[ -n $mint_session ]]; then
+  [[ $dry_run == 0 ]] || die '--mint-session cannot be combined with --dry-run'
+  [[ $# -ge 2 ]] || usage
+  owner_repo=$1
+  session=$2
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --work-item) [[ $# -ge 2 ]] || usage; work_item=$2; shift 2 ;;
+      --ttl) [[ $# -ge 2 ]] || usage; ttl=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [[ $session =~ ^ses_[A-Za-z0-9]+$ ]] || die '--session must look like ses_…'
+  [[ -z $work_item || $work_item =~ ^WI-[0-9]+$ ]] || die '--work-item must look like WI-123'
+  [[ $ttl =~ ^[1-9][0-9]*$ ]] || die '--ttl takes seconds'
+  base=main
+  line=trial-1
+else
+  [[ $# -ge 2 && $# -le 3 ]] || usage
+  owner_repo=$1
+  base=$2
+  line=${3:-trial-1}
+fi
 
 [[ $owner_repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die 'repo must be OWNER/REPO'
 [[ $base =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] || die 'invalid base branch'
@@ -36,19 +62,46 @@ suffix=$(printf '%s' "$repo" | tr '_' '-')
 service=graft-mirror-$suffix
 token_file=mirror-token-$suffix
 config=mirror-$suffix.toml
-secret_name=GRAFT_$(printf '%s' "$repo" | tr '[:lower:]-' '[:upper:]_')_AGENT_ISSUER_TOKEN
-apps_project=76b1ebe1-3656-4cef-952c-30d5d489c6e7
-
 existing=$(awk -F'|' -v upstream="$owner_repo" '$1 !~ /^#/ && $3 == upstream {print; exit}' "$registry")
 if [[ -n $existing ]]; then
-  IFS='|' read -r service repo _ base token_file config port _source <<<"$existing"
+  IFS='|' read -r service repo _ registered_base token_file config port _source <<<"$existing"
   suffix=${service#graft-mirror-}
-  secret_name=GRAFT_$(printf '%s' "$repo" | tr '[:lower:]-' '[:upper:]_')_AGENT_ISSUER_TOKEN
-  log "$owner_repo is already registered as $repo; configuration will be left unchanged"
+  [[ $registered_base == "$base" ]] || die "$owner_repo is registered to follow $registered_base, not $base; refusing to keep the old base silently"
+  log "$owner_repo is already registered as $repo following $base"
 else
   awk -F'|' -v repo="$repo" -v service="$service" '$1 == service || $2 == repo {found=1} END {exit !found}' "$registry" \
     && die "service or graft repository already exists for $repo"
   port=$(( $(awk -F'|' '$1 !~ /^#/ {if ($7 > max) max=$7} END {print max+0}' "$registry") + 1 ))
+fi
+
+if [[ -n $mint_session ]]; then
+  [[ -n $existing ]] || die "$owner_repo is not registered; onboard it before minting a session token"
+  command -v docker >/dev/null || die 'docker is required; run this command in the graft-dev checkout'
+  set -a
+  # shellcheck source=/dev/null
+  . "$here/image.env"
+  set +a
+  extra=()
+  [[ -z $work_item ]] || extra+=(--work-item "$work_item")
+  out=${GRAFT_TOKEN_DIR:-$HOME/.config/graft}/$repo-$session.token
+  umask 077
+  mkdir -p "$(dirname "$out")"
+  chmod 0700 "$(dirname "$out")"
+  tmp=$out.new
+  compose=(docker compose --env-file "$here/image.env" -f "$here/compose.yml" -f "$here/compose.onboarded.yml")
+  if ! "${compose[@]}" exec -T graft-server graft-server admin token mint \
+      --subject "$session" --kind agent --session "$session" \
+      --scope "repo:$repo:read" --scope "repo:$repo:write" \
+      --scope "repo:$repo:drafts" --scope "repo:$repo:land:$line" \
+      --ttl "$ttl" "${extra[@]}" >"$tmp"; then
+    rm -f "$tmp"
+    die "session token mint failed; nothing stored"
+  fi
+  [[ -s $tmp ]] || { rm -f "$tmp"; die 'session token was empty'; }
+  chmod 0600 "$tmp"
+  mv "$tmp" "$out"
+  log "wrote a session-bound agent token for $session ($(wc -c <"$out") bytes, not printed)"
+  exit 0
 fi
 
 cat <<PLAN
@@ -58,7 +111,7 @@ Followed base:    $base
 Integration line:$line
 Mirror service:  $service
 Metrics port:    $port
-Infisical secret:$secret_name (apps/prod; value is never printed)
+Agent tokens:     kind agent, one per session, never stored for sharing
 PLAN
 
 cat <<RULESET
@@ -77,10 +130,11 @@ if [[ $dry_run == 1 ]]; then
 Dry run only; would:
 1. Add $registry, $here/$config and regenerate compose.onboarded.yml when absent.
 2. Run $here/up.sh (the checked deploy and per-repository refs wait).
-3. Create line $line from $base if it does not exist.
-4. Mint a read/write/drafts/land:$line issuer token and pipe it to secret set.
-5. Use this broker manifest line for sessions in this repository:
-   GRAFT_TOKEN $apps_project $secret_name ondemand
+3. Create line $line from $base, retrying while the first import has no ref.
+4. Leave session minting to a later call:
+   deploy/onboard-repo.sh --mint-session $owner_repo ses_… [--work-item WI-N]
+   That mints one --kind agent token with --session, scopes read/write/drafts/land:$line,
+   and writes it to a mode-0600 file. It is never stored for another session to share.
 DRY
   exit 0
 fi
@@ -118,11 +172,21 @@ fi
 
 compose=(docker compose --env-file "$here/image.env" -f "$here/compose.yml" -f "$here/compose.onboarded.yml")
 work=$(mktemp -d "${TMPDIR:-/tmp}/graft-onboard.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+cleanup() {
+  if [[ -s ${work:-}/admin.token ]]; then
+    "${compose[@]}" exec -T graft-server graft-server admin token revoke <"$work/admin.token" \
+      >/dev/null 2>&1 || log 'warning: temporary admin token was not revoked'
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
 "${compose[@]}" exec -T graft-server graft-server admin token mint \
   --subject "onboard-$repo" --kind service --scope "repo:$repo:admin" --ttl 3600 >"$work/admin.token"
 [[ -s $work/admin.token ]] || die 'temporary admin token was empty'
 
+attempts=${GRAFT_LINE_ATTEMPTS:-60}
+attempt=1
+while :; do
 if ! docker run --rm --user 0:0 --network graft-dev \
     --entrypoint sh -v "$work:/w" "${GRAFT_IMAGE:?deploy/image.env did not set GRAFT_IMAGE}" -c '
       set -eu
@@ -130,25 +194,32 @@ if ! docker run --rm --user 0:0 --network graft-dev \
       g() { graft --endpoint http://graft-server:7878 --token-file /w/admin.token --repo "$repo" "$@"; }
       if g log --at "$line" --limit 1 >/dev/null 2>/w/error; then exit 0; fi
       grep -qi "not.found" /w/error || { cat /w/error >&2; exit 1; }
+      if ! g log --at "$base" --limit 1 >/dev/null 2>/w/error; then
+        grep -qi "not.found" /w/error && exit 75
+        cat /w/error >&2
+        exit 1
+      fi
       g line create "$line" --from "$base" >/dev/null
     ' sh "$repo" "$base" "$line"; then
-  die "could not create line $line from $base"
-fi
-log "line $line exists and was not moved"
-
-if secret describe "$secret_name" --project apps --env prod >/dev/null 2>&1; then
-  log "Infisical secret $secret_name already exists; left unchanged"
+  rc=0
 else
-  "${compose[@]}" exec -T graft-server graft-server admin token mint \
-    --subject "vogt-$repo" --kind service \
-    --scope "repo:$repo:read" --scope "repo:$repo:write" \
-    --scope "repo:$repo:drafts" --scope "repo:$repo:land:$line" --ttl 2592000 \
-    | secret set "$secret_name" --project apps --env prod
-  log "stored $secret_name in Infisical apps/prod"
+  rc=$?
 fi
+  if [[ $rc == 0 ]]; then
+    break
+  elif [[ $rc == 75 && $attempt -lt $attempts ]]; then
+    log "base $base has no ref yet; waiting for the first import ($attempt/$attempts)"
+    sleep "${GRAFT_LINE_POLL:-10}"
+    attempt=$((attempt + 1))
+  else
+    die "could not create line $line from $base"
+  fi
+done
+log "line $line exists and was not moved"
 
 cat <<DONE
 
-Onboarding complete. Configure the repository's Vogt session manifest with:
-GRAFT_TOKEN $apps_project $secret_name ondemand
+Onboarding complete. Mint one session-bound token when a session starts:
+deploy/onboard-repo.sh --mint-session $owner_repo ses_… [--work-item WI-N]
+The token is kind agent with --session and is never stored for another session.
 DONE

@@ -117,13 +117,20 @@ runs `deploy/up.sh`. The normal deploy path creates the graft repository,
 mints its mirror token, starts the service, and waits for that repository's
 first imported ref before the command creates the integration line.
 
-The final credential is a narrow issuer token (`read`, `write`, `drafts`,
-and `land:<line>`) stored directly in Infisical `apps/prod`; its value is
-never printed or placed in argv. The command prints the `GRAFT_TOKEN ...
-ondemand` manifest line that lets Vogt mint the session-bound agent token
-described by D10. A rerun leaves the mirror declaration, line, and existing
-Infisical secret unchanged. It also prints the D28 ruleset checklist that
-must be applied to the GitHub repository before its first batch is landed.
+Session credentials follow D10 and `trial/mint-agent-tokens.sh`: one
+`--kind agent` token per session, minted with `--session`, scopes `read`,
+`write`, `drafts` and `land:<line>`. Mint it when the session starts:
+
+```sh
+deploy/onboard-repo.sh --mint-session OWNER/REPO ses_… [--work-item WI-N]
+```
+
+The token is written to a mode-0600 file and is never printed, passed in
+argv, or stored for another session to share. A rerun with the same base
+leaves the mirror and line unchanged. A rerun that names a different base
+fails instead of silently keeping the registered one. The command prints the
+D28 ruleset checklist that must be applied to the GitHub repository before
+its first batch is landed.
 
 Check that a mirror has caught up (lag 0) on the VM:
 
