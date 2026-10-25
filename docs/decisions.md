@@ -61,6 +61,10 @@ Already decided by the operator (2026-10-22):
 - **D29** (operator, 2026-10-24, WI-2363): a merge between lines records a
   merge point per (source, target) pair, read by `MergeBase`; history stays
   first-parent. See [D29](#d29-merge-points-between-lines).
+- **D30** (operator, 2026-10-24, WI-2434): a land that arrives while its
+  batch PR is open and unsealed is appended to it as one more per-land
+  commit, a fast-forward with a lease; no close and recut. Amends D21 and
+  D28. See [D30](#d30-a-land-after-pr-batch-joins-the-open-batch-pr).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -97,6 +101,7 @@ Already decided by the operator (2026-10-22):
 | D27 | Pre-land check in `graft land` | **Decided:** conflict preview and draft-overlap check by default; a real conflict stops the land; `--no-check` skips | — |
 | D28 | Batch PR review and merge | **Decided:** oversight reviews the batch PR as a whole; `land-pr` rebase-merges it past the squash queue (`--admin`) once GitHub's required checks pass; graft still never merges. Amends D21, D26 | — |
 | D29 | Merges between lines | **Decided:** one merge point per (source, target) line pair, written with the land and read by `MergeBase`; first-parent history, no second parent, no encoding change | — |
+| D30 | Appending to an open batch | **Decided:** a land after `pr-batch` joins the open, unsealed batch PR as one more commit (fast-forward with a lease); sealed batches take no appends | — |
 
 ---
 
@@ -857,3 +862,60 @@ Rejected:
 - Merge metadata only in the changeset (`graft.merged-from`) read by
   `MergeBase`. Finding it means scanning a line's changesets, which breaks
   costs-follow-the-change; the metadata is still written, for readers.
+
+## D30. A land after pr-batch joins the open batch PR
+
+**Decided (operator, 2026-10-24, WI-2297; design WI-2434): a land that
+arrives on the integration line while its batch PR is open is appended to
+that PR as one more per-land commit (D26), instead of waiting for the next
+batch.** This amends [D21](#d21-batch-pr-export) and the batch rule of
+[D28](#d28-batch-prs-are-reviewed-and-landed-like-any-pr) ("a fix-forward goes
+in the next batch; an open batch is not rewritten"): the open batch is still
+never rewritten, but it may grow. The design is
+[design.md §11.6](design.md#116-appending-to-an-open-batch).
+
+- **When.** The line's last batch is open (PR open, not merged, not
+  rejected), not sealed, and the line has moved only forward from the
+  batch's cut: every changeset after the cut is a land (no sync changeset).
+  While a batch is open the run does not sync, so this holds unless the line
+  was moved by hand.
+- **Sealed.** A batch is sealed once its merge has started: the PR has
+  auto-merge enabled, is in a merge queue, or GitHub reports it merging.
+  Then nothing is appended, and new lands wait for the next batch, as
+  before. `land-pr`'s `--match-head-commit` (D28) closes the race: an append
+  that wins against a merge in flight makes the merge fail on the head, and
+  oversight reviews again.
+- **Push.** The new commits are built on the batch's last commit, replayed
+  as D26 replays (line merge onto the commit before, same base), root-checked
+  against the new line tip, recorded, and then pushed as a fast-forward of
+  `graft/batch-<n>` with a lease on the old head. Never a force push. The
+  earlier commits keep their shas.
+- **Review.** The appended commits are reviewed again. GitHub drops stale
+  approvals on a new push, and oversight re-reviews the whole PR head, with
+  the new commits named. graft keeps no review state (D26).
+- **Drop and cap.** `--exclude` of a land in the open batch still lands a
+  revert, and the revert is appended like any land: no close and recut. A
+  batch that would pass `max_lands` or `MAX_COMMITS` (500) is not appended
+  to; the lands wait. `max_age_ms` holds back only the first cut, never an
+  append.
+- **Fallback.** When an append does not replay cleanly or fails the root
+  check, nothing is pushed and the batch is left as it is; the lands wait for
+  the next batch, and the run says why. An open batch is never re-exported
+  squashed.
+- **Attribution.** Each appended commit has the land's author, session and
+  work item trailers and `Graft-Batch: <n>`, exactly as D26. The PR body's
+  land table is rewritten to list every commit.
+
+Why: trial 2 (#215 to #216) and trial 3 (#217 to #218, #164 to #165,
+#1190 to #1191). Every review fix-forward cost a close, a recut and a fresh
+review of commits that had not changed.
+
+Rejected:
+
+- Fixes wait for the next batch (D28 as written): the known bug merges first.
+- Close and recut on every fix (what the trials did): the review restarts
+  and CI runs again on unchanged commits.
+- Rewriting the batch branch (amend the bad land's commit, force push): it
+  breaks the lease rule and the determinism of D26.
+- An opt-in `pr-batch --append`: a fix-forward that needs a flag gets
+  forgotten; appending is the default and `--no-append` turns it off.

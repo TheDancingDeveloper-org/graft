@@ -1721,8 +1721,8 @@ the approval" read as this section.
   LLM and stores no review data (D26).
 - **Blockers name the land.** A finding names the land's commit (its
   `Graft-Changeset` trailer). It is fixed forward by a new land on the
-  integration line, which the next batch carries, or by dropping the land.
-  graft does not rewrite an open batch.
+  integration line, which joins the open batch as one more commit (§11.6,
+  D30), or by dropping the land. graft does not rewrite an open batch.
 - **Merge.** A clean review goes to oversight's `land-pr`, which merges once
   GitHub's required checks on the PR pass, with rebase-merge to keep the
   per-land commits (D26). graft still never merges or queues the PR: the
@@ -1734,6 +1734,55 @@ the approval" read as this section.
   oversight, then merged by `land-pr` once the required checks pass.
 - **Settle.** Unchanged: follow imports the merge and records the batch as
   merged (§11.4).
+
+### 11.6 Appending to an open batch
+
+[D30](decisions.md#d30-a-land-after-pr-batch-joins-the-open-batch-pr) lets a
+land that arrives while the line's batch PR is open join that PR. §11.5's
+"graft does not rewrite an open batch" still holds: an append adds commits
+and never changes one.
+
+```
+open batch n:   B ── c1 ── … ── ck            cut at line position p
+line:           … ── Lp ── L(p+1) ── … ── Lm  (lands only after p)
+append:         B ── c1 ── … ── ck ── c(k+1) ── … ── c(k+m-p)
+```
+
+- **Allowed** when all hold: the batch is open and not sealed; every
+  changeset after the cut is a land (a sync changeset means the base moved,
+  so the lands wait for the next batch); the batch stays within `max_lands`
+  and `MAX_COMMITS`. `max_age_ms` does not apply to an append.
+- **Sealed** means the merge has started: auto-merge on, in a merge queue,
+  or GitHub reports it merging. A sealed batch takes no appends, and new
+  lands wait. If an append races a `land-pr` merge, the merge's
+  `--match-head-commit` fails and oversight reviews the new head (D28).
+- **Replay.** Each new land's own diff is rebased with line merge (D16) onto
+  the replay of `ck`, held by the same mirror workspace `batch-<n>`. The
+  last replay must have the new tip's root id. Cost: one diff and one
+  rebase per new land, never the earlier ones again.
+- **Record, then push.** The new `(land, sha)` pairs and the new cut are
+  added to the batch record, then `graft/batch-<n>` is pushed as a
+  fast-forward with a lease on `ck`. A lost lease (someone else pushed) stops
+  the run with nothing changed in graft's record beyond the recorded chain,
+  which the next run re-checks. Never a force push.
+- **What the reviewer sees.** The same PR with more commits; the earlier
+  shas are unchanged, so their review comments stay in place. The PR body's
+  land table lists every commit, marks the appended ones, and is rewritten
+  in place. Stale approvals are dropped by GitHub's push rule, and oversight
+  re-reviews the head.
+- **Drop.** `--exclude` lands a revert, which is appended. The open PR is no
+  longer superseded for a drop (WI-2340's close and recut applies only when
+  the batch is sealed or cannot be appended to).
+- **Failure modes.** Replay conflict or root mismatch: nothing pushed,
+  lands wait, the run reports the land. Lease lost: stop, report, retry on
+  the next run. PR merged or closed between read and push: the push still
+  only adds commits to a branch; follow settles the batch from what merged,
+  and lands not in the merge go in the next batch. Crash after record, before
+  push: the retry pushes the same shas (D26 determinism).
+- **Agnostic.** The rule reads only graft's line, the batch record and the
+  PR's state. It runs no build, test or check (D22) and knows nothing of the
+  project's language or layout; the forge's own required checks run on the
+  new head as on any push.
 
 ## 12. Auth
 
