@@ -1,0 +1,1 @@
+WI-2443: decision D33. An empty single-parent changeset is valid only when it carries `mirror.git-commit` from a git import; native empty changesets stay rejected. Records the rule-9 exception in `docs/decisions.md` and `docs/design.md` §4.5. Encoding and golden vectors for native changesets are unchanged. Docs only; the model and importer change is a later PR.

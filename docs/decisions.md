@@ -65,6 +65,10 @@ Already decided by the operator (2026-10-22):
   batch PR is open and unsealed is appended to it as one more per-land
   commit, a fast-forward with a lease; no close and recut. Amends D21 and
   D28. See [D30](#d30-a-land-after-pr-batch-joins-the-open-batch-pr).
+- **D33** (operator, 2026-10-25, WI-2443): an empty single-parent changeset
+  is valid only when it carries `mirror.git-commit` from a git import.
+  Native empty changesets stay rejected. See
+  [D33](#d33-empty-imported-changesets).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -102,6 +106,7 @@ Already decided by the operator (2026-10-22):
 | D28 | Batch PR review and merge | **Decided:** oversight reviews the batch PR as a whole; `land-pr` rebase-merges it past the squash queue (`--admin`) once GitHub's required checks pass; graft still never merges. Amends D21, D26 | — |
 | D29 | Merges between lines | **Decided:** one merge point per (source, target) line pair, written with the land and read by `MergeBase`; first-parent history, no second parent, no encoding change | — |
 | D30 | Appending to an open batch | **Decided:** a land after `pr-batch` joins the open, unsealed batch PR as one more commit (fast-forward with a lease); sealed batches take no appends | — |
+| D33 | Empty imported changesets | **Decided:** an empty single-parent changeset is valid only with `mirror.git-commit` (git import); native empty changesets stay rejected | — |
 
 ---
 
@@ -919,3 +924,40 @@ Rejected:
   breaks the lease rule and the determinism of D26.
 - An opt-in `pr-batch --append`: a fix-forward that needs a flag gets
   forgotten; appending is the default and `--no-append` turns it off.
+
+## D33. Empty imported changesets
+
+**Decided (operator, 2026-10-25, WI-2443): an empty single-parent changeset
+is valid only when its metadata carries `mirror.git-commit`.** Native
+`CreateChangeset` with no changes and fewer than two parents stays rejected.
+This is an exception to validity rule 9 in
+[design.md §4.5](design.md#45-changesets). The canonical encoding does not
+change, and the golden vectors for native changesets are unchanged.
+
+rustnzb `main` has four single-parent commits whose tree is byte-identical
+to the parent's (`1443f1c2b16d527a0bb3345f8ad81a1c31f8da50`,
+`0951bf9507873a632742f7ffc27739f4dabdf37f`,
+`6bca7aecd7131ab4780d4b5eb3bf1b802a06da9d`,
+`48c2c30bd8768eef4c6672eee1cbf58adf23fb72`). Import precheck reports
+`empty-changeset` and writes nothing, so the follow never creates a ref.
+An empty change list is already a legal encoding for a merge
+(`parents.len() >= 2`). Accepting it for one parent does not change the
+bytes of ids, trees, changesets, frames or tokens. It does change the
+validity rule consumers enforce.
+
+- **Chosen:** `Changeset::check` allows zero changes with fewer than two
+  parents only when metadata contains `mirror.git-commit` (D19). That key
+  is set only by `graft-git` on import. Export already reproduces an empty
+  diff from an empty change list plus the stored raw headers, so
+  `export(import(c)).sha == c.sha` holds. Native requests without the key
+  still fail `Rule::EmptyChangeset`.
+- **Rejected:**
+  - splicing the empty commits out of parent links and keeping only the raw
+    commit in the mirror (lossy against the complete DAG and against 100%
+    fidelity; every descendant's git parent changes);
+  - rewriting the four commits upstream before the follow can proceed;
+  - treating `--allow-lossy` as covering them (it only names commits whose
+    export sha does not match, and these never get that far).
+
+The model and importer change is a later PR. This decision does not
+implement it.
