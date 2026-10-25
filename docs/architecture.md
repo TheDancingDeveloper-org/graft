@@ -78,6 +78,28 @@ flowchart TB
   testkit -.-> store
 ```
 
+## The idea in six lines
+
+- **The server computes.** Commits, history, diff, blame, rebase and landing
+  run on the server. The client lays out files and keeps a bounded cache.
+- **Changesets, not snapshots.** A changeset lists the files it changed
+  against its first parent and commits to its root tree. Writes cost the size
+  of the change.
+- **Content-addressed everything** (BLAKE3). Any tier can cache any object,
+  and any reader can verify it.
+- **Lock-free landing.** Refs move only by compare-and-swap. `land` rebases
+  on the server and retries there, so a client that loses a race is never
+  stranded.
+- **Drafts, not branches.** Work in progress lives in leased workspaces, and
+  orphans are collected incrementally.
+- **One API, four faces:** gRPC, the `graft` CLI, an MCP server for agents,
+  and an LSP server for editors.
+
+graft is **not** git-compatible and does not try to be. Command names follow
+git where the meaning is the same. Git itself lives only in a migration bridge
+(`graft-mirror` and `graft-git`), which does lossless import, a two-way GitHub
+mirror, and a full export.
+
 Which crate does what:
 
 | Crate | Owns |
