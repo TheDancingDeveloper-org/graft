@@ -152,9 +152,16 @@ if [[ -z $existing ]]; then
   # reference only: the container reads it into git http.extraHeader. The
   # token is never written into this config or into process arguments.
   private=0
-  if ! git ls-remote --heads "https://github.com/$owner_repo.git" >/dev/null 2>&1; then
+  ls_remote_error=$(mktemp)
+  if git ls-remote --heads "https://github.com/$owner_repo.git" >/dev/null 2>"$ls_remote_error"; then
+    :
+  elif grep -Eqi 'authentication failed|could not read username|terminal prompts disabled|repository not found|http basic: access denied' "$ls_remote_error"; then
     private=1
+  else
+    rm -f "$ls_remote_error"
+    die "could not check whether $owner_repo is private; GitHub or the network is unavailable"
   fi
+  rm -f "$ls_remote_error"
   github_section=
   if [[ $private == 1 ]]; then
     github_section=$(cat <<'GH'

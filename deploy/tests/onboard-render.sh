@@ -27,17 +27,66 @@ grep -q '/run/secrets/github-token' "$out"
 grep -q 'http.extraHeader' "$root/deploy/private-follow.sh"
 echo "render: private overlay uses a block tmpfs and a file-backed header"
 
-# Config mode: the generator's umask 022 plus chmod 0644.
-cfg=$tmp/mirror-sample.toml
-umask 022
-cat >"$cfg" << 'CFG'
-repo = "sample"
-token_file = "/run/secrets/graft-mirror-token"
-CFG
-chmod 0644 "$cfg"
+# Config mode: exercise onboard-repo.sh with external work stubbed out.
+fixture=$tmp/deploy
+bin=$tmp/bin
+mkdir -p "$fixture" "$bin"
+cp "$root/deploy/onboard-repo.sh" "$root/deploy/render-onboarded-compose.sh" "$fixture/"
+cat >"$fixture/mirrors.tsv" << 'TSV'
+# service|repo|owner/repo|base|token-file|config|metrics-port|compose|private
+graft-mirror|sample|example/sample|main|mirror-token|mirror.toml|17890|builtin|
+TSV
+printf 'GRAFT_IMAGE=test-image\n' >"$fixture/image.env"
+cat >"$fixture/up.sh" << 'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat >"$bin/git" << 'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat >"$bin/docker" << 'SH'
+#!/usr/bin/env bash
+if [[ ${1:-} == compose && " $* " == *' admin token mint '* ]]; then
+  printf 'temporary-admin-token\n'
+fi
+if [[ ${1:-} == run ]]; then
+  exit 1
+fi
+exit 0
+SH
+chmod +x "$fixture/onboard-repo.sh" "$fixture/render-onboarded-compose.sh" "$fixture/up.sh" "$bin/git" "$bin/docker"
+PATH="$bin:$PATH" "$fixture/onboard-repo.sh" example/mode-check main >/dev/null
+cfg=$fixture/mirror-mode-check.toml
 mode=$(stat -c '%a' "$cfg")
 [ "$mode" = 644 ]
 echo "config mode: 0644"
+
+# An availability failure must stop onboarding rather than mark the repo private.
+cat >"$bin/git" << 'SH'
+#!/usr/bin/env bash
+printf 'fatal: unable to access github: Could not resolve host\n' >&2
+exit 128
+SH
+set +e
+network_error=$(PATH="$bin:$PATH" "$fixture/onboard-repo.sh" example/network-failure main 2>&1)
+network_rc=$?
+set -e
+[ "$network_rc" -ne 0 ]
+printf '%s\n' "$network_error" | grep -q 'GitHub or the network is unavailable'
+[ ! -e "$fixture/mirror-network-failure.toml" ]
+echo "probe: network failure is not classified as private"
+
+# An authentication-shaped failure is the private-repository signal.
+cat >"$bin/git" << 'SH'
+#!/usr/bin/env bash
+printf 'fatal: could not read Username for https://github.com: terminal prompts disabled\n' >&2
+exit 128
+SH
+PATH="$bin:$PATH" "$fixture/onboard-repo.sh" example/private-repo main >/dev/null
+grep -q '^\[github\]$' "$fixture/mirror-private-repo.toml"
+grep -q 'example/private-repo|main|mirror-token-private-repo|mirror-private-repo.toml|.*|generated|1$' "$fixture/mirrors.tsv"
+echo "probe: authentication failure is classified as private"
 
 # no-ref deadline is not success and is not the importing log.
 export GRAFT_REFS_WAIT=1
