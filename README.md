@@ -22,6 +22,10 @@ yet. What is delivered is in [docs/status.md](docs/status.md).
 
 Release binaries (Linux and macOS, x86_64 and aarch64):
 
+Release CI builds and checksum-verifies all four target archives. The Rust
+test suite runs separately on the repository's self-hosted CI runner; the
+release matrix does not run target-specific tests from the packaged archives.
+
 ```sh
 curl -fsSL -o graft.tar.gz https://github.com/sprooty/graft/releases/latest/download/graft-x86_64-unknown-linux-musl.tar.gz
 tar -xzf graft.tar.gz
