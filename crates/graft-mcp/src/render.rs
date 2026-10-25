@@ -194,6 +194,13 @@ pub(crate) fn api_error_value(e: &ApiError) -> Value {
         ApiError::Contended { line, tip } => {
             json!({"kind": "contended", "line": line, "tip": tip.to_string()})
         }
+        ApiError::StaleBase(detail) => json!({
+            "kind": "stale_base",
+            "current_tip": detail.current_tip.to_string(),
+            "paths": detail.paths,
+            "truncated": detail.truncated,
+            "guidance": "run graft_sync, then graft_land",
+        }),
         ApiError::Rejected { policy, detail } => {
             json!({"kind": "rejected", "policy": policy, "detail": detail})
         }
@@ -308,6 +315,21 @@ mod tests {
         });
         assert_eq!(v["kind"], "not_found");
         assert_eq!(v["retryable"], false);
+
+        let v = api_error_value(&ApiError::StaleBase(Box::new(
+            graft_proto::error::StaleBase {
+                current_tip: id(4),
+                paths: vec!["src/lib.rs".into()],
+                truncated: false,
+            },
+        )));
+        assert_eq!(v["kind"], "stale_base");
+        assert_eq!(v["current_tip"], id(4).to_string());
+        assert_eq!(v["paths"], json!(["src/lib.rs"]));
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["guidance"], "run graft_sync, then graft_land");
+        assert_eq!(v["retryable"], false);
+        assert!(!v.to_string().contains("contents"));
     }
 
     #[test]
