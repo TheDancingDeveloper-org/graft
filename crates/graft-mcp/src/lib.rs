@@ -175,3 +175,71 @@ pub const TOOLS: &[ToolSpec] = &[
         bound: ToolBound::Capped,
     },
 ];
+
+#[cfg(test)]
+mod bound_proofs {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// Tools whose oversized results are proved by an integration test that
+    /// feeds real data and asserts a cursor, a truncated flag, or a typed
+    /// limit. A tool not listed here must still pass through [`render::bounded`]
+    /// or [`render::fit`], which refuse a result over [`MAX_RESULT_BYTES`].
+    const PROVED: &[&str] = &[
+        "graft_log",
+        "graft_show",
+        "graft_diff",
+        "graft_blame",
+        "graft_read",
+        "graft_ls",
+        "graft_conflicts",
+        "graft_upstream",
+        "graft_draft_overlap",
+    ];
+
+    #[test]
+    fn every_tool_is_proved_or_refused_past_the_byte_cap() {
+        let names: BTreeSet<&str> = TOOLS.iter().map(|t| t.name).collect();
+        assert_eq!(names.len(), TOOLS.len(), "duplicate tool names");
+        let proved: BTreeSet<&str> = PROVED.iter().copied().collect();
+        assert!(
+            proved.is_subset(&names),
+            "a proof names a tool that is not registered"
+        );
+        for spec in TOOLS {
+            assert!(
+                matches!(spec.bound, ToolBound::Paginated | ToolBound::Capped),
+                "{} has no bound",
+                spec.name
+            );
+        }
+        // The backstop itself refuses an oversized fixed result.
+        let huge = serde_json::json!({"blob": "x".repeat(MAX_RESULT_BYTES)});
+        let err = render::bounded(huge).expect_err("over the cap");
+        let result = err.into_result();
+        assert_eq!(result.is_error, Some(true));
+        let value = result.structured_content.as_ref().expect("structured");
+        assert_eq!(value["kind"], "result_too_large");
+        assert_eq!(value["max_bytes"], MAX_RESULT_BYTES);
+        assert!(serde_json::to_vec(&result).unwrap().len() <= MAX_RESULT_BYTES);
+        // Every tool is either proved against oversized data or returns only
+        // through that backstop (status, commit, sync, land, resolve, revert,
+        // pick, line_create, merge, tag, workspace).
+        let rest: BTreeSet<&str> = names.difference(&proved).copied().collect();
+        let expected = BTreeSet::from([
+            "graft_status",
+            "graft_commit",
+            "graft_sync",
+            "graft_land",
+            "graft_resolve",
+            "graft_revert",
+            "graft_pick",
+            "graft_line_create",
+            "graft_merge",
+            "graft_tag",
+            "graft_workspace",
+        ]);
+        assert_eq!(rest, expected);
+    }
+}

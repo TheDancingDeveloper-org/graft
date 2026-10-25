@@ -132,6 +132,15 @@ pub struct Fake {
     /// The tree every snapshot shows, by path. Empty unless built with
     /// [`Fake::with_files`].
     files: BTreeMap<String, FileSpec>,
+    /// Conflicting paths `GetConflicts` returns, when set.
+    conflicts: Vec<ConflictView>,
+    /// Paths a `sync` reports as changed, when set.
+    synced_paths: Vec<RepoPath>,
+    /// Draft-overlap hits `OverlappingDrafts` returns, when set.
+    /// `(path, workspace, owner)`.
+    overlaps: Vec<(String, String, String)>,
+    /// Whether `get_workspace` exposes a workspace at c1 on main.
+    upstream_workspace: bool,
 }
 
 impl Fake {
@@ -219,6 +228,10 @@ impl Fake {
             refs: HashMap::new(),
             order: Vec::new(),
             files: BTreeMap::new(),
+            conflicts: Vec::new(),
+            synced_paths: Vec::new(),
+            overlaps: Vec::new(),
+            upstream_workspace: false,
         };
         for i in 1..=count {
             let id = cid(i);
@@ -305,6 +318,62 @@ impl Fake {
             subject,
             line_pos: None,
         }
+    }
+
+    /// A fixture whose `GetConflicts` returns `n` paths, each with markers of
+    /// `marker_bytes`.
+    pub fn with_conflicts(n: usize, marker_bytes: usize) -> Arc<Self> {
+        let mut fake = Self::linear(1, |_| "author".into(), |_| "subject".into());
+        fake.conflicts = (0..n)
+            .map(|i| ConflictView {
+                path: RepoPath::new(&format!("src/f{i}.rs")).unwrap(),
+                base: None,
+                ours: None,
+                theirs: None,
+                text_mergeable: true,
+                markers: Some(vec![b'x'; marker_bytes]),
+                reason: None,
+            })
+            .collect();
+        Arc::new(fake)
+    }
+
+    /// A fixture whose sync reports `n` changed paths.
+    pub fn with_synced_paths(n: usize) -> Arc<Self> {
+        let mut fake = Self::linear(1, |_| "author".into(), |_| "subject".into());
+        fake.synced_paths = (0..n)
+            .map(|i| RepoPath::new(&format!("src/p{i}.rs")).unwrap())
+            .collect();
+        Arc::new(fake)
+    }
+
+    /// A fixture whose draft-overlap read returns `n` hits. Each hit is its
+    /// own workspace, with an owner of `owner_bytes`.
+    pub fn with_overlaps(n: usize, owner_bytes: usize) -> Arc<Self> {
+        let mut fake = Self::linear(1, |_| "author".into(), |_| "subject".into());
+        let owner = "o".repeat(owner_bytes);
+        fake.overlaps = (0..n)
+            .map(|i| (format!("src/h{i}.rs"), format!("ws{i}"), owner.clone()))
+            .collect();
+        Arc::new(fake)
+    }
+
+    /// A workspace based at c1 while main has `n` long changed paths at c2.
+    pub fn with_upstream_paths(n: usize, path_bytes: usize) -> Arc<Self> {
+        let mut fake = Self::linear(2, |_| "author".into(), |_| "subject".into());
+        let stem = "x".repeat(path_bytes.min(200));
+        fake.changesets.get_mut(&cid(2)).unwrap().changes = (0..n)
+            .map(|i| {
+                let path = format!("{stem}/{stem}/{stem}/{i:03}.txt");
+                Change::Put {
+                    path: RepoPath::new(&path).unwrap(),
+                    kind: EntryKind::File,
+                    id: ObjectId::hash(ObjectKind::Blob, i.to_string().as_bytes()),
+                }
+            })
+            .collect();
+        fake.upstream_workspace = true;
+        Arc::new(fake)
     }
 }
 
@@ -543,8 +612,19 @@ impl WorkspaceApi for Fake {
         Self::unavailable()
     }
 
-    async fn get_workspace(&self, _: &CallContext, _: WorkspaceRef) -> ApiResult<WorkspaceView> {
-        Self::unavailable()
+    async fn get_workspace(&self, _: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
+        if !self.upstream_workspace {
+            return Self::unavailable();
+        }
+        Ok(WorkspaceView {
+            name: req.name,
+            owner: "test-agent".into(),
+            session: None,
+            line: "main".into(),
+            base: cid(1),
+            head: None,
+            lease_until_ms: 0,
+        })
     }
 
     async fn list_workspaces(
@@ -572,10 +652,24 @@ impl WorkspaceApi for Fake {
     async fn sync(
         &self,
         _: &CallContext,
-        _: WorkspaceRef,
+        req: WorkspaceRef,
         _: Option<ChangesetId>,
     ) -> ApiResult<Synced> {
-        Self::unavailable()
+        if self.synced_paths.is_empty() {
+            return Self::unavailable();
+        }
+        Ok(Synced {
+            workspace: WorkspaceView {
+                name: req.name,
+                owner: "test-agent".into(),
+                session: None,
+                line: "main".into(),
+                base: cid(1),
+                head: Some(cid(1)),
+                lease_until_ms: 0,
+            },
+            changed_paths: self.synced_paths.clone(),
+        })
     }
 
     async fn stack(
@@ -594,9 +688,25 @@ impl WorkspaceApi for Fake {
     async fn get_conflicts(
         &self,
         _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::GetConflicts,
+        req: graft_proto::types::GetConflicts,
     ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
-        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
+        if self.conflicts.is_empty() {
+            return Err(graft_proto::ApiError::unimplemented("GetConflicts"));
+        }
+        let start = req
+            .page
+            .token
+            .as_deref()
+            .and_then(|t| t.parse::<usize>().ok())
+            .unwrap_or(0);
+        let end = (start + req.page.limit as usize).min(self.conflicts.len());
+        let next = (end < self.conflicts.len()).then(|| end.to_string());
+        Ok(Conflicts {
+            onto: cid(1),
+            draft: Some(cid(2)),
+            paths: self.conflicts[start..end].to_vec(),
+            next,
+        })
     }
 
     async fn resolve(
@@ -605,6 +715,47 @@ impl WorkspaceApi for Fake {
         _req: graft_proto::types::Resolve,
     ) -> graft_proto::error::ApiResult<graft_proto::types::Resolved> {
         Err(graft_proto::ApiError::unimplemented("Resolve"))
+    }
+
+    async fn overlapping_drafts(
+        &self,
+        _: &graft_proto::CallContext,
+        req: graft_proto::types::OverlappingDrafts,
+    ) -> graft_proto::error::ApiResult<graft_proto::types::DraftOverlap> {
+        if self.overlaps.is_empty() {
+            return Err(graft_proto::ApiError::unimplemented("OverlappingDrafts"));
+        }
+        let start = req
+            .page
+            .token
+            .as_deref()
+            .and_then(|t| t.parse::<usize>().ok())
+            .unwrap_or(0);
+        let end = (start + req.page.limit as usize).min(self.overlaps.len());
+        let page = &self.overlaps[start..end];
+        let next = (end < self.overlaps.len()).then(|| end.to_string());
+        use graft_proto::types::{DraftHit, DraftWorkspace};
+        Ok(graft_proto::types::DraftOverlap {
+            hits: page
+                .iter()
+                .map(|(path, workspace, _)| DraftHit {
+                    path: RepoPath::new(path).expect("fixture path"),
+                    workspace: workspace.clone(),
+                })
+                .collect(),
+            workspaces: page
+                .iter()
+                .map(|(_, workspace, owner)| DraftWorkspace {
+                    workspace: workspace.clone(),
+                    owner: owner.clone(),
+                    session: None,
+                    work_item: None,
+                    draft_age_ms: 1,
+                    lease_until_ms: 0,
+                })
+                .collect(),
+            next,
+        })
     }
 }
 

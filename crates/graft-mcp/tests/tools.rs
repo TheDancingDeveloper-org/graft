@@ -282,3 +282,83 @@ async fn blame_a_file_by_line_window() {
     .await;
     assert_golden("blame_window", &structured(&result));
 }
+
+#[tokio::test]
+async fn conflict_markers_are_clipped_and_pages_shrink_to_the_cap() {
+    use graft_mcp::CONFLICT_MARKERS_MAX_BYTES;
+    let client = connect(Fake::with_conflicts(1, CONFLICT_MARKERS_MAX_BYTES + 100)).await;
+    let one = call(
+        &client,
+        "graft_conflicts",
+        json!({"repo": "r", "workspace": "w"}),
+    )
+    .await;
+    let body = structured(&one);
+    assert_eq!(body["paths"][0]["markers_truncated"], true);
+    assert!(body["paths"][0]["markers"].as_str().unwrap().len() <= CONFLICT_MARKERS_MAX_BYTES);
+
+    let client = connect(Fake::with_conflicts(80, 4 * 1024)).await;
+    let page = call(
+        &client,
+        "graft_conflicts",
+        json!({"repo": "r", "workspace": "w", "limit": 64}),
+    )
+    .await;
+    let size = serde_json::to_vec(&page).unwrap().len();
+    assert!(size <= MAX_RESULT_BYTES, "conflicts result is {size} bytes");
+    let body = structured(&page);
+    let returned = body["paths"].as_array().unwrap().len();
+    assert!(returned < 64 && returned > 0, "page shrank to {returned}");
+    assert!(body["next"].is_string(), "the shrunk page has a cursor");
+}
+
+#[tokio::test]
+async fn sync_changed_paths_are_capped_and_flagged() {
+    let client = connect(Fake::with_synced_paths(250)).await;
+    let result = call(
+        &client,
+        "graft_sync",
+        json!({"repo": "r", "workspace": "w"}),
+    )
+    .await;
+    let body = structured(&result);
+    assert_eq!(body["changed_paths_truncated"], true);
+    assert_eq!(body["changed_paths_total"], 250);
+    assert_eq!(body["changed_paths"].as_array().unwrap().len(), 200);
+    let size = serde_json::to_vec(&result).unwrap().len();
+    assert!(size <= MAX_RESULT_BYTES);
+}
+
+#[tokio::test]
+async fn draft_overlap_pages_shrink_to_the_byte_cap() {
+    let client = connect(Fake::with_overlaps(200, 2_000)).await;
+    let result = call(
+        &client,
+        "graft_draft_overlap",
+        json!({"repo": "r", "paths": ["src"], "limit": 200}),
+    )
+    .await;
+    let size = serde_json::to_vec(&result).unwrap().len();
+    assert!(size <= MAX_RESULT_BYTES, "overlap result is {size} bytes");
+    let body = structured(&result);
+    let returned = body["overlaps"].as_array().unwrap().len();
+    assert!(returned < 200 && returned > 0, "page shrank to {returned}");
+    assert!(body["next"].is_string(), "the shrunk page has a cursor");
+}
+
+#[tokio::test]
+async fn upstream_changed_paths_shrink_to_the_byte_cap() {
+    let client = connect(Fake::with_upstream_paths(100, 200)).await;
+    let result = call(
+        &client,
+        "graft_upstream",
+        json!({"repo": "r", "workspace": "w", "limit": 100}),
+    )
+    .await;
+    let size = serde_json::to_vec(&result).unwrap().len();
+    assert!(size <= MAX_RESULT_BYTES, "upstream result is {size} bytes");
+    let body = structured(&result);
+    let returned = body["changed"].as_array().unwrap().len();
+    assert!(returned < 100 && returned > 0, "page shrank to {returned}");
+    assert!(body["next"].is_string(), "the shrunk page has a cursor");
+}

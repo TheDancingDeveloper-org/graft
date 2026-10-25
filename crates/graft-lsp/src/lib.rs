@@ -360,13 +360,17 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> LspServer<A> {
                 if let Some(uri) = doc_uri(&params) {
                     self.docs.remove(&uri);
                     if self.published.remove(&uri) {
-                        self.outbox.push(publish(&uri, Vec::new()));
+                        self.push_publish(&uri, Vec::new());
                     }
                 }
             }
             _ => {}
         }
         None
+    }
+
+    fn push_publish(&mut self, uri: &str, diagnostics: Vec<Value>) {
+        self.outbox.push(bounded_publish(uri, diagnostics));
     }
 
     fn initialize(&mut self, params: &Value) -> Value {
@@ -537,6 +541,32 @@ fn publish(uri: &str, diagnostics: Vec<Value>) -> Value {
     )
 }
 
+/// A diagnostics notification small enough to send. An oversized payload is
+/// replaced by one typed diagnostic naming the cap, so the notification
+/// itself stays under [`MAX_RESPONSE_BYTES`].
+fn bounded_publish(uri: &str, diagnostics: Vec<Value>) -> Value {
+    let note = publish(uri, diagnostics);
+    if serde_json::to_vec(&note).is_ok_and(|body| body.len() <= MAX_RESPONSE_BYTES) {
+        return note;
+    }
+    publish(
+        uri,
+        vec![json!({
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 1, "character": 0},
+            },
+            "severity": 1,
+            "source": "graft",
+            "code": "limit_exceeded",
+            "message": format!(
+                "diagnostics exceeded {MAX_RESPONSE_BYTES} bytes and were not published"
+            ),
+            "data": {"error": "limit_exceeded", "max_bytes": MAX_RESPONSE_BYTES},
+        })],
+    )
+}
+
 fn bounded_response(id: Value, result: Result<Value, RpcError>) -> Value {
     let response = rpc::response(id.clone(), result);
     if serde_json::to_vec(&response).is_ok_and(|body| body.len() <= MAX_RESPONSE_BYTES) {
@@ -574,11 +604,83 @@ mod tests {
     }
 
     #[test]
-    fn oversized_responses_become_typed_limit_errors() {
-        let response = bounded_response(json!(7), Ok(json!("x".repeat(MAX_RESPONSE_BYTES))));
-        assert_eq!(response["id"], 7);
-        assert_eq!(response["error"]["data"]["error"], "limit_exceeded");
-        assert_eq!(response["error"]["data"]["max_bytes"], MAX_RESPONSE_BYTES);
-        assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_RESPONSE_BYTES);
+    fn every_request_surface_refuses_an_oversized_result() {
+        let huge = "x".repeat(MAX_RESPONSE_BYTES);
+        let cases = [
+            (
+                "textDocument/hover",
+                json!({"contents": {"kind": "markdown", "value": huge}}),
+            ),
+            (
+                "textDocument/codeLens",
+                json!([{"command": {"title": huge}}]),
+            ),
+            (
+                "graft.diffBase",
+                json!({"files": [{"patch": huge, "truncated": true}], "next": "100"}),
+            ),
+            (
+                "graft.blameFile",
+                json!({"ranges": [{"subject": huge}], "truncated": true}),
+            ),
+            (READ_FILE_REQUEST, json!({"text": huge})),
+        ];
+        for (name, value) in cases {
+            let response = bounded_response(json!(name), Ok(value));
+            assert_eq!(response["id"], name);
+            assert_eq!(response["error"]["data"]["error"], "limit_exceeded");
+            assert_eq!(response["error"]["data"]["max_bytes"], MAX_RESPONSE_BYTES);
+            assert!(
+                serde_json::to_vec(&response).unwrap().len() <= MAX_RESPONSE_BYTES,
+                "{name} exceeded the response cap"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_diagnostics_become_a_typed_limit_notification() {
+        let huge = vec![json!({"message": "x".repeat(MAX_RESPONSE_BYTES)})];
+        let note = bounded_publish("file:///src/lib.rs", huge);
+        assert!(note.get("id").is_none(), "a notification has no id");
+        assert_eq!(note["method"], "textDocument/publishDiagnostics");
+        let diag = &note["params"]["diagnostics"];
+        assert_eq!(diag.as_array().unwrap().len(), 1);
+        assert_eq!(diag[0]["code"], "limit_exceeded");
+        assert_eq!(diag[0]["data"]["max_bytes"], MAX_RESPONSE_BYTES);
+        assert!(serde_json::to_vec(&note).unwrap().len() <= MAX_RESPONSE_BYTES);
+
+        let small = bounded_publish("file:///src/lib.rs", vec![json!({"message": "ok"})]);
+        assert_eq!(small["params"]["diagnostics"][0]["message"], "ok");
+    }
+
+    #[test]
+    fn the_output_inventory_covers_every_list_and_content_surface() {
+        let names: BTreeSet<&str> = OUTPUTS.iter().map(|o| o.name).collect();
+        for required in [
+            "textDocument/hover",
+            "textDocument/codeLens",
+            "textDocument/publishDiagnostics",
+            "graft.diffBase",
+            "graft.blameFile",
+            READ_FILE_REQUEST,
+        ] {
+            assert!(names.contains(required), "{required} has no bound");
+        }
+        assert_eq!(names.len(), OUTPUTS.len(), "duplicate output names");
+        let bounded_commands: BTreeSet<&str> = OUTPUTS
+            .iter()
+            .map(|output| output.name)
+            .filter(|name| COMMANDS.contains(name))
+            .collect();
+        assert_eq!(
+            bounded_commands,
+            BTreeSet::from(["graft.blameFile", "graft.diffBase"]),
+            "every content-returning command must be inventoried"
+        );
+        assert!(
+            OUTPUTS
+                .iter()
+                .all(|o| matches!(o.bound, OutputBound::Paginated | OutputBound::Capped))
+        );
     }
 }
