@@ -6,15 +6,13 @@ name: image
 #
 # - workflow_dispatch on main: build and push ghcr.io/<owner>/graft:sha-<sha>.
 #   This is how the operator cuts a pilot image from a landed commit.
-# - tags v*: the same, also tagged with the version.
 # - pull requests that touch the Dockerfile or this workflow: build only, no
 #   push, so the publish path is tested before anyone relies on it.
+# Version tags are built and pushed only by release.yml.
 # Never a required check, and no push trigger on main: the merge queue has
 # already tested what lands.
 on:
   workflow_dispatch:
-  push:
-    tags: ["v*"]
   pull_request:
     paths:
       - docker/Dockerfile
@@ -31,6 +29,9 @@ concurrency:
 
 jobs:
   image:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     # Self-hosted only (see the runner-policy job in ci.yml); `docker`
     # selects a runner with a Docker daemon for buildx.
     runs-on: [self-hosted, docker]
@@ -75,9 +76,6 @@ jobs:
           owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           image="ghcr.io/$owner/graft"
           tags="$image:sha-$GITHUB_SHA"
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            tags="$tags,$image:$GITHUB_REF_NAME"
-          fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
 
