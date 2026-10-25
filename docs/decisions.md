@@ -65,10 +65,10 @@ Already decided by the operator (2026-10-22):
   batch PR is open and unsealed is appended to it as one more per-land
   commit, a fast-forward with a lease; no close and recut. Amends D21 and
   D28. See [D30](#d30-a-land-after-pr-batch-joins-the-open-batch-pr).
-- **D33** (operator, 2026-10-25, WI-2443): an empty single-parent changeset
-  is valid only when it carries `mirror.git-commit` from a git import.
-  Native empty changesets stay rejected. See
-  [D33](#d33-empty-imported-changesets).
+- **D33** (operator, 2026-10-25, WI-2443): an empty changeset with fewer
+  than two parents is valid only when it carries `mirror.git-commit` from a
+  git import. Native empty changesets stay rejected, and a native write may
+  not set `mirror.*`. See [D33](#d33-empty-imported-changesets).
 - **D6, D16** (operator, 2026-10-23): `attested` landing on `main`, with
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
@@ -106,7 +106,7 @@ Already decided by the operator (2026-10-22):
 | D28 | Batch PR review and merge | **Decided:** oversight reviews the batch PR as a whole; `land-pr` rebase-merges it past the squash queue (`--admin`) once GitHub's required checks pass; graft still never merges. Amends D21, D26 | — |
 | D29 | Merges between lines | **Decided:** one merge point per (source, target) line pair, written with the land and read by `MergeBase`; first-parent history, no second parent, no encoding change | — |
 | D30 | Appending to an open batch | **Decided:** a land after `pr-batch` joins the open, unsealed batch PR as one more commit (fast-forward with a lease); sealed batches take no appends | — |
-| D33 | Empty imported changesets | **Decided:** an empty single-parent changeset is valid only with `mirror.git-commit` (git import); native empty changesets stay rejected | — |
+| D33 | Empty imported changesets | **Decided:** an empty changeset with fewer than two parents is valid only with `mirror.git-commit` (git import); native empty changesets stay rejected, and a native write may not set `mirror.*` | — |
 
 ---
 
@@ -927,8 +927,9 @@ Rejected:
 
 ## D33. Empty imported changesets
 
-**Decided (operator, 2026-10-25, WI-2443): an empty single-parent changeset
-is valid only when its metadata carries `mirror.git-commit`.** Native
+**Decided (operator, 2026-10-25, WI-2443): an empty changeset with fewer
+than two parents is valid only when its metadata carries `mirror.git-commit`.**
+That covers a single-parent commit and a parentless root. Native
 `CreateChangeset` with no changes and fewer than two parents stays rejected.
 This is an exception to validity rule 9 in
 [design.md §4.5](design.md#45-changesets). The canonical encoding does not
@@ -946,11 +947,13 @@ bytes of ids, trees, changesets, frames or tokens. It does change the
 validity rule consumers enforce.
 
 - **Chosen:** `Changeset::check` allows zero changes with fewer than two
-  parents only when metadata contains `mirror.git-commit` (D19). That key
-  is set only by `graft-git` on import. Export already reproduces an empty
-  diff from an empty change list plus the stored raw headers, so
-  `export(import(c)).sha == c.sha` holds. Native requests without the key
-  still fail `Rule::EmptyChangeset`.
+  parents only when metadata contains `mirror.git-commit` (D19). The native
+  write boundary rejects any metadata key under `mirror.*`, including
+  `mirror.git-commit`, so only `graft-git` on import can set it. Export
+  already reproduces an empty diff from an empty change list plus the stored
+  raw headers, so `export(import(c)).sha == c.sha` holds. Native requests
+  without the key still fail `Rule::EmptyChangeset`, and a native request
+  that supplies `mirror.*` fails at the boundary before that rule.
 - **Rejected:**
   - splicing the empty commits out of parent links and keeping only the raw
     commit in the mirror (lossy against the complete DAG and against 100%
