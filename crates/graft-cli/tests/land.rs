@@ -87,7 +87,8 @@ fn clone_app(s: &Served, dir: &Path) -> PathBuf {
 /// changeset ids are reproducible.
 fn wc_cmd(app: &Path) -> assert_cmd::Command {
     let mut cmd = graft(app);
-    cmd.env("GRAFT_AUTHOR_NAME", "Test Author")
+    cmd.arg("--experimental")
+        .env("GRAFT_AUTHOR_NAME", "Test Author")
         .env("GRAFT_AUTHOR_EMAIL", "author@example.com")
         .env("GRAFT_AUTHOR_KIND", "agent")
         .env("GRAFT_AUTHOR_DATE", "1700000000000");
@@ -645,6 +646,7 @@ fn attest_records_a_check_for_ci() {
     let elsewhere = scratch();
     graft(elsewhere.path())
         .args([
+            "--experimental",
             "--endpoint",
             &s.url,
             "--repo",

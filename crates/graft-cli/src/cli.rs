@@ -28,7 +28,7 @@ pub(crate) struct Cli {
 /// Options every command accepts.
 #[derive(Clone, Debug, Args)]
 pub(crate) struct Global {
-    /// Print the command's JSON, shaped by its schema in crates/graft-cli/schemas/
+    /// Print stable JSON; its schema is published with the release
     #[arg(long, global = true)]
     pub(crate) json: bool,
     /// Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
@@ -43,6 +43,9 @@ pub(crate) struct Global {
     /// Run as if started in this directory, like `git -C`
     #[arg(short = 'C', long = "directory", global = true, value_name = "DIR")]
     pub(crate) directory: Option<PathBuf>,
+    /// Enable commands that are not ready for general use
+    #[arg(long, global = true, hide = true)]
+    pub(crate) experimental: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -92,15 +95,17 @@ pub(crate) enum Command {
     Stack(StackArgs),
     /// Move the base to the line tip (the server rebases a stack; conflicts are written into the files)
     Sync,
-    /// Land the stack on the line, or hand it to the PR bridge
+    /// Land the stack on the line
     Land(LandArgs),
     /// Add a draft that inverts a changeset
     Revert(RevertArgs),
     /// Add a draft that re-applies a landed changeset (a cherry-pick; conflicts are written into the files)
     Pick(PickArgs),
     /// Record a check result for a changeset (for CI)
+    #[command(hide = true)]
     Attest(AttestArgs),
     /// CI helpers: exchange the job's identity token for a graft token
+    #[command(hide = true)]
     Ci(CiArgs),
     /// Call a read operation of the API, with JSON in and out
     Api(ApiArgs),
@@ -115,7 +120,7 @@ pub(crate) enum Command {
     /// is the MCP channel; messages go to standard error. The token comes
     /// only from --token-file or GRAFT_TOKEN.
     Mcp,
-    /// Run the LSP server over stdio (owned by G3.6)
+    /// Run the LSP server over stdio
     Lsp {
         /// Arguments passed to the LSP server
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -320,10 +325,10 @@ pub(crate) struct CommitArgs {
     /// The author as `Name <email>` (default: GRAFT_AUTHOR_NAME and GRAFT_AUTHOR_EMAIL, else $USER with no email)
     #[arg(long, value_name = "AUTHOR")]
     pub(crate) author: Option<String>,
-    /// What kind of author this is: human, agent, bot or ci (default: GRAFT_AUTHOR_KIND, else agent with VOGT_SESSION_ID set, else human)
+    /// What kind of author this is: human, agent, bot or ci (default: GRAFT_AUTHOR_KIND, else human)
     #[arg(long, value_name = "KIND")]
     pub(crate) author_kind: Option<String>,
-    /// Metadata `KEY=VALUE` for tools, for example `vogt.work_item=WI-1` (repeatable)
+    /// Metadata `KEY=VALUE` for tools (repeatable)
     #[arg(long = "meta", value_name = "KEY=VALUE")]
     pub(crate) meta: Vec<String>,
 }
@@ -394,7 +399,7 @@ pub(crate) enum LineAction {
         #[arg(long, value_name = "REV")]
         from: String,
     },
-    /// Merge another line into a line (D29); only the target moves
+    /// Merge another line into a line; only the target moves
     Merge {
         /// The source line, only read
         src: String,
@@ -407,7 +412,7 @@ pub(crate) enum LineAction {
         /// Message of the merge landing
         #[arg(short, long, value_name = "MSG")]
         message: Option<String>,
-        /// How a file both sides changed is merged: `line` (D16) or `file`
+        /// How a file both sides changed is merged: `line` or `file`
         #[arg(long, value_enum, value_name = "MODE", default_value_t = LandMerge::Line)]
         merge: LandMerge,
         /// On a conflict, sync this working copy (on the target line) to the tip and write the merge into the files
@@ -512,7 +517,7 @@ pub(crate) enum StackAction {
 
 #[derive(Debug, Args)]
 pub(crate) struct LandArgs {
-    /// Wait up to this many seconds: for a contended land (default 60), and for a queued pull request to merge (default: don't wait)
+    /// Wait up to this many seconds for a contended land (default: 60)
     #[arg(long, value_name = "SECONDS")]
     pub(crate) wait: Option<u64>,
     /// Land the stack as one changeset
@@ -521,13 +526,13 @@ pub(crate) struct LandArgs {
     /// On a conflict, sync to the tip and write the conflicts into the files (still exits 3)
     #[arg(long)]
     pub(crate) sync: bool,
-    /// How the server's rebase treats a file both sides changed: `line` merges text files line by line (D16), `file` refuses any file changed on both sides
+    /// How the server's rebase treats a file both sides changed: `line` merges text files line by line, `file` refuses any file changed on both sides
     #[arg(long, value_enum, value_name = "MODE", default_value_t = LandMerge::Line)]
     pub(crate) merge: LandMerge,
     /// Skip the pre-land check (the dry-run rebase that stops a land on a real conflict, and the draft-overlap report)
     #[arg(long)]
     pub(crate) no_check: bool,
-    /// Land a merge resolution (D29): record a merge point from `<line>@<rev>`
+    /// Land a merge resolution: record a merge point from `<line>@<rev>`
     #[arg(long, value_name = "LINE@REV")]
     pub(crate) merged_from: Option<String>,
 }
@@ -535,7 +540,7 @@ pub(crate) struct LandArgs {
 /// How `graft land` merges a file both sides changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum LandMerge {
-    /// Three-way line merge for text files under 1 MiB (decision D16)
+    /// Three-way line merge for text files under 1 MiB
     Line,
     /// Any file changed on both sides conflicts
     File,

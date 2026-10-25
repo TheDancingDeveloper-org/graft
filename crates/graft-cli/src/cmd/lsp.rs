@@ -66,6 +66,7 @@ fn empty() -> Global {
         repo: None,
         token_file: None,
         directory: None,
+        experimental: false,
     }
 }
 

@@ -2,6 +2,7 @@
 name = "graft-cli"
 description = "The graft command-line client, including graft mcp and graft lsp."
 version.workspace = true
+build = "build.rs"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
