@@ -7,6 +7,7 @@ mod support;
 use std::fs;
 use std::path::Path;
 
+use graft_proto::PROTOCOL_VERSION;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use serde_json::{Value, json};
@@ -49,7 +50,9 @@ fn text(output: &std::process::Output) -> String {
 fn version_human_and_json() {
     let dir = scratch();
     let out = graft(dir.path()).arg("version").assert().success();
-    insta::assert_snapshot!("version_human", text(out.get_output()));
+    let human = text(out.get_output());
+    assert!(human.starts_with(concat!("graft ", env!("CARGO_PKG_VERSION"), "+")));
+    assert!(human.ends_with(&format!(" (protocol {PROTOCOL_VERSION})\n")));
 
     let out = graft(dir.path())
         .args(["--json", "version"])
@@ -57,7 +60,144 @@ fn version_human_and_json() {
         .success();
     let value = json_out(out.get_output());
     assert_valid("version", &value);
-    insta::assert_json_snapshot!("version_json", value);
+    let version = value["version"].as_str().unwrap();
+    assert!(version.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")));
+    assert_ne!(version, "0.0.0");
+    assert_eq!(
+        value["protocol"],
+        json!({"major": PROTOCOL_VERSION.major, "minor": PROTOCOL_VERSION.minor})
+    );
+}
+
+#[test]
+fn help_is_public_facing_for_every_command() {
+    const COMMANDS: &[&[&str]] = &[
+        &[],
+        &["clone"],
+        &["status"],
+        &["diff"],
+        &["log"],
+        &["show"],
+        &["blame"],
+        &["cat"],
+        &["ls"],
+        &["sparse"],
+        &["sparse", "list"],
+        &["sparse", "add"],
+        &["sparse", "remove"],
+        &["commit"],
+        &["workspace"],
+        &["workspace", "show"],
+        &["workspace", "list"],
+        &["workspace", "open"],
+        &["workspace", "renew"],
+        &["workspace", "close"],
+        &["line"],
+        &["line", "create"],
+        &["line", "merge"],
+        &["line", "merges"],
+        &["line", "list"],
+        &["tag"],
+        &["tag", "create"],
+        &["tag", "list"],
+        &["stack"],
+        &["stack", "list"],
+        &["stack", "squash"],
+        &["stack", "reorder"],
+        &["stack", "split"],
+        &["stack", "drop"],
+        &["sync"],
+        &["land"],
+        &["revert"],
+        &["pick"],
+        &["attest"],
+        &["ci"],
+        &["ci", "exchange"],
+        &["api"],
+        &["version"],
+        &["mcp"],
+        &["lsp"],
+    ];
+
+    for command in COMMANDS {
+        let dir = scratch();
+        let output = graft(dir.path())
+            .args(*command)
+            .arg("--help")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(output).unwrap();
+        assert_no_internal_references(command, &help);
+    }
+}
+
+#[test]
+fn top_level_help_snapshot() {
+    let dir = scratch();
+    let out = graft(dir.path()).arg("--help").assert().success();
+    insta::assert_snapshot!("top_level_help", text(out.get_output()));
+}
+
+#[test]
+fn experimental_commands_are_hidden_and_gated() {
+    let dir = scratch();
+    let help = graft(dir.path()).arg("--help").assert().success();
+    let help = text(help.get_output());
+    assert!(!help.contains("attest"));
+    assert!(!help.contains("ci "));
+
+    graft(dir.path())
+        .args(["attest", "main", "--check", "test", "--pass"])
+        .assert()
+        .code(2)
+        .stderr(contains("experimental; enable with GRAFT_EXPERIMENTAL=1"));
+    graft(dir.path())
+        .args(["ci", "exchange", "--provider", "github", "--out", "token"])
+        .assert()
+        .code(2)
+        .stderr(contains("experimental; enable with GRAFT_EXPERIMENTAL=1"));
+}
+
+fn assert_no_internal_references(command: &[&str], help: &str) {
+    const LITERALS: &[&str] = &[
+        "pr bridge",
+        "crates/",
+        "owned by",
+        "vogt",
+        "trial",
+        "graft-dev",
+        "phase",
+    ];
+    let lowercase = help.to_ascii_lowercase();
+    for leak in LITERALS {
+        assert!(
+            !lowercase.contains(leak),
+            "graft {} --help leaked {leak:?}:\n{help}",
+            command.join(" ")
+        );
+    }
+    for word in help.split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+    {
+        let numbered = (word.starts_with("WI-")
+            && word.len() > 3
+            && word[3..]
+                .chars()
+                .all(|character| character.is_ascii_digit()))
+            || ((word.starts_with('D') || word.starts_with('G'))
+                && word.len() > 1
+                && word[1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_digit()));
+        assert!(
+            !numbered,
+            "graft {} --help leaked internal reference {word:?}:\n{help}",
+            command.join(" ")
+        );
+    }
 }
 
 #[test]

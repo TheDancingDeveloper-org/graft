@@ -9,7 +9,11 @@ use crate::render;
 
 /// Prints the version.
 pub(crate) fn run(g: &Global) -> Result<(), Failure> {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = format!(
+        "{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("GRAFT_GIT_DESCRIBE")
+    );
     if g.json {
         return render::print_json(&json!({
             "version": version,
