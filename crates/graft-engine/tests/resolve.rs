@@ -233,7 +233,7 @@ fn same_line_conflict_shows_markers_and_resolves_to_a_clean_land<M: MetaStore>(f
     let onto = t.land_other(&[("a", THEIRS)], &[]);
 
     // The land conflicts, as before.
-    assert!(matches!(t.land(draft), Err(ApiError::Conflict { .. })));
+    assert!(matches!(t.land(draft), Err(ApiError::StaleBase(_))));
 
     let c = t.conflicts("w", 0, None);
     assert_eq!(

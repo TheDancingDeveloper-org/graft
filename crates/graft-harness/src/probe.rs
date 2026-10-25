@@ -519,7 +519,9 @@ pub fn racing_merges() -> Findings {
             (Ok(Landed::Landed { .. }), Some(m)) if read.as_deref() == Some(&m[..]) => {
                 f.notes.push(format!("{name}: landed the clean merge"));
             }
-            (Err(ApiError::Conflict { .. }), None) if now == after_first => {
+            (Err(ApiError::Conflict { .. } | ApiError::StaleBase(_)), None)
+                if now == after_first =>
+            {
                 f.notes
                     .push(format!("{name}: the conflict reached the client"));
             }

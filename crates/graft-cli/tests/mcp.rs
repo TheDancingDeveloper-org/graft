@@ -537,6 +537,22 @@ fn land_from_a_working_copy_line_merges_by_default() {
     assert_eq!(refused["kind"], "conflict", "{refused}");
     assert_eq!(rt.block_on(repo.tip()), first_tip);
 
+    let (stale, error) = mcp.call(
+        "graft_land",
+        json!({"repo": REPO, "workspace": workspace, "merge": "file", "check": false}),
+    );
+    assert!(!error, "{stale}");
+    assert_eq!(stale["outcome"], "conflict", "{stale}");
+    assert_eq!(stale["kind"], "stale_base", "{stale}");
+    assert_eq!(stale["current_tip"], first_tip.to_string(), "{stale}");
+    assert_eq!(stale["paths"], json!(["src/lib.rs"]), "{stale}");
+    assert_eq!(stale["truncated"], false, "{stale}");
+    assert_eq!(
+        stale["guidance"], "run graft_sync, then graft_land",
+        "{stale}"
+    );
+    assert_eq!(rt.block_on(repo.tip()), first_tip);
+
     // No `merge`: a line merge, rebased onto the first land.
     let landed = mcp.ok("graft_land", json!({"repo": REPO, "workspace": workspace}));
     assert_eq!(landed["outcome"], "landed", "{landed}");
