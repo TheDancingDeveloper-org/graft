@@ -184,6 +184,10 @@ pub(crate) struct CloneArgs {
     /// Line whose tip to clone, unless `--at` is given
     #[arg(long, default_value = DEFAULT_LINE)]
     pub(crate) line: String,
+    /// True when `--line` was passed. The default does not count, so a URL
+    /// `?line=` is not reported as a conflict with the implicit `main`.
+    #[arg(skip)]
+    pub(crate) line_explicit: bool,
     /// Snapshot to clone: a changeset id or a ref name
     #[arg(long, value_name = "REV")]
     pub(crate) at: Option<String>,
