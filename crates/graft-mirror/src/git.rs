@@ -333,8 +333,9 @@ impl Mirror {
         }
     }
 
-    /// Fetches `branches` from upstream into [`UPSTREAM_NS`], forced: the
-    /// copy always equals upstream, and follow decides what graft may take.
+    /// Fetches `branches` from the configured upstream into [`UPSTREAM_NS`],
+    /// forced: the copy always equals upstream, and follow decides what
+    /// graft may take.
     pub async fn fetch(&self, branches: &[&str]) -> Result<(), GitCliError> {
         let specs: Vec<String> = branches
             .iter()
