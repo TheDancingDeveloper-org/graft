@@ -289,33 +289,6 @@ pub fn config(dir: &Path, upstream: &str) -> NodeConfig {
     }
 }
 
-/// Waits until `Node::open` can take the cache, then drops that node.
-///
-/// The store's exclusive lock lives as long as any `Node` clone. Joining the
-/// serve task does not free it while one remains, and the next open panics
-/// with "in use by another process" (WI-2467). Retrying the open is the same
-/// check the failing test makes, bounded so a stuck clone fails instead of
-/// hanging.
-async fn wait_for_cache_lock(cache_dir: &Path, upstream: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match Node::open(&config(cache_dir, upstream), NodeMetrics::new().unwrap()) {
-            Ok(opened) => {
-                drop(opened);
-                return;
-            }
-            Err(e) if e.contains("in use by another process") => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "cache lock still held 5s after stop: {e}"
-                );
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(e) => panic!("open while waiting for the cache lock: {e}"),
-        }
-    }
-}
-
 impl NodeRun {
     pub async fn start(config: NodeConfig) -> Self {
         let listener =
@@ -340,11 +313,12 @@ impl NodeRun {
         }
     }
 
-    /// Stops the accept task and waits up to 5s for it to finish, so the
-    /// socket is free. The cache `flock` is held by every live `Node` clone
-    /// and is not released here: this `NodeRun` still owns one. Drop the run,
-    /// then [`NodeRun::wait_until_cache_unlocked`] before opening the same
-    /// cache again (WI-2467).
+    /// Stops the accept task and waits up to 5s for it to finish.
+    ///
+    /// `Node::serve` joins the tasks that held the cache lock before this
+    /// returns, so a later `Node::open` of the same cache does not see
+    /// "in use by another process" (WI-2467). This run's own `Node` is still
+    /// alive until the run is dropped; drop it before opening again.
     pub async fn stop(&mut self) {
         if let Some(tx) = self.stop.take() {
             let _ = tx.send(());
@@ -355,13 +329,6 @@ impl NodeRun {
                 .expect("node did not stop within 5s");
             done.expect("node serve task panicked");
         }
-    }
-
-    /// Waits until a fresh `Node::open` of `cache_dir` succeeds, then drops
-    /// it. Call after dropping every `Node` clone, including this `NodeRun`
-    /// (WI-2467).
-    pub async fn wait_until_cache_unlocked(cache_dir: &Path, upstream: &str) {
-        wait_for_cache_lock(cache_dir, upstream).await;
     }
 
     /// Waits until no fetch is in flight, so every fetched object that will

@@ -36,7 +36,11 @@ mod upstream;
 use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 
 use axum::Router;
 use axum::extract::Request as HttpRequest;
@@ -59,6 +63,12 @@ use crate::objects::Objects;
 use crate::upstream::{Upstream, UpstreamConfig};
 
 /// A running node's state. Cheap to clone.
+///
+/// `GetObjects` answers and cache-miss fetches are started with
+/// [`Node::track`]. Those tasks clone this node and hold the cache store
+/// lock until they finish. [`Node::serve`] aborts them when the socket stops
+/// and joins them before it returns, so the lock is free when `serve`
+/// finishes (WI-2467).
 #[derive(Clone)]
 pub struct Node {
     objects: Objects,
@@ -66,6 +76,60 @@ pub struct Node {
     metrics: NodeMetrics,
     max_connections: usize,
     max_streams: u32,
+    tracked: Tracker,
+}
+
+/// Tasks spawned by the node that clone it (object answers, fetch leads).
+///
+/// [`Node::serve`] joins them, so their store handles are dropped before
+/// `serve` returns (WI-2467).
+#[derive(Clone)]
+pub(crate) struct Tracker {
+    set: Arc<Mutex<JoinSet<()>>>,
+    stopping: Arc<AtomicBool>,
+}
+
+impl Tracker {
+    fn new() -> Self {
+        Self {
+            set: Arc::new(Mutex::new(JoinSet::new())),
+            stopping: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Spawns `task`. After shutdown has begun, does not spawn.
+    ///
+    /// The registrar does not hold a [`Node`]. It takes the same lock
+    /// [`Tracker::join`] takes before inserting, so a task cannot be missed
+    /// by shutdown except during the gap closed by [`Tracker::join`]'s second
+    /// pass.
+    pub(crate) fn spawn<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let set = self.set.clone();
+        let stopping = self.stopping.clone();
+        tokio::spawn(async move {
+            let mut set = set.lock().await;
+            if stopping.load(Ordering::Acquire) {
+                return;
+            }
+            set.spawn(task);
+        });
+    }
+
+    /// Aborts every spawned task and waits until it has dropped.
+    async fn join(&self) {
+        for _ in 0..8 {
+            {
+                let mut set = self.set.lock().await;
+                self.stopping.store(true, Ordering::Release);
+                set.abort_all();
+                while set.join_next().await.is_some() {}
+            }
+            tokio::task::yield_now().await;
+        }
+    }
 }
 
 impl Node {
@@ -97,12 +161,14 @@ impl Node {
             },
             metrics.clone(),
         )?;
+        let tracked = Tracker::new();
         let flights = Arc::new(Flights::new(
             config.max_inflight_objects,
             cache.clone(),
             upstream.clone(),
             service_token,
             metrics.clone(),
+            tracked.clone(),
         ));
         Ok(Self {
             objects: Objects {
@@ -110,6 +176,7 @@ impl Node {
                 cache,
                 flights,
                 metrics: metrics.clone(),
+                tasks: tracked.clone(),
             },
             forwarder: Forwarder {
                 upstream,
@@ -118,6 +185,7 @@ impl Node {
             metrics,
             max_connections: config.max_connections,
             max_streams: config.max_streams_per_connection,
+            tracked,
         })
     }
 
@@ -165,13 +233,17 @@ impl Node {
             shutdown.await;
             closer.close();
         };
-        tonic::transport::Server::builder()
+        let served = tonic::transport::Server::builder()
             .max_concurrent_streams(Some(self.max_streams))
             .http2_keepalive_interval(Some(Duration::from_secs(30)))
             .add_routes(tonic::service::Routes::from(self.router()))
             .serve_with_incoming_shutdown(incoming, shutdown)
             .await
-            .map_err(|e| format!("serve: {e}"))
+            .map_err(|e| format!("serve: {e}"));
+        // GetObjects and fetch tasks hold Node clones. Join them before
+        // returning so the cache lock is free (WI-2467).
+        self.tracked.join().await;
+        served
     }
 }
 
