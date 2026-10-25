@@ -227,6 +227,7 @@ pub(crate) fn resolve_settings(
     resolve_settings_from_sources(
         wc.map(|view| (view.config(), view.server())),
         user,
+        g.server.as_deref(),
         endpoint_override,
         token_override,
     )
@@ -235,12 +236,16 @@ pub(crate) fn resolve_settings(
 fn resolve_settings_from_sources(
     wc: Option<(&WcConfig, Option<&str>)>,
     user: &UserConfig,
+    server_override: Option<&str>,
     endpoint_override: Option<Endpoint>,
     token_override: Option<String>,
 ) -> Result<ResolvedSettings, Failure> {
-    let selected_server = wc
-        .and_then(|(_, server)| server)
-        .or(user.default_server.as_deref());
+    // `--server` names a server in the user config. It wins over the working
+    // copy's recorded server and the user default.
+    let selected_server = server_override.or_else(|| {
+        wc.and_then(|(_, server)| server)
+            .or(user.default_server.as_deref())
+    });
     let named = selected_server.and_then(|name| user.servers.get(name));
     let legacy_endpoint = wc
         .filter(|(_, server)| server.is_none())
@@ -584,7 +589,8 @@ mod tests {
         let wc = WcConfig::default();
 
         let settings =
-            resolve_settings_from_sources(Some((&wc, Some("working"))), &user, None, None).unwrap();
+            resolve_settings_from_sources(Some((&wc, Some("working"))), &user, None, None, None)
+                .unwrap();
         assert_eq!(settings.server.as_deref(), Some("working"));
         assert_eq!(settings.endpoint, Endpoint::parse("http://working.example"));
         assert_eq!(settings.token.as_deref(), Some("working-secret"));
@@ -595,7 +601,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let user = user_with_servers(dir.path());
 
-        let settings = resolve_settings_from_sources(None, &user, None, None).unwrap();
+        let settings = resolve_settings_from_sources(None, &user, None, None, None).unwrap();
         assert_eq!(settings.server.as_deref(), Some("default"));
         assert_eq!(settings.endpoint, Endpoint::parse("http://default.example"));
         assert_eq!(settings.token.as_deref(), Some("default-secret"));
@@ -608,14 +614,19 @@ mod tests {
         let endpoint = Endpoint::parse("http://override.example");
 
         let endpoint_only =
-            resolve_settings_from_sources(None, &user, Some(endpoint.clone()), None).unwrap();
+            resolve_settings_from_sources(None, &user, None, Some(endpoint.clone()), None).unwrap();
         assert_eq!(endpoint_only.endpoint, endpoint);
         assert_eq!(endpoint_only.server, None);
         assert_eq!(endpoint_only.token, None);
 
-        let token_only =
-            resolve_settings_from_sources(None, &user, None, Some("override-secret".to_owned()))
-                .unwrap();
+        let token_only = resolve_settings_from_sources(
+            None,
+            &user,
+            None,
+            None,
+            Some("override-secret".to_owned()),
+        )
+        .unwrap();
         assert_eq!(
             token_only.endpoint,
             Endpoint::parse("http://default.example")
@@ -631,6 +642,7 @@ mod tests {
         let settings = resolve_settings_from_sources(
             None,
             &user,
+            None,
             Some(Endpoint::parse("http://default.example")),
             None,
         )
@@ -649,7 +661,8 @@ mod tests {
             ..WcConfig::default()
         };
 
-        let settings = resolve_settings_from_sources(Some((&wc, None)), &user, None, None).unwrap();
+        let settings =
+            resolve_settings_from_sources(Some((&wc, None)), &user, None, None, None).unwrap();
 
         assert_eq!(settings.endpoint, Endpoint::parse("http://legacy.example"));
         assert_eq!(settings.server, None);
@@ -664,6 +677,7 @@ mod tests {
         let settings = resolve_settings_from_sources(
             Some((&wc, Some("removed"))),
             &user,
+            None,
             Some(Endpoint::parse("http://override.example")),
             Some("override-secret".to_owned()),
         )
@@ -674,5 +688,36 @@ mod tests {
             Endpoint::parse("http://override.example")
         );
         assert_eq!(settings.token.as_deref(), Some("override-secret"));
+    }
+
+    #[test]
+    fn server_override_precedes_the_working_copy_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+        let wc = WcConfig::default();
+
+        let settings = resolve_settings_from_sources(
+            Some((&wc, Some("working"))),
+            &user,
+            Some("default"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(settings.server.as_deref(), Some("default"));
+        assert_eq!(settings.endpoint, Endpoint::parse("http://default.example"));
+        assert_eq!(settings.token.as_deref(), Some("default-secret"));
+    }
+
+    #[test]
+    fn server_override_outside_a_working_copy_names_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = user_with_servers(dir.path());
+
+        let settings =
+            resolve_settings_from_sources(None, &user, Some("working"), None, None).unwrap();
+        assert_eq!(settings.server.as_deref(), Some("working"));
+        assert_eq!(settings.endpoint, Endpoint::parse("http://working.example"));
+        assert_eq!(settings.token.as_deref(), Some("working-secret"));
     }
 }

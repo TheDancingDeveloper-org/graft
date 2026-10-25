@@ -91,22 +91,25 @@ Never print the token. Never pass it as an argument.
 
 `graft mcp` is the stdio server. Inside a working copy it needs no flags: it uses the named server recorded by `graft clone` (or the user config's `default_server`) and reads the token from that server's private token file. The token never appears in the registration command, in the MCP client's config, or on stdout.
 
-Register it once, from the working copy:
+Print the snippet for the client you use. It never contains a token:
+
+```sh
+graft mcp --print-config claude
+graft mcp --print-config codex
+graft mcp --print-config cursor
+```
+
+From a working copy those print:
 
 ```sh
 claude mcp add graft -- graft mcp
 ```
 
-Codex (`config.toml`; `cwd` is the working copy):
-
 ```toml
 [mcp_servers.graft]
 command = "graft"
 args = ["mcp"]
-cwd = "/path/to/working-copy"
 ```
-
-Cursor (`.cursor/mcp.json`):
 
 ```json
 {
@@ -119,7 +122,13 @@ Cursor (`.cursor/mcp.json`):
 }
 ```
 
-Outside a working copy, pass `--server NAME` or `--endpoint URL` (and a token file or `GRAFT_TOKEN`). Do not put the token in the client's config.
+Cursor does not promise to start the server in the project root. Outside a working copy, or when Cursor might start elsewhere, the printed snippet passes `-C <dir>` so graft finds the checkout. Example:
+
+```json
+"args": ["-C", "/path/to/working-copy", "mcp"]
+```
+
+`--server NAME` selects a named server from the user config (`graft login`). It wins over the working copy's recorded server and `default_server`. Outside a working copy, pass `--server NAME` or `--endpoint URL` (and a token file or `GRAFT_TOKEN`). Do not put the token in the client's config.
 
 ### Tools
 
