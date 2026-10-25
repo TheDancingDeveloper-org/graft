@@ -48,7 +48,7 @@ use graft_telemetry::Metrics;
 
 use crate::db::{LineState, MirrorDb};
 use crate::git::Mirror;
-use crate::{MirrorError, current_ref, move_ref};
+use crate::{GitCliError, MirrorError, current_ref, move_ref};
 
 /// The poll interval of phase 1 (decision D9).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
@@ -319,7 +319,11 @@ where
         let Some(pattern) = self.config.tags.clone() else {
             return Ok(report);
         };
-        let upstream = self.mirror.ls_remote_tags(&pattern).await?;
+        let upstream = self
+            .mirror
+            .ls_remote_tags(&pattern)
+            .await
+            .map_err(|e| self.fetch_error(e))?;
         let listed: HashMap<&str, GitSha> = upstream
             .iter()
             .map(|t| (t.name.as_str(), t.commit))
@@ -374,7 +378,10 @@ where
             .map(|(t, _)| t.name.as_str())
             .collect();
         if !annotated.is_empty() {
-            self.mirror.fetch_tags(&annotated).await?;
+            self.mirror
+                .fetch_tags(&annotated)
+                .await
+                .map_err(|e| self.fetch_error(e))?;
         }
         for (tag, id) in todo {
             let name = &tag.name;
@@ -603,6 +610,13 @@ where
         }
     }
 
+    fn fetch_error(&self, error: GitCliError) -> MirrorError {
+        for line in &self.config.lines {
+            self.note_fetch_error(&line.line);
+        }
+        MirrorError::Fetch(scrub_git(&error.to_string()))
+    }
+
     fn export_state(&self, line: &str, state: &LineState) {
         let Some(m) = &self.metrics else { return };
         let lag_ms = state
@@ -618,7 +632,7 @@ where
 }
 
 /// Drops credentials from a git CLI failure: URL userinfo
-/// (`scheme://user:secret@host`) and `Bearer`/`Basic` header values.
+/// (`scheme://userinfo@host`) and `Bearer`/`Basic` header values.
 fn scrub_git(msg: &str) -> String {
     let mut out = String::with_capacity(msg.len());
     let mut rest = msg;
@@ -630,7 +644,7 @@ fn scrub_git(msg: &str) -> String {
             let after = &rest[scheme.len()..];
             if let Some(at) = after.find('@') {
                 let userinfo = &after[..at];
-                if userinfo.contains(':') && !userinfo.contains('/') {
+                if !userinfo.contains('/') {
                     out.push_str(scheme);
                     out.push_str("***@");
                     rest = &after[at + 1..];
@@ -652,4 +666,22 @@ fn scrub_git(msg: &str) -> String {
         rest = &rest[ch.len_utf8()..];
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrub_git;
+
+    #[test]
+    fn git_errors_scrub_url_userinfo_and_authorization_values() {
+        let message = concat!(
+            "https://ghp_token@github.com/owner/repo Bearer bearer-token ",
+            "http://user:password@example.com/repo Basic basic-token"
+        );
+
+        assert_eq!(
+            scrub_git(message),
+            "https://***@github.com/owner/repo Bearer *** http://***@example.com/repo Basic ***"
+        );
+    }
 }

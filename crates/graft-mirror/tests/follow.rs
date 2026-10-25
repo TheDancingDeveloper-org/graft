@@ -669,3 +669,37 @@ async fn unreachable_configured_upstream_is_a_typed_error() {
     );
     assert_eq!(db.commit_count().unwrap(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn tag_listing_failure_is_a_typed_fetch_error() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let m = metrics();
+    let dead = w.mirror_dir.parent().unwrap().join("not-a-tag-remote");
+    std::fs::write(&dead, b"not a git repository\n").unwrap();
+    let config = FollowConfig {
+        repo: REPO.to_owned(),
+        lines: vec![FollowLine {
+            branch: "main".to_owned(),
+            line: "main".to_owned(),
+        }],
+        allow_lossy: Vec::new(),
+        batch: 2,
+        interval: graft_mirror::follow::POLL_INTERVAL,
+        tags: Some("*".to_owned()),
+    };
+    let mirror = Mirror::new(&w.mirror_dir, dead.to_str().unwrap());
+    let mut follower = Follower::new(&w.api, cx(), &db, mirror, config)
+        .with_metrics(m.clone())
+        .with_clock(clock);
+
+    let error = follower
+        .poll_tags()
+        .await
+        .expect_err("a dead tag upstream fails the poll");
+    assert!(
+        error.to_string().starts_with("git fetch failed:"),
+        "{error}"
+    );
+    assert_eq!(lag_changesets(&m), -1);
+}
