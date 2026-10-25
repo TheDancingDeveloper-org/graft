@@ -37,6 +37,8 @@ pub(crate) struct BatchHeader {
     pub(crate) max_lands: usize,
     /// Why the batch is one squashed commit instead of one per land.
     pub(crate) fallback: Option<String>,
+    /// Lands added after the PR opened.
+    pub(crate) appended: HashSet<ChangesetId>,
 }
 
 /// How many of `lands` (newest first) a batch capped at `max` takes, oldest
@@ -80,11 +82,12 @@ fn checks_text(land: &LandLine) -> String {
 }
 
 /// One table row for a land. Every cell is bounded, so a row is too.
-pub(crate) fn land_row(land: &LandLine) -> String {
+pub(crate) fn land_row(land: &LandLine, appended: bool) -> String {
     let cell = |s: &str| clean_text(s, FIELD_CHARS, false).replace('|', "\\|");
     let checks = checks_text(land);
+    let appended = if appended { " (appended)" } else { "" };
     format!(
-        "| `{}` | {} | {} | {} | {} | {} |\n",
+        "| `{}{appended}` | {} | {} | {} | {} | {} |\n",
         short(land.id),
         cell(&land.author),
         cell(land.session.as_deref().unwrap_or("-")),
@@ -254,7 +257,10 @@ pub(crate) fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
         "\n{BATCH_TRAILER} {}\nGraft-Line: {line}\nGraft-Changeset: {}\n",
         h.number, h.tip
     );
-    let rows: Vec<String> = lands.iter().map(land_row).collect();
+    let rows: Vec<String> = lands
+        .iter()
+        .map(|land| land_row(land, h.appended.contains(&land.id)))
+        .collect();
 
     let mut message = head.clone();
     for r in &rows {
