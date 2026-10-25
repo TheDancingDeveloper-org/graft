@@ -85,6 +85,8 @@ pub struct Pull {
     pub merge_commit: Option<String>,
     /// The head commit of its branch (40-hex).
     pub head_sha: String,
+    /// The PR body, as GitHub currently stores it.
+    pub body: String,
 }
 
 /// A PR to open.
@@ -122,6 +124,12 @@ pub trait Forge: Send + Sync {
     fn create_pull(&self, new: &NewPull) -> impl Future<Output = Result<Pull, ForgeError>> + Send;
     /// Reads PR `number`.
     fn get_pull(&self, number: u64) -> impl Future<Output = Result<Pull, ForgeError>> + Send;
+    /// Replaces PR `number`'s body.
+    fn update_pull(
+        &self,
+        number: u64,
+        body: &str,
+    ) -> impl Future<Output = Result<(), ForgeError>> + Send;
     /// Puts the PR with `node_id` in the merge queue. Already queued is success.
     fn enqueue(&self, node_id: &str) -> impl Future<Output = Result<(), ForgeError>> + Send;
     /// The check runs on `sha`.
@@ -505,6 +513,8 @@ struct RawPull {
     #[serde(default)]
     merge_commit_sha: Option<String>,
     head: RawHead,
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -546,6 +556,7 @@ fn pull_from(v: Value) -> Result<Pull, ForgeError> {
         merged: raw.merged,
         merge_commit: raw.merge_commit_sha,
         head_sha: raw.head.sha,
+        body: raw.body.unwrap_or_default(),
     })
 }
 
@@ -629,6 +640,18 @@ impl<C: CredentialProvider> Forge for HttpForge<C> {
         let path = format!("{}/pulls/{number}", self.repo_path());
         let v = self.send(reqwest::Method::GET, &path, &[], None).await?;
         pull_from(v)
+    }
+
+    async fn update_pull(&self, number: u64, body: &str) -> Result<(), ForgeError> {
+        let path = format!("{}/pulls/{number}", self.repo_path());
+        self.send(
+            reqwest::Method::PATCH,
+            &path,
+            &[],
+            Some(&json!({ "body": body })),
+        )
+        .await
+        .map(drop)
     }
 
     async fn enqueue(&self, node_id: &str) -> Result<(), ForgeError> {

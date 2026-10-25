@@ -45,6 +45,8 @@ struct FakeGitHub {
     comments: Mutex<Vec<(u64, String)>>,
     /// PR numbers GitHub is merging (queued or auto-merge).
     merging: Mutex<Vec<u64>>,
+    /// A branch update made immediately after the next PR read.
+    race_push: Mutex<Option<(usize, String, String)>>,
 }
 
 impl FakeGitHub {
@@ -55,11 +57,12 @@ impl FakeGitHub {
             enqueued: Mutex::new(Vec::new()),
             comments: Mutex::new(Vec::new()),
             merging: Mutex::new(Vec::new()),
+            race_push: Mutex::new(None),
         }
     }
 
     fn pull(&self, pr: &FakePr) -> Pull {
-        Pull {
+        let pull = Pull {
             number: pr.number,
             url: format!("https://github.com/o/r/pull/{}", pr.number),
             node_id: format!("PR_{}", pr.number),
@@ -67,7 +70,24 @@ impl FakeGitHub {
             merged: pr.merged.is_some(),
             merge_commit: pr.merged.clone(),
             head_sha: support::branch(&self.upstream, &pr.new.head).unwrap_or_default(),
+            body: pr.new.body.clone(),
+        };
+        let mut race = self.race_push.lock().unwrap();
+        if let Some((reads, _, _)) = race.as_mut()
+            && *reads > 0
+        {
+            *reads -= 1;
+        } else if let Some((_, branch, sha)) = race.take() {
+            git(
+                &self.upstream,
+                &["update-ref", &format!("refs/heads/{branch}"), &sha],
+            );
         }
+        pull
+    }
+
+    fn prs_mut(&self) -> std::sync::MutexGuard<'_, Vec<FakePr>> {
+        self.prs.lock().unwrap()
     }
 
     fn prs(&self) -> Vec<FakePr> {
@@ -192,6 +212,16 @@ impl Forge for FakeGitHub {
             .find(|p| p.number == number)
             .map(|p| self.pull(p))
             .ok_or_else(|| ForgeError::Refused("status 404: Not Found".into()))
+    }
+
+    async fn update_pull(&self, number: u64, body: &str) -> Result<(), ForgeError> {
+        let mut prs = self.prs.lock().unwrap();
+        let pr = prs
+            .iter_mut()
+            .find(|pr| pr.number == number)
+            .ok_or_else(|| ForgeError::Refused("status 404: Not Found".into()))?;
+        pr.new.body = body.to_owned();
+        Ok(())
     }
 
     async fn enqueue(&self, node_id: &str) -> Result<(), ForgeError> {
@@ -553,6 +583,205 @@ async fn a_batch_is_one_pr_and_the_next_forks_from_its_merge() {
 }
 
 #[tokio::test]
+async fn a_land_after_the_cut_is_appended_without_changing_earlier_shas() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    let main = support::branch(&w.upstream, "main").unwrap();
+    let before = chain_of(&w, &main, &first.squash_sha.to_hex());
+
+    let appended = w.land(&[("c.txt", "c1\n")], "review fix", 3).await;
+    let run = w.batcher().run().await.unwrap();
+    let BatchOutcome::Waiting(rec) = run.outcome else {
+        panic!("expected the open batch to wait")
+    };
+
+    assert_eq!((rec.number, rec.lands), (first.number, first.lands + 1));
+    assert_eq!(w.github.prs().len(), 1);
+    let after = chain_of(&w, &main, &rec.squash_sha.to_hex());
+    assert_eq!(&after[..before.len()], before);
+    assert_eq!(after.len(), before.len() + 1);
+    let body = &w.github.prs()[0].new.body;
+    assert!(
+        body.contains(&format!("{} (appended)", short(appended))),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_line_rewind_is_refused_instead_of_appended() {
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    let rec = opened(w.batcher().run().await.unwrap().outcome);
+    let sibling = w
+        .api
+        .create_changeset(
+            &cx(),
+            CreateChangeset {
+                repo: REPO.to_owned(),
+                parents: vec![a],
+                changes: vec![Change::Put {
+                    path: RepoPath::new("other.txt").unwrap(),
+                    kind: EntryKind::File,
+                    id: graft_model::ObjectId::hash(ObjectKind::Blob, b"other\n"),
+                }],
+                author: Author {
+                    name: "Tess".to_owned(),
+                    email: "tess@example.com".to_owned(),
+                    kind: AuthorKind::Agent,
+                },
+                authored_at: Timestamp {
+                    ms: 1_700_000_003_000,
+                    offset_min: 0,
+                },
+                message: "divergent land".to_owned(),
+                metadata: Metadata::new(),
+                inline_blobs: vec![Frame::encode(ObjectKind::Blob, b"other\n")],
+                workspace: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let mut divergent = rec.clone();
+    divergent.tip = sibling;
+    w.db.put_batch(&divergent).unwrap();
+
+    let err = w.batcher().run().await.unwrap_err();
+    assert!(
+        matches!(err, MirrorError::Config(ref message) if message.contains("moved other than forward")),
+        "{err:?}"
+    );
+    assert_eq!(
+        support::branch(&w.upstream, &rec.branch).unwrap(),
+        rec.squash_sha.to_hex()
+    );
+}
+
+#[tokio::test]
+async fn a_batch_github_is_merging_is_not_appended() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    let head = support::branch(&w.upstream, &first.branch).unwrap();
+    let body = w.github.prs()[0].new.body.clone();
+    w.github
+        .merging
+        .lock()
+        .unwrap()
+        .push(first.pr_number.unwrap());
+    let extra = w.land(&[("b.txt", "b1\n")], "review fix", 2).await;
+
+    let run = w.batcher().run().await.unwrap();
+    // One open batch per line: while GitHub is merging it, the next land
+    // waits. It is not appended, and it is not cut into a second PR.
+    assert!(run.settled.is_none(), "a merging batch is not settled");
+    let BatchOutcome::Waiting(rec) = run.outcome else {
+        panic!("expected to wait, got {:?}", run.outcome)
+    };
+    assert_eq!(rec.number, first.number);
+    assert_eq!(rec.lands, first.lands);
+    assert_eq!(w.github.prs().len(), 1);
+    assert_eq!(support::branch(&w.upstream, &first.branch).unwrap(), head);
+    assert_eq!(w.github.prs()[0].new.body, body);
+    assert!(!w.github.prs()[0].new.body.contains(&short(extra)));
+    assert_eq!(w.db.batch_commits(first.number).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_merged_batch_is_not_appended_and_the_next_land_starts_a_batch() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    w.github.squash_merge(first.pr_number.unwrap());
+    let extra = w.land(&[("b.txt", "b1\n")], "after merge", 2).await;
+
+    let run = w.batcher().run().await.unwrap();
+    assert_eq!(run.settled.unwrap().state, BatchState::Merged);
+    let rec = opened(run.outcome);
+    assert_eq!(rec.number, first.number + 1);
+    assert_eq!(rec.lands, 1);
+    assert!(w.github.prs()[1].new.body.contains(&short(extra)));
+    assert!(!w.github.prs()[0].new.body.contains("(appended)"));
+}
+
+#[tokio::test]
+async fn a_crash_after_the_record_re_pushes_with_the_lease_and_refreshes_the_body() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    let stale_body = w.github.prs()[0].new.body.clone();
+    let extra = w.land(&[("b.txt", "b1\n")], "review fix", 2).await;
+    let run = w.batcher().run().await.unwrap();
+    let BatchOutcome::Waiting(rec) = run.outcome else {
+        panic!("expected the append to wait")
+    };
+    // The database and the branch head moved; the PR body did not, as if
+    // the run died after the push.
+    let head = rec.squash_sha.to_hex();
+    git(
+        &w.upstream,
+        &[
+            "update-ref",
+            &format!("refs/heads/{}", rec.branch),
+            &first.squash_sha.to_hex(),
+        ],
+    );
+    {
+        let mut prs = w.github.prs_mut();
+        prs[0].new.body = stale_body.clone();
+    }
+    assert_ne!(support::branch(&w.upstream, &rec.branch).unwrap(), head);
+
+    let again = w.batcher().run().await.unwrap();
+    let BatchOutcome::Waiting(rec) = again.outcome else {
+        panic!("expected to wait, got {:?}", again.outcome)
+    };
+    assert_eq!(rec.lands, first.lands + 1);
+    assert_eq!(support::branch(&w.upstream, &rec.branch).unwrap(), head);
+    let body = &w.github.prs()[0].new.body;
+    assert!(
+        body.contains(&format!("{} (appended)", short(extra))),
+        "{body}"
+    );
+    assert_eq!(w.github.prs().len(), 1);
+    // A second run with the body already current pushes nothing new.
+    let third = w.batcher().run().await.unwrap();
+    assert!(matches!(third.outcome, BatchOutcome::Waiting(_)));
+    assert_eq!(support::branch(&w.upstream, &rec.branch).unwrap(), head);
+}
+
+#[tokio::test]
+async fn a_concurrent_batch_branch_push_is_refused_by_the_lease() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let rec = opened(w.batcher().run().await.unwrap().outcome);
+    let head = rec.squash_sha.to_hex();
+    let tree = git(&w.upstream, &["rev-parse", &format!("{head}^{{tree}}")]);
+    let raced = git(
+        &w.upstream,
+        &["commit-tree", &tree, "-p", &head, "-m", "concurrent push"],
+    );
+    *w.github.race_push.lock().unwrap() = Some((1, rec.branch.clone(), raced.clone()));
+    w.land(&[("b.txt", "b1\n")], "review fix", 2).await;
+
+    let err = w.batcher().run().await.unwrap_err();
+    assert!(
+        matches!(err, MirrorError::Config(ref message) if message.contains("did not fast-forward from leased head")),
+        "{err:?}"
+    );
+    assert_eq!(support::branch(&w.upstream, &rec.branch).unwrap(), raced);
+}
+
+#[tokio::test]
 async fn a_closed_pr_is_rejected_and_its_lands_stay_in_the_next_batch() {
     let w = World::new().await;
     w.start().await;
@@ -761,7 +990,7 @@ fn short(id: ChangesetId) -> String {
 }
 
 #[tokio::test]
-async fn an_excluded_land_is_reverted_and_the_open_batch_is_recut_without_it() {
+async fn an_excluded_land_is_reverted_and_appended_to_the_open_batch() {
     let w = World::new().await;
     w.start().await;
     let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
@@ -783,23 +1012,17 @@ async fn an_excluded_land_is_reverted_and_the_open_batch_is_recut_without_it() {
     };
     assert_eq!(dropped, b);
     assert_eq!(w.tip(LINE).await, Some(revert), "the revert is a land");
-    // The open batch is closed with a comment and superseded.
-    let settled = run.settled.expect("batch 1 superseded");
-    assert_eq!(settled.state, BatchState::Rejected);
-    assert!(settled.detail.contains("superseded"), "{}", settled.detail);
-    let comments = w.github.comments();
-    assert_eq!(comments.len(), 1);
-    assert_eq!(comments[0].0, first.pr_number.unwrap());
-    assert!(comments[0].1.contains(&short(b)));
-    assert!(!w.github.prs()[0].open);
-
-    // The recut batch keeps the lands before and after it.
-    let rec = opened(run.outcome);
-    assert_eq!((rec.number, rec.lands), (2, 4), "a, b, c and b's revert");
-    let squash = support::branch(&w.upstream, "graft/batch-2").unwrap();
+    assert!(run.settled.is_none());
+    let BatchOutcome::Waiting(rec) = run.outcome else {
+        panic!("expected the open batch to wait")
+    };
+    assert_eq!((rec.number, rec.lands), (1, 4), "a, b, c and b's revert");
+    assert!(w.github.comments().is_empty());
+    assert!(w.github.prs()[0].open);
+    let squash = support::branch(&w.upstream, "graft/batch-1").unwrap();
     let main = support::branch(&w.upstream, "main").unwrap();
     assert_eq!(w.changed(&main, &squash), ["a.txt", "c.txt"]);
-    let body = &w.github.prs()[1].new.body;
+    let body = &w.github.prs()[0].new.body;
     for text in [
         "Dropped: 1 land",
         &format!(
@@ -809,6 +1032,7 @@ async fn an_excluded_land_is_reverted_and_the_open_batch_is_recut_without_it() {
         ),
         &short(a),
         &short(c),
+        &format!("{} (appended)", short(revert)),
     ] {
         assert!(body.contains(text), "{text} missing from {body}");
     }
@@ -936,7 +1160,7 @@ async fn a_cut_never_splits_a_dropped_land_from_its_revert() {
 }
 
 #[tokio::test]
-async fn a_drop_that_conflicts_part_way_still_supersedes_the_open_batch() {
+async fn a_drop_that_conflicts_part_way_leaves_the_open_batch_unchanged() {
     let w = World::new().await;
     w.start().await;
     let b = w
@@ -946,6 +1170,7 @@ async fn a_drop_that_conflicts_part_way_still_supersedes_the_open_batch() {
         .await;
     let a = w.land(&[("a.txt", "a1\n")], "add a", 3).await;
     let first = opened(w.batcher().run().await.unwrap().outcome);
+    let first_head = first.squash_sha;
 
     // Newest first: a reverts, then b conflicts with the edit after it.
     let run = w
@@ -956,23 +1181,16 @@ async fn a_drop_that_conflicts_part_way_still_supersedes_the_open_batch() {
     assert_eq!(run.dropped.len(), 1);
     assert_eq!(run.dropped[0].0, a);
     assert!(matches!(run.outcome, BatchOutcome::Conflict { .. }));
-    let settled = run.settled.expect("the stale batch is superseded");
+    assert!(run.settled.is_none());
+    assert!(w.github.prs()[0].open);
     assert_eq!(
-        (settled.number, settled.state),
-        (first.number, BatchState::Rejected)
+        support::branch(&w.upstream, &first.branch).unwrap(),
+        first_head.to_hex()
     );
-    assert!(!w.github.prs()[0].open);
-
-    // The next run cuts a batch carrying a's revert.
-    let rec = opened(w.batcher().run().await.unwrap().outcome);
-    assert_eq!(rec.number, 2);
-    let squash = support::branch(&w.upstream, "graft/batch-2").unwrap();
-    let main = support::branch(&w.upstream, "main").unwrap();
-    assert_eq!(w.changed(&main, &squash), ["shared.txt"]);
 }
 
 #[tokio::test]
-async fn a_revert_left_by_an_interrupted_run_supersedes_the_open_batch() {
+async fn a_revert_left_by_an_interrupted_run_is_appended_to_the_open_batch() {
     let w = World::new().await;
     w.start().await;
     let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
@@ -997,12 +1215,14 @@ async fn a_revert_left_by_an_interrupted_run_supersedes_the_open_batch() {
 
     let run = w.batcher().run().await.unwrap();
     assert!(run.dropped.is_empty());
-    assert_eq!(run.settled.unwrap().state, BatchState::Rejected);
-    let rec = opened(run.outcome);
+    assert!(run.settled.is_none());
+    let BatchOutcome::Waiting(rec) = run.outcome else {
+        panic!("expected the open batch to wait")
+    };
     let squash = support::branch(&w.upstream, &rec.branch).unwrap();
     let main = support::branch(&w.upstream, "main").unwrap();
     assert_eq!(w.changed(&main, &squash), ["b.txt"]);
-    assert!(rec.body.contains("reverted on the line"), "{}", rec.body);
+    assert!(rec.body.contains("(appended)"), "{}", rec.body);
 }
 
 #[tokio::test]
@@ -1024,7 +1244,7 @@ async fn a_batch_github_is_merging_is_not_closed() {
     assert_eq!(run.dropped.len(), 1, "the line still drops it");
     match run.outcome {
         BatchOutcome::Waiting(rec) => {
-            assert!(rec.detail.contains("merge queue"), "{}", rec.detail)
+            assert!(rec.detail.contains("waiting for review"), "{}", rec.detail)
         }
         other => panic!("expected to wait, got {other:?}"),
     }
