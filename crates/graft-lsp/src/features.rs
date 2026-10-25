@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::render::{kind_name, old_ranges, short, time};
 use crate::rpc::RpcError;
-use crate::{LspServer, Target, doc_uri, file_uri, publish};
+use crate::{LspServer, Target, doc_uri, file_uri};
 
 /// History entries a code lens counts before it says "N+".
 pub(crate) const LOG_PAGE: u32 = 100;
@@ -333,7 +333,7 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> LspServer<A> {
             } else {
                 self.published.insert(uri.clone());
             }
-            self.outbox.push(publish(&uri, diagnostics));
+            self.push_publish(&uri, diagnostics);
         }
     }
 

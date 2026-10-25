@@ -100,6 +100,20 @@ pub(crate) fn fits(result: &CallToolResult) -> bool {
     serde_json::to_vec(result).is_ok_and(|bytes| bytes.len() <= MAX_RESULT_BYTES)
 }
 
+/// Whether a `tools/call` response is within [`MAX_RESULT_BYTES`].
+///
+/// Intermediate responses (client input, or a task handle) carry no tool
+/// payload, so they always fit. A completed result is measured as the
+/// client receives it.
+pub(crate) fn response_fits(response: &rmcp::model::CallToolResponse) -> bool {
+    match response {
+        rmcp::model::CallToolResponse::Complete(result) => fits(result),
+        rmcp::model::CallToolResponse::InputRequired(_)
+        | rmcp::model::CallToolResponse::Task(_) => true,
+        _ => true,
+    }
+}
+
 /// Wraps a result that is not paged. It must fit on its own, or the tool
 /// reports [`ToolError::TooLarge`].
 pub(crate) fn bounded(value: Value) -> Result<CallToolResult, ToolError> {

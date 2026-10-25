@@ -259,14 +259,20 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
     }
 
     fn build(api: Arc<A>, principal: Option<Principal>) -> Self {
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut tool_router = Self::tool_router()
+            + Self::write_tool_router()
+            + Self::upstream_tool_router()
+            + Self::drafts_tool_router();
+        // Tests only. The tool returns a payload larger than the cap and
+        // does not bound itself, so only `call_tool` can refuse it.
+        #[cfg(test)]
+        tool_router.add_route(unbounded_probe());
         Self {
             api,
             principal,
             working_copy: None,
-            tool_router: Self::tool_router()
-                + Self::write_tool_router()
-                + Self::upstream_tool_router()
-                + Self::drafts_tool_router(),
+            tool_router,
         }
     }
 
@@ -857,7 +863,15 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> ServerHandler for McpSer
     ) -> Result<CallToolResponse, ErrorData> {
         let auth = http_auth(&context);
         let tcc = ToolCallContext::new(self, request, context);
-        AUTH.scope(auth, self.tool_router.call(tcc)).await
+        let result = AUTH.scope(auth, self.tool_router.call(tcc)).await?;
+        // One place every tool result passes. A handler that pages or clips
+        // stays under the cap; one that does not is refused here, typed,
+        // instead of leaving the process.
+        if crate::render::response_fits(&result) {
+            Ok(result)
+        } else {
+            Ok(crate::render::ToolError::TooLarge.into_result().into())
+        }
     }
 
     async fn list_resource_templates(
@@ -903,6 +917,34 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> ServerHandler for McpSer
             }
         }
     }
+}
+
+/// A tool registered only under `cfg(test)`. Its handler returns a payload
+/// larger than the result cap and does not bound it, so a typed refusal can
+/// come only from [`ServerHandler::call_tool`].
+#[cfg(test)]
+fn unbounded_probe<A>() -> rmcp::handler::server::router::tool::ToolRoute<McpServer<A>>
+where
+    A: Send + Sync + 'static,
+{
+    use rmcp::handler::server::tool::ToolCallContext;
+
+    let tool = rmcp::model::Tool::new(
+        "graft_unbounded_probe",
+        "Test-only tool that returns an oversized result.",
+        serde_json::Map::new(),
+    );
+    rmcp::handler::server::router::tool::ToolRoute::new_dyn(
+        tool,
+        |_ctx: ToolCallContext<'_, McpServer<A>>| {
+            Box::pin(async move {
+                let value = json!({"blob": "x".repeat(crate::MAX_RESULT_BYTES)});
+                Ok(CallToolResponse::Complete(CallToolResult::structured(
+                    value,
+                )))
+            })
+        },
+    )
 }
 
 const INSTRUCTIONS: &str = "Read and write a graft repository. Results are capped at 64 KiB; \
@@ -1102,4 +1144,199 @@ fn request_id(n: u64) -> String {
     static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let nonce = NONCE.get_or_init(|| RandomState::new().hash_one(std::process::id()));
     format!("mcp-{}-{nonce:016x}-{n}", std::process::id())
+}
+
+/// Drives `graft_unbounded_probe` through [`ServerHandler::call_tool`].
+///
+/// The handler returns a completed result over the cap and does not call
+/// [`bounded`]. `graft_status` does, so an oversized status cannot prove this
+/// check. The probe exists only under `cfg(test)`, which unit tests set and
+/// integration tests do not.
+#[cfg(test)]
+mod call_tool_cap {
+    use std::sync::Arc;
+
+    use graft_proto::context::{CallContext, Principal, PrincipalKind};
+    use graft_proto::error::ApiResult;
+    use graft_proto::types::*;
+    use graft_proto::{ApiError, RepoApi, WorkspaceApi};
+    use rmcp::ServiceExt;
+    use rmcp::model::CallToolRequestParams;
+
+    use super::McpServer;
+    use crate::MAX_RESULT_BYTES;
+
+    struct Idle;
+
+    fn gone<T>() -> ApiResult<T> {
+        Err(ApiError::Unavailable {
+            retry_after_ms: 60_000,
+        })
+    }
+
+    impl RepoApi for Idle {
+        async fn create_changeset(
+            &self,
+            _: &CallContext,
+            _: CreateChangeset,
+        ) -> ApiResult<Created> {
+            gone()
+        }
+        async fn get_changesets(&self, _: &CallContext, _: GetChangesets) -> ApiResult<Changesets> {
+            gone()
+        }
+        async fn resolve_ref(&self, _: &CallContext, _: ResolveRef) -> ApiResult<RefView> {
+            gone()
+        }
+        async fn list_refs(&self, _: &CallContext, _: ListRefs) -> ApiResult<Vec<RefView>> {
+            gone()
+        }
+        async fn update_ref(&self, _: &CallContext, _: UpdateRef) -> ApiResult<RefView> {
+            gone()
+        }
+        async fn stat(&self, _: &CallContext, _: PathAt) -> ApiResult<EntryView> {
+            gone()
+        }
+        async fn list_tree(&self, _: &CallContext, _: ListTree) -> ApiResult<Entries> {
+            gone()
+        }
+        async fn read_file(&self, _: &CallContext, _: PathAt) -> ApiResult<FileContent> {
+            gone()
+        }
+        async fn log(&self, _: &CallContext, _: Log) -> ApiResult<History> {
+            gone()
+        }
+        async fn is_ancestor(&self, _: &CallContext, _: Pair) -> ApiResult<bool> {
+            gone()
+        }
+        async fn merge_base(
+            &self,
+            _: &CallContext,
+            _: Pair,
+        ) -> ApiResult<Option<graft_model::ChangesetId>> {
+            gone()
+        }
+        async fn diff(&self, _: &CallContext, _: Diff) -> ApiResult<DiffResult> {
+            gone()
+        }
+        async fn blame(&self, _: &CallContext, _: Blame) -> ApiResult<BlameResult> {
+            gone()
+        }
+        async fn rebase(&self, _: &CallContext, _: Rebase) -> ApiResult<graft_model::ChangesetId> {
+            gone()
+        }
+        async fn revert(&self, _: &CallContext, _: Revert) -> ApiResult<graft_model::ChangesetId> {
+            gone()
+        }
+        async fn land(&self, _: &CallContext, _: Land) -> ApiResult<Landed> {
+            gone()
+        }
+        async fn attest(&self, _: &CallContext, _: Attest) -> ApiResult<()> {
+            gone()
+        }
+        async fn watch(&self, _: &CallContext, _: Watch) -> ApiResult<JournalPage> {
+            gone()
+        }
+    }
+
+    impl WorkspaceApi for Idle {
+        async fn open_workspace(
+            &self,
+            _: &CallContext,
+            _: OpenWorkspace,
+        ) -> ApiResult<WorkspaceView> {
+            gone()
+        }
+        async fn get_workspace(
+            &self,
+            _: &CallContext,
+            _: WorkspaceRef,
+        ) -> ApiResult<WorkspaceView> {
+            gone()
+        }
+        async fn list_workspaces(
+            &self,
+            _: &CallContext,
+            _: String,
+            _: Page,
+        ) -> ApiResult<Vec<WorkspaceView>> {
+            gone()
+        }
+        async fn renew_lease(
+            &self,
+            _: &CallContext,
+            _: WorkspaceRef,
+            _: u64,
+        ) -> ApiResult<WorkspaceView> {
+            gone()
+        }
+        async fn set_head(&self, _: &CallContext, _: SetHead) -> ApiResult<WorkspaceView> {
+            gone()
+        }
+        async fn sync(
+            &self,
+            _: &CallContext,
+            _: WorkspaceRef,
+            _: Option<graft_model::ChangesetId>,
+        ) -> ApiResult<Synced> {
+            gone()
+        }
+        async fn stack(
+            &self,
+            _: &CallContext,
+            _: WorkspaceRef,
+            _: StackOp,
+        ) -> ApiResult<WorkspaceView> {
+            gone()
+        }
+        async fn close_workspace(
+            &self,
+            _: &CallContext,
+            _: WorkspaceRef,
+            _: bool,
+        ) -> ApiResult<()> {
+            gone()
+        }
+        async fn get_conflicts(&self, _: &CallContext, _: GetConflicts) -> ApiResult<Conflicts> {
+            gone()
+        }
+        async fn resolve(&self, _: &CallContext, _: Resolve) -> ApiResult<Resolved> {
+            gone()
+        }
+    }
+
+    #[tokio::test]
+    async fn call_tool_refuses_an_unbounded_completed_result() {
+        let server = McpServer::new(
+            Arc::new(Idle),
+            Principal {
+                subject: "probe".into(),
+                kind: PrincipalKind::Service,
+                session: None,
+                work_item: None,
+                scopes: vec!["read".into()],
+            },
+        );
+        let (client_io, server_io) = tokio::io::duplex(1 << 20);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        tokio::spawn(async move {
+            let _ = server.serve_io(server_read, server_write).await;
+        });
+        let (client_read, client_write) = tokio::io::split(client_io);
+        let client = ().serve((client_read, client_write)).await.expect("handshake");
+        let result = client
+            .call_tool(CallToolRequestParams::new("graft_unbounded_probe"))
+            .await
+            .expect("call completes");
+        assert_eq!(result.is_error, Some(true));
+        let value = result.structured_content.as_ref().expect("structured");
+        assert_eq!(value["kind"], "result_too_large");
+        assert_eq!(value["max_bytes"], MAX_RESULT_BYTES);
+        let rendered = serde_json::to_string(value).unwrap();
+        assert!(
+            !rendered.contains(&"x".repeat(1024)),
+            "the oversized payload must not leave call_tool"
+        );
+        assert!(serde_json::to_vec(&result).unwrap().len() <= MAX_RESULT_BYTES);
+    }
 }
