@@ -49,6 +49,7 @@ set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 secrets=${GRAFT_SECRETS_DIR:-/etc/graft}
+registry=$here/mirrors.tsv
 export GRAFT_SECRETS_DIR=$secrets
 
 # An unreadable deploy.env is an error, not a skip: skipping it would move the
@@ -69,15 +70,14 @@ set -a
 set +a
 
 # Every repository the stack serves; creating one that exists is a no-op.
-repos=(rusttorrent graft-dev fluent2-egui vogt)
-# The followed repositories, one graft-mirror service each (trial 3):
-# service, graft repository, token file under $secrets, config in deploy/.
-# A new repository's first follow is its initial import.
-mirrors=(
-  "graft-mirror rusttorrent mirror-token mirror.toml"
-  "graft-mirror-fluent2 fluent2-egui mirror-token-fluent2 mirror-fluent2.toml"
-  "graft-mirror-vogt vogt mirror-token-vogt mirror-vogt.toml"
-)
+repos=(graft-dev)
+# One registry row per followed repository. The first follow is its import.
+mirrors=()
+while IFS='|' read -r svc mrepo _owner_repo _base tok cfg _port _source; do
+  [[ -n $svc && $svc != \#* ]] || continue
+  repos+=("$mrepo")
+  mirrors+=("$svc $mrepo $tok $cfg")
+done <"$registry"
 mirror_services=()
 mirror_configs=()
 for m in "${mirrors[@]}"; do
@@ -114,7 +114,8 @@ die() {
 }
 
 compose() {
-  docker compose --env-file "$here/image.env" -f "$here/compose.yml" "$@"
+  docker compose --env-file "$here/image.env" -f "$here/compose.yml" \
+    -f "$here/compose.onboarded.yml" "$@"
 }
 
 # Run a shell snippet as root in a throwaway container from the pinned image,
