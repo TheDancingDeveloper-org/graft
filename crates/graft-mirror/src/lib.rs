@@ -62,6 +62,7 @@ pub mod text;
 
 pub use db::MirrorDb;
 pub use entry::TempClone;
+pub use entry::report_import_failure_lines;
 pub use entry::run;
 pub use git::{GitCliError, Mirror};
 

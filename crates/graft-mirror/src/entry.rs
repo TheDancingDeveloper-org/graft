@@ -286,10 +286,14 @@ pub(crate) async fn prepare_clone(source: &Path) -> Result<Option<TempClone>, Cm
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    crate::git::Mirror::clone_mirror(raw, &dest)
+    // Guard first. `git clone` creates `dest` before it can fail, and a
+    // killed git process leaves that directory behind. Drop removes it on
+    // every path, including a failed clone.
+    let guard = TempClone { path: dest };
+    crate::git::Mirror::clone_mirror(raw, guard.path())
         .await
         .map_err(|e| CmdError::Failed(MirrorError::from(redact_cli(e, raw))))?;
-    Ok(Some(TempClone { path: dest }))
+    Ok(Some(guard))
 }
 
 /// Drops userinfo if git echoed the URL. The URL git was given has none.
@@ -335,8 +339,16 @@ fn capped_lines(rows: impl IntoIterator<Item = (String, String)>) -> Vec<String>
 /// Prints the fidelity, path-rule and unrepresentable reports before the
 /// command fails.
 fn report_import_failure(err: &MirrorError) {
+    for line in report_import_failure_lines(err) {
+        eprintln!("{line}");
+    }
+}
+
+/// The lines [`report_import_failure`] prints: a heading, then
+/// `<sha> <reason>` lines. Empty when this error is not one of those reports.
+pub fn report_import_failure_lines(err: &MirrorError) -> Vec<String> {
     let MirrorError::Git(git) = err else {
-        return;
+        return Vec::new();
     };
     let (heading, lines) = match git {
         graft_git::GitError::Fidelity(shas) => (
@@ -360,12 +372,12 @@ fn report_import_failure(err: &MirrorError) {
                     .map(|c| (c.commit.to_string(), c.reason.to_owned())),
             ),
         ),
-        _ => return,
+        _ => return Vec::new(),
     };
-    eprintln!("{heading}");
-    for line in lines {
-        eprintln!("{line}");
-    }
+    let mut out = Vec::with_capacity(1 + lines.len());
+    out.push(heading);
+    out.extend(lines);
+    out
 }
 
 /// The commented sample `mirror.toml` (`init-config`).
