@@ -1342,12 +1342,79 @@ fn repo_from_arg(
             "a graft URL names a server, and this MCP process has no connected endpoint to match",
         ));
     };
-    if !url.matches_endpoint(connected) {
+    if !endpoints_match(&url.endpoint, connected) {
         return Err(invalid(
             "the graft URL names a different server than the one this MCP process is connected to",
         ));
     }
     Ok((url.repo.clone(), Some(url)))
+}
+
+/// Same server after dropping the scheme's default port and lowercasing the
+/// host. `http://h` matches `http://h:80`; `http://h:8080` does not match
+/// `http://h`; `http` and `https` never match. A form this cannot parse is
+/// compared as text, so an odd connected endpoint still only matches itself.
+fn endpoints_match(left: &str, right: &str) -> bool {
+    match (endpoint_key(left), endpoint_key(right)) {
+        (Some(a), Some(b)) => a == b,
+        _ => left.trim().trim_end_matches('/') == right.trim().trim_end_matches('/'),
+    }
+}
+
+fn endpoint_key(endpoint: &str) -> Option<(bool, String, Option<u16>)> {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    let (tls, rest) = if let Some(rest) = endpoint.strip_prefix("https://") {
+        (true, rest)
+    } else {
+        let rest = endpoint.strip_prefix("http://")?;
+        (false, rest)
+    };
+    if rest.is_empty() || rest.contains('/') || rest.contains('@') {
+        return None;
+    }
+    let (host, port) = split_host_port(rest)?;
+    if host.is_empty() {
+        return None;
+    }
+    let port = match port {
+        Some(port) if port == default_port(tls) => None,
+        other => other,
+    };
+    Some((tls, host.to_ascii_lowercase(), port))
+}
+
+fn default_port(tls: bool) -> u16 {
+    if tls { 443 } else { 80 }
+}
+
+/// `host`, `host:port`, or `[ipv6]:port`.
+fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        let port = if let Some(port) = after.strip_prefix(':') {
+            Some(parse_port(port)?)
+        } else if after.is_empty() {
+            None
+        } else {
+            return None;
+        };
+        return Some((host, port));
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.is_empty() || host.contains(':') {
+            return None;
+        }
+        return Some((host, Some(parse_port(port)?)));
+    }
+    Some((authority, None))
+}
+
+fn parse_port(port: &str) -> Option<u16> {
+    let value: u16 = port.parse().ok()?;
+    if value == 0 { None } else { Some(value) }
 }
 
 fn invalid(message: &str) -> ToolError {
@@ -1651,6 +1718,26 @@ mod tests {
         assert!(repo_from_arg("graft://other:1/repo", here).is_err());
         assert!(repo_from_arg("graft://graft-dev:17888/repo", None).is_err());
         assert_eq!(repo_from_arg("demo", None).unwrap().0, "demo");
+    }
+
+    #[test]
+    fn workspace_endpoint_ignores_default_port_and_host_case() {
+        assert!(endpoints_match("http://h", "http://h:80"));
+        assert!(endpoints_match("https://h", "https://h:443"));
+        assert!(endpoints_match("http://H", "http://h"));
+        assert!(endpoints_match("http://H:80/", "http://h"));
+        assert!(endpoints_match(
+            "https://[2001:DB8::1]",
+            "https://[2001:db8::1]:443"
+        ));
+        assert!(!endpoints_match("http://h:8080", "http://h"));
+        assert!(!endpoints_match("http://h", "https://h"));
+        assert!(!endpoints_match("https://h:80", "http://h:80"));
+        assert!(!endpoints_match("http://h:443", "http://h"));
+        assert!(repo_from_arg("graft://H/demo", Some("http://h:80")).is_ok());
+        assert!(repo_from_arg("grafts://H/demo", Some("https://h:443")).is_ok());
+        assert!(repo_from_arg("graft://h:8080/demo", Some("http://h")).is_err());
+        assert!(repo_from_arg("graft://h/demo", Some("https://h")).is_err());
     }
 
     #[test]
