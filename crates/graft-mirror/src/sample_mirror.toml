@@ -1,0 +1,61 @@
+# Sample mirror.toml for graft-mirror.
+# Written by `graft-mirror init-config`. Values are placeholders: replace
+# them before use. The token never goes in this file; name a token_file.
+
+# The graft server this mirror talks to.
+server = "http://127.0.0.1:7420"
+# The graft repository name.
+repo = "example-repo"
+# Upstream git URL the mirror follows and exports.
+upstream = "https://github.com/example-org/example-repo.git"
+# Local bare clone of upstream.
+mirror_dir = "/var/lib/graft-mirror/example-repo.git"
+# SQLite file that remembers what the mirror has already imported or exported.
+db = "/var/lib/graft-mirror/example-repo.sqlite"
+# File holding the graft bearer token. Alternative: the GRAFT_TOKEN environment variable.
+token_file = "/path/to/token"
+# Seconds between follow and export polls. Default 15; must be at least 1.
+poll_interval_secs = 15
+# Address that serves /metrics. Omit to leave metrics off.
+metrics_addr = "127.0.0.1:9465"
+# Emit logs as JSON lines instead of text.
+json_logs = false
+# Changesets sent in one import batch. Default 256.
+batch = 256
+# Upstream commits (40 hex characters) allowed to fail the fidelity check.
+allow_lossy = []
+# Upstream tags to follow, as a pattern under refs/tags/. "*" is all; "" follows none.
+tags = "*"
+
+# One block per followed branch. `line` is the graft line; it defaults to `branch`.
+[[lines]]
+branch = "main"
+line = "main"
+
+# GitHub repository for pr-batch, pull import and the authority switch.
+# Omit the whole section to follow and import only.
+[github]
+# GitHub API root. Default https://api.github.com.
+api = "https://api.github.com"
+owner = "example-org"
+repo = "example-repo"
+# Exactly one credential: this token file, or the github_app block below.
+# The file holds the token; the token itself is never written here.
+token_file = "/path/to/token"
+
+# GitHub App credential. Do not set this and token_file together.
+# [github.github_app]
+# app_id = 0
+# installation_id = 0
+# private_key_file = "/path/to/github-app.pem"
+
+# Graft-primary export (`graft-mirror export --config`).
+[export]
+# Import open GitHub pull requests as drafts. Needs the [github] section.
+import_pulls = false
+# "Name <email>" used when the authenticated principal has no authors entry.
+default_author = "Example Author <author@example.com>"
+
+# Git identity per authenticated principal.
+[export.authors]
+example = { name = "Example Author", email = "author@example.com" }

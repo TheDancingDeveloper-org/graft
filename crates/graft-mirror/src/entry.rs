@@ -33,6 +33,7 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
   import <git-dir> --repo <name>        lossless import with fidelity check
          [--server <url>] [--db <file>] [--token-file <file>]
          [--line <git-ref>=<line>]... [--no-tags] [--allow-lossy <sha>]...
+  init-config [--out <file>]            write a commented sample mirror.toml
   follow --config <file>                git-primary: follow GitHub main
   export --config <file>                graft-primary: export lines to GitHub
   export --to <bare-repo> --repo <name> full export (exit path, drill)
@@ -67,6 +68,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
     }
     match args.first().map(String::as_str) {
         Some("import") => execute(cmd_import(&args[1..])),
+        Some("init-config") => cmd_init_config(&args[1..]),
         Some("follow") => execute(cmd_follow(&args[1..])),
         Some("export") => execute(cmd_export(&args[1..])),
         Some("reconcile") => execute(cmd_reconcile(&args[1..])),
@@ -219,6 +221,59 @@ async fn cmd_import(args: &[String]) -> Result<(), CmdError> {
         println!("tag {}: skipped, names a {} not a commit", t.name, t.kind);
     }
     Ok(())
+}
+
+/// The commented sample `mirror.toml` (`init-config`).
+const SAMPLE_CONFIG: &str = include_str!("sample_mirror.toml");
+
+/// Writes the sample config. Default is stdout. Refuses an existing `--out`.
+fn cmd_init_config(args: &[String]) -> ExitCode {
+    let mut out: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                let Some(path) = args.get(i + 1) else {
+                    eprintln!("graft-mirror: init-config --out needs a file");
+                    return usage();
+                };
+                if out.replace(PathBuf::from(path)).is_some() {
+                    eprintln!("graft-mirror: init-config takes one --out");
+                    return usage();
+                }
+                i += 2;
+            }
+            other => {
+                eprintln!("graft-mirror: unknown argument {other:?}");
+                return usage();
+            }
+        }
+    }
+    let Some(path) = out else {
+        print!("{SAMPLE_CONFIG}");
+        return ExitCode::SUCCESS;
+    };
+    if path.exists() {
+        eprintln!(
+            "graft-mirror: {} already exists; init-config will not overwrite it",
+            path.display()
+        );
+        return usage();
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("graft-mirror: cannot create {}: {e}", parent.display());
+        return ExitCode::FAILURE;
+    }
+    match std::fs::write(&path, SAMPLE_CONFIG) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("graft-mirror: cannot write {}: {e}", path.display());
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn cmd_follow(args: &[String]) -> Result<(), CmdError> {
@@ -970,5 +1025,44 @@ async fn shutdown() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{SAMPLE_CONFIG, cmd_init_config};
+    use crate::config::FileConfig;
+
+    #[test]
+    fn sample_parses_with_the_follow_loader() {
+        let config = FileConfig::parse(SAMPLE_CONFIG).expect("sample mirror.toml parses");
+        let follow = config.follow().expect("follow accepts the sample");
+        assert_eq!(follow.repo, "example-repo");
+        assert_eq!(config.repo, "example-repo");
+        assert!(config.export.is_some(), "export settings are in the sample");
+        assert!(config.github.is_some(), "pr-batch needs [github]");
+    }
+
+    #[test]
+    fn sample_names_no_estate() {
+        for forbidden in ["graft-dev", "vogt", "rusttorrent"] {
+            assert!(
+                !SAMPLE_CONFIG.to_ascii_lowercase().contains(forbidden),
+                "{forbidden} must not appear in the sample"
+            );
+        }
+    }
+
+    #[test]
+    fn init_config_refuses_to_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mirror.toml");
+        fs::write(&path, "keep-me").unwrap();
+        let before = fs::read(&path).unwrap();
+        let code = cmd_init_config(&["--out".into(), path.display().to_string()]);
+        assert_eq!(code, std::process::ExitCode::from(super::EXIT_USAGE));
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 }
