@@ -1,1 +1,0 @@
-- Design: local repositories (D32, WI-2366). `graft init` will open the engine in-process over the sqlite and filesystem stores; no server, daemon or token. Docs only.

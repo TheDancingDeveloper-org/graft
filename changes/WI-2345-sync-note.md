@@ -1,1 +1,0 @@
-- docs: record what sync does after a lost land ack (note §3.3, design §8.4). The sync drops the landed draft and empties the stack, and a retry of the old head returns the first `Landed`. This is safe: no land is lost or duplicated.

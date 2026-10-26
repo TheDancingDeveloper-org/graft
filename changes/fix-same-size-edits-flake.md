@@ -1,1 +1,0 @@
-- graft-client tests: `fifty_same_size_edits_within_a_second_are_all_detected` no longer asserts the edit loop runs under one wall-clock second (it failed under merge-queue load). The pinned mtime already models the coarse tick; the test now checks the mtime and size really stayed put instead. No product change: detection was correct.

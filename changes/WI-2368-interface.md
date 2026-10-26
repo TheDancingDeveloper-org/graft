@@ -1,1 +1,0 @@
-- Interface for merge points between lines (D29, WI-2368): `LineMerge`, `LineMerges`, `Land.merged_from`, the `LineMerged` journal body, `MergeBaseResult.via`, and the `line_merges` store read with `Write::PutLineMerge`. The engine, SQLite (schema v6) and surfaces are stubbed; no durable encoding changes.

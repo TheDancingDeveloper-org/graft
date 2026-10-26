@@ -1,1 +1,0 @@
-- docs: the phase-1 read-path kill criterion is now "not slower than git" for `log`, `status` and `sync`; 2× faster than git moves to a later phase (operator decision, 2026-10-24).

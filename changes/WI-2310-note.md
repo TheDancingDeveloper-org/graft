@@ -1,1 +1,0 @@
-- docs: design note for draft overlap (`repo:<r>:drafts` scope, per-workspace draft-path index, `OverlappingDrafts` query, CLI and MCP surfaces) in `docs/notes/draft-overlap.md` (WI-2310).
