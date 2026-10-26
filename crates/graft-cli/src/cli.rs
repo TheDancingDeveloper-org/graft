@@ -63,6 +63,12 @@ pub(crate) enum Command {
     /// Inspect user configuration
     Config(ConfigArgs),
     /// Check config, server, endpoint, protocol and token
+    ///
+    /// Exit status:
+    ///
+    /// * 0  every check passes
+    /// * 1  any check fails or is skipped
+    /// * 2  a usage error, or the working copy cannot be read, before the checks run
     Doctor,
     /// Create a local repository and working copy
     Init(InitArgs),
