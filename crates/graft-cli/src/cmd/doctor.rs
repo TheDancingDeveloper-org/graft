@@ -1,17 +1,22 @@
-//! `graft doctor`: config, server, endpoint, protocol and token checks.
+//! `graft doctor`: config, server, endpoint, protocol, token, working
+//! copy, lease, node daemon and ignore-file checks.
 //!
 //! The endpoint probe calls `resolve_ref` with no token, so an expired
 //! token does not hide a server that is down. Claims are peeked only to
-//! show expiry and scopes. The token itself is never printed.
+//! show expiry and scopes. The token itself is never printed. Outside a
+//! working copy the working-copy checks are skipped.
 
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use graft_auth::{Claims, Token};
-use graft_client::{Endpoint, Remote};
+use graft_client::ignore::IGNORE_FILES;
+use graft_client::workcopy::WcInfo;
+use graft_client::{Endpoint, NODE_SOCKET, Remote};
 use graft_proto::PROTOCOL_VERSION;
-use graft_proto::api::RepoApi;
+use graft_proto::api::{RepoApi, WorkspaceApi};
 use graft_proto::context::{CallContext, Principal, PrincipalKind};
-use graft_proto::types::ResolveRef;
+use graft_proto::types::{GetChangesets, ResolveRef, WorkspaceRef};
 use serde_json::{Value, json};
 
 use crate::cli::{DEFAULT_LINE, Global};
@@ -56,24 +61,70 @@ impl Status {
 
 /// Runs the checks. Exit 0 only when every check passes.
 pub(crate) fn run(g: &Global) -> Result<(), Failure> {
+    conn::runtime()?.block_on(run_checks(g))
+}
+
+async fn run_checks(g: &Global) -> Result<(), Failure> {
     let mut checks = Vec::new();
     let Some(config) = config_check(&mut checks) else {
         return finish(g, checks);
     };
     let wc = conn::working_copy_info()?;
-    let Some(resolved) = server_check(g, wc.as_ref(), &config, &mut checks) else {
+    let resolved = server_check(g, wc.as_ref(), &config, &mut checks);
+    let Some(resolved) = resolved else {
         skip(&mut checks, "endpoint", "no server");
         skip(&mut checks, "protocol", "no server");
         skip(&mut checks, "token", "no server");
+        working_copy_checks(g, wc.as_ref(), None, &config, &mut checks).await;
         return finish(g, checks);
     };
-    if !endpoint_check(&resolved, &mut checks) {
+    if !endpoint_check(&resolved, &mut checks).await {
         skip(&mut checks, "protocol", "endpoint unreachable");
         skip(&mut checks, "token", "endpoint unreachable");
+        working_copy_checks(g, wc.as_ref(), None, &config, &mut checks).await;
         return finish(g, checks);
     }
     token_check(g, wc.as_ref(), &config, &resolved.server, &mut checks)?;
+    working_copy_checks(g, wc.as_ref(), Some(&resolved), &config, &mut checks).await;
     finish(g, checks)
+}
+
+async fn working_copy_checks(
+    g: &Global,
+    wc: Option<&WcInfo>,
+    resolved: Option<&Resolved>,
+    config: &UserConfig,
+    checks: &mut Vec<Check>,
+) {
+    match wc {
+        Some(info) => {
+            let usable = working_copy_check(info, config, checks);
+            if let Some(resolved) = resolved.filter(|_| usable) {
+                match conn::resolve_settings(g, Some(info), config) {
+                    Ok(settings) => {
+                        let token = settings.token.filter(|token| !token.is_empty());
+                        revisions_check(resolved, info, token.as_deref(), checks).await;
+                        lease_check(resolved, info, token.as_deref(), checks).await;
+                    }
+                    Err(failure) => {
+                        let detail = failure.to_string();
+                        push(checks, "revisions", Status::Fail, detail.clone());
+                        push(checks, "lease", Status::Fail, detail);
+                    }
+                }
+            } else {
+                skip(checks, "revisions", "working copy not usable");
+                skip(checks, "lease", "working copy not usable");
+            }
+            node_check(checks).await;
+            ignore_check(info.root(), checks);
+        }
+        None => {
+            for name in ["workcopy", "revisions", "lease", "node", "ignore"] {
+                skip(checks, name, "not in a working copy");
+            }
+        }
+    }
 }
 
 fn config_check(checks: &mut Vec<Check>) -> Option<UserConfig> {
@@ -168,20 +219,19 @@ fn endpoint_override(g: &Global) -> Option<Endpoint> {
     })
 }
 
-fn endpoint_check(resolved: &Resolved, checks: &mut Vec<Check>) -> bool {
+async fn endpoint_check(resolved: &Resolved, checks: &mut Vec<Check>) -> bool {
     let endpoint = resolved.endpoint.clone();
     let shown = endpoint.to_string();
-    let probed = conn::runtime().and_then(|rt| {
-        rt.block_on(async move {
-            let remote = Remote::connect(endpoint).await?;
-            remote
-                .resolve_ref(&probe_context(), probe_request())
-                .await
-                .map(|_| ())
-                .map_err(graft_client::Error::from)
-        })
-        .map_err(Failure::from)
-    });
+    let probed = async move {
+        let remote = Remote::connect(endpoint).await?;
+        remote
+            .resolve_ref(&probe_context(), probe_request())
+            .await
+            .map(|_| ())
+            .map_err(graft_client::Error::from)
+    }
+    .await
+    .map_err(Failure::from);
     match probed {
         Ok(()) => {
             push(
@@ -325,6 +375,297 @@ fn token_check(
         format!("expires {} scopes {scopes}", claims.exp),
     );
     Ok(())
+}
+
+fn working_copy_check(info: &WcInfo, user: &UserConfig, checks: &mut Vec<Check>) -> bool {
+    let Some(name) = info.server() else {
+        push(
+            checks,
+            "workcopy",
+            Status::Fail,
+            "working copy has no named server".to_owned(),
+        );
+        return false;
+    };
+    if !user.servers.contains_key(name) {
+        push(
+            checks,
+            "workcopy",
+            Status::Fail,
+            format!("recorded server {name} is not a known named server"),
+        );
+        return false;
+    }
+    push(
+        checks,
+        "workcopy",
+        Status::Ok,
+        format!("present, server {name}"),
+    );
+    true
+}
+
+async fn authed_remote(endpoint: &Endpoint, token: Option<&str>) -> Result<Remote, Failure> {
+    let remote = Remote::connect(endpoint.clone()).await?;
+    Ok(match token {
+        Some(token) => remote.with_token(token),
+        None => remote,
+    })
+}
+
+async fn revisions_check(
+    resolved: &Resolved,
+    info: &WcInfo,
+    token: Option<&str>,
+    checks: &mut Vec<Check>,
+) {
+    let remote = match authed_remote(&resolved.endpoint, token).await {
+        Ok(remote) => remote,
+        Err(failure) => {
+            push(checks, "revisions", Status::Fail, failure.to_string());
+            return;
+        }
+    };
+    let cx = probe_context();
+    let repo = info.config().repo.clone();
+    let state = info.state();
+    let mut ids = vec![state.base];
+    ids.extend(state.head);
+    let page = match remote
+        .get_changesets(
+            &cx,
+            GetChangesets {
+                repo,
+                ids: ids.clone(),
+            },
+        )
+        .await
+    {
+        Ok(page) => page,
+        Err(failure) => {
+            push(
+                checks,
+                "revisions",
+                Status::Fail,
+                Failure::from(failure).to_string(),
+            );
+            return;
+        }
+    };
+    let found: std::collections::BTreeSet<_> =
+        page.found.iter().map(|view| view.changeset.id()).collect();
+    let mut missing = Vec::new();
+    if !found.contains(&state.base) {
+        missing.push("base");
+    }
+    if state.head.is_some_and(|head| !found.contains(&head)) {
+        missing.push("head");
+    }
+    let _ = ids;
+    if missing.is_empty() {
+        let which = if state.head.is_some() {
+            "base and head resolve"
+        } else {
+            "base resolves"
+        };
+        push(checks, "revisions", Status::Ok, which.to_owned());
+    } else {
+        push(
+            checks,
+            "revisions",
+            Status::Fail,
+            format!("{} do not resolve on the server", missing.join(" and ")),
+        );
+    }
+}
+
+async fn lease_check(
+    resolved: &Resolved,
+    info: &WcInfo,
+    token: Option<&str>,
+    checks: &mut Vec<Check>,
+) {
+    let Some(name) = info.config().workspace.clone() else {
+        push(checks, "lease", Status::Ok, "no workspace".to_owned());
+        return;
+    };
+    let remote = match authed_remote(&resolved.endpoint, token).await {
+        Ok(remote) => remote,
+        Err(failure) => {
+            push(checks, "lease", Status::Fail, failure.to_string());
+            return;
+        }
+    };
+    match remote
+        .get_workspace(
+            &probe_context(),
+            WorkspaceRef {
+                repo: info.config().repo.clone(),
+                name,
+            },
+        )
+        .await
+    {
+        Ok(view) => {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+                .unwrap_or(0);
+            if view.lease_until_ms <= now_ms {
+                push(
+                    checks,
+                    "lease",
+                    Status::Fail,
+                    "workspace lease expired; run `graft workspace renew`".to_owned(),
+                );
+            } else {
+                push(
+                    checks,
+                    "lease",
+                    Status::Ok,
+                    format!("alive until {} ms", view.lease_until_ms),
+                );
+            }
+        }
+        Err(failure) => {
+            let failure = Failure::from(failure);
+            if failure.kind() == "lease_expired" || failure.kind() == "not_found" {
+                push(
+                    checks,
+                    "lease",
+                    Status::Fail,
+                    "workspace lease expired; run `graft workspace renew`".to_owned(),
+                );
+            } else {
+                push(checks, "lease", Status::Fail, failure.to_string());
+            }
+        }
+    }
+}
+
+async fn node_check(checks: &mut Vec<Check>) {
+    let path = Path::new(NODE_SOCKET);
+    if !path.exists() {
+        push(
+            checks,
+            "node",
+            Status::Ok,
+            "not running; graft talks to the server directly".to_owned(),
+        );
+        return;
+    }
+    let remote = match Remote::connect(Endpoint::NodeSocket(path.to_owned())).await {
+        Ok(remote) => remote,
+        Err(_) => {
+            push(
+                checks,
+                "node",
+                Status::Fail,
+                format!(
+                    "socket present at {} but it does not answer",
+                    path.display()
+                ),
+            );
+            return;
+        }
+    };
+    match remote.resolve_ref(&probe_context(), probe_request()).await {
+        Ok(_) => push(
+            checks,
+            "node",
+            Status::Ok,
+            format!("answers at {}", path.display()),
+        ),
+        Err(failure) => {
+            let failure = Failure::from(failure);
+            if failure.kind() == "unavailable" {
+                push(
+                    checks,
+                    "node",
+                    Status::Fail,
+                    format!(
+                        "socket present at {} but it does not answer",
+                        path.display()
+                    ),
+                );
+            } else {
+                push(
+                    checks,
+                    "node",
+                    Status::Ok,
+                    format!("answers at {}", path.display()),
+                );
+            }
+        }
+    }
+}
+
+fn count_rules(text: &str) -> u64 {
+    text.lines()
+        .filter(|line| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            let line = trim_unescaped_trailing_spaces(line);
+            if line.is_empty() || line.starts_with('#') {
+                return false;
+            }
+            let body = line.strip_prefix('!').unwrap_or(line);
+            let body = if body.ends_with('/') && !body.ends_with("\\/") {
+                &body[..body.len() - 1]
+            } else {
+                body
+            };
+            !body.strip_prefix('/').unwrap_or(body).is_empty()
+        })
+        .count() as u64
+}
+
+fn trim_unescaped_trailing_spaces(line: &str) -> &str {
+    let mut end = line.len();
+    while line[..end].ends_with(' ') {
+        let before = &line[..end - 1];
+        let slashes = before.len() - before.trim_end_matches('\\').len();
+        if slashes % 2 == 1 {
+            break;
+        }
+        end -= 1;
+    }
+    &line[..end]
+}
+
+fn ignore_check(root: &Path, checks: &mut Vec<Check>) {
+    let mut count = 0u64;
+    let mut present = Vec::new();
+    for name in IGNORE_FILES {
+        let path = root.join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                present.push(name);
+                count += count_rules(&text);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                push(
+                    checks,
+                    "ignore",
+                    Status::Fail,
+                    format!("cannot read {name}: {}", error.kind()),
+                );
+                return;
+            }
+        }
+    }
+    let files = if present.is_empty() {
+        "no ignore files".to_owned()
+    } else {
+        present.join(" ")
+    };
+    let rules = if count == 1 { "rule" } else { "rules" };
+    push(
+        checks,
+        "ignore",
+        Status::Ok,
+        format!("{files}, {count} {rules}"),
+    );
 }
 
 fn skip(checks: &mut Vec<Check>, name: &'static str, detail: &str) {

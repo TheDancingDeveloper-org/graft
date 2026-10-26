@@ -55,7 +55,14 @@ fn healthy_server_every_check_ok() {
     let config = home.path().join("config.toml");
     let raw = minted(4_102_444_800);
     login(home.path(), &config, &served.url, &raw);
-    let out = graft(home.path())
+    let dir = scratch();
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config)
+        .args(["--endpoint", &served.url, "clone", support::REPO, "app"])
+        .assert()
+        .success();
+    let app = dir.path().join("app");
+    let out = graft(&app)
         .env("GRAFT_CONFIG", &config)
         .args(["doctor"])
         .assert()
@@ -140,15 +147,26 @@ fn json_lists_checks_and_redacts_the_token() {
     let config = home.path().join("config.toml");
     let raw = minted(4_102_444_800);
     login(home.path(), &config, &served.url, &raw);
-    let out = graft(home.path())
+    let dir = scratch();
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config)
+        .args(["--endpoint", &served.url, "clone", support::REPO, "app"])
+        .assert()
+        .success();
+    let app = dir.path().join("app");
+    let out = graft(&app)
         .env("GRAFT_CONFIG", &config)
         .args(["--json", "doctor"])
         .assert()
         .success();
     let value: Value = json_out(out.get_output());
     let checks = value["checks"].as_array().expect("checks");
-    assert_eq!(checks.len(), 5);
-    assert!(checks.iter().all(|check| check["ok"] == true));
+    assert_eq!(checks.len(), 10);
+    assert!(
+        checks
+            .iter()
+            .all(|check| check["ok"] == true && check["status"] == "pass")
+    );
     let rendered = value.to_string();
     assert_redacted(&rendered);
     assert_redacted(&String::from_utf8_lossy(&out.get_output().stderr));
@@ -156,20 +174,116 @@ fn json_lists_checks_and_redacts_the_token() {
 }
 
 #[test]
-fn help_lists_exit_status_and_json_status() {
-    let out = graft(scratch().path())
-        .args(["doctor", "--help"])
+fn working_copy_checks_pass_with_a_live_lease_and_ignore_rules() {
+    let served = serve();
+    let home = scratch();
+    let config = home.path().join("config.toml");
+    login(home.path(), &config, &served.url, &minted(4_102_444_800));
+    let dir = scratch();
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config)
+        .args(["--endpoint", &served.url, "clone", support::REPO, "app"])
+        .assert()
+        .success();
+    let app = dir.path().join("app");
+    fs::write(app.join(".gitignore"), "*.log\n# note\n\n").unwrap();
+    fs::write(app.join(".graftignore"), "vendor/\n").unwrap();
+    let out = graft(&app)
+        .env("GRAFT_CONFIG", &config)
+        .args(["doctor"])
         .assert()
         .success();
     let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(text.contains("Exit status"), "{text}");
-    assert!(text.contains("0  every check passes"), "{text}");
-    assert!(text.contains("1  any check fails or is skipped"), "{text}");
+    for needle in [
+        "ok  workcopy  present, server dev",
+        "ok  revisions  base resolves",
+        "ok  lease  no workspace",
+        "ok  node  not running; graft talks to the server directly",
+        "ok  ignore  .gitignore .graftignore, 2 rules",
+    ] {
+        assert!(text.contains(needle), "{needle}\n{text}");
+    }
+    assert_redacted(&text);
+}
+
+#[test]
+fn expired_workspace_lease_names_renew() {
+    let served = serve();
+    let home = scratch();
+    let config = home.path().join("config.toml");
+    login(home.path(), &config, &served.url, &minted(4_102_444_800));
+    let dir = scratch();
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config)
+        .args(["--endpoint", &served.url, "clone", support::REPO, "app"])
+        .assert()
+        .success();
+    let app = dir.path().join("app");
+    graft(&app)
+        .env("GRAFT_CONFIG", &config)
+        .args(["workspace", "open"])
+        .assert()
+        .success();
+    served.fixture.repo().expire_workspace("w-1");
+    let out = graft(&app)
+        .env("GRAFT_CONFIG", &config)
+        .args(["doctor"])
+        .assert()
+        .code(1);
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(
-        text.contains("2  a usage error, or the working copy cannot be read"),
+        text.contains("fail  lease  workspace lease expired; run `graft workspace renew`"),
         "{text}"
     );
+    assert_redacted(&text);
+}
 
+#[test]
+fn unknown_server_and_unreadable_ignore_file_fail() {
+    let served = serve();
+    let home = scratch();
+    let config = home.path().join("config.toml");
+    login(home.path(), &config, &served.url, &minted(4_102_444_800));
+    let dir = scratch();
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config)
+        .args(["--endpoint", &served.url, "clone", support::REPO, "app"])
+        .assert()
+        .success();
+    let app = dir.path().join("app");
+    let graft_dir = app.join(".graft");
+    let config_text = fs::read_to_string(graft_dir.join("config")).unwrap();
+    let rewritten = config_text.replace("server = dev\n", "server = missing\n");
+    assert_ne!(rewritten, config_text, "{config_text}");
+    fs::write(graft_dir.join("config"), rewritten).unwrap();
+    fs::create_dir(app.join(".gitignore")).unwrap();
+    let out = graft(&app)
+        .env("GRAFT_CONFIG", &config)
+        .args(["doctor"])
+        .assert()
+        .code(1);
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        text.contains("fail  workcopy  recorded server missing is not a known named server"),
+        "{text}"
+    );
+    assert!(
+        text.contains("skip  revisions  working copy not usable"),
+        "{text}"
+    );
+    assert!(
+        text.contains("skip  lease  working copy not usable"),
+        "{text}"
+    );
+    assert!(
+        text.contains("fail  ignore  cannot read .gitignore: is a directory"),
+        "{text}"
+    );
+    assert_redacted(&text);
+}
+
+#[test]
+fn outside_a_working_copy_the_extra_checks_are_skipped() {
     let served = serve();
     let home = scratch();
     let config = home.path().join("config.toml");
@@ -178,40 +292,17 @@ fn help_lists_exit_status_and_json_status() {
         .env("GRAFT_CONFIG", &config)
         .args(["--json", "doctor"])
         .assert()
-        .success();
-    let value: Value = json_out(out.get_output());
-    let checks = value["checks"].as_array().expect("checks");
-    assert!(
-        checks.iter().all(|check| check["status"] == "pass"),
-        "{value}"
-    );
-
-    let url = "http://127.0.0.1:1".to_owned();
-    let home = scratch();
-    let config = home.path().join("config.toml");
-    let token_path = home.path().join("tokens").join("dev");
-    fs::create_dir_all(token_path.parent().unwrap()).unwrap();
-    write_token(&token_path, TOKEN);
-    let body = format!(
-        "default_server = \"dev\"\n\n[servers.dev]\nendpoint = \"{url}\"\ntoken_file = \"{}\"\n",
-        token_path.display()
-    );
-    fs::write(&config, body).unwrap();
-    let out = graft(home.path())
-        .env("GRAFT_CONFIG", &config)
-        .args(["--json", "doctor"])
-        .assert()
         .code(1);
     let value: Value = json_out(out.get_output());
-    let by_name: std::collections::BTreeMap<_, _> = value["checks"]
-        .as_array()
-        .expect("checks")
-        .iter()
-        .map(|check| (check["name"].as_str().unwrap().to_owned(), check.clone()))
-        .collect();
-    assert_eq!(by_name["endpoint"]["status"], "fail");
-    assert_eq!(by_name["endpoint"]["ok"], false);
-    assert_eq!(by_name["protocol"]["status"], "skip");
-    assert_eq!(by_name["token"]["status"], "skip");
-    assert_eq!(by_name["config"]["status"], "pass");
+    let checks = value["checks"].as_array().expect("checks");
+    assert_eq!(checks.len(), 10);
+    for name in ["workcopy", "revisions", "lease", "node", "ignore"] {
+        let row = checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing"));
+        assert_eq!(row["ok"], false, "{row}");
+        assert_eq!(row["status"], "skip", "{row}");
+        assert_eq!(row["detail"], "not in a working copy");
+    }
 }
