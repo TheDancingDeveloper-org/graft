@@ -4,3 +4,4 @@ graft-mirror-fluent2|fluent2-egui|TheDancingDeveloper-org/fluent2-egui|main|mirr
 graft-mirror-vogt|vogt|TheDancingDeveloper-org/vogt|rust-core|mirror-token-vogt|mirror-vogt.toml|17892|builtin
 graft-mirror-rustnzb|rustnzb|TheDancingDeveloper-org/rustnzb|main|mirror-token-rustnzb|mirror-rustnzb.toml|17893|generated|0
 graft-mirror-myaiagent|myaiagent|TheDancingDeveloper-org/myaiagent|main|mirror-token-myaiagent|mirror-myaiagent.toml|17894|generated|1
+graft-mirror-rdpapp|rdpapp|TheDancingDeveloper-org/rdpapp|main|mirror-token-rdpapp|mirror-rdpapp.toml|17895|generated|1
