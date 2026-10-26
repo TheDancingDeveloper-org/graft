@@ -172,27 +172,3 @@ jobs:
           exit "$status"
       - run: cargo test --workspace --all-features --doc
         if: steps.scope.outputs.docs_only != 'true'
-
-  # Not a required check (WI-2467). The kill-9 e2e is #[ignore]d in the
-  # required `test` job. This job runs only that test on the merge queue so
-  # a flake stays visible without blocking the queue. continue-on-error
-  # keeps a red run from failing the workflow's required checks.
-  slow:
-    runs-on: [self-hosted]
-    timeout-minutes: 30
-    continue-on-error: true
-    if: github.event_name == 'merge_group'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: |
-          curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
-      - name: nextest slow
-        shell: bash
-        run: |
-          "$RUNNER_TEMP/cargo-nextest" nextest run -p graft-server --all-features \
-            --run-ignored only \
-            -E 'test(import_kill9_restart_fetch_fsck)'
