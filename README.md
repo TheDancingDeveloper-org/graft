@@ -171,6 +171,29 @@ graft is early. The design is [docs/design.md](docs/design.md); work lands
 on short-lived branches through the merge queue. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Documentation
+
+User guide:
+
+- [Concepts](docs/guide/concepts.md): glossary and the git-to-graft table.
+- [MCP](docs/guide/mcp.md): every MCP tool, with its arguments and results.
+- [Server](docs/guide/server.md): config, tokens, repositories, lines, metrics and upgrades.
+- [Git migration](docs/guide/git-migration.md): import, follow GitHub, batch pull requests and export.
+- [FAQ](docs/guide/faq.md): git compatibility, offline use, lines, CI and the licence.
+- [Benchmarks](docs/guide/benchmarks.md): how the published timings were measured.
+- [Agents](docs/agents.md): how an agent session uses graft.
+
+[The same index](docs/guide/README.md) lives with the guide.
+
+## How it is built
+
+- [Design](docs/design.md)
+- [Plan](docs/plan.md)
+- [Decisions](docs/decisions.md)
+- [Status](docs/status.md)
+- [Trials](docs/trials)
+- [Notes](docs/notes)
+
 ## Licence
 
 [AGPL-3.0-only](LICENSE).
