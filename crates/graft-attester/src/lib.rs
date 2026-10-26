@@ -522,7 +522,7 @@ pub struct Attester<A> {
     /// this read has not yet passed. Once the cursor moves past one it is
     /// dropped: a restart does not ask about it again.
     deferred: HashMap<u64, ()>,
-    /// Line lookups given up and dropped, counted by their LSN.
+    /// How many line lookups have been given up and dropped.
     dropped: u64,
     /// Drafts already queued or checked. A failed lookup keeps the cursor
     /// on that entry, so the same page is read again; these are not queued
