@@ -185,6 +185,46 @@ pub trait RepoApi: Send + Sync {
     }
     /// Record a check result.
     fn attest(&self, cx: &CallContext, req: Attest) -> impl Future<Output = ApiResult<()>> + Send;
+    /// Record an attestation with a kind, a status and a display name
+    /// (v0.2). The default answers `ApiError::unimplemented`.
+    fn attest_v2(
+        &self,
+        cx: &CallContext,
+        req: AttestV2,
+    ) -> impl Future<Output = ApiResult<()>> + Send {
+        let _ = (cx, req);
+        async { Err(crate::ApiError::unimplemented("AttestV2")) }
+    }
+    /// A changeset's or a line range's attestations, paged (v0.2). The
+    /// default answers `ApiError::unimplemented`.
+    fn get_attestations(
+        &self,
+        cx: &CallContext,
+        req: GetAttestations,
+    ) -> impl Future<Output = ApiResult<AttestationPage>> + Send {
+        let _ = (cx, req);
+        async { Err(crate::ApiError::unimplemented("GetAttestations")) }
+    }
+    /// The check state of each landing on a line, paged (v0.2). The default
+    /// answers `ApiError::unimplemented`.
+    fn get_land_checks(
+        &self,
+        cx: &CallContext,
+        req: GetLandChecks,
+    ) -> impl Future<Output = ApiResult<LandCheckPage>> + Send {
+        let _ = (cx, req);
+        async { Err(crate::ApiError::unimplemented("GetLandChecks")) }
+    }
+    /// Landings on a line to review since an LSN, paged (v0.2). The default
+    /// answers `ApiError::unimplemented`.
+    fn review_queue(
+        &self,
+        cx: &CallContext,
+        req: ReviewQueue,
+    ) -> impl Future<Output = ApiResult<ReviewQueuePage>> + Send {
+        let _ = (cx, req);
+        async { Err(crate::ApiError::unimplemented("ReviewQueue")) }
+    }
     /// Read the journal (long-poll page).
     fn watch(
         &self,

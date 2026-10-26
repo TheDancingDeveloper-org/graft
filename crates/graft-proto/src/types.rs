@@ -646,6 +646,231 @@ pub struct Attest {
     pub url: String,
 }
 
+/// What an attestation records (v0.2).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum AttestKind {
+    /// An automated check, for example `ci/test`. What every pre-v0.2
+    /// `Attest` is.
+    #[default]
+    Check,
+    /// A reviewer's verdict.
+    Review,
+    /// An approval to land.
+    Approval,
+}
+
+/// The outcome an attestation reports (v0.2).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AttestStatus {
+    /// Passed, or approved.
+    Pass,
+    /// Failed, or changes requested.
+    Fail,
+    /// Started, no verdict yet.
+    Pending,
+    /// The attester itself failed; says nothing about the changeset.
+    Error,
+}
+
+impl AttestStatus {
+    /// The status a pre-v0.2 `passed` flag means.
+    pub fn from_passed(passed: bool) -> Self {
+        if passed {
+            AttestStatus::Pass
+        } else {
+            AttestStatus::Fail
+        }
+    }
+}
+
+/// The v0.2 `Attest` request: [`Attest`] with a kind, a status and a display
+/// name. It travels in the same `AttestRequest` message; an old client's
+/// request decodes as `kind = Check`, `status = from_passed(passed)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttestV2 {
+    /// Repository.
+    pub repo: String,
+    /// The changeset attested.
+    pub changeset: ChangesetId,
+    /// What is recorded.
+    pub kind: AttestKind,
+    /// Check or review name, for example `ci/test`.
+    pub check: String,
+    /// The outcome.
+    pub status: AttestStatus,
+    /// Display name of the attester. The subject is taken from the token.
+    pub by: Option<String>,
+    /// Link to the run or review.
+    pub url: String,
+}
+
+impl From<Attest> for AttestV2 {
+    fn from(a: Attest) -> Self {
+        AttestV2 {
+            repo: a.repo,
+            changeset: a.changeset,
+            kind: AttestKind::Check,
+            check: a.check,
+            status: AttestStatus::from_passed(a.passed),
+            by: None,
+            url: a.url,
+        }
+    }
+}
+
+/// Largest page any v0.2 review read returns; larger limits are clamped.
+pub const MAX_REVIEW_PAGE: u32 = 1_000;
+
+/// Which attestations `GetAttestations` reads.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttestationSelector {
+    /// One changeset's.
+    ByChangeset(ChangesetId),
+    /// Those of the changesets at positions `from_pos..=to_pos` on a line.
+    ByLineRange {
+        /// The line.
+        line: String,
+        /// First position.
+        from_pos: u64,
+        /// Last position.
+        to_pos: u64,
+    },
+}
+
+/// `GetAttestations` request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GetAttestations {
+    /// Repository.
+    pub repo: String,
+    /// Which changesets.
+    pub selector: AttestationSelector,
+    /// Only these kinds (empty = all).
+    pub kinds: Vec<AttestKind>,
+    /// Paging (limit at most [`MAX_REVIEW_PAGE`]).
+    pub page: Page,
+}
+
+/// One recorded attestation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attestation {
+    /// The changeset attested.
+    pub changeset: ChangesetId,
+    /// What was recorded.
+    pub kind: AttestKind,
+    /// Check or review name.
+    pub check: String,
+    /// The outcome.
+    pub status: AttestStatus,
+    /// Display name of the attester.
+    pub by: Option<String>,
+    /// Link to the run or review.
+    pub url: String,
+}
+
+/// `GetAttestations` response.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AttestationPage {
+    /// The attestations.
+    pub attestations: Vec<Attestation>,
+    /// Resume token.
+    pub next: Option<String>,
+}
+
+/// `GetLandChecks` request: the check state of each landing on a line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GetLandChecks {
+    /// Repository.
+    pub repo: String,
+    /// The line.
+    pub line: String,
+    /// First position wanted.
+    pub from_pos: u64,
+    /// Paging (limit at most [`MAX_REVIEW_PAGE`]).
+    pub page: Page,
+}
+
+/// The check state of one landing.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LandCheckState {
+    /// Checks not all reported.
+    Pending,
+    /// Every check passed.
+    Good,
+    /// A check failed.
+    Bad,
+    /// Reverted on the line.
+    Reverted,
+}
+
+/// One row of `GetLandChecks`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LandCheck {
+    /// Position on the line.
+    pub pos: u64,
+    /// The landed changeset.
+    pub changeset: ChangesetId,
+    /// Its check state.
+    pub state: LandCheckState,
+    /// The changeset that reverted it, when `Reverted`.
+    pub revert: Option<ChangesetId>,
+}
+
+/// `GetLandChecks` response.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LandCheckPage {
+    /// Rows in position order.
+    pub rows: Vec<LandCheck>,
+    /// Resume token.
+    pub next: Option<String>,
+}
+
+/// `ReviewQueue` request: landings on a line still to review, from an LSN.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewQueue {
+    /// Repository.
+    pub repo: String,
+    /// The line.
+    pub line: String,
+    /// Only landings journalled after this LSN.
+    pub since_lsn: u64,
+    /// Only landings touching this path or directory.
+    pub path_prefix: Option<RepoPath>,
+    /// Only landings changing at most this many lines.
+    pub max_lines: Option<u32>,
+    /// Paging (limit at most [`MAX_REVIEW_PAGE`]).
+    pub page: Page,
+}
+
+/// One landing to review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewItem {
+    /// The landed changeset.
+    pub changeset: ChangesetId,
+    /// Position on the line.
+    pub pos: u64,
+    /// LSN of its landing.
+    pub lsn: u64,
+    /// Its author.
+    pub author: Author,
+    /// Paths it touches.
+    pub paths_touched: u32,
+    /// Lines it adds or removes.
+    pub lines_changed: u64,
+}
+
+/// `ReviewQueue` response.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReviewQueuePage {
+    /// Items in LSN order.
+    pub items: Vec<ReviewItem>,
+    /// Pass as `since_lsn` to continue; `None` when caught up.
+    pub next_lsn: Option<u64>,
+}
+
 /// `Watch` request: read the journal from an LSN.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Watch {
