@@ -2036,3 +2036,115 @@ async fn an_append_whose_lease_fails_is_an_error() {
     );
     assert_eq!(support::branch(&w.upstream, &first.branch).unwrap(), main);
 }
+
+/// A PR left on GitHub for `head` that this mirror DB never opened (a trial,
+/// or a DB that was reset): merged into `main` as `merged`, its branch gone.
+fn leftover_merged_pr(w: &World, head: &str, merged: &str) -> u64 {
+    let mut prs = w.github.prs_mut();
+    let number = prs.len() as u64 + 1;
+    prs.push(FakePr {
+        number,
+        new: NewPull {
+            title: "an earlier batch".to_owned(),
+            body: String::new(),
+            head: head.to_owned(),
+            base: "main".to_owned(),
+        },
+        open: false,
+        merged: Some(merged.to_owned()),
+    });
+    number
+}
+
+/// WI-2585: a fresh DB on a GitHub repo that already has `graft/batch-1`
+/// merged (branch deleted) never adopts that PR; the lands go in a new PR.
+#[tokio::test]
+async fn a_leftover_merged_pr_is_never_adopted() {
+    let w = World::new().await;
+    w.start().await;
+    let main = support::branch(&w.upstream, "main").unwrap();
+    let old = leftover_merged_pr(&w, "graft/batch-1", &main);
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let b = w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+
+    let run = w.batcher().run().await.unwrap();
+    assert!(run.settled.is_none());
+    let rec = opened(run.outcome);
+    assert_eq!(rec.state, BatchState::Open, "{}", rec.detail);
+    assert_eq!((rec.number, rec.lands), (2, 2));
+    assert_eq!(rec.branch, "graft/batch-2");
+    assert!(rec.merged.is_none() && rec.merge_sha.is_none());
+    let new = rec.pr_number.unwrap();
+    assert_ne!(new, old);
+
+    let prs = w.github.prs();
+    let pr = prs.iter().find(|p| p.number == new).unwrap();
+    assert!(pr.open && pr.merged.is_none());
+    assert_eq!(pr.new.head, "graft/batch-2");
+    for id in [a, b] {
+        assert!(
+            pr.new.body.contains(&id.to_string()[..13]),
+            "{}",
+            pr.new.body
+        );
+    }
+    // Nothing reached main; the old PR is as it was.
+    assert_eq!(support::branch(&w.upstream, "main").unwrap(), main);
+    assert!(support::branch(&w.upstream, "graft/batch-1").is_none());
+    let old_pr = prs.iter().find(|p| p.number == old).unwrap();
+    assert!(!old_pr.open && old_pr.new.head == "graft/batch-1");
+
+    // The next run waits on the new PR; it does not settle anything.
+    match w.batcher().run().await.unwrap().outcome {
+        BatchOutcome::Waiting(r) => assert_eq!(r.pr_number, Some(new)),
+        other => panic!("expected to wait, got {other:?}"),
+    }
+}
+
+/// WI-2585: a leftover branch with other commits and a leftover merged PR
+/// (the trial's batch-1 and batch-2) are both skipped; the lands go in a
+/// fresh PR on a free number, and neither leftover is changed.
+#[tokio::test]
+async fn leftover_batch_branches_and_prs_are_skipped_for_a_fresh_number() {
+    let w = World::new().await;
+    w.start().await;
+    let main = support::branch(&w.upstream, "main").unwrap();
+    let tree = git(&w.upstream, &["rev-parse", &format!("{main}^{{tree}}")]);
+    let stray = git(
+        &w.upstream,
+        &["commit-tree", &tree, "-p", &main, "-m", "trial leftover"],
+    );
+    git(
+        &w.upstream,
+        &["update-ref", "refs/heads/graft/batch-1", &stray],
+    );
+    let old = leftover_merged_pr(&w, "graft/batch-2", &main);
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+
+    let rec = opened(w.batcher().run().await.unwrap().outcome);
+    assert_eq!(rec.state, BatchState::Open, "{}", rec.detail);
+    assert_eq!((rec.number, rec.lands), (3, 2));
+    assert_eq!(rec.branch, "graft/batch-3");
+    assert!(rec.merged.is_none());
+    assert_ne!(rec.pr_number, Some(old));
+    let prs = w.github.prs();
+    let pr = prs
+        .iter()
+        .find(|p| Some(p.number) == rec.pr_number)
+        .unwrap();
+    assert!(pr.open && pr.merged.is_none());
+    assert_eq!(pr.new.head, "graft/batch-3");
+    assert_eq!(
+        w.changed(
+            &main,
+            &support::branch(&w.upstream, "graft/batch-3").unwrap()
+        ),
+        ["a.txt", "b.txt"]
+    );
+    assert_eq!(
+        support::branch(&w.upstream, "graft/batch-1").unwrap(),
+        stray
+    );
+    assert_eq!(support::branch(&w.upstream, "main").unwrap(), main);
+}
