@@ -10,7 +10,8 @@ use common::*;
 use counting::Counting;
 use graft_engine::policy::LineChecks;
 use graft_engine::{
-    EngineConfig, LINES_UNAVAILABLE, LineConfig, MAX_REVIEW_SCAN, PATHS_UNAVAILABLE,
+    EngineConfig, LINES_UNAVAILABLE, LineConfig, MAX_JOURNAL_PROBE, MAX_REVIEW_SCAN,
+    PATHS_UNAVAILABLE,
 };
 use graft_model::ObjectKind;
 use graft_model::{ChangesetId, RepoPath};
@@ -18,7 +19,7 @@ use graft_proto::Frame;
 use graft_proto::types::*;
 use graft_proto::{ApiError, RepoApi};
 use graft_store::memory::MemoryStore;
-use graft_store::{MetaStore, RepoId};
+use graft_store::{MetaStore, MetaTxn, RepoId, Write};
 use std::sync::Arc;
 
 /// `chk` has post-land checks; `main` and every other line are off.
@@ -490,4 +491,73 @@ fn cost_follows_the_page_not_the_line_memory() {
 fn cost_follows_the_page_not_the_line_sqlite() {
     let (meta, dir) = sqlite_meta();
     cost_follows_the_page_not_the_line(Arc::new(Counting::new(meta)), Some(dir));
+}
+
+// Review fix: the probe for a landing's `RefMoved` entry stops at
+// `MAX_JOURNAL_PROBE` entries. A landing whose entry lies past the cap (here
+// a row written straight to the store behind 20 other entries) gets an
+// unavailable summary after reading exactly the cap, and the next landing
+// on the page is answered as usual.
+fn journal_probe_stops_at_its_cap<M: MetaStore>(meta: Arc<Counting<M>>, dir: Option<TempDir>) {
+    let f = build(meta.clone(), config(), dir);
+    let t = T::new(&f);
+    let repo: RepoId = block_on(meta.repo("r")).expect("repo").expect("exists");
+    let far = t.commit(t.root, &[("src/far.rs", b"far\n")], &[]);
+    let mut writes: Vec<Write> = (0..20)
+        .map(|i| Write::Journal {
+            kind: "Noise".to_owned(),
+            body: format!("{{\"n\":{i}}}").into_bytes(),
+        })
+        .collect();
+    writes.push(Write::PutLand {
+        draft: far,
+        line: "main".to_owned(),
+        landed: far,
+        pos: Some(1_000),
+        checked: false,
+    });
+    block_on(meta.commit(
+        repo,
+        MetaTxn {
+            preconditions: Vec::new(),
+            writes,
+        },
+    ))
+    .expect("commit");
+    let near = t.land(t.commit(t.root, &[("docs/n.md", b"n\n")], &[]), "main");
+
+    let before = meta.journal_entries();
+    let page = t.queue("main", 0, None, None, 1);
+    assert_eq!(
+        meta.journal_entries() - before,
+        u64::from(MAX_JOURNAL_PROBE)
+    );
+    let item = &page.items[0];
+    assert_eq!(
+        (item.changeset, item.paths_touched, item.lines_changed),
+        (far, PATHS_UNAVAILABLE, LINES_UNAVAILABLE)
+    );
+
+    let page = t.queue("main", 0, None, None, 0);
+    let got: Vec<(ChangesetId, u32, u64)> = page
+        .items
+        .iter()
+        .map(|i| (i.changeset, i.paths_touched, i.lines_changed))
+        .collect();
+    assert_eq!(
+        got,
+        vec![(far, PATHS_UNAVAILABLE, LINES_UNAVAILABLE), (near, 1, 1)]
+    );
+    assert_eq!(page.next_lsn, None);
+}
+
+#[test]
+fn journal_probe_stops_at_its_cap_memory() {
+    journal_probe_stops_at_its_cap(Arc::new(Counting::new(MemoryStore::new())), None);
+}
+
+#[test]
+fn journal_probe_stops_at_its_cap_sqlite() {
+    let (meta, dir) = sqlite_meta();
+    journal_probe_stops_at_its_cap(Arc::new(Counting::new(meta)), Some(dir));
 }
