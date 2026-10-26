@@ -20,6 +20,7 @@
 //! The token is never in the file or in process arguments: it comes from
 //! `token_file` or the `GRAFT_TOKEN` environment variable.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -83,6 +84,10 @@ pub struct FileConfig {
 /// ```toml
 /// [export]
 /// import_pulls = true   # import GitHub PRs as drafts; needs [github]
+///
+/// # principal (author name when the land has no email) -> git identity
+/// [export.authors]
+/// ada = { name = "Ada Lovelace", email = "ada@example.com" }
 /// ```
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,6 +95,21 @@ pub struct ExportFile {
     /// Import open GitHub PRs as drafts in `github-pr/<n>` workspaces.
     #[serde(default)]
     pub import_pulls: bool,
+    /// Git identities for principals whose lands carry no email. The key is
+    /// the author name. The bot committer is used only when a principal is
+    /// absent here.
+    #[serde(default)]
+    pub authors: BTreeMap<String, AuthorFile>,
+}
+
+/// A git identity in `[export.authors]`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorFile {
+    /// Display name.
+    pub name: String,
+    /// Email. Never a secret: it is written on the exported commit.
+    pub email: String,
 }
 
 /// The mirror's GitHub repository and how it authenticates.
@@ -258,6 +278,26 @@ impl FileConfig {
             .map(|l| FollowLine {
                 branch: l.branch.clone(),
                 line: l.line.clone().unwrap_or_else(|| l.branch.clone()),
+            })
+            .collect()
+    }
+
+    /// Git identities from `[export.authors]`, keyed by principal.
+    pub fn author_map(&self) -> BTreeMap<String, crate::batch::AuthorIdentity> {
+        let Some(export) = &self.export else {
+            return BTreeMap::new();
+        };
+        export
+            .authors
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    crate::batch::AuthorIdentity {
+                        name: v.name.clone(),
+                        email: v.email.clone(),
+                    },
+                )
             })
             .collect()
     }
