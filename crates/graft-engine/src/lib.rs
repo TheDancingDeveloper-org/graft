@@ -10,7 +10,8 @@
 //! `GetLandChecks` on lines whose checks are `PostLand` (`attest.rs`,
 //! D25, D37). They record and never gate a land. `ReviewQueue`
 //! (`review_queue.rs`) lists the landings of any line with no `review`
-//! attestation yet, from the store's index and each landing's summary.
+//! attestation yet, from the store's index, with summaries computed when
+//! it is read.
 //!
 //! G3.7 adds `Revert` (`revert.rs`), the `Stack` operations (`stack.rs`),
 //! line merge in `Rebase`, `Sync` and `Land` (decision D16, recorded in
@@ -101,7 +102,7 @@ pub use protect::{CLAIM_HOLDER, ProtectReport};
 pub use rebase::{MERGED_PATHS, REBASED_FROM, RESOLVED_PATHS};
 pub use refs::MAX_REF_NAME;
 pub use revert::REVERTS;
-pub use review_queue::{LAND_SUMMARY, MAX_REVIEW_SCAN};
+pub use review_queue::{LAND_SUMMARY, LINES_UNAVAILABLE, MAX_REVIEW_SCAN, PATHS_UNAVAILABLE};
 pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
 pub use write::MAX_REPO_NAME;
 

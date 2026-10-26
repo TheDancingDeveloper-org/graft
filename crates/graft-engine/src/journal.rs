@@ -352,6 +352,19 @@ pub(crate) fn ref_moved(
     entry(REF_MOVED, body)
 }
 
+/// The old target of a `RefMoved` body written by [`ref_moved`] for ref
+/// `name`, when it moved the ref to `new`; `None` for any other body.
+pub(crate) fn ref_moved_old(body: &[u8], name: &str, new: ChangesetId) -> Option<ChangesetId> {
+    let body = std::str::from_utf8(body).ok()?;
+    let mut prefix = String::from("{\"name\":");
+    json_str(&mut prefix, name);
+    prefix.push_str(",\"old\":\"");
+    let rest = body.strip_prefix(&prefix)?;
+    let (old, rest) = rest.split_once('"')?;
+    rest.strip_prefix(&format!(",\"new\":\"{new}\","))?;
+    old.parse().ok()
+}
+
 impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// One page of the journal from `from_lsn`. `wait_ms` is not honoured
     /// yet: the `MetaStore` port has no tail notification, so an empty page

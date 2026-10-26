@@ -888,8 +888,6 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             }],
             writes: Vec::new(),
         };
-        // The landing's first position on the line, for its summary.
-        let mut first_pos = 0;
         let mut result = LandResult {
             landed: candidate,
             version: line.version,
@@ -929,14 +927,6 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     _ => None,
                 })
                 .ok_or_else(|| errors::invalid(None, "candidate-not-indexed"))?;
-            first_pos = rows
-                .iter()
-                .filter_map(|w| match w {
-                    Write::PutLinePos { line, pos, .. } if *line == req.line => Some(*pos),
-                    _ => None,
-                })
-                .min()
-                .unwrap_or(result.pos);
             result.version = line.version + 1;
             txn.writes = rows;
         }
@@ -949,15 +939,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             let reverted = self.revert_writes(repo, config, stack, &steps).await?;
             txn.writes.extend(reverted);
         }
-        // Every landing that moves the line enters the review queue, with
-        // its summary, whatever the line's checks (a query, never a gate).
+        // Every landing that moves the line gets its review queue index row
+        // (position, LSN, changeset), whatever the line's checks. Nothing
+        // else: the queue's summaries are computed when it is read, so a
+        // land reads no blob for it (a query, never a gate).
         let moved = candidate != tip;
-        if moved {
-            txn.writes.push(
-                self.land_summary_write(repo, &req.line, tip, candidate, first_pos)
-                    .await?,
-            );
-        }
         txn.writes.push(Write::PutLand {
             draft: req.head,
             line: req.line.clone(),

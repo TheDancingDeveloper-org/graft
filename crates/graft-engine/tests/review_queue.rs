@@ -3,15 +3,23 @@
 //! A query, never a gate.
 
 mod common;
+#[path = "review_queue_support/counting.rs"]
+mod counting;
 
 use common::*;
+use counting::Counting;
 use graft_engine::policy::LineChecks;
-use graft_engine::{EngineConfig, LineConfig, MAX_REVIEW_SCAN};
+use graft_engine::{
+    EngineConfig, LINES_UNAVAILABLE, LineConfig, MAX_REVIEW_SCAN, PATHS_UNAVAILABLE,
+};
+use graft_model::ObjectKind;
 use graft_model::{ChangesetId, RepoPath};
+use graft_proto::Frame;
 use graft_proto::types::*;
 use graft_proto::{ApiError, RepoApi};
-use graft_store::MetaStore;
 use graft_store::memory::MemoryStore;
+use graft_store::{MetaStore, RepoId};
+use std::sync::Arc;
 
 /// `chk` has post-land checks; `main` and every other line are off.
 fn config() -> EngineConfig {
@@ -317,6 +325,68 @@ fn reads_need_read_and_reject_tokens<M: MetaStore>(f: &Fixture<M>) {
     ));
 }
 
+// Review fix: the summary is computed when the queue is read, never in the
+// land. A land succeeds when the objects a summary needs are missing or
+// corrupt, the land reads no blob, and the queue answers that item with
+// its summary unavailable instead of failing the page.
+fn missing_or_corrupt_objects_never_fail_a_land_or_the_page<M: MetaStore>(f: &Fixture<M>) {
+    let t = T::new(f);
+    let (meta, _) = t.r.e().stores();
+    let repo: RepoId = block_on(meta.repo("r")).expect("repo").expect("exists");
+    let corrupt = t.commit(t.root, &[("src/c.rs", b"c1\n")], &[]);
+    let missing = t.commit(corrupt, &[("src/m.rs", b"m1\n")], &[]);
+    let fine = t.commit(missing, &[("docs/f.md", b"f1\nf2\n")], &[]);
+    f.objects.corrupt(
+        repo,
+        blob_id(b"c1\n"),
+        Frame::encode(ObjectKind::Blob, b"not c1").to_bytes(),
+    );
+    f.objects
+        .frames
+        .lock()
+        .expect("frames")
+        .remove(&(repo, blob_id(b"m1\n")));
+
+    let gets = || f.objects.gets.load(std::sync::atomic::Ordering::SeqCst);
+    let before = gets();
+    for id in [corrupt, missing, fine] {
+        assert_eq!(t.land(id, "main"), id);
+    }
+    assert_eq!(gets(), before, "a fast-forward land reads no object");
+
+    let page = t.queue("main", 0, None, None, 0);
+    let got: Vec<(ChangesetId, u32, u64)> = page
+        .items
+        .iter()
+        .map(|i| (i.changeset, i.paths_touched, i.lines_changed))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (corrupt, PATHS_UNAVAILABLE, LINES_UNAVAILABLE),
+            (missing, PATHS_UNAVAILABLE, LINES_UNAVAILABLE),
+            (fine, 1, 2),
+        ]
+    );
+    // The path filter needs no blob; a size filter leaves out what it
+    // cannot size.
+    assert_eq!(
+        ids(&t.queue("main", 0, Some("src"), None, 0)),
+        vec![corrupt, missing]
+    );
+    assert_eq!(ids(&t.queue("main", 0, None, Some(1_000), 0)), vec![fine]);
+    // Unavailable is not cached: once the object is back, the summary is.
+    t.r.upload(&[b"m1\n"]);
+    let page = t.queue("main", 0, Some("src/m.rs"), None, 0);
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|i| (i.paths_touched, i.lines_changed))
+            .collect::<Vec<_>>(),
+        vec![(1, 1)]
+    );
+}
+
 macro_rules! on_both {
     ($($name:ident),* $(,)?) => {
         mod memory_store {
@@ -334,15 +404,19 @@ on_both!(
     any_line_and_never_a_gate,
     pages_resume_from_next_lsn,
     reads_need_read_and_reject_tokens,
+    missing_or_corrupt_objects_never_fail_a_land_or_the_page,
 );
 
 // Accept 3: on a 10k-landing line a call visits the page plus the landings
-// it filters out, capped at `MAX_REVIEW_SCAN`, never the line: a counting
-// store records every review queue row read.
-#[test]
-fn cost_follows_the_page_not_the_line() {
-    let meta = std::sync::Arc::new(MemoryStore::new());
-    let f = build(meta.clone(), config(), None);
+// it filters out, capped at `MAX_REVIEW_SCAN`, never the line. A counting
+// wrapper records the queue rows each call reads and every other store
+// read, on both stores; each row costs a bounded number of reads.
+fn cost_follows_the_page_not_the_line<M: MetaStore>(meta: Arc<Counting<M>>, dir: Option<TempDir>) {
+    /// Store reads one queue row may cost: summary cache, journal probe,
+    /// line position, path index, and the changesets of a summary and an
+    /// item.
+    const PER_ROW: u64 = 10;
+    let f = build(meta.clone(), config(), dir);
     let t = T::new(&f);
     const LANDS: usize = 10_000;
     const OPEN: usize = 10;
@@ -354,35 +428,66 @@ fn cost_follows_the_page_not_the_line() {
         tip = t.land(t.commit(tip, &[(path, body.as_bytes())], &[]), "main");
         landed.push(tip);
     }
+    let cost = |run: &dyn Fn()| {
+        let (rows, reads) = meta.counts();
+        run();
+        let (rows2, reads2) = meta.counts();
+        (rows2 - rows, reads2 - reads)
+    };
+    let within = |(rows, reads): (u64, u64), bound: u64| {
+        assert!(rows <= bound, "rows {rows} > {bound}");
+        assert!(reads <= PER_ROW * rows + 2, "reads {reads} for {rows} rows");
+    };
 
     // Unreviewed and filtered out everywhere: one call reads at most the
     // scan cap, then hands back `next_lsn` to go on.
-    let before = meta.rows_visited();
-    let page = t.queue("main", 0, Some("nope"), None, 0);
-    let visited = meta.rows_visited() - before;
-    assert!(page.items.is_empty());
-    assert!(page.next_lsn.is_some());
-    assert!(visited <= u64::from(MAX_REVIEW_SCAN), "visited {visited}");
+    within(
+        cost(&|| {
+            let page = t.queue("main", 0, Some("nope"), None, 0);
+            assert!(page.items.is_empty());
+            assert!(page.next_lsn.is_some());
+        }),
+        u64::from(MAX_REVIEW_SCAN),
+    );
 
     // An unfiltered page of 10 reads 10 rows.
-    let before = meta.rows_visited();
-    assert_eq!(t.queue("main", 0, None, None, 10).items.len(), 10);
-    assert_eq!(meta.rows_visited() - before, 10);
+    let (rows, reads) = cost(&|| assert_eq!(t.queue("main", 0, None, None, 10).items.len(), 10));
+    assert_eq!(rows, 10);
+    within((rows, reads), 10);
 
     // Review all but the last `OPEN`: they leave the index, so the queue
     // reads only what is still open, wherever it starts.
     for id in &landed[..LANDS - OPEN] {
         t.attest(*id, AttestKind::Review, AttestStatus::Pass);
     }
-    let before = meta.rows_visited();
-    let page = t.queue("main", 0, None, None, 0);
-    assert_eq!(ids(&page), landed[LANDS - OPEN..]);
-    assert_eq!(page.next_lsn, None);
-    assert!(meta.rows_visited() - before <= OPEN as u64);
+    within(
+        cost(&|| {
+            let page = t.queue("main", 0, None, None, 0);
+            assert_eq!(ids(&page), landed[LANDS - OPEN..]);
+            assert_eq!(page.next_lsn, None);
+        }),
+        OPEN as u64,
+    );
 
     // A path filter reads the open window and keeps the one match.
-    let before = meta.rows_visited();
-    let page = t.queue("main", 0, Some("c"), None, 0);
-    assert_eq!(ids(&page), vec![landed[LANDS - 1]]);
-    assert!(meta.rows_visited() - before <= OPEN as u64);
+    within(
+        cost(&|| {
+            assert_eq!(
+                ids(&t.queue("main", 0, Some("c"), None, 0)),
+                vec![landed[LANDS - 1]]
+            )
+        }),
+        OPEN as u64,
+    );
+}
+
+#[test]
+fn cost_follows_the_page_not_the_line_memory() {
+    cost_follows_the_page_not_the_line(Arc::new(Counting::new(MemoryStore::new())), None);
+}
+
+#[test]
+fn cost_follows_the_page_not_the_line_sqlite() {
+    let (meta, dir) = sqlite_meta();
+    cost_follows_the_page_not_the_line(Arc::new(Counting::new(meta)), Some(dir));
 }
