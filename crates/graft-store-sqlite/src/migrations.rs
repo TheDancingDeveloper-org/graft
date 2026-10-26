@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -224,6 +224,52 @@ CREATE TABLE line_merges (
     PRIMARY KEY (repo, dst, dst_pos)
 ) WITHOUT ROWID;
 CREATE INDEX line_merges_src ON line_merges (repo, dst, src, dst_pos);
+";
+
+/// Version 8 (WI-2593, v0.2): attestations, land checks and the review
+/// queue. Attestations are keyed by their journal entry (`lsn`, `seq`), with
+/// an index by changeset and one by `(line, pos)`. A land-checks row per
+/// checked landing, keyed by position. The review queue holds each indexed
+/// landing until a `Review` attestation names its changeset. Codes: kind
+/// Check 0, Review 1, Approval 2; status Pass 0, Fail 1, Pending 2, Error 3;
+/// state Pending 0, Good 1, Bad 2, Reverted 3. Additive; no back-fill.
+const V8: &str = "
+CREATE TABLE attestations (
+    repo      INTEGER NOT NULL REFERENCES repos(id),
+    lsn       INTEGER NOT NULL,
+    seq       INTEGER NOT NULL,
+    changeset BLOB NOT NULL,
+    line      TEXT,
+    pos       INTEGER,
+    kind      INTEGER NOT NULL,
+    name      TEXT NOT NULL,
+    status    INTEGER NOT NULL,
+    by        TEXT,
+    url       TEXT NOT NULL,
+    PRIMARY KEY (repo, lsn, seq)
+) WITHOUT ROWID;
+CREATE INDEX attestations_changeset ON attestations (repo, changeset, lsn, seq);
+CREATE INDEX attestations_line ON attestations (repo, line, pos, lsn, seq);
+
+CREATE TABLE land_checks (
+    repo      INTEGER NOT NULL REFERENCES repos(id),
+    line      TEXT NOT NULL,
+    pos       INTEGER NOT NULL,
+    changeset BLOB NOT NULL,
+    state     INTEGER NOT NULL,
+    revert    BLOB,
+    PRIMARY KEY (repo, line, pos)
+) WITHOUT ROWID;
+
+CREATE TABLE review_queue (
+    repo      INTEGER NOT NULL REFERENCES repos(id),
+    line      TEXT NOT NULL,
+    lsn       INTEGER NOT NULL,
+    pos       INTEGER NOT NULL,
+    changeset BLOB NOT NULL,
+    PRIMARY KEY (repo, line, lsn)
+) WITHOUT ROWID;
+CREATE INDEX review_queue_changeset ON review_queue (repo, changeset, line);
 ";
 
 /// The database's schema version.
