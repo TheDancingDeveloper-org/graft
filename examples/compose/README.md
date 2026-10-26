@@ -1,5 +1,5 @@
 User-facing compose for `graft serve` and `graft node`.
 
-See [Running with compose](../../docs/guide/server.md#running-with-compose) in the server guide.
+See the server guide at [docs/guide/server.md](../../docs/guide/server.md).
 
 The `mirror` profile is off unless you pass `--profile mirror`.
