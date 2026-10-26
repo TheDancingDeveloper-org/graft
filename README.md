@@ -149,6 +149,13 @@ Git import and export stay behind `graft mirror`. Nothing else in graft speaks g
 graft does not run builds, tests or checkers. It does not try to be
 git-compatible. Command names follow git where the meaning is the same.
 
+The CLI, the node and the server ship for Linux x86_64 and aarch64 (musl)
+and macOS aarch64, the archive jobs in
+[.github/workflows/release.yml](.github/workflows/release.yml). Windows is
+not built. Required checks run on the repository's self-hosted runner
+([.github/workflows/ci.yml](.github/workflows/ci.yml)); release builds use
+the hosted runners named in the release workflow.
+
 ## Benchmarks
 
 ![graft against git](docs/guide/bench.svg)
@@ -190,6 +197,8 @@ User guide:
 - [Git migration](docs/guide/git-migration.md): import, follow GitHub, batch pull requests and export.
 - [FAQ](docs/guide/faq.md): git compatibility, offline use, lines, CI and the licence.
 - [Benchmarks](docs/guide/benchmarks.md): how the published timings were measured.
+- [Stability](docs/guide/stability.md): frozen encodings, the protocol rule, 0.x releases and platforms.
+- [Safety](docs/guide/safety.md): each safety claim and the test that shows it.
 - [Agents](docs/agents.md): how an agent session uses graft.
 
 [The same index](docs/guide/README.md) lives with the guide.

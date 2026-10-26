@@ -8,6 +8,8 @@
 - [FAQ](faq.md): git compatibility, offline use, lines, CI and the licence.
 - [Benchmarks](benchmarks.md): how the published timings were measured.
 - [Bench chart](bench.svg): the rendered timings the methodology describes.
+- [Stability](stability.md): frozen encodings, the protocol rule, 0.x releases and platforms.
+- [Safety](safety.md): each safety claim and the test that shows it.
 - [Agents](../agents.md): how an agent session uses graft.
 
 The same list is in the repository [README](../../README.md#documentation).
