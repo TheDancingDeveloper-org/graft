@@ -5,7 +5,9 @@ use std::ffi::OsStr;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::JoinHandle;
 
 use assert_cmd::Command as AssertCommand;
 
@@ -29,7 +31,8 @@ fn server_bin() -> PathBuf {
 struct Running {
     child: Child,
     stdout: BufReader<ChildStdout>,
-    stderr: Option<ChildStderr>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    stderr_reader: Option<JoinHandle<()>>,
 }
 
 impl Running {
@@ -41,11 +44,25 @@ impl Running {
             .spawn()
             .expect("start graft role");
         let stdout = BufReader::new(child.stdout.take().expect("role stdout"));
-        let stderr = child.stderr.take();
+        let mut pipe = child.stderr.take().expect("role stderr");
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&stderr);
+        let stderr_reader = Some(std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend_from_slice(&chunk[..n]);
+            }
+        }));
         Self {
             child,
             stdout,
             stderr,
+            stderr_reader,
         }
     }
 
@@ -55,10 +72,13 @@ impl Running {
             line.clear();
             if self.stdout.read_line(&mut line).expect("read role stdout") == 0 {
                 let _ = self.child.wait();
-                let mut stderr = String::new();
-                if let Some(mut pipe) = self.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
+                if let Some(reader) = self.stderr_reader.take() {
+                    let _ = reader.join();
                 }
+                let stderr = String::from_utf8_lossy(
+                    &self.stderr.lock().unwrap_or_else(PoisonError::into_inner),
+                )
+                .into_owned();
                 panic!("role exited before printing {prefix:?}; stderr:\n{stderr}");
             }
             if let Some(value) = line.trim().strip_prefix(prefix) {
