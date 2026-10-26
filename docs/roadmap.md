@@ -86,6 +86,9 @@ session and work-item fields (D39).
 Everything needed to know whether a landed change is good, with nothing in
 the land path. This is the work that was deliberately kept out of v0.1, and
 it is the precondition for any repository leaving its git host.
+The first candidate repository is graft itself
+([D40](decisions.md#d40-graft-is-the-first-graft-primary-repository));
+it stays git-primary until v0.4.
 
 - **Attestations generalised.** `Attest { changeset, kind, status, by, url }`
   with `kind` in `check`, `review`, `approval`; `GetAttestations` by changeset
