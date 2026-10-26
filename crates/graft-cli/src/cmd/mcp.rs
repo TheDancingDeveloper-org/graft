@@ -316,7 +316,7 @@ impl WorkingCopyTools for Served {
                 },
                 metadata: {
                     let mut m = Metadata::new();
-                    identity::add_vogt_metadata(&mut m);
+                    identity::add_session_metadata(&mut m);
                     m
                 },
                 amend: false,

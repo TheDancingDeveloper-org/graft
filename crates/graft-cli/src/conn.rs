@@ -121,7 +121,7 @@ pub(crate) fn require_working_copy() -> Result<WorkingCopy, Failure> {
 
 /// The call context for one request. Request ids are for logs and
 /// idempotency, so they only need to be unique per process. The session and
-/// work item come from `VOGT_SESSION_ID` and `VOGT_WORK_ITEM`.
+/// work item come from `GRAFT_SESSION_ID` and `GRAFT_WORK_ITEM` (the legacy names are a fallback).
 pub(crate) fn call_context() -> CallContext {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);

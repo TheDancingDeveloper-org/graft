@@ -26,7 +26,7 @@ pub(crate) fn run(g: &Global, args: &CommitArgs) -> Result<(), Failure> {
     }
     let author = author(args)?;
     let mut metadata = metadata(&args.meta)?;
-    identity::add_vogt_metadata(&mut metadata);
+    identity::add_session_metadata(&mut metadata);
     let opts = CommitOptions {
         message: args.message.clone(),
         author,
@@ -82,8 +82,7 @@ pub(crate) fn run(g: &Global, args: &CommitArgs) -> Result<(), Failure> {
 
 /// The author: `--author`, else the default identity (`GRAFT_AUTHOR_NAME`
 /// and `GRAFT_AUTHOR_EMAIL`, else the user name with no email). The
-/// kind is `--author-kind`, else `GRAFT_AUTHOR_KIND`, else `agent` in a Vogt
-/// session, else `human`.
+/// kind is `--author-kind`, else `GRAFT_AUTHOR_KIND`, else `agent` when a session id is set, else `human`.
 fn author(args: &CommitArgs) -> Result<Author, Failure> {
     let kind_text = args
         .author_kind

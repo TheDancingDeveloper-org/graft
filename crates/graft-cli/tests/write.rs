@@ -454,11 +454,11 @@ fn land_through_the_pr_bridge() {
     assert_eq!(error_kind(&a), json!("rejected"));
 }
 
-/// `VOGT_SESSION_ID` and `VOGT_WORK_ITEM` become the draft's `vogt.session`
-/// and `vogt.work_item` metadata: the draft id matches one committed with
+/// `GRAFT_SESSION_ID` and `GRAFT_WORK_ITEM` become the draft's `agent.session`
+/// and `agent.work_item` metadata: the draft id matches one committed with
 /// the same `--meta`, and differs from one committed without (WI-2350).
 #[test]
-fn vogt_session_and_work_item_reach_the_draft() {
+fn session_and_work_item_reach_the_draft() {
     let commit = |env: bool, meta: &[&str]| {
         let s = serve();
         let dir = scratch();
@@ -466,8 +466,10 @@ fn vogt_session_and_work_item_reach_the_draft() {
         fs::write(app.join("src/lib.rs"), "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
         let mut cmd = wc_cmd(&app);
         if env {
-            cmd.env("VOGT_SESSION_ID", "ses_test")
-                .env("VOGT_WORK_ITEM", "WI-9");
+            cmd.env("GRAFT_SESSION_ID", "ses_test")
+                .env("GRAFT_WORK_ITEM", "WI-9")
+                .env_remove("VOGT_SESSION_ID")
+                .env_remove("VOGT_WORK_ITEM");
         }
         let out = cmd
             .args(["--json", "commit", "-m", "add c"])
@@ -481,9 +483,9 @@ fn vogt_session_and_work_item_reach_the_draft() {
         false,
         &[
             "--meta",
-            "vogt.session=ses_test",
+            "agent.session=ses_test",
             "--meta",
-            "vogt.work_item=WI-9",
+            "agent.work_item=WI-9",
         ],
     );
     let bare = commit(false, &[]);
@@ -491,7 +493,7 @@ fn vogt_session_and_work_item_reach_the_draft() {
     assert_ne!(from_env, bare);
 }
 
-/// With no `GRAFT_AUTHOR_*` and no `--meta`, a commit inside a Vogt session
+/// With no `GRAFT_AUTHOR_*` and no `--meta`, a commit inside a session
 /// is authored by `$USER` with kind `agent` and carries the session and work
 /// item: its id matches one given all of that explicitly (WI-2350).
 #[test]
@@ -506,6 +508,8 @@ fn the_environment_alone_sets_the_session_work_item_and_author() {
         if env {
             cmd.env("VOGT_SESSION_ID", "ses_env")
                 .env("VOGT_WORK_ITEM", "WI-7")
+                .env_remove("GRAFT_SESSION_ID")
+                .env_remove("GRAFT_WORK_ITEM")
                 .args(["--json", "commit", "-m", "add c"]);
         } else {
             // `--author` needs an email; the default has none (WI-2412).
@@ -514,9 +518,9 @@ fn the_environment_alone_sets_the_session_work_item_and_author() {
                 "--author-kind",
                 "agent",
                 "--meta",
-                "vogt.session=ses_env",
+                "agent.session=ses_env",
                 "--meta",
-                "vogt.work_item=WI-7",
+                "agent.work_item=WI-7",
             ]);
         }
         let out = cmd.assert().success();
