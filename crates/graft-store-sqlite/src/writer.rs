@@ -650,6 +650,7 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 draft,
                 line,
                 landed,
+                ..
             } => {
                 conn.prepare_cached(
                     "INSERT OR IGNORE INTO lands (repo, draft, line, landed)
@@ -657,6 +658,11 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 )
                 .and_then(|mut s| s.execute(params![repo, &draft.0.0[..], line, &landed.0.0[..]]))
                 .map_err(sql_err)?;
+            }
+            Write::PutAttestation { .. } | Write::SetLandCheck { .. } => {
+                return Err(StoreError::Backend(
+                    "review indexes are not implemented in this store yet".to_owned(),
+                ));
             }
             write @ (Write::AddHolderUntil { .. }
             | Write::SetExpiry { .. }

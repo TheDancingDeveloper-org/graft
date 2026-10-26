@@ -7,13 +7,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::{Future, ready};
+use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 
 use crate::meta::{
-    ChangesetRecord, DoomMark, LineMergeRow, Lsn, MetaStore, MetaTxn, Precondition, Protection,
-    RecordState, RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
+    AttestKind, AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandCheckState,
+    LandingRow, LineMergeRow, Lsn, MetaStore, MetaTxn, Precondition, Protection, RecordState,
+    RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
 };
 use crate::object::{ObjectStore, StoreStats};
 use crate::{RepoId, StoreError, StoreResult, page_limit};
@@ -44,6 +47,17 @@ struct Repo {
     doomed: BTreeMap<ObjectId, DoomMark>,
     gc_protection: bool,
     lands: BTreeMap<(ChangesetId, String), ChangesetId>,
+    /// Attestations by (changeset, lsn, seq).
+    attestations: BTreeMap<(ChangesetId, Lsn, u32), AttestationRow>,
+    /// Attestation index by (line, pos, lsn, seq) → changeset.
+    attestations_by_line: BTreeMap<(String, u64, Lsn, u32), ChangesetId>,
+    /// Land-checks rows by (line, pos).
+    land_checks: BTreeMap<(String, u64), LandCheckRow>,
+    /// Landings with no review, by (line, lsn) → (pos, changeset).
+    unreviewed: BTreeMap<(String, Lsn), (u64, ChangesetId)>,
+    /// Landings by (changeset, line) → lsn, to take a reviewed changeset
+    /// out of `unreviewed`.
+    landings: BTreeMap<(ChangesetId, String), Lsn>,
     /// Entry `i` has LSN `i + 1`.
     journal: Vec<(Lsn, String, Vec<u8>)>,
 }
@@ -314,8 +328,51 @@ fn validate(repo: &Repo, txn: &MetaTxn) -> StoreResult<()> {
     // Versions as the writes so far would leave them.
     let mut versions: HashMap<&str, u64> = HashMap::new();
     let mut overlay = Overlay::new(repo);
+    let has_journal = txn
+        .writes
+        .iter()
+        .any(|w| matches!(w, Write::Journal { .. }));
+    // Land-checks rows the writes so far add.
+    let mut new_checks: BTreeSet<(&str, u64)> = BTreeSet::new();
     for write in &txn.writes {
         overlay.check(write)?;
+        match write {
+            Write::PutLand {
+                draft,
+                line,
+                pos,
+                checked,
+                ..
+            } if !repo.lands.contains_key(&(*draft, line.clone())) => {
+                if pos.is_some() && !has_journal {
+                    return Err(invalid(format!(
+                        "land on {line} is indexed without a journal entry"
+                    )));
+                }
+                if *checked {
+                    let pos = pos.ok_or_else(|| {
+                        invalid(format!("checked land on {line} has no position"))
+                    })?;
+                    if repo.land_checks.contains_key(&(line.clone(), pos))
+                        || !new_checks.insert((line.as_str(), pos))
+                    {
+                        return Err(invalid(format!("{line} already has a land check at {pos}")));
+                    }
+                }
+            }
+            Write::PutAttestation { changeset, .. } if !has_journal => {
+                return Err(invalid(format!(
+                    "attestation of {changeset} without a journal entry"
+                )));
+            }
+            Write::SetLandCheck { line, pos, .. }
+                if !repo.land_checks.contains_key(&(line.clone(), *pos))
+                    && !new_checks.contains(&(line.as_str(), *pos)) =>
+            {
+                return Err(invalid(format!("{line} has no land check at {pos}")));
+            }
+            _ => {}
+        }
         if let Write::PutLineFork { line, .. } = write {
             // As SQLite's primary key does: one fork per line, ever.
             let twice = txn
@@ -373,6 +430,7 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
     // The first journal entry of this transaction: records take its LSN.
     let first_lsn = repo.journal.len() as u64 + 1;
     let mut lsns = Vec::new();
+    let mut seq = 0u32;
     for write in txn.writes {
         match write {
             Write::PutChangeset {
@@ -523,8 +581,80 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
                 draft,
                 line,
                 landed,
+                pos,
+                checked,
             } => {
-                repo.lands.entry((draft, line)).or_insert(landed);
+                if repo.lands.contains_key(&(draft, line.clone())) {
+                    // A retried land: the first record and its rows stand.
+                    continue;
+                }
+                repo.lands.insert((draft, line.clone()), landed);
+                if let Some(pos) = pos {
+                    if checked {
+                        let row = LandCheckRow {
+                            line: line.clone(),
+                            pos,
+                            changeset: landed,
+                            state: LandCheckState::Pending,
+                            revert: None,
+                        };
+                        repo.land_checks.insert((line.clone(), pos), row);
+                    }
+                    repo.landings.insert((landed, line.clone()), first_lsn);
+                    if !reviewed(repo, landed) {
+                        repo.unreviewed.insert((line, first_lsn), (pos, landed));
+                    }
+                }
+            }
+            Write::PutAttestation {
+                changeset,
+                line_pos,
+                kind,
+                name,
+                status,
+                by,
+                url,
+            } => {
+                if let Some((line, pos)) = &line_pos {
+                    repo.attestations_by_line
+                        .insert((line.clone(), *pos, first_lsn, seq), changeset);
+                }
+                if kind == AttestKind::Review {
+                    let lines: Vec<(String, Lsn)> = repo
+                        .landings
+                        .range((changeset, String::new())..)
+                        .take_while(|((c, _), _)| *c == changeset)
+                        .map(|((_, line), lsn)| (line.clone(), *lsn))
+                        .collect();
+                    for key in lines {
+                        repo.unreviewed.remove(&key);
+                    }
+                }
+                let row = AttestationRow {
+                    lsn: first_lsn,
+                    seq,
+                    changeset,
+                    line_pos,
+                    kind,
+                    name,
+                    status,
+                    by,
+                    url,
+                };
+                repo.attestations.insert((changeset, first_lsn, seq), row);
+                seq += 1;
+            }
+            Write::SetLandCheck {
+                line,
+                pos,
+                state,
+                revert,
+            } => {
+                // Validated above: the row exists by now.
+                if let Some(row) = repo.land_checks.get_mut(&(line, pos)) {
+                    row.state = state;
+                    row.revert = revert;
+                }
             }
             Write::Journal { kind, body } => {
                 let lsn = repo.journal.len() as u64 + 1;
@@ -558,6 +688,15 @@ fn add_draft_paths(repo: &mut Repo, workspace: &str, line: &str, paths: Vec<Repo
     }
 }
 
+/// Whether `changeset` has a `Review` attestation (one range over its own
+/// attestations).
+fn reviewed(repo: &Repo, changeset: ChangesetId) -> bool {
+    repo.attestations
+        .range((changeset, 0, 0)..)
+        .take_while(|((c, _, _), _)| *c == changeset)
+        .any(|(_, row)| row.kind == AttestKind::Review)
+}
+
 /// Clears a doomed mark that is not `deleting`: the object is held again.
 fn revive(repo: &mut Repo, object: ObjectId) {
     if repo.doomed.get(&object).is_some_and(|m| !m.deleting) {
@@ -569,12 +708,25 @@ fn revive(repo: &mut Repo, object: ObjectId) {
 #[derive(Clone, Debug, Default)]
 pub struct MemoryStore {
     state: Arc<Mutex<State>>,
+    /// Index rows the attestation, land-checks and review-queue reads have
+    /// visited, so tests can assert their cost.
+    visited: Arc<AtomicU64>,
 }
 
 impl MemoryStore {
     /// An empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Index rows visited so far by the attestation, land-checks and
+    /// review-queue reads.
+    pub fn rows_visited(&self) -> u64 {
+        self.visited.load(Ordering::Relaxed)
+    }
+
+    fn visit(&self, rows: usize) {
+        self.visited.fetch_add(rows as u64, Ordering::Relaxed);
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut State) -> StoreResult<T>) -> StoreResult<T> {
@@ -1229,5 +1381,106 @@ impl MetaStore for MemoryStore {
 
     fn gc_protection(&self, repo: RepoId) -> impl Future<Output = StoreResult<bool>> + Send {
         ready(self.with(|st| Ok(st.repo(repo)?.gc_protection)))
+    }
+
+    fn attestations_by_changeset(
+        &self,
+        repo: RepoId,
+        changeset: ChangesetId,
+        after: Option<(Lsn, u32)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<AttestationRow>>> + Send {
+        ready(self.with(|st| {
+            let start = match after {
+                Some((lsn, seq)) => Excluded((changeset, lsn, seq)),
+                None => Included((changeset, 0, 0)),
+            };
+            let rows: Vec<AttestationRow> = st
+                .repo(repo)?
+                .attestations
+                .range((start, Unbounded))
+                .take_while(|((c, _, _), _)| *c == changeset)
+                .take(page_limit(limit))
+                .map(|(_, row)| row.clone())
+                .collect();
+            self.visit(rows.len());
+            Ok(rows)
+        }))
+    }
+
+    fn attestations_by_line(
+        &self,
+        repo: RepoId,
+        line: &str,
+        from_pos: u64,
+        to_pos: u64,
+        after: Option<(u64, Lsn, u32)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<AttestationRow>>> + Send {
+        ready(self.with(|st| {
+            let r = st.repo(repo)?;
+            let start = match after {
+                Some((pos, lsn, seq)) if pos >= from_pos => {
+                    Excluded((line.to_owned(), pos, lsn, seq))
+                }
+                _ => Included((line.to_owned(), from_pos, 0, 0)),
+            };
+            let rows: Vec<AttestationRow> = r
+                .attestations_by_line
+                .range((start, Unbounded))
+                .take_while(|((l, pos, _, _), _)| l == line && *pos <= to_pos)
+                .take(page_limit(limit))
+                .filter_map(|((_, _, lsn, seq), c)| r.attestations.get(&(*c, *lsn, *seq)))
+                .cloned()
+                .collect();
+            self.visit(rows.len());
+            Ok(rows)
+        }))
+    }
+
+    fn land_checks(
+        &self,
+        repo: RepoId,
+        line: &str,
+        from_pos: u64,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<LandCheckRow>>> + Send {
+        ready(self.with(|st| {
+            let rows: Vec<LandCheckRow> = st
+                .repo(repo)?
+                .land_checks
+                .range((line.to_owned(), from_pos)..)
+                .take_while(|((l, _), _)| l == line)
+                .take(page_limit(limit))
+                .map(|(_, row)| row.clone())
+                .collect();
+            self.visit(rows.len());
+            Ok(rows)
+        }))
+    }
+
+    fn review_queue(
+        &self,
+        repo: RepoId,
+        line: &str,
+        since: Lsn,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<LandingRow>>> + Send {
+        ready(self.with(|st| {
+            let rows: Vec<LandingRow> = st
+                .repo(repo)?
+                .unreviewed
+                .range((Excluded((line.to_owned(), since)), Unbounded))
+                .take_while(|((l, _), _)| l == line)
+                .take(page_limit(limit))
+                .map(|((_, lsn), (pos, changeset))| LandingRow {
+                    lsn: *lsn,
+                    pos: *pos,
+                    changeset: *changeset,
+                })
+                .collect();
+            self.visit(rows.len());
+            Ok(rows)
+        }))
     }
 }
