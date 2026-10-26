@@ -267,3 +267,131 @@ fn idents_and_offsets_are_safe() {
 fn dates_are_utc_seconds() {
     assert_eq!(git_time(1_700_000_000_999), "1700000000 +0000");
 }
+
+/// The four attribution fields, under one key prefix.
+fn attribution_meta(
+    prefix: &str,
+    session: &str,
+    work: &str,
+    model: &str,
+    co: &str,
+) -> graft_model::Metadata {
+    [
+        ("session", session),
+        ("work_item", work),
+        ("model", model),
+        ("coauthors", co),
+    ]
+    .into_iter()
+    .map(|(field, value)| (format!("{prefix}.{field}"), value.to_owned()))
+    .collect()
+}
+
+fn read_four(meta: &graft_model::Metadata) -> (String, String, String, Vec<String>) {
+    use graft_proto::attribution::Key;
+    (
+        super::attribution_cell(meta, Key::Session).unwrap(),
+        super::attribution_cell(meta, Key::WorkItem).unwrap(),
+        super::attribution_trailer(meta, Key::Model).unwrap(),
+        super::coauthor_lines(meta),
+    )
+}
+
+#[test]
+fn attribution_new_keys_only() {
+    let meta = attribution_meta(
+        "agent",
+        "ses_new",
+        "WI-9",
+        "model-a",
+        "Ada <ada@example.com>",
+    );
+    assert_eq!(
+        read_four(&meta),
+        (
+            "ses_new".into(),
+            "WI-9".into(),
+            "model-a".into(),
+            vec!["Ada <ada@example.com>".into()]
+        )
+    );
+}
+
+#[test]
+fn attribution_legacy_keys_only() {
+    let meta = attribution_meta(
+        "vogt",
+        "ses_old",
+        "WI-1",
+        "model-z",
+        "Bea <bea@example.com>",
+    );
+    assert_eq!(
+        read_four(&meta),
+        (
+            "ses_old".into(),
+            "WI-1".into(),
+            "model-z".into(),
+            vec!["Bea <bea@example.com>".into()]
+        )
+    );
+}
+
+#[test]
+fn attribution_both_prefers_new() {
+    let mut meta = attribution_meta(
+        "agent",
+        "ses_new",
+        "WI-9",
+        "model-a",
+        "Ada <ada@example.com>",
+    );
+    meta.extend(attribution_meta(
+        "vogt",
+        "ses_old",
+        "WI-1",
+        "model-z",
+        "Bea <bea@example.com>",
+    ));
+    assert_eq!(
+        read_four(&meta),
+        (
+            "ses_new".into(),
+            "WI-9".into(),
+            "model-a".into(),
+            vec!["Ada <ada@example.com>".into()]
+        )
+    );
+}
+
+#[test]
+fn pr_body_says_session_and_work_item_not_the_tracker() {
+    let (body, message) = render(&header(false), &[land(1, false)]);
+    for text in [&body, &message] {
+        assert!(text.contains("| Session | Work item |"), "{text}");
+        assert!(!text.contains("Vogt") && !text.contains("vogt"), "{text}");
+    }
+    // Export trailers stay the Graft-* names this crate already wrote.
+    let msg = land_message(3, &land(1, false));
+    assert!(msg.contains("Graft-Session: ses_x\n"));
+    assert!(msg.contains("Graft-Work-Item: WI-1\n"));
+    assert!(!msg.contains("Vogt-"));
+    let raw = land_commit(
+        3,
+        &land(1, false),
+        GitSha([2; 20]),
+        GitSha([3; 20]),
+        &default_committer(),
+    );
+    let again = land_commit(
+        3,
+        &land(1, false),
+        GitSha([2; 20]),
+        GitSha([3; 20]),
+        &default_committer(),
+    );
+    assert_eq!(raw, again, "the same land still hashes to the same commit");
+    let text = String::from_utf8(raw).unwrap();
+    assert!(text.contains("Graft-Session: ses_x\n"));
+    assert!(!text.contains("Vogt-"));
+}

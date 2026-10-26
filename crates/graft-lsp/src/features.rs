@@ -6,6 +6,7 @@ use graft_client::workcopy::{Stat, needs_rehash};
 use graft_model::{BlobId, Change, ChangesetId, RepoPath};
 use graft_proto::ApiError;
 use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
+use graft_proto::attribution;
 use graft_proto::types::{
     Blame, Diff, DraftState, GetChangesets, Log, Page, PatchOptions, ResolveRef,
 };
@@ -161,11 +162,26 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> LspServer<A> {
                 text.push_str(&format!(" · {state}"));
             }
             let meta = &view.changeset.metadata;
-            if let Some(item) = meta.get("vogt.work_item") {
+            // New keys win; legacy names are read as aliases (D39).
+            if let Some(item) = attribution::get(meta, attribution::Key::WorkItem) {
                 text.push_str(&format!(" · work item {}", escape(&clip(item))));
             }
-            if let Some(session) = meta.get("vogt.session") {
+            if let Some(session) = attribution::get(meta, attribution::Key::Session) {
                 text.push_str(&format!(" · session {}", escape(&clip(session))));
+            }
+            if let Some(model) = attribution::get(meta, attribution::Key::Model) {
+                text.push_str(&format!(" · model {}", escape(&clip(model))));
+            }
+            if let Some(authors) = attribution::get(meta, attribution::Key::Coauthors) {
+                let names = authors
+                    .split([',', '\n'])
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !names.is_empty() {
+                    text.push_str(&format!(" · co-authors {}", escape(&clip(&names))));
+                }
             }
         }
         if local && self.has_local_changes(&path) {

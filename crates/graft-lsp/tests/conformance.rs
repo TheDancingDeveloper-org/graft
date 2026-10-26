@@ -534,3 +534,99 @@ async fn exit_without_shutdown_or_closed_input_is_unclean() {
     drop(env.client);
     assert_eq!(task.await.unwrap().unwrap(), Ended::Unclean);
 }
+
+/// Hover attribution (WI-2531): new keys, legacy keys, and both (new wins).
+/// The rendered hover never names the tracker.
+#[tokio::test]
+async fn hover_attribution_reads_new_and_legacy_keys() {
+    let rig = support::Rig::new().await;
+    let human = author("Ada", AuthorKind::Human);
+    rig.land_on_main(&[("src/lib.rs", "fn a() {}\n")], human, &[], "start")
+        .await;
+    let legacy = rig
+        .land_on_main(
+            &[("src/lib.rs", "fn a() { 1 }\n")],
+            author("old-agent", AuthorKind::Agent),
+            &[
+                ("vogt.work_item", "WI-OLD"),
+                ("vogt.session", "ses_old"),
+                ("vogt.model", "legacy-model"),
+                ("vogt.coauthors", "Ada\nBea"),
+            ],
+            "legacy keys only",
+        )
+        .await;
+    let fresh = rig
+        .land_on_main(
+            &[("src/lib.rs", "fn a() { 2 }\n")],
+            author("new-agent", AuthorKind::Agent),
+            &[
+                ("agent.work_item", "WI-NEW"),
+                ("agent.session", "ses_new"),
+                ("agent.model", "new-model"),
+                ("agent.coauthors", "Cy"),
+            ],
+            "new keys only",
+        )
+        .await;
+    let both = rig
+        .land_on_main(
+            &[("src/lib.rs", "fn a() { 3 }\n")],
+            author("both-agent", AuthorKind::Agent),
+            &[
+                ("agent.work_item", "WI-WIN"),
+                ("vogt.work_item", "WI-LOSE"),
+                ("agent.session", "ses_win"),
+                ("vogt.session", "ses_lose"),
+                ("agent.model", "win-model"),
+                ("vogt.model", "lose-model"),
+                ("agent.coauthors", "Win"),
+                ("vogt.coauthors", "Lose"),
+            ],
+            "both keys, new wins",
+        )
+        .await;
+
+    let mut env = Env::open_on(rig, support::Fixture { c1: both, c2: both }).await;
+    env.initialize().await;
+
+    async fn at(env: &mut Env, rev: ChangesetId) -> String {
+        let doc = GraftUri {
+            repo: REPO.into(),
+            rev: rev.to_string(),
+            path: RepoPath::new("src/lib.rs").unwrap(),
+        };
+        hover_text(&env.hover(&doc.to_string(), 0).await)
+    }
+
+    let legacy_text = at(&mut env, legacy).await;
+    assert!(legacy_text.contains("work item WI\\-OLD"), "{legacy_text}");
+    assert!(legacy_text.contains("session ses\\_old"), "{legacy_text}");
+    assert!(
+        legacy_text.contains("model legacy\\-model"),
+        "{legacy_text}"
+    );
+    assert!(
+        legacy_text.contains("co-authors Ada\\, Bea"),
+        "{legacy_text}"
+    );
+
+    let fresh_text = at(&mut env, fresh).await;
+    assert!(fresh_text.contains("work item WI\\-NEW"), "{fresh_text}");
+    assert!(fresh_text.contains("session ses\\_new"), "{fresh_text}");
+    assert!(fresh_text.contains("model new\\-model"), "{fresh_text}");
+    assert!(fresh_text.contains("co-authors Cy"), "{fresh_text}");
+
+    let both_text = at(&mut env, both).await;
+    assert!(both_text.contains("work item WI\\-WIN"), "{both_text}");
+    assert!(both_text.contains("session ses\\_win"), "{both_text}");
+    assert!(both_text.contains("model win\\-model"), "{both_text}");
+    assert!(both_text.contains("co-authors Win"), "{both_text}");
+    assert!(!both_text.contains("LOSE"), "{both_text}");
+    assert!(!both_text.contains("ses\\_lose"), "{both_text}");
+    assert!(!both_text.contains("lose\\-model"), "{both_text}");
+
+    for text in [&legacy_text, &fresh_text, &both_text] {
+        assert!(!text.to_ascii_lowercase().contains("vogt"), "{text}");
+    }
+}

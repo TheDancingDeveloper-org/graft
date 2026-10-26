@@ -391,9 +391,8 @@ pub struct Env {
 }
 
 impl Env {
-    pub async fn new() -> Env {
-        let rig = Rig::new().await;
-        let history = history(&rig).await;
+    /// A working copy of `main` and an LSP client over an existing rig.
+    pub async fn open_on(rig: Arc<Rig>, history: Fixture) -> Env {
         let server = TestServer::tcp_workspaces(rig.clone()).await;
         let remote = remote(&server).await;
         let dir = tempfile::tempdir().unwrap();
@@ -416,15 +415,20 @@ impl Env {
         .expect("clone");
         let lsp =
             LspServer::new(remote, REPO, Some(wc)).with_author(author("Lin", AuthorKind::Human));
-        let client = Client::start(lsp);
         Env {
             rig,
             server,
             dir,
             root,
             history,
-            client,
+            client: Client::start(lsp),
         }
+    }
+
+    pub async fn new() -> Env {
+        let rig = Rig::new().await;
+        let history = history(&rig).await;
+        Self::open_on(rig, history).await
     }
 
     /// The `file:` URI of a working-copy path.
