@@ -4,11 +4,12 @@
 //! has committed. A slow or dead receiver never holds a land or a `Watch`:
 //! delivery is a later read of rows that are already durable.
 //!
-//! The cursor is the next LSN to send. It moves only after a sent entry is
-//! answered with 2xx, or after an entry the filters skip. A crash, a timeout
-//! or a non-2xx retries the same entry. The secret is the value of the
-//! environment variable `secret_env` names. It is never logged and never
-//! appears in `Debug`.
+//! The cursor is the next LSN to send. A new endpoint starts at the journal
+//! tip (`start = "tip"`, the default) or at an explicit LSN (`start = "<lsn>"`)
+//! when a replay is wanted. It moves after a 2xx, after a filter skip, and
+//! after a 4xx (that entry is final). A crash, a timeout or a 5xx retries the
+//! same entry. The secret is the value of the environment variable `secret_env`
+//! names. It is never logged and never appears in `Debug`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,7 +50,7 @@ const METRIC: &str = "graft_webhook_delivery_total";
 type HmacSha256 = Hmac<Sha256>;
 
 /// One `[[webhooks]]` entry.
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct WebhookSpec {
     /// Receiver URL (`http` or `https`).
@@ -63,6 +64,27 @@ pub(crate) struct WebhookSpec {
     /// Repositories to deliver. Required: the meta store has no repo list,
     /// and delivery must not scan history to discover one.
     pub(crate) repos: Vec<String>,
+    /// Where a new cursor starts: `"tip"` (the default) or a decimal LSN.
+    /// `"tip"` delivers only entries written after the hook is configured.
+    #[serde(default = "default_start")]
+    pub(crate) start: String,
+}
+
+fn default_start() -> String {
+    "tip".into()
+}
+
+impl Default for WebhookSpec {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            kinds: Vec::new(),
+            lines: Vec::new(),
+            secret_env: String::new(),
+            repos: Vec::new(),
+            start: default_start(),
+        }
+    }
 }
 
 impl std::fmt::Debug for WebhookSpec {
@@ -73,6 +95,7 @@ impl std::fmt::Debug for WebhookSpec {
             .field("lines", &self.lines)
             .field("secret_env", &self.secret_env)
             .field("repos", &self.repos)
+            .field("start", &self.start)
             .finish()
     }
 }
@@ -91,6 +114,9 @@ pub(crate) fn check(specs: &[WebhookSpec]) -> Result<(), String> {
         }
         if spec.repos.is_empty() {
             return Err("webhooks: repos is empty".into());
+        }
+        if spec.start != "tip" && spec.start.parse::<u64>().is_err() {
+            return Err("webhooks: start must be \"tip\" or an lsn".into());
         }
     }
     Ok(())
@@ -209,13 +235,25 @@ async fn deliver_repo<M: MetaStore>(
     metric: &Option<IntCounterVec>,
 ) -> Result<bool, String> {
     let key = cursor_key(index);
-    let cursor = read_cursor(meta, repo, &key).await?;
+    let cursor = read_cursor(meta, spec, repo, &key).await?;
     let rows = meta
         .journal(repo, cursor, 1)
         .await
         .map_err(|e| format!("{e:?}"))?;
     let Some((lsn, kind, body)) = rows.into_iter().next() else {
-        return Ok(false);
+        // Record a new tip cursor so a later entry is not hidden by a
+        // recomputed tip, and so a configured replay LSN is kept.
+        return match meta
+            .derived(repo, CURSOR_KIND, CURSOR_VERSION, &key)
+            .await
+            .map_err(|e| format!("{e:?}"))?
+        {
+            None => {
+                advance(meta, repo, &key, cursor, cursor).await?;
+                Ok(false)
+            }
+            Some(_) => Ok(false),
+        };
     };
     if lsn != cursor {
         return Err(format!("journal returned {lsn}, cursor is {cursor}"));
@@ -229,9 +267,10 @@ async fn deliver_repo<M: MetaStore>(
             count(metric, "delivered");
             advance(meta, repo, &key, cursor, cursor.saturating_add(1)).await
         }
-        Post::Rejected => {
-            count(metric, "rejected");
-            Err("rejected".into())
+        Post::Rejected(status) => {
+            count(metric, "failed");
+            tracing::error!(lsn, status, "webhook receiver rejected the entry");
+            advance(meta, repo, &key, cursor, cursor.saturating_add(1)).await
         }
         Post::Failed => {
             count(metric, "failed");
@@ -242,7 +281,8 @@ async fn deliver_repo<M: MetaStore>(
 
 enum Post {
     Delivered,
-    Rejected,
+    /// A 4xx. The status is logged; the body is not.
+    Rejected(u16),
     Failed,
 }
 
@@ -284,7 +324,9 @@ async fn post(client: &reqwest::Client, spec: &WebhookSpec, secret: &str, body: 
         .await;
     match response {
         Ok(response) if response.status().is_success() => Post::Delivered,
-        Ok(response) if response.status().is_client_error() => Post::Rejected,
+        Ok(response) if response.status().is_client_error() => {
+            Post::Rejected(response.status().as_u16())
+        }
         Ok(_) => Post::Failed,
         Err(_) => Post::Failed,
     }
@@ -316,23 +358,52 @@ fn cursor_key(index: usize) -> Vec<u8> {
     index.to_string().into_bytes()
 }
 
-async fn read_cursor<M: MetaStore>(meta: &M, repo: RepoId, key: &[u8]) -> Result<Lsn, String> {
+async fn read_cursor<M: MetaStore>(
+    meta: &M,
+    spec: &WebhookSpec,
+    repo: RepoId,
+    key: &[u8],
+) -> Result<Lsn, String> {
     match meta
         .derived(repo, CURSOR_KIND, CURSOR_VERSION, key)
         .await
         .map_err(|e| format!("{e:?}"))?
     {
-        None => Ok(1),
-        Some(bytes) => {
-            let text = std::str::from_utf8(&bytes).map_err(|_| "cursor: not utf-8".to_owned())?;
-            text.parse::<u64>()
-                .map_err(|_| "cursor: not an lsn".to_owned())
-        }
+        None => initial_cursor(meta, spec, repo).await,
+        Some(bytes) => parse_lsn(&bytes),
     }
 }
 
-/// Moves the cursor from `expected` to `next`. Absent and the text `"1"` both
-/// mean the cursor is still at LSN 1.
+fn parse_lsn(bytes: &[u8]) -> Result<Lsn, String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| "cursor: not utf-8".to_owned())?;
+    text.parse::<u64>()
+        .map_err(|_| "cursor: not an lsn".to_owned())
+}
+
+/// The first cursor for an endpoint that has never delivered.
+///
+/// `"tip"` is one past [`MetaStore::journal_tip`]: one indexed lookup, not a
+/// walk of the journal. An explicit LSN replays from there.
+async fn initial_cursor<M: MetaStore>(
+    meta: &M,
+    spec: &WebhookSpec,
+    repo: RepoId,
+) -> Result<Lsn, String> {
+    if spec.start != "tip" {
+        return spec
+            .start
+            .parse::<u64>()
+            .map_err(|_| "webhooks: start must be \"tip\" or an lsn".into());
+    }
+    match meta.journal_tip(repo).await.map_err(|e| format!("{e:?}"))? {
+        None => Ok(1),
+        Some(lsn) => Ok(lsn.saturating_add(1)),
+    }
+}
+
+/// Moves the cursor from `expected` to `next`. An absent row matches any
+/// expected LSN (a new hook may start past 1). A stored row matches only
+/// when its text is that LSN.
 async fn advance<M: MetaStore>(
     meta: &M,
     repo: RepoId,
@@ -344,9 +415,9 @@ async fn advance<M: MetaStore>(
         .derived(repo, CURSOR_KIND, CURSOR_VERSION, key)
         .await
         .map_err(|e| format!("{e:?}"))?;
-    let matches = match expected {
-        1 => current.is_none() || current.as_deref() == Some(b"1" as &[u8]),
-        _ => current.as_deref() == Some(expected.to_string().as_bytes()),
+    let matches = match &current {
+        None => true,
+        Some(bytes) => bytes.as_slice() == expected.to_string().as_bytes(),
     };
     if !matches {
         return Ok(false);
@@ -386,10 +457,15 @@ mod tests {
     use graft_model::SystemClock;
     use graft_store_fs::{FsMode, FsObjectStore};
     use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
-    use std::sync::Mutex;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use graft_store::{StoreResult, TxnOutcome};
 
     struct Harness {
         engine: Engine<SqliteMetaStore, FsObjectStore>,
+        meta: Arc<SqliteMetaStore>,
         _dir: tempfile::TempDir,
     }
 
@@ -401,12 +477,16 @@ mod tests {
             FsObjectStore::open(dir.path().join("objects"), FsMode::Authoritative).unwrap(),
         );
         let engine = Engine::new(
-            meta,
+            meta.clone(),
             objects,
             Arc::new(SystemClock),
             EngineConfig::default(),
         );
-        Harness { engine, _dir: dir }
+        Harness {
+            engine,
+            meta,
+            _dir: dir,
+        }
     }
 
     async fn repo(engine: &Engine<SqliteMetaStore, FsObjectStore>) -> RepoId {
@@ -516,6 +596,7 @@ mod tests {
             lines: vec![],
             secret_env: "GRAFT_WEBHOOK_SECRET".into(),
             repos: vec!["graft".into()],
+            start: "1".into(),
         }
     }
 
@@ -583,7 +664,7 @@ mod tests {
         );
         assert_eq!(value(&metric, "failed"), 1);
         assert_eq!(
-            read_cursor(engine.stores().0, id, &cursor_key(0))
+            read_cursor(engine.stores().0, &spec, id, &cursor_key(0))
                 .await
                 .unwrap(),
             first
@@ -634,7 +715,7 @@ mod tests {
         assert_eq!(seen[1].2, sign(secret, &seen[1].1));
         assert_ne!(seen[1].2, sign("other", &seen[1].1));
         assert_eq!(
-            read_cursor(engine.stores().0, id, &cursor_key(0))
+            read_cursor(engine.stores().0, &spec, id, &cursor_key(0))
                 .await
                 .unwrap(),
             second + 1
@@ -748,11 +829,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rejected_post_does_not_advance_and_counts() {
+    async fn a_rejected_post_is_final_and_later_entries_still_deliver() {
         let harness = engine();
         let engine = &harness.engine;
         let id = repo(engine).await;
-        let lsn = journal(engine, id, "WorkspaceOpened", r#"{"line":"main"}"#).await;
+        let rejected = journal(engine, id, "WorkspaceOpened", r#"{"line":"main"}"#).await;
+        let later = journal(engine, id, "WorkspaceOpened", r#"{"line":"main"}"#).await;
         let inbox = Arc::new(Inbox::bind().await);
         inbox.set_status(400);
         let (_tx, rx) = watch::channel(false);
@@ -772,14 +854,285 @@ mod tests {
                 &Some(metric.clone())
             )
             .await
-            .is_err()
+            .unwrap()
         );
-        assert_eq!(value(&metric, "rejected"), 1);
+        assert_eq!(value(&metric, "failed"), 1);
         assert_eq!(
-            read_cursor(engine.stores().0, id, &cursor_key(0))
+            read_cursor(engine.stores().0, &spec, id, &cursor_key(0))
                 .await
                 .unwrap(),
-            lsn
+            rejected.saturating_add(1)
         );
+        inbox.set_status(200);
+        assert!(
+            deliver_repo(
+                engine.stores().0,
+                &client,
+                &spec,
+                0,
+                id,
+                "k",
+                &Some(metric.clone())
+            )
+            .await
+            .unwrap()
+        );
+        let seen = inbox.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, 400);
+        assert_eq!(seen[1].0, 200);
+        assert_eq!(
+            String::from_utf8(seen[1].1.clone())
+                .unwrap()
+                .lines()
+                .nth(1)
+                .unwrap(),
+            later.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_hook_starts_at_the_tip() {
+        let harness = engine();
+        let engine = &harness.engine;
+        let id = repo(engine).await;
+        let before = journal(engine, id, "LandAttempt", r#"{"line":"main"}"#).await;
+        let inbox = Arc::new(Inbox::bind().await);
+        let (_tx, rx) = watch::channel(false);
+        let serving = inbox.clone();
+        tokio::spawn(async move { serving.serve(rx).await });
+        let mut spec = spec(&inbox.url());
+        spec.start = "tip".into();
+        let client = reqwest::Client::new();
+        let metric = counter();
+        assert!(
+            !deliver_repo(
+                engine.stores().0,
+                &client,
+                &spec,
+                0,
+                id,
+                "k",
+                &Some(metric.clone())
+            )
+            .await
+            .unwrap()
+        );
+        assert!(inbox.seen.lock().unwrap().is_empty());
+        assert_eq!(
+            read_cursor(engine.stores().0, &spec, id, &cursor_key(0))
+                .await
+                .unwrap(),
+            before.saturating_add(1)
+        );
+        let after = journal(engine, id, "LandAttempt", r#"{"line":"main"}"#).await;
+        assert!(
+            deliver_repo(engine.stores().0, &client, &spec, 0, id, "k", &Some(metric))
+                .await
+                .unwrap()
+        );
+        let seen = inbox.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            String::from_utf8(seen[0].1.clone())
+                .unwrap()
+                .lines()
+                .nth(1)
+                .unwrap(),
+            after.to_string()
+        );
+        assert_ne!(after, before);
+    }
+
+    /// A new hook on a long journal asks for the tip once and reads at most
+    /// the next row. It does not page the history.
+    #[tokio::test]
+    async fn a_new_hook_on_a_long_journal_reads_the_tip_once() {
+        let harness = engine();
+        let engine = &harness.engine;
+        let id = repo(engine).await;
+        let batch = MetaTxn {
+            preconditions: vec![],
+            writes: (0..10_000)
+                .map(|n| Write::Journal {
+                    kind: "LandAttempt".into(),
+                    body: format!(r#"{{"line":"main","n":{n}}}"#).into_bytes(),
+                })
+                .collect(),
+        };
+        engine.stores().0.commit(id, batch).await.unwrap();
+        let counted = Counted {
+            inner: harness.meta.clone(),
+            journal: Arc::new(AtomicU64::new(0)),
+            journal_tip: Arc::new(AtomicU64::new(0)),
+        };
+        let inbox = Arc::new(Inbox::bind().await);
+        let (_tx, rx) = watch::channel(false);
+        let serving = inbox.clone();
+        tokio::spawn(async move { serving.serve(rx).await });
+        let mut spec = spec(&inbox.url());
+        spec.start = "tip".into();
+        let client = reqwest::Client::new();
+        assert!(
+            !deliver_repo(&counted, &client, &spec, 0, id, "k", &None)
+                .await
+                .unwrap()
+        );
+        assert!(inbox.seen.lock().unwrap().is_empty());
+        assert_eq!(counted.journal_tip.load(Ordering::Relaxed), 1);
+        assert!(
+            counted.journal.load(Ordering::Relaxed) <= 1,
+            "journal reads {}",
+            counted.journal.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            read_cursor(&counted, &spec, id, &cursor_key(0))
+                .await
+                .unwrap(),
+            10_001
+        );
+    }
+
+    struct Counted {
+        inner: Arc<SqliteMetaStore>,
+        journal: Arc<AtomicU64>,
+        journal_tip: Arc<AtomicU64>,
+    }
+
+    impl MetaStore for Counted {
+        fn create_repo(&self, name: &str) -> impl Future<Output = StoreResult<RepoId>> + Send {
+            self.inner.create_repo(name)
+        }
+        fn repo(&self, name: &str) -> impl Future<Output = StoreResult<Option<RepoId>>> + Send {
+            self.inner.repo(name)
+        }
+        fn commit(
+            &self,
+            repo: RepoId,
+            txn: MetaTxn,
+        ) -> impl Future<Output = StoreResult<TxnOutcome>> + Send {
+            self.inner.commit(repo, txn)
+        }
+        fn changeset(
+            &self,
+            repo: RepoId,
+            id: graft_model::ChangesetId,
+        ) -> impl Future<Output = StoreResult<Option<(Vec<u8>, graft_store::ChangesetRecord)>>> + Send
+        {
+            self.inner.changeset(repo, id)
+        }
+        fn get_ref(
+            &self,
+            repo: RepoId,
+            name: &str,
+        ) -> impl Future<Output = StoreResult<Option<graft_store::RefRecord>>> + Send {
+            self.inner.get_ref(repo, name)
+        }
+        fn list_refs(
+            &self,
+            repo: RepoId,
+            prefix: &str,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<graft_store::RefRecord>>> + Send {
+            self.inner.list_refs(repo, prefix, limit)
+        }
+        fn workspace(
+            &self,
+            repo: RepoId,
+            name: &str,
+        ) -> impl Future<Output = StoreResult<Option<graft_store::WorkspaceRecord>>> + Send
+        {
+            self.inner.workspace(repo, name)
+        }
+        fn expired_workspaces(
+            &self,
+            repo: RepoId,
+            before_ms: i64,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<graft_store::WorkspaceRecord>>> + Send {
+            self.inner.expired_workspaces(repo, before_ms, limit)
+        }
+        fn list_workspaces(
+            &self,
+            repo: RepoId,
+            owner: &str,
+            after: &str,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<graft_store::WorkspaceRecord>>> + Send {
+            self.inner.list_workspaces(repo, owner, after, limit)
+        }
+        fn count_records(
+            &self,
+            repo: RepoId,
+            state: graft_store::RecordState,
+        ) -> impl Future<Output = StoreResult<u64>> + Send {
+            self.inner.count_records(repo, state)
+        }
+        fn count_workspaces(
+            &self,
+            repo: RepoId,
+            before_ms: Option<i64>,
+        ) -> impl Future<Output = StoreResult<u64>> + Send {
+            self.inner.count_workspaces(repo, before_ms)
+        }
+        fn derived(
+            &self,
+            repo: RepoId,
+            kind: &str,
+            version: u32,
+            key: &[u8],
+        ) -> impl Future<Output = StoreResult<Option<Vec<u8>>>> + Send {
+            self.inner.derived(repo, kind, version, key)
+        }
+        fn line_pos(
+            &self,
+            repo: RepoId,
+            line: &str,
+            id: graft_model::ChangesetId,
+        ) -> impl Future<Output = StoreResult<Option<u64>>> + Send {
+            self.inner.line_pos(repo, line, id)
+        }
+        fn scan_line_path(
+            &self,
+            repo: RepoId,
+            line: &str,
+            path: &graft_model::RepoPath,
+            before: u64,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<(u64, graft_model::ChangesetId)>>> + Send
+        {
+            self.inner.scan_line_path(repo, line, path, before, limit)
+        }
+        fn holders(
+            &self,
+            repo: RepoId,
+            object: graft_model::ObjectId,
+        ) -> impl Future<Output = StoreResult<u32>> + Send {
+            self.inner.holders(repo, object)
+        }
+        fn land(
+            &self,
+            repo: RepoId,
+            draft: graft_model::ChangesetId,
+            line: &str,
+        ) -> impl Future<Output = StoreResult<Option<graft_model::ChangesetId>>> + Send {
+            self.inner.land(repo, draft, line)
+        }
+        fn journal(
+            &self,
+            repo: RepoId,
+            from: Lsn,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<(Lsn, String, Vec<u8>)>>> + Send {
+            self.journal.fetch_add(1, Ordering::Relaxed);
+            self.inner.journal(repo, from, limit)
+        }
+        fn journal_tip(
+            &self,
+            repo: RepoId,
+        ) -> impl Future<Output = StoreResult<Option<Lsn>>> + Send {
+            self.journal_tip.fetch_add(1, Ordering::Relaxed);
+            self.inner.journal_tip(repo)
+        }
     }
 }

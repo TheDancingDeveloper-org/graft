@@ -1104,6 +1104,10 @@ impl MetaStore for MemoryStore {
         }))
     }
 
+    fn journal_tip(&self, repo: RepoId) -> impl Future<Output = StoreResult<Option<Lsn>>> + Send {
+        ready(self.with(|st| Ok(st.repo(repo)?.journal.last().map(|(lsn, _, _)| *lsn))))
+    }
+
     fn list_records(
         &self,
         repo: RepoId,

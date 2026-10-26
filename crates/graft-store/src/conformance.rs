@@ -38,6 +38,7 @@ where
     case!(failed_transactions_write_nothing);
     case!(commit_run_chains_and_stops_at_a_failure);
     case!(journal_lsns_are_monotonic_and_gap_free);
+    case!(journal_tip_is_the_highest_lsn);
     case!(workspace_head_cas);
     case!(workspace_leases);
     case!(workspace_record_cas);
@@ -626,6 +627,28 @@ async fn journal_lsns_are_monotonic_and_gap_free<O: ObjectStore, M: MetaStore>(
         run_txn(meta, other, txn(vec![], vec![journal("x")])).await,
         TxnOutcome::Committed(vec![1])
     );
+}
+
+async fn journal_tip_is_the_highest_lsn<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
+    let repo = new_repo(meta, "tip").await;
+    assert_eq!(meta.journal_tip(repo).await.expect("empty"), None);
+
+    let t = txn(vec![], vec![journal("k1")]);
+    assert_eq!(run_txn(meta, repo, t).await, TxnOutcome::Committed(vec![1]));
+    assert_eq!(meta.journal_tip(repo).await.expect("one"), Some(1));
+
+    let many = txn(
+        vec![],
+        (2u64..=10_000).map(|n| journal(&format!("k{n}"))).collect(),
+    );
+    assert_eq!(
+        run_txn(meta, repo, many).await,
+        TxnOutcome::Committed((2u64..=10_000).collect())
+    );
+    assert_eq!(meta.journal_tip(repo).await.expect("many"), Some(10_000));
+
+    let other = new_repo(meta, "tip-other").await;
+    assert_eq!(meta.journal_tip(other).await.expect("isolated"), None);
 }
 
 async fn workspace_head_cas<O: ObjectStore, M: MetaStore>(_objects: &O, meta: &M) {
