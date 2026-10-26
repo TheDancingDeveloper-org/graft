@@ -42,6 +42,8 @@ struct Faults {
     attest: Mutex<u32>,
     /// `GetWorkspace` calls to fail, counted down. `u32::MAX` never runs out.
     get_workspace: Mutex<u32>,
+    /// Fail `GetWorkspace` only for this workspace name.
+    get_workspace_name: Mutex<Option<String>>,
     /// `Watch` calls to fail. The reader makes one per page, so one failure
     /// is one failed per-entry fetch.
     watch: Mutex<u32>,
@@ -110,7 +112,15 @@ impl WorkspaceApi for AsAttester {
         self.engine.open_workspace(&self.cx(cx), req).await
     }
     async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
-        Faults::fire(&self.faults.get_workspace)?;
+        let named = self
+            .faults
+            .get_workspace_name
+            .lock()
+            .expect("faults")
+            .clone();
+        if named.as_deref().is_none_or(|n| n == req.name) {
+            Faults::fire(&self.faults.get_workspace)?;
+        }
         self.engine.get_workspace(&self.cx(cx), req).await
     }
     async fn list_workspaces(
@@ -874,7 +884,8 @@ async fn a_permanently_failing_lookup_does_not_stop_later_entries() {
         attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
     // Drop the line the journal already recorded, so the stuck entry's
     // fetch is a `GetWorkspace` that never succeeds. Past the bound it is
-    // reported and left, and the entry after it is still processed.
+    // recorded as failed and the cursor moves past it. The entry after it
+    // is still processed.
     a.forget_lines();
     *faults.get_workspace.lock().expect("faults") = u32::MAX;
     // The first failing lookup is reported and the page continues, so the
@@ -886,8 +897,11 @@ async fn a_permanently_failing_lookup_does_not_stop_later_entries() {
     assert!(results.iter().all(|r| r.outcome.passed()), "{results:?}");
     assert!(a.run_next().await.expect("stuck is not queued").is_none());
     for n in 2..8 {
-        let err = a.poll(0).await.expect_err("lookup keeps failing");
-        assert!(err.to_string().contains("unavailable"), "try {n}: {err}");
+        if let Err(err) = a.poll(0).await {
+            assert!(err.to_string().contains("unavailable"), "try {n}: {err}");
+        } else {
+            break;
+        }
         // The saved position stays on the unhandled entry, so this page is
         // read again. Drain whatever that re-read queued; `stuck` is not in it.
         while let Some(report) = a.run_next().await.expect("queue") {
@@ -895,28 +909,168 @@ async fn a_permanently_failing_lookup_does_not_stop_later_entries() {
             assert_ne!(id, stuck);
         }
     }
-    // Past the bound the stuck entry is left and not asked again. The
-    // saved position is still that entry. The page is re-read from there,
-    // so a later entry may be queued again; the stuck one is not.
-    assert!(a.poll(0).await.expect("past the bound") <= 1);
-    while let Some(report) = a.run_next().await.expect("queue") {
-        let (id, _) = checked(Some(report));
-        assert_ne!(id, stuck);
+    // Past the bound the stuck entry is recorded as failed and the cursor
+    // moves past it. It is not queued, and it is not asked about again.
+    loop {
+        let _ = a.poll(0).await.expect("past the bound");
+        let mut more = false;
+        while let Some(report) = a.run_next().await.expect("queue") {
+            more = true;
+            let (id, _) = checked(Some(report));
+            assert_ne!(id, stuck);
+        }
+        if saved_lsn(dir.path()) > stuck_lsn && !more {
+            break;
+        }
     }
-    assert_eq!(saved_lsn(dir.path()), stuck_lsn);
+    assert!(saved_lsn(dir.path()) > stuck_lsn);
     let got = attested_ids(&engine).await;
     assert!(
         !got.iter().any(|id| id == &before.to_string()),
         "before was already handled: {got:?}"
     );
-    assert_eq!(
-        got.iter().filter(|id| *id == &after.to_string()).count(),
-        2,
-        "after processed once: {got:?}"
+    assert!(
+        got.iter().any(|id| *id == after.to_string()),
+        "after was processed: {got:?}"
     );
     assert!(
         !got.iter().any(|id| id == &stuck.to_string()),
         "the failing entry was not processed: {got:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_lookup_then_a_full_queue_keeps_the_failed_entry() {
+    let (engine, root) = repo().await;
+    let before = draft(&engine, root, "before", &[("src.txt", "b\n")]).await;
+    let failed = draft(&engine, root, "failed", &[("src.txt", "f\n")]).await;
+    let filler = draft(&engine, root, "filler", &[("src.txt", "i\n")]).await;
+    let full = draft(&engine, root, "full", &[("src.txt", "q\n")]).await;
+    let failed_lsn = created_lsn(&engine, failed).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("state")).expect("state dir");
+    std::fs::write(dir.path().join("state/lsn"), format!("{failed_lsn}\n")).expect("state");
+    let (_server, mut a, faults) =
+        attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    a.set_queue_cap(1);
+    a.forget_lines();
+    // The first GetWorkspace is the failed entry. Later ones on the page
+    // succeed, and the queue fills on the entry after the filler.
+    *faults.get_workspace_name.lock().expect("faults") = Some("failed".to_owned());
+    *faults.get_workspace.lock().expect("faults") = u32::MAX;
+    let err = a.poll(0).await.expect_err("lookup fails");
+    assert!(err.to_string().contains("unavailable"), "{err}");
+    // The cursor stays on the failed entry, not on the full-queue entry.
+    assert_eq!(saved_lsn(dir.path()), failed_lsn);
+    let (id, _) = checked(
+        a.run_next()
+            .await
+            .expect("one draft queued before the queue filled"),
+    );
+    assert_eq!(id, filler);
+    assert!(a.run_next().await.expect("the rest waits").is_none());
+    // The named workspace was the one that failed. The retry succeeds.
+    *faults.get_workspace.lock().expect("faults") = 0;
+
+    // Retry: the failed entry is processed, then the one the full queue held.
+    let mut got = Vec::new();
+    for _ in 0..4 {
+        let _ = a.poll(0).await.expect("retry");
+        while let Some(report) = a.run_next().await.expect("queue") {
+            got.push(checked(Some(report)).0);
+        }
+        if got.contains(&failed) && got.contains(&full) {
+            break;
+        }
+    }
+    assert!(got.contains(&failed), "entry 5 after retry: {got:?}");
+    assert!(got.contains(&full), "the held entry after retry: {got:?}");
+
+    // Restart from the saved position and read again: both were handled,
+    // so neither is skipped and neither is required to run twice. The
+    // failed entry's LSN was processed, which a cursor saved at the full
+    // entry would have dropped.
+    let remote = Remote::connect(Endpoint::Server(_server.url().to_owned()))
+        .await
+        .expect("connect");
+    let mut cfg = Config::new(REPO, LINE, dir.path());
+    cfg.checks = CHECKS
+        .iter()
+        .map(|c| Check::parse(c).expect("check"))
+        .collect();
+    cfg.wait_ms = 0;
+    cfg.queue_cap = 1;
+    let mut restarted = Attester::new(remote, cfg).expect("restart");
+    assert!(restarted.next_lsn() > failed_lsn);
+    let _ = restarted.poll(0).await.expect("reread");
+    let attested = attested_ids(&engine).await;
+    assert!(
+        attested.iter().any(|id| id == &failed.to_string()),
+        "failed entry processed: {attested:?}"
+    );
+    assert!(
+        !attested.iter().any(|id| id == &before.to_string()),
+        "before was already handled: {attested:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_given_up_entry_does_not_hide_a_later_page() {
+    let (engine, root) = repo().await;
+    let stuck = draft(&engine, root, "stuck", &[("src.txt", "s\n")]).await;
+    let mut later = Vec::new();
+    for n in 0..40 {
+        later.push(
+            draft(
+                &engine,
+                root,
+                &format!("w{n}"),
+                &[("src.txt", &format!("{n}\n"))],
+            )
+            .await,
+        );
+    }
+    let stuck_lsn = created_lsn(&engine, stuck).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("state")).expect("state dir");
+    std::fs::write(dir.path().join("state/lsn"), format!("{stuck_lsn}\n")).expect("state");
+    let (_server, mut a, faults) =
+        attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    a.forget_lines();
+    *faults.get_workspace_name.lock().expect("faults") = Some("stuck".to_owned());
+    *faults.get_workspace.lock().expect("faults") = u32::MAX;
+    for n in 1..=8 {
+        if let Err(err) = a.poll(0).await {
+            assert!(err.to_string().contains("unavailable"), "try {n}: {err}");
+        }
+        while let Some(report) = a.run_next().await.expect("queue") {
+            let (id, _) = checked(Some(report));
+            assert_ne!(id, stuck);
+        }
+    }
+    // Given up: the cursor has moved past the stuck entry, and drafts
+    // recorded after it (past where a pinned cursor could read) run.
+    let mut seen = Vec::new();
+    for _ in 0..30 {
+        let _ = a.poll(0).await.expect("later pages");
+        while let Some(report) = a.run_next().await.expect("queue") {
+            seen.push(checked(Some(report)).0);
+        }
+        if seen.len() >= 16 {
+            break;
+        }
+    }
+    assert!(saved_lsn(dir.path()) > stuck_lsn);
+    assert!(
+        seen.len() >= 16,
+        "entries after the given-up one ran: {}",
+        seen.len()
+    );
+    let attested = attested_ids(&engine).await;
+    assert!(
+        !attested.iter().any(|id| id == &stuck.to_string()),
+        "the given-up entry was not processed"
     );
 }
 
