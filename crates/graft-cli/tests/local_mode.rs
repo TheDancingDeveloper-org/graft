@@ -107,10 +107,21 @@ fn kill_during_local_land_keeps_the_acknowledged_write() {
     run(&root, dir.path(), &["init", "demo", "--repo", "demo"]).success();
     fs::write(demo.join("file.txt"), "base\n").unwrap();
     run(&demo, dir.path(), &["commit", "-m", "start"]).success();
-    run(&demo, dir.path(), &["land", "--json"]).success();
+    let setup = run(&demo, dir.path(), &["land", "--json"]).success();
+    let setup_out = String::from_utf8_lossy(&setup.get_output().stdout).into_owned();
+    let setup_id = serde_json::from_str::<serde_json::Value>(setup_out.trim())
+        .ok()
+        .filter(|value| value.get("outcome").and_then(|v| v.as_str()) == Some("landed"))
+        .and_then(|value| {
+            value
+                .get("landed")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .expect("setup land is acknowledged with a changeset id");
 
     let repo_dir = demo.join(".graft").join("repo");
-    let mut acked: Vec<String> = Vec::new();
+    let mut acked: Vec<String> = vec![setup_id];
     let mut killed = 0u32;
     // Keep going until several lands die mid-operation. A land that
     // finishes before the kill does not count. Hitting the bound is the
