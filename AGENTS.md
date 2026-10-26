@@ -41,6 +41,12 @@ These are the constraints reviewers will say "no" to:
    process arguments.
 9. **Validate at the boundary, then trust.** Don't add defensive re-checks
    deep inside the engine for cases the boundary already rejects.
+10. **Tests assert outcomes, not timing.** No pass condition may depend on a
+   fixed sleep, a minimum count of timed events, or machine speed; CI runners
+   are slower than your host. Crash and concurrency tests record what was
+   acknowledged, inject the fault, then check exactly that afterwards
+   (presence and integrity). A test that can pass without exercising the
+   fault is a defect.
 
 ## Checks (targeted; CI runs the rest)
 
@@ -64,6 +70,8 @@ cargo nextest run -p <crate> --all-features   # or: cargo test -p <crate>
 - Commit with the identity in your brief, push the branch, and **stop**.
   Don't open the PR, don't poll CI. Oversight opens it, reviews it and lands
   it.
-- Leave a Vogt hand-off comment on your work item: branch, head sha, what is
-  done, what remains, and which checks you ran.
+- Leave a Vogt hand-off comment on your work item: branch, head sha, and
+  which checks you ran. Then list **every** Deliver and Accept item from the
+  work item, each with the file and test that meets it, or `NOT DONE: <why>`.
+  Never describe partial work as done; reviewers check this list line by line.
 - Print `AUTOPILOT: DONE`.
