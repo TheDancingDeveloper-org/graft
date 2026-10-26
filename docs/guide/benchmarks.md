@@ -25,9 +25,9 @@ as a speed change.
 
 ## What is not on the chart
 
-The twelve-run read-path medians recorded by WI-2341 on 2026-10-24 are
-not in any file under `bench/results/`. They are written in
-[docs/status.md](../status.md) and [docs/decisions.md](../decisions.md) (D31):
+The twelve-run read-path medians recorded on 2026-10-24 are
+not in any file under `bench/results/`. They are written in the engineering
+record listed under "How it is built":
 
 | | 1k graft / git | 10k graft / git |
 | --- | ---: | ---: |
@@ -48,17 +48,17 @@ graft is faster on full clone, sparse clone, `log --path` and blame at
 both recorded scales, and faster on concurrent clean lands at 10k
 (238 ms vs 365 ms). It is slower on `log -50`, status and, at 10k, sync.
 
-Read latency is a no-regression floor, not a phase-1 target (D31,
-2026-10-25). No read path may be slower than the WI-2341 medians above,
-and every operation stays O(change). Being 1.3× to 2.4× slower than git
-on log, status and sync in the single-run files is recorded, not a
-defect to close in phase 1. 2× faster than git is a later-phase target.
-WI-2400 is wont_do.
+Read latency is a no-regression floor, not a phase-1 target
+(recorded 2026-10-25). No read path may be slower than the twelve-run
+medians above, and every operation stays O(change). Being 1.3× to 2.4×
+slower than git on log, status and sync in the single-run files is
+recorded, not a defect to close in phase 1. 2× faster than git is a
+later-phase target. Closing that gap is out of scope for phase 1.
 
 ## Real-PR replay
 
 `bench/results/2026-10-24-real-prs/results.json`, 2026-10-24, 115 PRs in
-five cases (rdpapp split and stack, fluent2 registration, rustTorrent
+five cases (rdpapp split and stack, fluent2 registration, the qBittorrent importer
 qBittorrent, graft merge-back). Clean merges and conflicts match git on
 every case: 58 clean, 47 conflicts, graft-only and git-only clean both
 zero. One case (`rdpapp-stack`) has no `agreement` object; its graft and
@@ -73,8 +73,8 @@ The chart uses the agreement block.
 
 `bench/results/2026-10-24-branching/results.json`, seed 2362. The chart
 shows round trips and conflict blocks for trunk, git flow and release
-branches, graft-tracked against git. This file predates merge points
-(WI-2372). [docs/status.md](../status.md) records the later hand-off: with merge points,
+branches, graft-tracked against git. This file predates merge points.
+The engineering record lists the later hand-off: with merge points,
 graft reports the same conflicts as git (18 of 18 blocks) and merges
 `release/1.1` into `main` clean. That later run is not in this file, so
 it is not on the chart. The file will be regenerated; until then the

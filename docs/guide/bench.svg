@@ -80,7 +80,7 @@
 <text x="32" y="418" class="lab">rdpapp-split: 9 PRs, clean 1=1, conflicts 8=8, rt 17/19</text>
 <text x="32" y="434" class="lab">rdpapp-stack: 11 PRs, clean 0=0, conflicts 1=1, rt 2/2</text>
 <text x="32" y="450" class="lab">fluent2-registration: 34 PRs, clean 18=18, conflicts 16=16, rt 50/64</text>
-<text x="32" y="466" class="lab">rusttorrent-qbit: 4 PRs, clean 0=0, conflicts 4=4, rt 8/8</text>
+<text x="32" y="466" class="lab">qbit-importer: 4 PRs, clean 0=0, conflicts 4=4, rt 8/8</text>
 <text x="32" y="482" class="lab">graft-merge-back: 57 PRs, clean 39=39, conflicts 18=18, rt 75/153</text>
 <rect x="462" y="320" width="442" height="210" rx="8" class="box"/>
 <text x="478" y="344" class="h">Branching strategies</text>
@@ -88,6 +88,6 @@
 <text x="478" y="400" class="lab">trunk: round trips 85 / 60, conflict blocks 4 / 5</text>
 <text x="478" y="420" class="lab">gitflow: round trips 293 / 154, conflict blocks 29 / 18</text>
 <text x="478" y="440" class="lab">release: round trips 173 / 106, conflict blocks 11 / 11</text>
-<text x="24" y="548" class="sub">Not on this chart: the WI-2341 twelve-run read-path medians (D31 floor). They are in docs/status.md and docs/decisions.md only, not in a results file.</text>
+<text x="24" y="548" class="sub">Not on this chart: the twelve-run read-path medians (the read-latency floor). They are in the engineering record only, not in a results file.</text>
 </svg>
 
