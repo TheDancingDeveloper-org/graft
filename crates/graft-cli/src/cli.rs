@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 
 use clap::parser::ValueSource;
-use clap::{ArgMatches, Args, Parser, Subcommand};
+use clap::{ArgMatches, Args, CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 /// The default line when no working copy or `--at` names a snapshot.
 pub(crate) const DEFAULT_LINE: &str = "main";
@@ -134,6 +135,19 @@ pub(crate) enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Print a shell completion script
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Generate manual pages
+    #[command(hide = true)]
+    Man {
+        /// Directory to write manual pages into
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
     /// Run the authoritative server
     #[command(hide = true)]
     Serve(ServeArgs),
@@ -146,6 +160,27 @@ pub(crate) enum Command {
     /// Commands designed but not built yet
     #[command(external_subcommand)]
     Planned(Vec<String>),
+}
+
+/// The public command tree used by generated documentation and completions.
+pub(crate) fn public_command() -> clap::Command {
+    let command = Cli::command();
+    clap::Command::new("graft")
+        .about("The graft command-line client.")
+        .disable_version_flag(true)
+        .arg_required_else_help(true)
+        .args(
+            command
+                .get_arguments()
+                .filter(|argument| !argument.is_hide_set())
+                .cloned(),
+        )
+        .subcommands(
+            command
+                .get_subcommands()
+                .filter(|subcommand| !subcommand.is_hide_set())
+                .cloned(),
+        )
 }
 
 /// Which MCP client a registration snippet is for.

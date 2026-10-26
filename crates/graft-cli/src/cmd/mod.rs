@@ -7,6 +7,7 @@ pub(crate) mod cat;
 pub(crate) mod ci;
 pub(crate) mod clone;
 pub(crate) mod commit;
+pub(crate) mod completions;
 pub(crate) mod config;
 pub(crate) mod diff;
 pub(crate) mod init;

@@ -522,6 +522,47 @@ pub fn scratch() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
 }
 
+/// Asserts that public output does not expose internal planning references.
+pub fn assert_no_internal_references(command: &[&str], output: &str) {
+    const LITERALS: &[&str] = &[
+        "pr bridge",
+        "crates/",
+        "owned by",
+        "vogt",
+        "trial",
+        "graft-dev",
+        "phase",
+    ];
+    let lowercase = output.to_ascii_lowercase();
+    for leak in LITERALS {
+        assert!(
+            !lowercase.contains(leak),
+            "graft {} output leaked {leak:?}:\n{output}",
+            command.join(" ")
+        );
+    }
+    for word in
+        output.split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+    {
+        let numbered = (word.starts_with("WI-")
+            && word.len() > 3
+            && word[3..]
+                .chars()
+                .all(|character| character.is_ascii_digit()))
+            || ((word.starts_with('D') || word.starts_with('G'))
+                && word.len() > 1
+                && word[1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_digit()));
+        assert!(
+            !numbered,
+            "graft {} output leaked internal reference {word:?}:\n{output}",
+            command.join(" ")
+        );
+    }
+}
+
 /// The schema file for a command's JSON output.
 pub fn schema_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

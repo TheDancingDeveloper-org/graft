@@ -1,0 +1,19 @@
+---
+source: crates/graft-cli/tests/cli.rs
+expression: text(out.get_output())
+---
+Print a shell completion script
+
+Usage: graft completions [OPTIONS] <SHELL>
+
+Arguments:
+  <SHELL>  Shell to generate completions for [possible values: bash, elvish, fish, powershell, zsh]
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
