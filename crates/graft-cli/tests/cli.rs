@@ -863,6 +863,59 @@ fn clone_by_url_uses_the_matching_named_server() {
     assert!(err.contains("userinfo"), "{err}");
 }
 
+/// `--line b` and `--line=b` both conflict with a URL `?line=` that names a
+/// different line. The same line, or no flag, clones that line (WI-2559).
+#[test]
+fn clone_explicit_line_conflicts_with_url_line_in_either_syntax() {
+    let served = serve();
+    let home = scratch();
+    let config_path = home.path().join("config.toml");
+    graft(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["login", "dev", "--endpoint", &served.url])
+        .write_stdin("line-equals-secret\n")
+        .assert()
+        .success();
+    let host = served
+        .url
+        .strip_prefix("http://")
+        .expect("testkit serves http");
+    let url = format!("graft://{host}/{REPO}?line=main");
+    let conflict = "the URL already names a line";
+
+    for flag in ["--line", "--line=other"] {
+        let root = scratch();
+        let args: Vec<&str> = if flag == "--line" {
+            vec!["clone", &url, "app", "--line", "other"]
+        } else {
+            vec!["clone", &url, "app", flag]
+        };
+        let bad = graft(root.path())
+            .env("GRAFT_CONFIG", &config_path)
+            .args(args)
+            .assert()
+            .code(2);
+        let err = String::from_utf8_lossy(&bad.get_output().stderr);
+        assert!(err.contains(conflict), "{flag}: {err}");
+        assert!(!root.path().join("app").exists(), "{flag}");
+    }
+
+    for extra in [vec!["--line", "main"], vec!["--line=main"], vec![]] {
+        let root = scratch();
+        let mut args = vec!["clone", url.as_str(), "app"];
+        args.extend(extra.iter().copied());
+        let out = graft(root.path())
+            .env("GRAFT_CONFIG", &config_path)
+            .args(["--json"])
+            .args(args)
+            .assert()
+            .success();
+        let value = json_out(out.get_output());
+        assert_eq!(value["line"], json!("main"));
+        assert!(root.path().join("app/.graft/config").is_file());
+    }
+}
+
 #[test]
 fn endpoint_override_clone_records_the_override_not_the_default_server() {
     let default_server = serve();
