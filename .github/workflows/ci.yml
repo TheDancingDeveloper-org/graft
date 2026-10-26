@@ -194,3 +194,25 @@ jobs:
         run: |
           "$RUNNER_TEMP/cargo-nextest" nextest run -p graft-server --all-features \
             -E 'test(restart_serves_and_keeps_an_acknowledged_write)' --no-capture
+
+  # Not a required check. Runs the README quick starts only in the merge
+  # queue (WI-2478). A failing step or a missed line-merge fails the job.
+  docs-smoke:
+    runs-on: [self-hosted]
+    timeout-minutes: 30
+    continue-on-error: false
+    if: github.event_name == 'merge_group'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: build graft
+        run: cargo build -p graft-cli
+        env:
+          CARGO_BUILD_JOBS: "4"
+      - name: README quick starts
+        run: scripts/docs-smoke.sh
+        env:
+          GRAFT_BIN: ${{ github.workspace }}/target/debug/graft

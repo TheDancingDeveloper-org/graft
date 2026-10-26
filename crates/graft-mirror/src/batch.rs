@@ -84,8 +84,8 @@ mod tests;
 
 pub use batcher::Batcher;
 pub use types::{
-    BATCH, BATCH_TRAILER, BRANCH_PREFIX, BatchCommit, BatchConfig, BatchLine, BatchOutcome,
-    BatchRecord, BatchRun, BatchState, CHANGESET_TRAILER, DEFAULT_DROP_REASON, MAX_ATTEST_PAGES,
-    MAX_CHECKS, MAX_COMMITS, MAX_DROPS_LISTED, MAX_LANDS, MAX_PR_BODY, REVERTS_KEY, SYNC_KEY,
-    is_sync,
+    AuthorIdentity, BATCH, BATCH_TRAILER, BRANCH_PREFIX, BatchCommit, BatchConfig, BatchLine,
+    BatchOutcome, BatchRecord, BatchRun, BatchState, CHANGESET_TRAILER, DEFAULT_DROP_REASON,
+    MAX_ATTEST_PAGES, MAX_CHECKS, MAX_COMMITS, MAX_DROPS_LISTED, MAX_LANDS, MAX_PR_BODY,
+    REVERTS_KEY, SYNC_KEY, is_sync,
 };

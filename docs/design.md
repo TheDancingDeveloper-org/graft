@@ -1024,8 +1024,8 @@ the first `Landed` (§7.9).
 `commit` adds a draft on top of the head. `commit --amend` replaces the head
 (the old head is superseded). `stack squash|reorder|split|drop` produce new
 drafts on the server and move the head by CAS. `land` lands the whole stack
-by default, each draft as its own landed changeset in order. `--squash` lands
-it as one.
+by default, each draft as its own landed changeset in order. `land --squash` isn't built yet:
+squash the stack with the Stack operation, then land its head as one changeset.
 
 ### 8.6 Orphans and collection
 

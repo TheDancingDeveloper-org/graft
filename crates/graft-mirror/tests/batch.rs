@@ -368,6 +368,20 @@ impl World {
         n: i64,
         email: &str,
     ) -> ChangesetId {
+        self.land_as("Tess", files, message, n, email, None).await
+    }
+
+    /// A land whose author name is `principal` and whose email may be empty.
+    /// `extra` is `(model, coauthors)` when the land records them.
+    async fn land_as(
+        &self,
+        principal: &str,
+        files: &[(&str, &str)],
+        message: &str,
+        n: i64,
+        email: &str,
+        extra: Option<(&str, &str)>,
+    ) -> ChangesetId {
         let tip = self.tip(LINE).await;
         let mut changes = Vec::new();
         let mut inline = Vec::new();
@@ -382,6 +396,14 @@ impl World {
         let mut metadata = Metadata::new();
         metadata.insert("vogt.session".to_owned(), format!("ses_{n}"));
         metadata.insert("vogt.work_item".to_owned(), format!("WI-{n}"));
+        if let Some((model, coauthors)) = extra {
+            if !model.is_empty() {
+                metadata.insert("vogt.model".to_owned(), model.to_owned());
+            }
+            if !coauthors.is_empty() {
+                metadata.insert("vogt.coauthors".to_owned(), coauthors.to_owned());
+            }
+        }
         let id = self
             .api
             .create_changeset(
@@ -391,7 +413,7 @@ impl World {
                     parents: tip.into_iter().collect(),
                     changes,
                     author: Author {
-                        name: "Tess".to_owned(),
+                        name: principal.to_owned(),
                         email: email.to_owned(),
                         kind: AuthorKind::Agent,
                     },
@@ -1414,6 +1436,74 @@ async fn a_batch_of_three_lands_is_three_commits_and_a_rebase_merge_maps_back() 
         assert_ne!(c.merged, Some(c.sha), "a rebase-merge makes new commits");
     }
     assert_eq!([mapped[0].land, mapped[1].land, mapped[2].land], [a, b, c]);
+}
+
+#[tokio::test]
+async fn two_principals_export_as_mapped_authors_with_trailers() {
+    let w = World::new().await;
+    w.start().await;
+    w.land_as(
+        "ada",
+        &[("a.txt", "a1\n")],
+        "add a",
+        1,
+        "",
+        Some(("gpt-test", "Lin <lin@example.com>")),
+    )
+    .await;
+    w.land_as("grace", &[("b.txt", "b1\n")], "add b", 2, "", None)
+        .await;
+    let rec = opened(
+        w.batcher_with(&w.db, |c| {
+            c.authors = [
+                (
+                    "ada".to_owned(),
+                    graft_mirror::batch::AuthorIdentity {
+                        name: "Ada Lovelace".to_owned(),
+                        email: "ada@example.com".to_owned(),
+                    },
+                ),
+                (
+                    "grace".to_owned(),
+                    graft_mirror::batch::AuthorIdentity {
+                        name: "Grace Hopper".to_owned(),
+                        email: "grace@example.com".to_owned(),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect();
+        })
+        .run()
+        .await
+        .unwrap()
+        .outcome,
+    );
+    let commits = w.db.batch_commits(rec.number).unwrap();
+    assert_eq!(commits.len(), 2);
+    let who = |sha: &graft_git::GitSha| {
+        git(
+            &w.upstream,
+            &["log", "-1", "--format=%an <%ae>", &sha.to_hex()],
+        )
+    };
+    let body =
+        |sha: &graft_git::GitSha| git(&w.upstream, &["log", "-1", "--format=%B", &sha.to_hex()]);
+    assert_eq!(who(&commits[0].sha), "Ada Lovelace <ada@example.com>");
+    assert_eq!(who(&commits[1].sha), "Grace Hopper <grace@example.com>");
+    let first = body(&commits[0].sha);
+    assert!(first.contains("Graft-Session: ses_1"), "{first}");
+    assert!(first.contains("Graft-Work-Item: WI-1"), "{first}");
+    assert!(first.contains("Graft-Model: gpt-test"), "{first}");
+    assert!(
+        first.contains("Co-authored-by: Lin <lin@example.com>"),
+        "{first}"
+    );
+    let second = body(&commits[1].sha);
+    assert!(second.contains("Graft-Session: ses_2"), "{second}");
+    assert!(second.contains("Graft-Work-Item: WI-2"), "{second}");
+    assert!(!second.contains("Graft-Model:"), "{second}");
+    assert!(!second.contains("Co-authored-by:"), "{second}");
 }
 
 #[tokio::test]

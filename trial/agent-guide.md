@@ -57,7 +57,9 @@ g() { graft --token-file "$HOME/.config/graft/trial-N.token" "$@"; }   # N from 
    `g stack` lists the drafts; `g stack squash` makes them one.
 5. **Sync** to pick up what others landed: `g sync`. Exit 0 means you are on
    the line tip (your stack is rebased). Exit 3 means conflicts, see below.
-6. **Land**: `g land` (add `--squash` to land the stack as one changeset).
+6. **Land**: `g land`. To land a stack as one changeset, run `g stack squash`
+   and then `g land`. `land --squash` isn't built yet: it exits 5 with
+   `not built yet` and lands nothing.
    Landing is immediate: there is no attestation to wait for. `g land` first
    runs the pre-land check (D27): a dry-run rebase that stops the land on a
    real conflict before anything is sent; `--no-check` skips it. Exit 0
@@ -92,7 +94,7 @@ conflicts written into the files:
 | 0 | landed (`landed <id> on $LINE`) | done |
 | 3 | conflict, or `dirty` | resolve as above, then commit and land |
 | 4 | contended (another land won the race) | run `g land` again; `--wait 120` retries longer |
-| 5 | rejected by the line policy | not expected: `$LINE` is `direct`. Report blocked with the message. Do not attest checks yourself |
+| 5 | rejected by the line policy | if the message says `not built yet`, use the documented alternative (for a squash: `g stack squash` then `g land`). Otherwise not expected: `$LINE` is `direct`. Report blocked with the message. Do not attest checks yourself |
 | 6 | not authorized (token expired or missing scope) | stop and report blocked |
 | 7 | unavailable / transport error | retry `g land` (it is idempotent); after 3 tries report blocked |
 | 1, 2 | other failure / usage error | read the message; fix the command or report blocked |

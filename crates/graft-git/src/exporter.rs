@@ -36,6 +36,14 @@ pub const SESSION_KEY: &str = "vogt.session";
 /// Metadata key for the work item a changeset belongs to. Exported as a
 /// `Vogt-Work-Item` trailer.
 pub const WORK_ITEM_KEY: &str = "vogt.work_item";
+/// Metadata key for the model that wrote a changeset. Batch export writes
+/// it as a `Graft-Model` trailer. Native git export does not: that commit
+/// encoding is frozen by golden vectors.
+pub const MODEL_KEY: &str = "vogt.model";
+/// Metadata key for extra co-authors, one `Name <email>` per line. Batch
+/// export writes each as `Co-authored-by`. Not a `graft.` key: those are
+/// reserved for the server.
+pub const COAUTHORS_KEY: &str = "vogt.coauthors";
 /// Metadata key a merge landing carries: `<src>@<changeset>`, the line and
 /// changeset it merged (D29). Exported as a `Graft-Merged-From` trailer on
 /// a one-parent commit; graft makes no git merge commits.

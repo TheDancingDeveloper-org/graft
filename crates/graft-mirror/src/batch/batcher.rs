@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use graft_git::GitSha;
 use graft_git::export::commit_object;
-use graft_git::exporter::{Exporter, MERGED_FROM_KEY, SESSION_KEY, WORK_ITEM_KEY};
+use graft_git::exporter::{
+    COAUTHORS_KEY, Exporter, MERGED_FROM_KEY, MODEL_KEY, SESSION_KEY, WORK_ITEM_KEY,
+};
 use graft_git::map::{ImportedCommit, MirrorMap};
 use graft_model::{Author, AuthorKind, Change, ChangesetId, Metadata, Timestamp};
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
@@ -649,7 +651,7 @@ where
                     .get(REVERTS_KEY)
                     .and_then(|r| ChangesetId::parse(r).ok()),
                 parent: cs.first_parent(),
-                ident: land_ident(&cs.author, &self.config.committer),
+                ident: land_ident(&cs.author, &self.config.authors, &self.config.committer),
                 authored: cs.authored_at,
                 message: clean_message(&cs.message, MESSAGE_CHARS, true),
                 trailer_session: cs
@@ -660,6 +662,11 @@ where
                     .metadata
                     .get(WORK_ITEM_KEY)
                     .map(|v| clean_message(v, FIELD_CHARS, false)),
+                trailer_model: cs
+                    .metadata
+                    .get(MODEL_KEY)
+                    .map(|v| clean_message(v, FIELD_CHARS, false)),
+                trailer_coauthors: coauthor_lines(&cs.metadata),
                 trailer_merged_from: cs
                     .metadata
                     .get(MERGED_FROM_KEY)
@@ -1648,4 +1655,20 @@ where
         self.db.put_batch(rec)?;
         Ok(())
     }
+}
+
+/// `Co-authored-by` values on a land: `graft.coauthors`, one identity per
+/// line. Lines that cannot be a trailer are dropped, never rewritten into
+/// the commit.
+fn coauthor_lines(metadata: &Metadata) -> Vec<String> {
+    let Some(raw) = metadata.get(COAUTHORS_KEY) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.contains('\n') && !l.contains('\0'))
+        .take(8)
+        .map(|l| clean_message(l, FIELD_CHARS, false))
+        .filter(|l| !l.is_empty())
+        .collect()
 }

@@ -3,9 +3,11 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::JoinHandle;
 
 use assert_cmd::Command as AssertCommand;
 
@@ -29,6 +31,8 @@ fn server_bin() -> PathBuf {
 struct Running {
     child: Child,
     stdout: BufReader<ChildStdout>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    stderr_reader: Option<JoinHandle<()>>,
 }
 
 impl Running {
@@ -36,21 +40,47 @@ impl Running {
         let mut child = Command::new(program)
             .args(args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("start graft role");
         let stdout = BufReader::new(child.stdout.take().expect("role stdout"));
-        Self { child, stdout }
+        let mut pipe = child.stderr.take().expect("role stderr");
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&stderr);
+        let stderr_reader = Some(std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend_from_slice(&chunk[..n]);
+            }
+        }));
+        Self {
+            child,
+            stdout,
+            stderr,
+            stderr_reader,
+        }
     }
 
     fn wait_for_line(&mut self, prefix: &str) -> String {
         let mut line = String::new();
         loop {
             line.clear();
-            assert!(
-                self.stdout.read_line(&mut line).expect("read role stdout") > 0,
-                "role exited before printing {prefix:?}"
-            );
+            if self.stdout.read_line(&mut line).expect("read role stdout") == 0 {
+                let _ = self.child.wait();
+                if let Some(reader) = self.stderr_reader.take() {
+                    let _ = reader.join();
+                }
+                let stderr = String::from_utf8_lossy(
+                    &self.stderr.lock().unwrap_or_else(PoisonError::into_inner),
+                )
+                .into_owned();
+                panic!("role exited before printing {prefix:?}; stderr:\n{stderr}");
+            }
             if let Some(value) = line.trim().strip_prefix(prefix) {
                 return value
                     .trim_matches(|c: char| c == '"' || c == '\'')
@@ -75,13 +105,6 @@ impl Drop for Running {
             .status();
         let _ = self.child.wait();
     }
-}
-
-fn free_addr() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve port")
-        .local_addr()
-        .expect("reserved address")
 }
 
 fn metrics(addr: SocketAddr) -> String {
@@ -145,12 +168,10 @@ fn init_git_repo(path: &Path) {
 #[test]
 fn one_binary_starts_every_role() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let listen = free_addr();
-    let metrics_addr = free_addr();
     std::fs::write(
         dir.path().join("server.toml"),
         format!(
-            "listen = \"{listen}\"\nmetrics = \"{metrics_addr}\"\nobjects_dir = {:?}\nmeta_db = {:?}\njson_logs = false\nmin_free_fraction = 0.0\nshutdown_grace_s = 1\n",
+            "listen = \"127.0.0.1:0\"\nmetrics = \"127.0.0.1:0\"\nobjects_dir = {:?}\nmeta_db = {:?}\njson_logs = false\nmin_free_fraction = 0.0\nshutdown_grace_s = 1\n",
             dir.path().join("objects"),
             dir.path().join("meta/meta.db"),
         ),
@@ -181,11 +202,8 @@ fn one_binary_starts_every_role() {
 
     let unified_metrics = {
         let mut server = Running::start(bin(), &["serve", "--config", config_str]);
-        assert_eq!(server.wait_for_addr("graft-server listening on "), listen);
-        assert_eq!(
-            server.wait_for_addr("graft-server metrics on "),
-            metrics_addr
-        );
+        let listen = server.wait_for_addr("graft-server listening on ");
+        let metrics_addr = server.wait_for_addr("graft-server metrics on ");
         let fresh_metrics = metrics(metrics_addr);
 
         let git_repo = dir.path().join("fixture");
@@ -215,12 +233,8 @@ fn one_binary_starts_every_role() {
             server_bin.display()
         );
         let mut server = Running::start(&server_bin, &["--config", config_str, "serve"]);
-        assert_eq!(server.wait_for_addr("graft-server listening on "), listen);
-        assert_eq!(
-            server.wait_for_addr("graft-server metrics on "),
-            metrics_addr
-        );
-        metrics(metrics_addr)
+        server.wait_for_addr("graft-server listening on ");
+        metrics(server.wait_for_addr("graft-server metrics on "))
     };
     assert_eq!(
         metric_names(&unified_metrics),
@@ -230,7 +244,7 @@ fn one_binary_starts_every_role() {
     std::fs::write(
         dir.path().join("node.toml"),
         format!(
-            "socket = {:?}\ncache_dir = {:?}\nupstream = \"http://127.0.0.1:9\"\nserver_public_key = \"0000000000000000000000000000000000000000000000000000000000000000\"\njson_logs = false\nmin_free_bytes = 0\nshutdown_grace_s = 1\n",
+            "socket = {:?}\ncache_dir = {:?}\nupstream = \"http://127.0.0.1:9\"\nserver_public_key = \"0000000000000000000000000000000000000000000000000000000000000000\"\nmetrics = \"127.0.0.1:0\"\njson_logs = false\nmin_free_bytes = 0\nshutdown_grace_s = 1\n",
             dir.path().join("node.sock"),
             dir.path().join("cache"),
         ),
@@ -249,4 +263,6 @@ fn one_binary_starts_every_role() {
         Path::new(&socket).exists(),
         "node socket was not created at {socket}"
     );
+    let node_metrics = metrics(node.wait_for_addr("graft-node metrics on "));
+    assert!(!metric_names(&node_metrics).is_empty(), "{node_metrics}");
 }

@@ -49,6 +49,7 @@ git command above.
 `graft init` creates a repository the CLI opens in-process: no server, no
 daemon, no token. A second working copy is `graft clone` of the first.
 
+<!-- docs-smoke: local -->
 ```sh
 graft init demo && cd demo
 printf 'one\n' > file.txt
@@ -59,6 +60,7 @@ printf 'one\ntwo\n' > file.txt
 graft commit -m "add a line"
 graft land                       # moves the line by compare-and-swap
 ```
+<!-- /docs-smoke: local -->
 
 From the second copy, edit a different region of `file.txt`, commit and
 land. Line merge (merge3) keeps both edits. A second land of an overlapping
@@ -79,6 +81,7 @@ graft serve --dev
 In another terminal, clone with the printed command, then commit and land.
 The working copy uses the named server `dev`, so no token is an argument.
 
+<!-- docs-smoke: server -->
 ```sh
 graft clone graft://127.0.0.1:PORT/dev
 cd dev
@@ -87,6 +90,7 @@ graft commit -m "hello"
 graft sync
 graft land
 ```
+<!-- /docs-smoke: server -->
 
 `graft login NAME` stores a server you already run: the token is read from
 stdin or `--token-file`, never taken as an argument. A longer stack is
