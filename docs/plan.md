@@ -32,7 +32,7 @@ and clone speed, history integrity.
 
 ### Phase 1 backlog
 
-The Vogt review WI-2297 holds this list; Vogt is the source of truth for its
+The review WI-2297 holds this list; the work tracker is the source of truth for its
 state. Delivered on 2026-10-23 (#82 through #111), all done:
 
 - WI-2296 `graft land` line-merges by default (#83, #84).
@@ -153,8 +153,8 @@ Each item is sized for **one worker session** and states:
 - **Accept:** the acceptance criteria, which are the review checklist;
 - **Test:** the test strategy.
 
-Items are numbered `G<phase>.<n>`, and each becomes one Vogt work item and one
-branch (`g<phase>-<n>-<slug>`).
+Items are numbered `G<phase>.<n>`, and each becomes one work item and one
+branch (`g<phase>-<n>-<slug>`). Session and work-item identity on a changeset use `GRAFT_SESSION_ID` / `GRAFT_WORK_ITEM`, the `agent.session` / `agent.work_item` / `agent.model` / `agent.coauthors` keys, and the `Graft-Work-Item` trailer; the older names are still read as aliases.
 
 ### Crate ownership and parallelism
 
@@ -573,7 +573,7 @@ session instead of as a DIRTY PR or a queue ejection hours later.
 **Goal:** agents commit drafts in graft and land them through GitHub. `graft
 land` exports the stack as a PR into the existing merge queue, and the merged
 commit returns through follow and marks the drafts landed. A node daemon runs
-on Node B. Sessions hold leased workspaces tied to their Vogt session. Review,
+on Node B. Sessions hold leased workspaces tied to their session. Review,
 CI and the merge queue do not change.
 
 ### Wave 2.A
@@ -627,10 +627,10 @@ CI and the merge queue do not change.
 - Crates: `graft-server`, `graft-auth`
 - Needs: G2.1
 - Deliver: wire the workspace RPCs and the streaming `Watch`; `MintToken` for
-  a Vogt service principal (scoped and with a TTL); the `jti` denylist store;
+  an orchestrator service principal (scoped and with a TTL); the `jti` denylist store;
   node token passthrough; audit fields (`session`, `work_item`) on every
   span.
-- Accept: a Vogt-scoped token mints a session token no broader than its own
+- Accept: a service-principal-scoped token mints a session token no broader than its own
   scope (tested). `Watch` resumes from an LSN with no gaps or duplicates after
   a server restart. A revoked `jti` is refused on writes.
 - Test: process-level integration tests through the testkit server.
@@ -686,16 +686,16 @@ CI and the merge queue do not change.
   against the fakes.
 - Test: an end-to-end test over the testkit server plus a fake mirror.
 
-**G2.9 GC reporting and the Vogt integration.**
-- Crates: `graft-gc`; the Vogt repository (a separate PR there)
+**G2.9 GC reporting and the orchestrator integration.**
+- Crates: `graft-gc`; the orchestrator (a separate PR there)
 - Needs: G2.1, G2.4
 - Deliver: `Gc { dry_run: true }`, which reports what would be collected (no
-  deletes yet). On the Vogt side: mint a graft token at session start, renew
+  deletes yet). On the orchestrator side: mint a graft token at session start, renew
   the workspace lease while the session lives, close it when the session
   stops, and link landed changesets to work items through the journal.
-- Accept: the dry-run report matches a brute-force computation. A Vogt
+- Accept: the dry-run report matches a brute-force computation. A
   session that stops leaves its workspace closed within one minute.
-- Test: model tests; a Vogt-side integration test against a testkit server.
+- Test: model tests; an orchestrator-side integration test against a testkit server.
 
 ### Phase 2 exit
 
@@ -903,7 +903,7 @@ Each becomes items in waves of three when phase 3 exits.
 | Symbol index (derived `symbols`) for LSP and MCP | `graft-index`, `graft-lsp`, `graft-mcp` | Workspace symbols across the whole repository from a sparse checkout |
 | Filesystem watcher for status | `graft-client` | Status in O(changed files) on a 100,000-file synthetic tree |
 | Postgres `MetaStore` (if D3 says so) | `graft-store-postgres` | Passes conformance and the crash suite; two server replicas land concurrently |
-| Second repository (for example vogt) | operations | Phase 1 to 3 criteria, compressed |
+| Second repository (for example another product repo) | operations | Phase 1 to 3 criteria, compressed |
 | Weekly export drill | `graft-mirror`, ops | An automated full export compared with GitHub, with a report |
 | Path read restrictions | `graft-engine`, `graft-auth` | Restricted paths are absent from path-addressed reads for a principal without the scope |
 
@@ -944,7 +944,7 @@ publish decisions (D1, D2).
 | G2.6 | 2.B | graft-mirror |
 | G2.7 | 2.C | graft-engine |
 | G2.8 | 2.C | graft-mcp |
-| G2.9 | 2.C | graft-gc, vogt |
+| G2.9 | 2.C | graft-gc, orchestrator |
 | G3.1 | 3.A | graft-engine |
 | G3.3 | 3.A | graft-mirror |
 | G3.4 | 3.B | graft-model |
