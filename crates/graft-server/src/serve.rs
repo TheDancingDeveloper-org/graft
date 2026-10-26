@@ -156,6 +156,16 @@ async fn run(
         )
         .with_gc(gc_settings(&config, Arc::new(TokioPace))),
     );
+    if !config.webhooks.is_empty() {
+        // Delivery is its own task. It reads the journal after a land has
+        // committed, so a slow or dead receiver cannot hold a land or a Watch.
+        tokio::spawn(crate::webhooks::deliver_forever(
+            engine.clone(),
+            telemetry.clone(),
+            config.webhooks.clone(),
+            signal_rx.clone(),
+        ));
+    }
     if config.gc.enabled {
         tokio::spawn(gc_forever(
             engine.clone(),

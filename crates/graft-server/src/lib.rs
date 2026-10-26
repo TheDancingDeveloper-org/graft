@@ -25,6 +25,7 @@ mod mcp;
 mod mint;
 mod serve;
 mod watch;
+mod webhooks;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
