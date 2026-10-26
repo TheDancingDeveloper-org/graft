@@ -518,13 +518,13 @@ pub struct Attester<A> {
     lines: HashMap<String, String>,
     /// Failed line lookups for one entry, counted by its LSN.
     lookup_tries: HashMap<u64, u32>,
-    /// Entries whose line lookup failed [`LOOKUP_TRIES`] times. They stay
-    /// unprocessed (the saved position never passes them) and are not asked
-    /// about again until a restart.
+    /// Entries whose line lookup failed [`LOOKUP_TRIES`] times. They are
+    /// recorded as failed and the cursor moves past them; a restart asks
+    /// again, so they are not remembered on disk.
     deferred: HashMap<u64, ()>,
     /// Drafts already queued or checked. A failed lookup keeps the cursor
     /// on that entry, so the same page is read again; these are not queued
-    /// a second time.
+    /// a second time. Entries below the saved cursor are dropped.
     seen: HashMap<u64, ()>,
 }
 
@@ -556,6 +556,12 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
     /// The configuration.
     pub fn config(&self) -> &Config {
         &self.cfg
+    }
+
+    /// How many drafts may wait. Tests shrink this to fill the queue.
+    pub fn set_queue_cap(&mut self, cap: usize) {
+        self.queue = Queue::new(cap);
+        self.cfg.queue_cap = cap;
     }
 
     /// Forgets every workspace's line, so the next draft asks the server.
@@ -656,34 +662,41 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
                             failed = Some(e);
                             continue;
                         }
-                        // Past the bound: leave it unprocessed (the saved
-                        // position stays here) and keep going, so one entry
-                        // that never resolves does not hold the page.
+                        // Past the bound: record the failure and move
+                        // past it. A given-up entry is handled, so one that
+                        // never resolves does not pin the cursor.
                         log(&format!(
-                            "line lookup for lsn {} failed {LOOKUP_TRIES} times; leaving it and continuing",
+                            "line lookup for lsn {} failed {LOOKUP_TRIES} times; recorded as failed",
                             entry.lsn
                         ));
                         self.deferred.insert(entry.lsn, ());
-                        resume = resume.min(entry.lsn);
-                        blocked = true;
                         continue;
                     }
                 }
                 if !self.queue.push(p) {
                     // Full: read this entry again once there is room.
                     // Nothing after it is taken, so the page stays ordered.
-                    resume = entry.lsn;
+                    // An earlier failure on this page already holds a
+                    // smaller position; don't move the cursor past it.
+                    resume = resume.min(entry.lsn);
                     blocked = true;
                     break;
                 }
                 queued += 1;
-                self.seen.insert(entry.lsn, ());
+                // Only entries the saved cursor has passed are remembered.
+                // One queued while an earlier entry is still deferred is
+                // read again, and must be queued again then.
+                if !blocked {
+                    self.seen.insert(entry.lsn, ());
+                }
             }
             self.next_lsn = if blocked {
                 resume
             } else {
                 page.next_lsn.max(self.next_lsn)
             };
+            // The cursor will not return below here.
+            self.seen.retain(|lsn, _| *lsn >= self.next_lsn);
             if let Some(e) = failed {
                 self.save()?;
                 return Err(Error::Api(e));
