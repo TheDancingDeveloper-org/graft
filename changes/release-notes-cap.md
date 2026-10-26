@@ -1,0 +1,1 @@
+- Release notes over 100,000 bytes are cut at a section boundary and link to CHANGELOG.md, so `gh release create` stays under GitHub's body limit.
