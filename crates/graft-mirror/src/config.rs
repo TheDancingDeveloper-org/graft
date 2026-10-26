@@ -28,8 +28,10 @@ use graft_git::GitSha;
 use serde::Deserialize;
 
 use crate::MirrorError;
+use crate::credentials::StaticToken;
 use crate::export::ExportConfig;
 use crate::follow::{FollowConfig, FollowLine, POLL_INTERVAL};
+use crate::git::Mirror;
 
 /// The parsed file.
 #[derive(Clone, Debug, Deserialize)]
@@ -318,6 +320,26 @@ impl FileConfig {
                 )
             })
             .collect()
+    }
+
+    /// The local mirror of upstream. With `[github] token_file` set, that
+    /// token goes with every git network command the mirror runs (follow's
+    /// polls, export, pr-batch), so each works however it is launched
+    /// (WI-2571). A token file that cannot be read or is empty logs one
+    /// warning and the mirror reaches upstream without a credential.
+    pub fn mirror(&self) -> Mirror {
+        let credential = self
+            .github
+            .as_ref()
+            .and_then(|gh| gh.token_file.as_deref())
+            .and_then(|path| match StaticToken::load(path) {
+                Ok(token) => Some(token.into_secret()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "git reaches upstream without a credential");
+                    None
+                }
+            });
+        Mirror::new(&self.mirror_dir, &self.upstream).with_credential(credential)
     }
 
     /// The export settings.
