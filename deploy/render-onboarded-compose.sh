@@ -21,9 +21,7 @@ tmp=$output.new
     env_name=$(printf '%s' "$env_name" | tr '[:lower:]-' '[:upper:]_')
     suffix=${service#graft-mirror-}
     private=${private:-0}
-    if [[ $private == 1 ]]; then
-      github_volume=$(cat <<VOL
-      - ./private-follow.sh:/etc/graft/deploy/private-follow.sh:ro
+    github_volume=$(cat <<VOL
       - type: bind
         source: \${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
         target: /run/secrets/github-token
@@ -32,13 +30,18 @@ tmp=$output.new
           create_host_path: false
 VOL
 )
+    if [[ $private == 1 ]]; then
+      private_volume=$(cat <<VOL
+      - ./private-follow.sh:/etc/graft/deploy/private-follow.sh:ro
+VOL
+)
       command_yaml=$(cat <<'CMD'
     entrypoint: ["/bin/bash", "/etc/graft/deploy/private-follow.sh"]
     command: []
 CMD
 )
     else
-      github_volume=
+      private_volume=
       command_yaml='    command: ["graft-mirror", "follow", "--config", "/etc/graft/deploy/mirror.toml"]'
     fi
     cat <<YAML
@@ -66,13 +69,14 @@ ${command_yaml}
     ports:
       - "\${GRAFT_BIND_IP:-127.0.0.1}:\${GRAFT_MIRROR_${env_name}_METRICS_PORT:-$port}:9465"
     volumes:
-      - ./$config:/etc/graft/deploy/mirror.toml:ro
+      - \${GRAFT_MIRROR_CONFIG_DIR:-.}/$config:/etc/graft/deploy/mirror.toml:ro
       - type: bind
         source: \${GRAFT_SECRETS_DIR:-/etc/graft}/$token
         target: /run/secrets/graft-mirror-token
         read_only: true
         bind:
           create_host_path: false
+${private_volume}
 ${github_volume}
       - graft-dev-mirror-$suffix:/var/lib/graft/mirror
     healthcheck:

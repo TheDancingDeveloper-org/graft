@@ -110,10 +110,16 @@ services:
     ports:
       - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_METRICS_PORT:-17890}:9465"
     volumes:
-      - ./mirror.toml:/etc/graft/deploy/mirror.toml:ro
+      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror.toml:/etc/graft/deploy/mirror.toml:ro
       - type: bind
         source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token
         target: /run/secrets/graft-mirror-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
         read_only: true
         bind:
           create_host_path: false
@@ -148,10 +154,16 @@ services:
     ports:
       - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_FLUENT2_METRICS_PORT:-17891}:9465"
     volumes:
-      - ./mirror-fluent2.toml:/etc/graft/deploy/mirror.toml:ro
+      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-fluent2.toml:/etc/graft/deploy/mirror.toml:ro
       - type: bind
         source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-fluent2
         target: /run/secrets/graft-mirror-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
         read_only: true
         bind:
           create_host_path: false
@@ -174,10 +186,16 @@ services:
     ports:
       - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_VOGT_METRICS_PORT:-17892}:9465"
     volumes:
-      - ./mirror-vogt.toml:/etc/graft/deploy/mirror.toml:ro
+      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-vogt.toml:/etc/graft/deploy/mirror.toml:ro
       - type: bind
         source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-vogt
         target: /run/secrets/graft-mirror-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
         read_only: true
         bind:
           create_host_path: false

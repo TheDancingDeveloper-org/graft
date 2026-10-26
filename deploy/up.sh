@@ -6,7 +6,12 @@
 #   1. Bootstrap secrets under /etc/graft, if missing: the server signing key,
 #      and (after the server is up) the mirror's service token. Both are
 #      written by a throwaway root container from the pinned image, mode 0600,
-#      owned by uid 10001. Neither is ever printed.
+#      owned by uid 10001. Neither is ever printed. github-token, placed on the
+#      VM at /etc/graft/github-token, is set to the same owner and mode by
+#      that root container (the runner never reads it). A missing or empty
+#      file is one warning; the deploy continues and every mirror starts
+#      without [github]. The mounted mirror configs are written by the root
+#      container to $GRAFT_SECRETS_DIR/mirror-configs.
 #   2. Pull the pinned image and pre-flight: check deploy/server.toml and
 #      every deploy/mirror*.toml with that image's own binaries. A config the image
 #      can't parse stops the deploy here, with the running stack untouched
@@ -31,6 +36,9 @@
 # Non-secret host settings (GRAFT_BIND_IP, ports) may go in
 # /etc/graft/deploy.env. Environment overrides:
 #   GRAFT_SECRETS_DIR       secrets directory (default /etc/graft)
+#   GRAFT_MIRROR_CONFIG_DIR directory of the mirror configs compose mounts
+#                           (set by this script to $GRAFT_SECRETS_DIR/mirror-configs;
+#                           compose without up.sh defaults to deploy/)
 #   GRAFT_REMINT=1          mint a new mirror token even if the current one is fresh
 #   GRAFT_TOKEN_RENEW_DAYS  re-mint a token older than this (default 20; TTL is 30)
 #   GRAFT_REFS_WAIT         seconds each followed repo waits for its first ref
@@ -120,9 +128,11 @@ compose() {
 
 # Run a shell snippet as root in a throwaway container from the pinned image,
 # with the secrets directory at /s. stdin is passed through. No network.
+# as_root_mounts adds extra docker mounts for one call.
+as_root_mounts=()
 as_root() {
   docker run --rm -i --user 0:0 --network none --entrypoint sh \
-    -v "$secrets:/s" "$GRAFT_IMAGE" -c "$1"
+    -v "$secrets:/s" "${as_root_mounts[@]}" "$GRAFT_IMAGE" -c "$1"
 }
 
 # Write stdin to /s/$1 atomically: 0600, owned by $2 (default 10001:10001),
@@ -138,6 +148,101 @@ store_secret() {
 }
 
 command -v curl >/dev/null || die "curl is required"
+
+# GitHub credential for every mirror's [github] token_file (WI-2487).
+# Placed once on the VM, outside this deploy, at /etc/graft/github-token
+# (root-owned, 0600). Every step that touches it runs through as_root, so the
+# runner user never reads it. It ends up at $secrets/github-token, mode 0600,
+# owned by 10001:10001 like the other secrets, so the mirrors (uid 10001) can
+# read it. The value is never printed or placed in argv or compose env.
+#
+# A missing or empty file does not fail the deploy: the secret is an empty
+# 0600 file (the mount still resolves), the mounted configs omit [github]
+# (graft-mirror treats it as optional) and private-follow.sh starts the
+# private mirrors without credentials (their polls fail and retry until the
+# file is placed). pr-batch says "configure [github]" until then.
+github_ready=0
+install_github_token() {
+  local src=${1:-/etc/graft/github-token} rc=0 in=/s/github-token
+  github_ready=0
+  # The source is mounted only when it is not the secret itself. A path
+  # test only stats it; the runner never opens the file.
+  as_root_mounts=()
+  if [ "$src" != "$secrets/github-token" ] && ! [ "$src" -ef "$secrets/github-token" ]; then
+    in=/missing
+    if [ -e "$src" ]; then
+      in=/src/github-token
+      as_root_mounts=(--mount "type=bind,source=$src,target=$in,readonly")
+    fi
+  fi
+  as_root "set -e
+    umask 077
+    src=$in
+    if [ -s \"\$src\" ] && [ -n \"\$(tr -d ' \t\r\n' < \"\$src\")\" ]; then
+      cp \"\$src\" /s/.github-token.tmp
+      ok=0
+    else
+      : > /s/.github-token.tmp
+      ok=3
+    fi
+    chown 10001:10001 /s/.github-token.tmp
+    chmod 0600 /s/.github-token.tmp
+    mv /s/.github-token.tmp /s/github-token
+    exit \$ok" || rc=$?
+  as_root_mounts=()
+  case $rc in
+    0)
+      github_ready=1
+      log "github-token installed at $secrets/github-token (mode 0600, uid 10001, not printed)"
+      ;;
+    3) log "warning: $src is missing or empty; mirrors start without [github], private mirrors cannot fetch, and pr-batch cannot open pull requests until that file is placed" ;;
+    *) die "installing github-token failed (exit $rc)" ;;
+  esac
+}
+
+# Drop a trailing [github] table. [[lines]] stays.
+strip_github_table() {
+  awk '
+    /^\[github\]/ { skip=1; next }
+    /^\[/ { skip=0 }
+    !skip { print }
+  '
+}
+
+# The mirror configs compose mounts, staged like record_last_good: built in
+# a runner temp dir (removed on exit), then written by as_root into
+# $secrets/mirror-configs (0755, files 0644) with an atomic swap. With a
+# token they are the checkout copies; without one they omit [github].
+mounted_configs=mirror-configs
+stage=
+cleanup_stage() { [ -z "$stage" ] || rm -rf -- "$stage"; }
+trap cleanup_stage EXIT
+prepare_mounted_configs() {
+  local cfg
+  stage=$(mktemp -d)
+  for cfg in "${mirror_configs[@]}"; do
+    if [ "$github_ready" = 1 ]; then
+      cp -- "$here/$cfg" "$stage/$cfg"
+    else
+      strip_github_table <"$here/$cfg" >"$stage/$cfg"
+    fi
+  done
+  tar -C "$stage" -cf - "${mirror_configs[@]}" | install_mounted_configs
+  export GRAFT_MIRROR_CONFIG_DIR=$secrets/$mounted_configs
+}
+# Replace $secrets/mirror-configs with the tar on stdin.
+install_mounted_configs() {
+  as_root "set -e
+    rm -rf /s/.$mounted_configs.tmp
+    mkdir -m 0755 /s/.$mounted_configs.tmp
+    tar -C /s/.$mounted_configs.tmp -xf -
+    chmod 0644 /s/.$mounted_configs.tmp/*
+    rm -rf /s/$mounted_configs
+    mv /s/.$mounted_configs.tmp /s/$mounted_configs"
+}
+
+install_github_token /etc/graft/github-token
+prepare_mounted_configs
 
 log "pulling $GRAFT_IMAGE"
 # The attester (profile `attester`) is built here, not pulled.
@@ -166,9 +271,9 @@ check_server_config() {
 # then reads the token file. With no token mounted, reaching that read means
 # the config passed.
 check_mirror_config() {
-  local cfg=$1 out rc=0
+  local cfg=$1 out rc=0 dir=${GRAFT_MIRROR_CONFIG_DIR:-$here}
   out=$(timeout 60 docker run --rm --network none --user 10001:10001 \
-    --entrypoint graft-mirror -v "$here/$cfg:/c/mirror.toml:ro" \
+    --entrypoint graft-mirror -v "$dir/$cfg:/c/mirror.toml:ro" \
     "$GRAFT_IMAGE" follow --config /c/mirror.toml 2>&1) || rc=$?
   if ! printf '%s' "$out" | grep -q 'reading the token file'; then
     printf '%s\n' "$out" | tail -n 5 >&2
@@ -183,7 +288,8 @@ for cfg in "${mirror_configs[@]}"; do
 done
 
 # The last good deploy: image.env, server.toml and the mirror configs as they were
-# when the stack last came up healthy. Kept under the secrets directory
+# when the stack last came up healthy. The mirror configs recorded are the
+# mounted copies (from the stage), not the checkout's. Kept under the secrets directory
 # (root-owned, written like the secrets) so it survives a fresh checkout.
 # They hold no secrets. A record made before a mirror config existed lacks
 # that file; a rollback then leaves the checkout's copy in place.
@@ -193,7 +299,7 @@ have_last_good() {
 }
 
 record_last_good() {
-  tar -C "$here" -cf - image.env server.toml "${mirror_configs[@]}" \
+  tar -C "$here" -cf - image.env server.toml -C "$stage" "${mirror_configs[@]}" \
     | as_root "set -e
       rm -rf /s/.$last_good.tmp
       mkdir -m 0755 /s/.$last_good.tmp
@@ -205,7 +311,7 @@ record_last_good() {
 
 # GRAFT_CONFIG_HASH: a change to any config recreates the containers.
 config_hash() {
-  GRAFT_CONFIG_HASH=$( (cd "$here" && cat server.toml "${mirror_configs[@]}") | sha256sum | cut -c1-16)
+  GRAFT_CONFIG_HASH=$( (cat "$here/server.toml" && cd "$stage" && cat "${mirror_configs[@]}") | sha256sum | cut -c1-16)
   export GRAFT_CONFIG_HASH
 }
 
@@ -228,11 +334,19 @@ rollback() {
   fi
   log "rolling back to the last good image pin and configs"
   local f
-  for f in image.env server.toml "${mirror_configs[@]}"; do
+  for f in image.env server.toml; do
     as_root "test -s /s/$last_good/$f" || continue
     as_root "cat /s/$last_good/$f" > "$here/.$f.tmp"
     mv "$here/.$f.tmp" "$here/$f"
   done
+  # The mounted mirror configs: the stage becomes what was mounted at the
+  # last good deploy, then is installed as the mounted set. A config the
+  # record lacks keeps its current mounted copy.
+  for f in "${mirror_configs[@]}"; do
+    as_root "test -s /s/$last_good/$f" || continue
+    as_root "cat /s/$last_good/$f" > "$stage/$f"
+  done
+  tar -C "$stage" -cf - "${mirror_configs[@]}" | install_mounted_configs
   set -a
   # shellcheck source=/dev/null
   . "$here/image.env"

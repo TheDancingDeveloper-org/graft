@@ -5,7 +5,7 @@
 # import, as it was for `rusttorrent`. Nothing here is secret: the token comes
 # from /run/secrets/graft-mirror-token, mounted read-only from the host file
 # /etc/graft/mirror-token-fluent2 that up.sh mints (scope repo:fluent2-egui:admin).
-# No [github] section, so the mirror follows and imports but does not bridge.
+# [github] token_file is /run/secrets/github-token, the shared host file (WI-2487).
 server = "http://graft-server:7878"
 repo = "fluent2-egui"
 upstream = "https://github.com/TheDancingDeveloper-org/fluent2-egui.git"
@@ -16,6 +16,11 @@ poll_interval_secs = 15
 metrics_addr = "0.0.0.0:9465"
 json_logs = true
 
+
+[github]
+owner = "TheDancingDeveloper-org"
+repo = "fluent2-egui"
+token_file = "/run/secrets/github-token"
 [[lines]]
 branch = "main"
 line = "main"

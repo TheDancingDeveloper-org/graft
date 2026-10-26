@@ -24,7 +24,7 @@ services:
     ports:
       - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_RUSTNZB_METRICS_PORT:-17893}:9465"
     volumes:
-      - ./mirror-rustnzb.toml:/etc/graft/deploy/mirror.toml:ro
+      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-rustnzb.toml:/etc/graft/deploy/mirror.toml:ro
       - type: bind
         source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-rustnzb
         target: /run/secrets/graft-mirror-token
@@ -32,6 +32,12 @@ services:
         bind:
           create_host_path: false
 
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
+        read_only: true
+        bind:
+          create_host_path: false
       - graft-dev-mirror-rustnzb:/var/lib/graft/mirror
     healthcheck:
       test: [CMD, bash, -c, "exec 3<>/dev/tcp/127.0.0.1/9465 && printf 'GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
@@ -64,7 +70,7 @@ services:
     ports:
       - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_MYAIAGENT_METRICS_PORT:-17894}:9465"
     volumes:
-      - ./mirror-myaiagent.toml:/etc/graft/deploy/mirror.toml:ro
+      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-myaiagent.toml:/etc/graft/deploy/mirror.toml:ro
       - type: bind
         source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-myaiagent
         target: /run/secrets/graft-mirror-token
@@ -110,7 +116,7 @@ services:
     ports:
       - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_RDPAPP_METRICS_PORT:-17895}:9465"
     volumes:
-      - ./mirror-rdpapp.toml:/etc/graft/deploy/mirror.toml:ro
+      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-rdpapp.toml:/etc/graft/deploy/mirror.toml:ro
       - type: bind
         source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-rdpapp
         target: /run/secrets/graft-mirror-token

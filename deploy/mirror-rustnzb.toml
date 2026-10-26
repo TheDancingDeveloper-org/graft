@@ -9,6 +9,11 @@ poll_interval_secs = 15
 metrics_addr = "0.0.0.0:9465"
 json_logs = true
 
+
+[github]
+owner = "TheDancingDeveloper-org"
+repo = "rustnzb"
+token_file = "/run/secrets/github-token"
 [[lines]]
 branch = "main"
 line = "main"

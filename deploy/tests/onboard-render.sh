@@ -51,7 +51,7 @@ if [[ ${1:-} == compose && " $* " == *' admin token mint '* ]]; then
   printf 'temporary-admin-token\n'
 fi
 if [[ ${1:-} == run ]]; then
-  exit 1
+  exit 0
 fi
 exit 0
 SH
@@ -61,6 +61,47 @@ cfg=$fixture/mirror-mode-check.toml
 mode=$(stat -c '%a' "$cfg")
 [ "$mode" = 644 ]
 echo "config mode: 0644"
+
+# Line creation: exit 75 then 1 must die with the line message, not succeed.
+cat >"$bin/docker" << 'SH'
+#!/usr/bin/env bash
+if [[ ${1:-} == compose && " $* " == *' admin token mint '* ]]; then
+  printf 'temporary-admin-token\n'
+fi
+if [[ ${1:-} == run ]]; then
+  n=${GRAFT_LINE_FAIL_N:-0}
+  n=$((n + 1))
+  printf '%s\n' "$n" >"${GRAFT_LINE_FAIL_COUNT:?}"
+  if [[ $n -eq 1 ]]; then exit 75; fi
+  exit 1
+fi
+exit 0
+SH
+chmod +x "$bin/docker"
+export GRAFT_LINE_ATTEMPTS=2 GRAFT_LINE_POLL=0
+export GRAFT_LINE_FAIL_COUNT=$tmp/line-fails
+printf '0\n' >"$GRAFT_LINE_FAIL_COUNT"
+set +e
+line_err=$(PATH="$bin:$PATH" "$fixture/onboard-repo.sh" example/line-fail main 2>&1)
+line_rc=$?
+set -e
+[ "$line_rc" -ne 0 ]
+printf '%s\n' "$line_err" | grep -q 'could not create line trial-1 from main'
+echo "line create: exit 75 then 1 dies"
+
+cat >"$bin/docker" << 'SH'
+#!/usr/bin/env bash
+if [[ ${1:-} == compose && " $* " == *' admin token mint '* ]]; then
+  printf 'temporary-admin-token\n'
+fi
+if [[ ${1:-} == run ]]; then
+  exit 0
+fi
+exit 0
+SH
+chmod +x "$bin/docker"
+unset GRAFT_LINE_ATTEMPTS GRAFT_LINE_POLL GRAFT_LINE_FAIL_COUNT
+
 
 # An availability failure must stop onboarding rather than mark the repo private.
 cat >"$bin/git" << 'SH'
