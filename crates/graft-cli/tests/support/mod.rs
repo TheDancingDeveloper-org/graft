@@ -504,6 +504,8 @@ pub fn graft(cwd: &Path) -> Command {
         .env("GRAFT_CONFIG", cwd.join(".graft-test-config.toml"))
         // Tests run inside Vogt sessions and as any user; keep the caller's
         // identity out so ids and output don't depend on it.
+        .env_remove("GRAFT_SESSION_ID")
+        .env_remove("GRAFT_WORK_ITEM")
         .env_remove("VOGT_SESSION_ID")
         .env_remove("VOGT_WORK_ITEM")
         .env_remove("GRAFT_AUTHOR_NAME")
