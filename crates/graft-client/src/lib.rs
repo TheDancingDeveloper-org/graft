@@ -27,6 +27,98 @@ pub use local::LocalRepo;
 pub use remote::Remote;
 pub use sparse::Sparse;
 
+use graft_proto::api::RepoApi;
+use graft_proto::error::ApiResult;
+use graft_proto::types::{
+    Attestation, AttestationPage, GetAttestations, GetLandChecks, LandCheck, LandCheckPage, Page,
+    ReviewItem, ReviewQueue, ReviewQueuePage,
+};
+
+/// How many pages one helper walk will follow before it stops.
+const MAX_PAGES_WALKED: u32 = 10_000;
+
+/// Walks `GetAttestations` until the server has no next token or `limit`
+/// attestations have been collected. Each request asks for at most the
+/// remaining count. A server that never ends the walk is capped.
+pub async fn attestations(
+    api: &impl RepoApi,
+    cx: &graft_proto::CallContext,
+    mut req: GetAttestations,
+    limit: u32,
+) -> ApiResult<Vec<Attestation>> {
+    let mut out = Vec::new();
+    for _ in 0..MAX_PAGES_WALKED {
+        if out.len() as u32 >= limit {
+            break;
+        }
+        req.page.limit = limit - out.len() as u32;
+        let page: AttestationPage = api.get_attestations(cx, req.clone()).await?;
+        let n = page.attestations.len();
+        out.extend(page.attestations);
+        match page.next {
+            Some(token) if n > 0 => req.page.token = Some(token),
+            _ => break,
+        }
+    }
+    out.truncate(limit as usize);
+    Ok(out)
+}
+
+/// Walks `GetLandChecks` the same way as [`attestations`].
+pub async fn land_checks(
+    api: &impl RepoApi,
+    cx: &graft_proto::CallContext,
+    mut req: GetLandChecks,
+    limit: u32,
+) -> ApiResult<Vec<LandCheck>> {
+    let mut out = Vec::new();
+    for _ in 0..MAX_PAGES_WALKED {
+        if out.len() as u32 >= limit {
+            break;
+        }
+        req.page.limit = limit - out.len() as u32;
+        let page: LandCheckPage = api.get_land_checks(cx, req.clone()).await?;
+        let n = page.rows.len();
+        out.extend(page.rows);
+        match page.next {
+            Some(token) if n > 0 => req.page.token = Some(token),
+            _ => break,
+        }
+    }
+    out.truncate(limit as usize);
+    Ok(out)
+}
+
+/// Walks `ReviewQueue`, passing each page's `next_lsn` back as `since_lsn`.
+/// Stops at `limit` items, when the server is caught up, or when a page
+/// does not move the cursor forward.
+pub async fn review_queue(
+    api: &impl RepoApi,
+    cx: &graft_proto::CallContext,
+    mut req: ReviewQueue,
+    limit: u32,
+) -> ApiResult<Vec<ReviewItem>> {
+    let mut out = Vec::new();
+    for _ in 0..MAX_PAGES_WALKED {
+        if out.len() as u32 >= limit {
+            break;
+        }
+        req.page = Page {
+            limit: limit - out.len() as u32,
+            token: None,
+        };
+        let page: ReviewQueuePage = api.review_queue(cx, req.clone()).await?;
+        let n = page.items.len();
+        out.extend(page.items);
+        match page.next_lsn {
+            Some(next) if n > 0 && next > req.since_lsn => req.since_lsn = next,
+            _ => break,
+        }
+    }
+    out.truncate(limit as usize);
+    Ok(out)
+}
+
 /// A request id for call `n` of this process: `prefix`, the process id, a
 /// random per-process nonce, and `n`. The server names an unnamed
 /// workspace from the principal and the request id, and answers a second

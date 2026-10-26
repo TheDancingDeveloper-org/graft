@@ -898,6 +898,38 @@ impl RepoApi for EngineRepo {
     async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
         delegate!(self, "Attest", cx, |c| self.engine.attest(&c, req).await)
     }
+    async fn attest_v2(&self, cx: &CallContext, req: AttestV2) -> ApiResult<()> {
+        delegate!(self, "AttestV2", cx, |c| self
+            .engine
+            .attest_v2(&c, req)
+            .await)
+    }
+    async fn get_attestations(
+        &self,
+        cx: &CallContext,
+        req: GetAttestations,
+    ) -> ApiResult<AttestationPage> {
+        delegate!(self, "GetAttestations", cx, |c| self
+            .engine
+            .get_attestations(&c, req)
+            .await)
+    }
+    async fn get_land_checks(
+        &self,
+        cx: &CallContext,
+        req: GetLandChecks,
+    ) -> ApiResult<LandCheckPage> {
+        delegate!(self, "GetLandChecks", cx, |c| self
+            .engine
+            .get_land_checks(&c, req)
+            .await)
+    }
+    async fn review_queue(&self, cx: &CallContext, req: ReviewQueue) -> ApiResult<ReviewQueuePage> {
+        delegate!(self, "ReviewQueue", cx, |c| self
+            .engine
+            .review_queue(&c, req)
+            .await)
+    }
     async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
         delegate!(self, "Watch", cx, |c| self.engine.watch(&c, req).await)
     }
