@@ -267,6 +267,7 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         Command::Login(args) => cmd::login::run(g, args),
         Command::Logout(args) => cmd::login::logout(g, args),
         Command::Config(args) => cmd::config::run(g, args),
+        Command::Doctor => cmd::doctor::run(g),
         Command::Init(args) => cmd::init::run(g, args),
         Command::Clone(args) => cmd::clone::run(g, args),
         Command::Status(args) => cmd::status::run(g, args),
