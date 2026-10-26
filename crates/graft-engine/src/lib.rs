@@ -8,7 +8,9 @@
 //! v0.2 adds the generalised `Attest` (kinds `check`, `review` and
 //! `approval`), `GetAttestations`, and land-checks rows with
 //! `GetLandChecks` on lines whose checks are `PostLand` (`attest.rs`,
-//! D25, D37). They record and never gate a land.
+//! D25, D37). They record and never gate a land. `ReviewQueue`
+//! (`review_queue.rs`) lists the landings of any line with no `review`
+//! attestation yet, from the store's index and each landing's summary.
 //!
 //! G3.7 adds `Revert` (`revert.rs`), the `Stack` operations (`stack.rs`),
 //! line merge in `Rebase`, `Sync` and `Land` (decision D16, recorded in
@@ -80,6 +82,7 @@ mod rebase;
 mod refs;
 mod resolve;
 mod revert;
+mod review_queue;
 mod source;
 mod stack;
 mod workspace;
@@ -98,6 +101,7 @@ pub use protect::{CLAIM_HOLDER, ProtectReport};
 pub use rebase::{MERGED_PATHS, REBASED_FROM, RESOLVED_PATHS};
 pub use refs::MAX_REF_NAME;
 pub use revert::REVERTS;
+pub use review_queue::{LAND_SUMMARY, MAX_REVIEW_SCAN};
 pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
 pub use write::MAX_REPO_NAME;
 
@@ -411,6 +415,9 @@ where
         req: GetLandChecks,
     ) -> ApiResult<LandCheckPage> {
         self.do_get_land_checks(cx, req).await
+    }
+    async fn review_queue(&self, cx: &CallContext, req: ReviewQueue) -> ApiResult<ReviewQueuePage> {
+        self.do_review_queue(cx, req).await
     }
     async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
         self.do_watch(cx, req).await

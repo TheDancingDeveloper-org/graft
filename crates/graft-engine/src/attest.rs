@@ -186,7 +186,7 @@ fn post_land(line: &LineConfig) -> Option<(&[String], u32)> {
 
 impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// The page size of a v0.2 review read.
-    fn review_page(&self, limit: u32) -> u32 {
+    pub(crate) fn review_page(&self, limit: u32) -> u32 {
         self.page_size(limit).min(MAX_REVIEW_PAGE)
     }
 
