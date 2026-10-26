@@ -63,22 +63,49 @@ fi
 echo "docs-smoke: local quick start"
 run_block local "$work"
 
-# The README prose after the local block: a second copy edits a different
-# region, commits and lands. Line merge keeps both edits.
-copy=$work/demo-2
-# The second copy was cloned before the first land. Sync, then edit a
-# different region (a new first line) and land. Line merge keeps both.
+# Explicit line merge, after the README steps. Land a shared three-line base,
+# sync B onto it, then each copy edits a different line and commits before
+# either lands. A lands first (fast-forward). B does not sync: its land must
+# rebase and line-merge. The file must contain both edits.
+a=$work/demo
+b=$work/demo-2
 (
-  cd "$copy"
-  graft sync
-  printf 'also\none\ntwo\n' > file.txt
-  graft commit -m "another region"
+  cd "$a"
+  printf 'one\ntwo\nthree\n' > file.txt
+  graft commit -m "shared base"
   graft land
 )
-got=$(cat "$copy/file.txt")
-want=$(printf 'also\none\ntwo\n')
+(
+  cd "$b"
+  graft sync
+)
+(
+  cd "$a"
+  printf 'alpha\ntwo\nthree\n' > file.txt
+  graft commit -m "region one"
+)
+(
+  cd "$b"
+  printf 'one\ntwo\nomega\n' > file.txt
+  graft commit -m "region two"
+)
+( cd "$a" && graft land )
+land_out=$(
+  cd "$b"
+  graft land
+)
+printf '%s\n' "$land_out"
+case "$land_out" in
+  *"(rebased onto the tip"*) ;;
+  *)
+    echo "docs-smoke: second land was not a rebase (fast-forward would pass with merge3 broken)" >&2
+    exit 1
+    ;;
+esac
+got=$(cat "$b/file.txt")
+want=$(printf 'alpha\ntwo\nomega\n')
 if [[ $got != "$want" ]]; then
-  echo "docs-smoke: second land did not line-merge" >&2
+  echo "docs-smoke: second land did not keep both edits" >&2
   printf 'got:\n%s\n' "$got" >&2
   exit 1
 fi
