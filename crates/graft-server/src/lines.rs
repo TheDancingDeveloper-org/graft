@@ -14,7 +14,9 @@
 //! Per-repository configs can come later.
 
 use graft_engine::EngineConfig;
-use graft_engine::policy::{Authority, LandPolicy, LineConfig, PathMerge, PathRule, PostLand};
+use graft_engine::policy::{
+    Authority, LandPolicy, LineChecks, LineConfig, PathMerge, PathRule, PostLand,
+};
 use graft_model::RepoPath;
 use serde::Deserialize;
 
@@ -199,6 +201,7 @@ impl LineSpec {
                 checks: p.checks.clone(),
                 auto_revert: p.auto_revert,
             }),
+            checks: LineChecks::Off,
         }
     }
 }

@@ -5,6 +5,11 @@
 //! G2.7 (rebase and sync), G3.1 (land and policies), G3.7 (revert, stacks,
 //! line merge).
 //!
+//! v0.2 adds the generalised `Attest` (kinds `check`, `review` and
+//! `approval`), `GetAttestations`, and land-checks rows with
+//! `GetLandChecks` on lines whose checks are `PostLand` (`attest.rs`,
+//! D25, D37). They record and never gate a land.
+//!
 //! G3.7 adds `Revert` (`revert.rs`), the `Stack` operations (`stack.rs`),
 //! line merge in `Rebase`, `Sync` and `Land` (decision D16, recorded in
 //! [`MERGED_PATHS`]), and the `attested` policy's `attest_merged`.
@@ -58,6 +63,7 @@ macro_rules! planted {
 }
 
 mod access;
+mod attest;
 mod diff;
 mod drafts;
 mod errors;
@@ -79,6 +85,7 @@ mod stack;
 mod workspace;
 mod write;
 
+pub use attest::MAX_ATTEST_BY;
 pub use diff::MAX_CONTEXT;
 pub use gc::GcSettings;
 #[cfg(feature = "planted-bugs")]
@@ -387,6 +394,23 @@ where
     }
     async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
         self.do_attest(cx, req).await
+    }
+    async fn attest_v2(&self, cx: &CallContext, req: AttestV2) -> ApiResult<()> {
+        self.do_attest_v2(cx, req).await
+    }
+    async fn get_attestations(
+        &self,
+        cx: &CallContext,
+        req: GetAttestations,
+    ) -> ApiResult<AttestationPage> {
+        self.do_get_attestations(cx, req).await
+    }
+    async fn get_land_checks(
+        &self,
+        cx: &CallContext,
+        req: GetLandChecks,
+    ) -> ApiResult<LandCheckPage> {
+        self.do_get_land_checks(cx, req).await
     }
     async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
         self.do_watch(cx, req).await
