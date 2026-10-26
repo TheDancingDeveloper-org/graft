@@ -11,12 +11,14 @@ use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
 use rusqlite::Connection;
 
 const TABLES: &[&str] = &[
+    "attestations",
     "changesets",
     "derived",
     "doomed",
     "draft_paths",
     "holders",
     "journal",
+    "land_checks",
     "lands",
     "line_forks",
     "line_merges",
@@ -24,6 +26,7 @@ const TABLES: &[&str] = &[
     "line_pos",
     "refs",
     "repos",
+    "review_queue",
     "tombstones",
     "uploads",
     "workspaces",

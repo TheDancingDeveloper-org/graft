@@ -9,12 +9,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    ChangesetRecord, DoomMark, LineMergeRow, Lsn, Protection, RecordState, RefRecord, RepoId,
-    StoreError, StoreResult, TimedRow, WorkspaceRecord, page_limit,
+    AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandingRow, LineMergeRow, Lsn,
+    Protection, RecordState, RefRecord, RepoId, StoreError, StoreResult, TimedRow, WorkspaceRecord,
+    page_limit,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::codec::{changeset_id, int, object_id, ref_kind, sql_err, state, state_code, uint};
+use crate::codec::{
+    attest_kind, attest_status, changeset_id, int, land_check, object_id, ref_kind, sql_err, state,
+    state_code, uint,
+};
 
 /// A queued read: runs against a reader's connection and answers itself.
 pub(crate) type ReadJob = Box<dyn FnOnce(&Connection) + Send>;
@@ -939,6 +943,166 @@ pub(crate) fn workspace_draft_paths(
 
 fn path(s: &str) -> StoreResult<RepoPath> {
     RepoPath::new(s).map_err(|e| StoreError::Corrupt(format!("draft path: {}", e.reason())))
+}
+
+/// The columns of an attestation row, in [`attestation`]'s order.
+const ATTESTATION_COLUMNS: &str =
+    "lsn, seq, changeset, line, pos, kind, name, status, by, url FROM attestations";
+
+fn attestation(r: &Row<'_>) -> rusqlite::Result<StoreResult<AttestationRow>> {
+    let (lsn, seq, id): (i64, i64, Vec<u8>) = (r.get(0)?, r.get(1)?, r.get(2)?);
+    let (line, pos): (Option<String>, Option<i64>) = (r.get(3)?, r.get(4)?);
+    let (kind, name, status): (i64, String, i64) = (r.get(5)?, r.get(6)?, r.get(7)?);
+    let (by, url): (Option<String>, String) = (r.get(8)?, r.get(9)?);
+    Ok((|| {
+        let line_pos = match (line, pos) {
+            (Some(line), Some(pos)) => Some((line, uint(pos)?)),
+            _ => None,
+        };
+        Ok(AttestationRow {
+            lsn: uint(lsn)?,
+            seq: u32::try_from(seq).map_err(|_| StoreError::Corrupt(format!("seq {seq}")))?,
+            changeset: changeset_id(&id)?,
+            line_pos,
+            kind: attest_kind(kind)?,
+            name,
+            status: attest_status(status)?,
+            by,
+            url,
+        })
+    })())
+}
+
+pub(crate) fn attestations_by_changeset(
+    conn: &Connection,
+    repo: RepoId,
+    changeset: ChangesetId,
+    after: Option<(Lsn, u32)>,
+    limit: u32,
+) -> StoreResult<Vec<AttestationRow>> {
+    check_repo(conn, repo)?;
+    let (lsn, seq) = match after {
+        Some((lsn, seq)) => (int(lsn)?, i64::from(seq)),
+        None => (-1, -1),
+    };
+    let limit = page_limit(limit) as i64;
+    conn.prepare_cached(&format!(
+        "SELECT {ATTESTATION_COLUMNS} INDEXED BY attestations_changeset
+         WHERE repo = ?1 AND changeset = ?2 AND (lsn, seq) > (?3, ?4)
+         ORDER BY lsn, seq LIMIT ?5"
+    ))
+    .and_then(|mut s| {
+        s.query_map(
+            params![repo.0, &changeset.0.0[..], lsn, seq, limit],
+            attestation,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+    })
+    .map_err(sql_err)?
+    .into_iter()
+    .collect()
+}
+
+pub(crate) fn attestations_by_line(
+    conn: &Connection,
+    repo: RepoId,
+    line: &str,
+    from_pos: u64,
+    to_pos: u64,
+    after: Option<(u64, Lsn, u32)>,
+    limit: u32,
+) -> StoreResult<Vec<AttestationRow>> {
+    check_repo(conn, repo)?;
+    let from = i64::try_from(from_pos).unwrap_or(i64::MAX);
+    let to = i64::try_from(to_pos).unwrap_or(i64::MAX);
+    let (pos, lsn, seq) = match after {
+        Some((pos, lsn, seq)) if pos >= from_pos => (int(pos)?, int(lsn)?, i64::from(seq)),
+        _ => (from, -1, -1),
+    };
+    let limit = page_limit(limit) as i64;
+    conn.prepare_cached(&format!(
+        "SELECT {ATTESTATION_COLUMNS} INDEXED BY attestations_line
+         WHERE repo = ?1 AND line = ?2 AND pos <= ?3 AND (pos, lsn, seq) > (?4, ?5, ?6)
+         ORDER BY pos, lsn, seq LIMIT ?7"
+    ))
+    .and_then(|mut s| {
+        s.query_map(params![repo.0, line, to, pos, lsn, seq, limit], attestation)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    })
+    .map_err(sql_err)?
+    .into_iter()
+    .collect()
+}
+
+/// `(pos, changeset, state, revert)` as stored.
+type RawLandCheck = (i64, Vec<u8>, i64, Option<Vec<u8>>);
+
+pub(crate) fn land_checks(
+    conn: &Connection,
+    repo: RepoId,
+    line: &str,
+    from_pos: u64,
+    limit: u32,
+) -> StoreResult<Vec<LandCheckRow>> {
+    check_repo(conn, repo)?;
+    let from = i64::try_from(from_pos).unwrap_or(i64::MAX);
+    let limit = page_limit(limit) as i64;
+    let rows: Vec<RawLandCheck> = conn
+        .prepare_cached(
+            "SELECT pos, changeset, state, revert FROM land_checks
+             WHERE repo = ?1 AND line = ?2 AND pos >= ?3 ORDER BY pos LIMIT ?4",
+        )
+        .and_then(|mut s| {
+            s.query_map(params![repo.0, line, from, limit], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect()
+        })
+        .map_err(sql_err)?;
+    rows.into_iter()
+        .map(|(pos, id, state, revert)| {
+            Ok(LandCheckRow {
+                line: line.to_owned(),
+                pos: uint(pos)?,
+                changeset: changeset_id(&id)?,
+                state: land_check(state)?,
+                revert: revert.as_deref().map(changeset_id).transpose()?,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn review_queue(
+    conn: &Connection,
+    repo: RepoId,
+    line: &str,
+    since: Lsn,
+    limit: u32,
+) -> StoreResult<Vec<LandingRow>> {
+    check_repo(conn, repo)?;
+    let since = i64::try_from(since).unwrap_or(i64::MAX);
+    let limit = page_limit(limit) as i64;
+    let rows: Vec<(i64, i64, Vec<u8>)> = conn
+        .prepare_cached(
+            "SELECT lsn, pos, changeset FROM review_queue
+             WHERE repo = ?1 AND line = ?2 AND lsn > ?3 ORDER BY lsn LIMIT ?4",
+        )
+        .and_then(|mut s| {
+            s.query_map(params![repo.0, line, since, limit], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect()
+        })
+        .map_err(sql_err)?;
+    rows.into_iter()
+        .map(|(lsn, pos, id)| {
+            Ok(LandingRow {
+                lsn: uint(lsn)?,
+                pos: uint(pos)?,
+                changeset: changeset_id(&id)?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

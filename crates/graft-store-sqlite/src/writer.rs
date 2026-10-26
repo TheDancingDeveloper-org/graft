@@ -14,12 +14,16 @@ use std::sync::mpsc::Receiver;
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    MetaTxn, Precondition, RecordState, RepoId, StoreError, StoreResult, TxnOutcome, Write,
+    AttestKind, LandCheckState, MetaTxn, Precondition, RecordState, RepoId, StoreError,
+    StoreResult, TxnOutcome, Write,
 };
 use rusqlite::{Connection, DropBehavior, OptionalExtension, TransactionBehavior, params};
 
 use crate::WriterQueue;
-use crate::codec::{int, ref_kind_code, sql_err, state_code, uint};
+use crate::codec::{
+    attest_kind_code, attest_status_code, int, land_check_code, ref_kind_code, sql_err, state_code,
+    uint,
+};
 use crate::oneshot;
 use crate::reader::{changeset, check_repo, doom_mark, read_protection, read_ref, workspace};
 
@@ -407,6 +411,8 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
     let first_lsn = uint(last)? + 1;
     let mut next_lsn = first_lsn;
     let mut lsns = Vec::new();
+    // Attestation order within this transaction.
+    let mut seq: u32 = 0;
     // Ref versions as this transaction's writes leave them.
     let mut versions: HashMap<String, u64> = HashMap::new();
 
@@ -650,19 +656,103 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
                 draft,
                 line,
                 landed,
-                ..
+                pos,
+                checked,
             } => {
-                conn.prepare_cached(
-                    "INSERT OR IGNORE INTO lands (repo, draft, line, landed)
-                     VALUES (?1, ?2, ?3, ?4)",
-                )
-                .and_then(|mut s| s.execute(params![repo, &draft.0.0[..], line, &landed.0.0[..]]))
-                .map_err(sql_err)?;
+                let inserted = conn
+                    .prepare_cached(
+                        "INSERT OR IGNORE INTO lands (repo, draft, line, landed)
+                         VALUES (?1, ?2, ?3, ?4)",
+                    )
+                    .and_then(|mut s| {
+                        s.execute(params![repo, &draft.0.0[..], line, &landed.0.0[..]])
+                    })
+                    .map_err(sql_err)?;
+                if inserted == 0 {
+                    // A retried land: the first record and its rows stand.
+                    continue;
+                }
+                put_landing(
+                    conn,
+                    repo,
+                    &line,
+                    landed,
+                    pos,
+                    checked,
+                    has_journal,
+                    first_lsn,
+                )?;
             }
-            Write::PutAttestation { .. } | Write::SetLandCheck { .. } => {
-                return Err(StoreError::Backend(
-                    "review indexes are not implemented in this store yet".to_owned(),
-                ));
+            Write::PutAttestation {
+                changeset,
+                line_pos,
+                kind,
+                name,
+                status,
+                by,
+                url,
+            } => {
+                if !has_journal {
+                    return Err(invalid(format!(
+                        "attestation of {changeset} without a journal entry"
+                    )));
+                }
+                let at = int(first_lsn)?;
+                let (line, pos) = match line_pos {
+                    Some((line, pos)) => (Some(line), Some(int(pos)?)),
+                    None => (None, None),
+                };
+                conn.prepare_cached(
+                    "INSERT INTO attestations
+                     (repo, lsn, seq, changeset, line, pos, kind, name, status, by, url)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                )
+                .and_then(|mut s| {
+                    s.execute(params![
+                        repo,
+                        at,
+                        seq,
+                        &changeset.0.0[..],
+                        line,
+                        pos,
+                        attest_kind_code(kind),
+                        name,
+                        attest_status_code(status),
+                        by,
+                        url
+                    ])
+                })
+                .map_err(sql_err)?;
+                seq += 1;
+                if kind == AttestKind::Review {
+                    conn.prepare_cached(
+                        "DELETE FROM review_queue INDEXED BY review_queue_changeset
+                         WHERE repo = ?1 AND changeset = ?2",
+                    )
+                    .and_then(|mut s| s.execute(params![repo, &changeset.0.0[..]]))
+                    .map_err(sql_err)?;
+                }
+            }
+            Write::SetLandCheck {
+                line,
+                pos,
+                state,
+                revert,
+            } => {
+                let pos = int(pos)?;
+                let revert = revert.map(|r| r.0.0.to_vec());
+                let updated = conn
+                    .prepare_cached(
+                        "UPDATE land_checks SET state = ?4, revert = ?5
+                         WHERE repo = ?1 AND line = ?2 AND pos = ?3",
+                    )
+                    .and_then(|mut s| {
+                        s.execute(params![repo, line, pos, land_check_code(state), revert])
+                    })
+                    .map_err(sql_err)?;
+                if updated == 0 {
+                    return Err(invalid(format!("{line} has no land check at {pos}")));
+                }
             }
             write @ (Write::AddHolderUntil { .. }
             | Write::SetExpiry { .. }
@@ -686,6 +776,78 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
         }
     }
     Ok(TxnOutcome::Committed(lsns))
+}
+
+/// The rows a first-time land indexes: the review-queue entry (with `pos`)
+/// and, on a checked line, the `Pending` land-checks row. Both share the
+/// land's transaction.
+#[allow(clippy::too_many_arguments)]
+fn put_landing(
+    conn: &Connection,
+    repo: i64,
+    line: &str,
+    landed: ChangesetId,
+    pos: Option<u64>,
+    checked: bool,
+    has_journal: bool,
+    first_lsn: u64,
+) -> StoreResult<()> {
+    if pos.is_some() && !has_journal {
+        return Err(invalid(format!(
+            "land on {line} is indexed without a journal entry"
+        )));
+    }
+    let Some(pos) = pos else {
+        if checked {
+            return Err(invalid(format!("checked land on {line} has no position")));
+        }
+        return Ok(());
+    };
+    let pos = int(pos)?;
+    if checked {
+        let added = conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO land_checks (repo, line, pos, changeset, state, revert)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+            )
+            .and_then(|mut s| {
+                s.execute(params![
+                    repo,
+                    line,
+                    pos,
+                    &landed.0.0[..],
+                    land_check_code(LandCheckState::Pending)
+                ])
+            })
+            .map_err(sql_err)?;
+        if added == 0 {
+            return Err(invalid(format!("{line} already has a land check at {pos}")));
+        }
+    }
+    let reviewed = conn
+        .prepare_cached(
+            "SELECT 1 FROM attestations INDEXED BY attestations_changeset
+             WHERE repo = ?1 AND changeset = ?2 AND kind = ?3 LIMIT 1",
+        )
+        .and_then(|mut s| {
+            s.query_row(
+                params![repo, &landed.0.0[..], attest_kind_code(AttestKind::Review)],
+                |_| Ok(()),
+            )
+            .optional()
+        })
+        .map_err(sql_err)?
+        .is_some();
+    if !reviewed {
+        let at = int(first_lsn)?;
+        conn.prepare_cached(
+            "INSERT OR REPLACE INTO review_queue (repo, line, lsn, pos, changeset)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .and_then(|mut s| s.execute(params![repo, line, at, pos, &landed.0.0[..]]))
+        .map_err(sql_err)?;
+    }
+    Ok(())
 }
 
 fn clear_draft_paths(conn: &Connection, repo: i64, workspace: &str) -> StoreResult<()> {

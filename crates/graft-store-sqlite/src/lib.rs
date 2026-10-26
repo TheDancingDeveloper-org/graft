@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    ChangesetRecord, DoomMark, LineMergeRow, Lsn, MetaStore, MetaTxn, Protection, RecordState,
-    RefRecord, RepoId, StoreError, StoreResult, TimedRow, TxnOutcome, WorkspaceRecord,
+    AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandingRow, LineMergeRow, Lsn,
+    MetaStore, MetaTxn, Protection, RecordState, RefRecord, RepoId, StoreError, StoreResult,
+    TimedRow, TxnOutcome, WorkspaceRecord,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -651,6 +652,63 @@ impl MetaStore for SqliteMetaStore {
     async fn gc_protection(&self, repo: RepoId) -> StoreResult<bool> {
         self.read("gc_protection", move |c| reader::gc_protection(c, repo))
             .await
+    }
+
+    async fn attestations_by_changeset(
+        &self,
+        repo: RepoId,
+        changeset: ChangesetId,
+        after: Option<(Lsn, u32)>,
+        limit: u32,
+    ) -> StoreResult<Vec<AttestationRow>> {
+        self.read("attestations_by_changeset", move |c| {
+            reader::attestations_by_changeset(c, repo, changeset, after, limit)
+        })
+        .await
+    }
+
+    async fn attestations_by_line(
+        &self,
+        repo: RepoId,
+        line: &str,
+        from_pos: u64,
+        to_pos: u64,
+        after: Option<(u64, Lsn, u32)>,
+        limit: u32,
+    ) -> StoreResult<Vec<AttestationRow>> {
+        let line = line.to_owned();
+        self.read("attestations_by_line", move |c| {
+            reader::attestations_by_line(c, repo, &line, from_pos, to_pos, after, limit)
+        })
+        .await
+    }
+
+    async fn land_checks(
+        &self,
+        repo: RepoId,
+        line: &str,
+        from_pos: u64,
+        limit: u32,
+    ) -> StoreResult<Vec<LandCheckRow>> {
+        let line = line.to_owned();
+        self.read("land_checks", move |c| {
+            reader::land_checks(c, repo, &line, from_pos, limit)
+        })
+        .await
+    }
+
+    async fn review_queue(
+        &self,
+        repo: RepoId,
+        line: &str,
+        since: Lsn,
+        limit: u32,
+    ) -> StoreResult<Vec<LandingRow>> {
+        let line = line.to_owned();
+        self.read("review_queue", move |c| {
+            reader::review_queue(c, repo, &line, since, limit)
+        })
+        .await
     }
 
     async fn land(
