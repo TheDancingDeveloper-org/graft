@@ -91,6 +91,8 @@ jobs:
         run: echo "docs-only change; skipping the Rust build"
       - if: steps.scope.outputs.docs_only == 'true'
         run: python3 bench/render.py docs/guide/bench.svg
+      - if: steps.scope.outputs.docs_only == 'true'
+        run: scripts/check-guide-names.sh
       - uses: dtolnay/rust-toolchain@stable
         if: steps.scope.outputs.docs_only != 'true'
         with:
