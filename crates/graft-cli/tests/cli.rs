@@ -961,3 +961,99 @@ fn login_json_never_prints_the_token() {
     assert!(!combined.contains(token));
     assert!(combined.contains("<redacted>"));
 }
+
+#[test]
+fn serve_dev_then_clone_by_the_printed_url() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let home = scratch();
+    let config_path = home.path().join("config.toml");
+    let data = home.path().join("data");
+    let state = home.path().join("state");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_graft"))
+        .current_dir(home.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .env_remove("GRAFT_ENDPOINT")
+        .env_remove("GRAFT_TOKEN")
+        .args([
+            "serve",
+            "--dev",
+            "--data",
+            data.to_str().unwrap(),
+            "--state",
+            state.to_str().unwrap(),
+            "--repo",
+            "demo",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn serve --dev");
+    let stdout = child.stdout.take().expect("stdout");
+    let stderr = child.stderr.take().expect("stderr");
+    let (url_tx, url_rx) = std::sync::mpsc::channel();
+    let captured_out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let captured_err = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let out_buf = std::sync::Arc::clone(&captured_out);
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            out_buf.lock().unwrap().push_str(&line);
+            out_buf.lock().unwrap().push('\n');
+            if let Some(url) = line.trim().strip_prefix("graft clone ") {
+                let _ = url_tx.send(url.to_owned());
+            }
+        }
+    });
+    let err_buf = std::sync::Arc::clone(&captured_err);
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            err_buf.lock().unwrap().push_str(&line);
+            err_buf.lock().unwrap().push('\n');
+        }
+    });
+    let url = url_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("clone command");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !config_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let config_text = fs::read_to_string(&config_path).expect("user config");
+    let parsed: toml::Value = toml::from_str(&config_text).unwrap();
+    let token_path = Path::new(parsed["servers"]["demo"]["token_file"].as_str().unwrap());
+    let token = fs::read_to_string(token_path).unwrap();
+    let token = token.trim();
+    assert!(!token.is_empty());
+    assert!(!captured_out.lock().unwrap().contains(token));
+    assert!(!captured_err.lock().unwrap().contains(token));
+    assert!(!config_text.contains(token));
+    assert_eq!(
+        fs::metadata(token_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let key = state.join("signing.key");
+    assert_eq!(
+        fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let clone_root = home.path().join("fresh");
+    fs::create_dir(&clone_root).unwrap();
+    let cloned = graft(&clone_root)
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["clone", &url, "app"])
+        .assert()
+        .success();
+    assert!(!text(cloned.get_output()).contains(token));
+    assert!(clone_root.join("app/.graft/config").is_file());
+
+    let _ = child.kill();
+    let _ = child.wait();
+}

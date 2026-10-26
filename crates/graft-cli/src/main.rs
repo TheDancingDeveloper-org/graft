@@ -87,7 +87,7 @@ fn legacy_role_entry(args: &[String]) -> Option<ExitCode> {
 
 fn role_entry(command: &Command) -> Option<ExitCode> {
     match command {
-        Command::Serve(args) => Some(graft_server::run(args.args.clone())),
+        Command::Serve(args) => Some(serve_entry(args)),
         Command::Node(args) => Some(graft_node::run(args.args.clone())),
         Command::Mirror(args) => Some(graft_mirror::run(args.args.clone())),
         _ => None,
@@ -135,6 +135,122 @@ fn mark_explicit_line(cli: &mut Cli) {
     }
 }
 
+fn serve_entry(args: &cli::ServeArgs) -> ExitCode {
+    if !args.dev {
+        return graft_server::run(args.args.clone());
+    }
+    if !args.args.is_empty() {
+        let failure =
+            Failure::usage("serve --dev does not take production server arguments".to_owned());
+        return ExitCode::from(failure.report(false) as u8);
+    }
+    match run_dev_server(args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => ExitCode::from(failure.report(false) as u8),
+    }
+}
+
+fn run_dev_server(args: &cli::ServeArgs) -> Result<(), Failure> {
+    use std::net::SocketAddr;
+    use std::sync::mpsc;
+
+    let repo = args.repo.clone().unwrap_or_else(|| "dev".to_owned());
+    let data = args
+        .data
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from(".graft-serve"));
+    let state = args
+        .state
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from(".graft-serve-state"));
+    let listen: SocketAddr = args
+        .listen
+        .as_deref()
+        .unwrap_or("127.0.0.1:0")
+        .parse()
+        .map_err(|error| Failure::usage(format!("listen address: {error}")))?;
+    let server_name = args.server.clone().unwrap_or_else(|| repo.clone());
+    config::validate_name(&server_name)?;
+
+    let user = config::load()?;
+    let stored = match user.servers.get(&server_name) {
+        Some(saved) => match std::fs::read_to_string(&saved.token_file) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(Failure::new(
+                    Exit::Failure,
+                    "config",
+                    format!("read {}: {error}", saved.token_file.display()),
+                ));
+            }
+        },
+        None => None,
+    };
+
+    let mut options = graft_server::DevOptions::new(data, state);
+    options.listen = listen;
+    options.repo = Some(repo.clone());
+    options.insecure_bind = args.insecure_bind;
+    options.token = stored;
+    let prepared = graft_server::DevServer::prepare(options)
+        .map_err(|error| Failure::new(Exit::Failure, "serve", error))?;
+    let minted = prepared.token().map(str::to_owned);
+    let token_path = config::token_path(&server_name)?;
+    if let Some(token) = &minted {
+        config::store_token(&token_path, token)?;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let repo_for_ready = repo;
+    let ready = move |addr: SocketAddr| {
+        tx.send(addr)
+            .map_err(|_| "development server stopped before it was ready".to_owned())?;
+        println!(
+            "graft clone graft://{}:{}/{repo_for_ready}",
+            addr.ip(),
+            addr.port()
+        );
+        Ok(())
+    };
+
+    let handle = std::thread::spawn(move || prepared.serve(ready));
+    let addr = match rx.recv() {
+        Ok(addr) => addr,
+        Err(_) => {
+            let message = match handle.join() {
+                Ok(Err(error)) => error,
+                Ok(Ok(())) => "development server exited before it was ready".to_owned(),
+                Err(_) => "development server panicked before it was ready".to_owned(),
+            };
+            return Err(Failure::new(Exit::Failure, "serve", message));
+        }
+    };
+    let endpoint = format!("http://{}:{}", addr.ip(), addr.port());
+    let mut loaded = config::load()?;
+    loaded.servers.insert(
+        server_name.clone(),
+        config::ServerConfig {
+            endpoint,
+            token_file: config::token_path(&server_name)?,
+        },
+    );
+    if loaded.default_server.is_none() {
+        loaded.default_server = Some(server_name);
+    }
+    config::save(&loaded)?;
+    handle
+        .join()
+        .map_err(|_| {
+            Failure::new(
+                Exit::Failure,
+                "serve",
+                "development server panicked".to_owned(),
+            )
+        })?
+        .map_err(|error| Failure::new(Exit::Failure, "serve", error))
+}
+
 fn dispatch(cli: &Cli) -> Result<(), Failure> {
     let g = &cli.global;
     if matches!(cli.command, Command::Attest(_) | Command::Ci(_)) && !experimental_enabled(g) {
@@ -173,7 +289,9 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
             Exit::Ok => Ok(()),
             code => Err(Failure::silent(code)),
         },
-        Command::Serve(_) | Command::Node(_) | Command::Mirror(_) => unreachable!("role command"),
+        Command::Serve(_) | Command::Node(_) | Command::Mirror(_) => {
+            unreachable!("role command")
+        }
         Command::Planned(args) => {
             let name = args.first().map_or("", String::as_str);
             Err(Failure::usage(format!("unknown command: {name}")))

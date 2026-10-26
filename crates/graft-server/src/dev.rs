@@ -5,7 +5,14 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use graft_auth::{Claims, NoDenylist, Token};
-use graft_proto::{Principal, PrincipalKind};
+use graft_model::{Author, AuthorKind, Changeset, ObjectKind, Timestamp, Tree};
+use graft_proto::{Frame, Principal, PrincipalKind};
+use graft_store::{
+    ChangesetRecord, Lsn, MetaStore, MetaTxn, ObjectStore, Precondition, RecordState, RefKind,
+    RefRecord, TxnOutcome, Write,
+};
+use graft_store_fs::{FsMode, FsObjectStore};
+use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
 
 use crate::config::ServerConfig;
 
@@ -88,6 +95,7 @@ impl DevServer {
         let token = match options.repo.as_deref() {
             Some(repo) => {
                 crate::admin::repo_create_quiet(&config, repo)?;
+                seed_main(&config, repo)?;
                 Some(match options.token {
                     Some(encoded) => validate_token(&signing, encoded, repo)?,
                     None => mint_token(&signing, repo)?,
@@ -120,6 +128,134 @@ impl DevServer {
         ready: impl FnOnce(SocketAddr) -> Result<(), String> + Send + 'static,
     ) -> Result<(), String> {
         crate::serve::serve_ready(self.config, ready)
+    }
+}
+
+/// The line a development repository starts on.
+const DEV_LINE: &str = "main";
+
+/// Writes the canonical empty root and points `main` at it, when the
+/// repository has no line yet. A second start finds the ref and writes
+/// nothing. The root's content is fixed (D34): no parents, no changes,
+/// empty author, bot, epoch, empty message and metadata, empty tree.
+fn seed_main(config: &ServerConfig, repo: &str) -> Result<(), String> {
+    let meta = SqliteMetaStore::open(SqliteConfig::new(&config.meta_db))
+        .map_err(|error| format!("open {}: {error:?}", config.meta_db.display()))?;
+    let objects = FsObjectStore::open(&config.objects_dir, FsMode::Authoritative)
+        .map_err(|error| format!("open {}: {error:?}", config.objects_dir.display()))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("runtime: {error}"))?;
+    runtime.block_on(seed_main_async(&meta, &objects, repo))
+}
+
+async fn seed_main_async(
+    meta: &SqliteMetaStore,
+    objects: &FsObjectStore,
+    repo: &str,
+) -> Result<(), String> {
+    let repo_id = meta
+        .repo(repo)
+        .await
+        .map_err(|error| format!("repository {repo}: {error:?}"))?
+        .ok_or_else(|| format!("repository {repo} was not created"))?;
+    if meta
+        .get_ref(repo_id, DEV_LINE)
+        .await
+        .map_err(|error| format!("read {DEV_LINE}: {error:?}"))?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let tree = Tree::default();
+    let changeset = Changeset {
+        parents: Vec::new(),
+        root: tree.id(),
+        changes: Vec::new(),
+        author: Author {
+            name: String::new(),
+            email: String::new(),
+            kind: AuthorKind::Bot,
+        },
+        authored_at: Timestamp {
+            ms: 0,
+            offset_min: 0,
+        },
+        message: String::new(),
+        metadata: Default::default(),
+    };
+    let id = changeset.id();
+    let tree_frame = Frame::encode(ObjectKind::Tree, &tree.encode()).to_bytes();
+    objects
+        .put(repo_id, tree.id().0, tree_frame)
+        .await
+        .map_err(|error| format!("store empty tree: {error:?}"))?;
+
+    let txn = MetaTxn {
+        preconditions: vec![
+            Precondition::ChangesetAbsent(id),
+            Precondition::RefIs {
+                name: DEV_LINE.to_owned(),
+                expected: None,
+            },
+        ],
+        writes: vec![
+            Write::PutChangeset {
+                id,
+                content: changeset.encode(),
+                record: ChangesetRecord {
+                    lsn: Lsn::default(),
+                    received_at_ms: 0,
+                    state: RecordState::Landed,
+                    holder: None,
+                    superseded_by: None,
+                },
+            },
+            Write::Journal {
+                kind: "ChangesetCreated".into(),
+                body: format!(r#"{{"id":"{id}","state":"abandoned"}}"#).into_bytes(),
+            },
+            Write::SetRef(RefRecord {
+                name: DEV_LINE.to_owned(),
+                target: id,
+                version: 1,
+                kind: RefKind::Line,
+            }),
+            Write::PutLinePos {
+                line: DEV_LINE.to_owned(),
+                changeset: id,
+                pos: 1,
+            },
+            Write::Journal {
+                kind: "RefMoved".into(),
+                body: format!(
+                    r#"{{"name":"{DEV_LINE}","old":null,"new":"{id}","version":1,"actor":"dev-admin"}}"#
+                )
+                .into_bytes(),
+            },
+        ],
+    };
+    match meta
+        .commit(repo_id, txn)
+        .await
+        .map_err(|error| format!("seed {DEV_LINE}: {error:?}"))?
+    {
+        TxnOutcome::Committed(_) => Ok(()),
+        TxnOutcome::PreconditionFailed(index) => {
+            if index == 1
+                && meta
+                    .get_ref(repo_id, DEV_LINE)
+                    .await
+                    .map_err(|error| format!("read {DEV_LINE}: {error:?}"))?
+                    .is_some()
+            {
+                Ok(())
+            } else {
+                Err(format!("seed {DEV_LINE}: precondition {index} failed"))
+            }
+        }
     }
 }
 
