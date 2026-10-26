@@ -16,7 +16,12 @@
 //!   `WorkspaceClosed`, so a name closed and reopened on another line is
 //!   read right. For a workspace opened before the read position, the
 //!   attester asks `GetWorkspace`, and remembers only an answer that names
-//!   a line: "not found" is asked again next time. Land candidates,
+//!   a line: "not found" is asked again next time. A failed `GetWorkspace`
+//!   (or any other per-entry fetch) is logged with the entry's LSN and that
+//!   entry is left for the next read, retried with a bound; entries after
+//!   it on the same page are still handled. The saved position is the
+//!   oldest entry not yet handled, so it never moves past one that was
+//!   not. Land candidates,
 //!   abandoned changesets and drafts on other lines are skipped. Before a draft runs, `GetChangesets` confirms
 //!   it is still a draft.
 //! - The queue keeps the newest draft per workspace (a land needs the
@@ -225,6 +230,11 @@ impl Config {
         }
     }
 }
+
+/// How many times one journal entry's line lookup may fail before that
+/// entry is left for a later read and the page continues. A restart reads
+/// the entry again, so the bound is per process, not forever.
+const LOOKUP_TRIES: u32 = 8;
 
 /// A draft waiting to be checked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -506,6 +516,16 @@ pub struct Attester<A> {
     unposted: HashMap<ChangesetId, Report>,
     /// Workspace → the line it tracks. Only known lines are kept.
     lines: HashMap<String, String>,
+    /// Failed line lookups for one entry, counted by its LSN.
+    lookup_tries: HashMap<u64, u32>,
+    /// Entries whose line lookup failed [`LOOKUP_TRIES`] times. They stay
+    /// unprocessed (the saved position never passes them) and are not asked
+    /// about again until a restart.
+    deferred: HashMap<u64, ()>,
+    /// Drafts already queued or checked. A failed lookup keeps the cursor
+    /// on that entry, so the same page is read again; these are not queued
+    /// a second time.
+    seen: HashMap<u64, ()>,
 }
 
 impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
@@ -527,12 +547,22 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
             running: None,
             unposted: HashMap::new(),
             lines: HashMap::new(),
+            lookup_tries: HashMap::new(),
+            deferred: HashMap::new(),
+            seen: HashMap::new(),
         })
     }
 
     /// The configuration.
     pub fn config(&self) -> &Config {
         &self.cfg
+    }
+
+    /// Forgets every workspace's line, so the next draft asks the server.
+    /// Tests use this to inject a `GetWorkspace` failure after the journal
+    /// has already named the line.
+    pub fn forget_lines(&mut self) {
+        self.lines.clear();
     }
 
     /// Drafts waiting.
@@ -572,7 +602,12 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
                 )
                 .await?;
             let advanced = page.next_lsn > self.next_lsn;
-            let mut next = page.next_lsn.max(self.next_lsn);
+            // The page's end, unless an entry is still unhandled. A failed
+            // lookup and a full queue both leave their entry to be read
+            // again; everything before it is handled. An entry queued on
+            // this page is handled even while an earlier lookup is not.
+            let mut resume = page.next_lsn.max(self.next_lsn);
+            let mut blocked = false;
             let mut failed = None;
             for entry in &page.entries {
                 if let Some((name, line)) = parse_workspace_entry(entry) {
@@ -582,34 +617,78 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
                             self.lines.remove(&name);
                         }
                     }
+                    self.lookup_tries.remove(&entry.lsn);
                     continue;
                 }
                 let Some(p) = parse_entry(entry) else {
+                    self.lookup_tries.remove(&entry.lsn);
+                    self.deferred.remove(&entry.lsn);
                     continue;
                 };
+                if self.deferred.contains_key(&entry.lsn) {
+                    // Reported already, and still unprocessed. Later
+                    // entries on this page are still handled.
+                    continue;
+                }
+                if self.seen.contains_key(&entry.lsn) {
+                    continue;
+                }
                 match self.workspace_line(&p.workspace).await {
-                    Ok(Some(line)) if line == self.cfg.line => {}
-                    Ok(_) => continue,
+                    Ok(Some(line)) if line == self.cfg.line => {
+                        self.lookup_tries.remove(&entry.lsn);
+                    }
+                    Ok(_) => {
+                        self.lookup_tries.remove(&entry.lsn);
+                        continue;
+                    }
                     Err(e) => {
-                        // Read this entry again on the next poll.
-                        next = entry.lsn;
-                        failed = Some(e);
-                        break;
+                        let tries = self.lookup_tries.entry(entry.lsn).or_insert(0);
+                        *tries += 1;
+                        log(&format!(
+                            "line lookup for lsn {} failed ({tries} of {LOOKUP_TRIES}): {e}",
+                            entry.lsn
+                        ));
+                        if *tries < LOOKUP_TRIES {
+                            // Read this entry again. Later entries on this
+                            // page are still handled below.
+                            resume = resume.min(entry.lsn);
+                            blocked = true;
+                            failed = Some(e);
+                            continue;
+                        }
+                        // Past the bound: leave it unprocessed (the saved
+                        // position stays here) and keep going, so one entry
+                        // that never resolves does not hold the page.
+                        log(&format!(
+                            "line lookup for lsn {} failed {LOOKUP_TRIES} times; leaving it and continuing",
+                            entry.lsn
+                        ));
+                        self.deferred.insert(entry.lsn, ());
+                        resume = resume.min(entry.lsn);
+                        blocked = true;
+                        continue;
                     }
                 }
                 if !self.queue.push(p) {
                     // Full: read this entry again once there is room.
-                    next = entry.lsn;
+                    // Nothing after it is taken, so the page stays ordered.
+                    resume = entry.lsn;
+                    blocked = true;
                     break;
                 }
                 queued += 1;
+                self.seen.insert(entry.lsn, ());
             }
-            self.next_lsn = next;
+            self.next_lsn = if blocked {
+                resume
+            } else {
+                page.next_lsn.max(self.next_lsn)
+            };
             if let Some(e) = failed {
                 self.save()?;
                 return Err(Error::Api(e));
             }
-            if !advanced {
+            if !advanced || blocked {
                 break;
             }
             wait = 0;
