@@ -34,3 +34,12 @@ quarantine together, under the same Vogt item.
 - **Fix (host-side, operator):** a 16–20 GiB memory limit on `vogt-prod`,
   and look into Node B's full swap. Then remove the retry, the script and
   this entry.
+
+## Resolved: `test` / `restart_to_serving_is_under_two_seconds` (WI-2480)
+
+Not quarantined. The graft-server restart test used to assert serving in
+under 2 s, and shared runners missed that bound (PR #223 `test` job, run
+40262080681, 2026-10-26). AGENTS.md rule 10 forbids a pass condition on
+wall-clock time. The required test now asserts outcomes only and prints
+the startup time. The `restart-timing` job records that print on
+`merge_group` with `continue-on-error: true`; it is not a required check.

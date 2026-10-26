@@ -172,3 +172,25 @@ jobs:
           exit "$status"
       - run: cargo test --workspace --all-features --doc
         if: steps.scope.outputs.docs_only != 'true'
+
+  # Not a required check (WI-2480). Records restart-to-serving time on the
+  # merge queue. continue-on-error means a slow host, or a crash in the
+  # measurement, never fails the workflow. There is no time assert.
+  restart-timing:
+    runs-on: [self-hosted]
+    timeout-minutes: 30
+    continue-on-error: true
+    if: github.event_name == 'merge_group'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: |
+          curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
+      - name: measure restart
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/cargo-nextest" nextest run -p graft-server --all-features \
+            -E 'test(restart_serves_and_keeps_an_acknowledged_write)' --no-capture
