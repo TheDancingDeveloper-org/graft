@@ -48,6 +48,14 @@ Archives are Linux x86_64, Linux aarch64 and macOS Apple Silicon. There is
 no Intel macOS archive. crates.io is not available yet; install with the
 git command above.
 
+Enable shell completions from the installed `graft` binary:
+
+```sh
+source <(graft completions bash)   # bash
+source <(graft completions zsh)    # zsh
+graft completions fish | source    # fish
+```
+
 ## Quick start: local
 
 `graft init` creates a repository the CLI opens in-process: no server, no

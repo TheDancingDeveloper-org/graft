@@ -24,6 +24,22 @@ while IFS=: read -r package bin; do
   install -m 0755 "target/$target/release/$bin" "dist/$bin"
 done < scripts/release/binaries.txt
 
+# Man pages and completions come from a host-built graft, not the
+# cross-compiled binary (that one cannot run on the build host).
+# `graft man` and `graft completions` are the commands on main.
+mkdir -p dist/man dist/completions
+cargo run --locked -p graft-cli --quiet -- man --out dist/man
+for shell in bash zsh fish; do
+  cargo run --locked -p graft-cli --quiet -- completions "$shell" > "dist/completions/graft.${shell}"
+done
+for generated in dist/man/graft.1 dist/man/graft-land.1 \
+  dist/completions/graft.bash dist/completions/graft.zsh dist/completions/graft.fish; do
+  if [ ! -s "$generated" ]; then
+    printf 'empty generated file: %s\n' "$generated" >&2
+    exit 1
+  fi
+done
+
 archive="graft-${target}.tar.gz"
 tar -C dist -czf "$archive" .
 if command -v sha256sum >/dev/null 2>&1; then
