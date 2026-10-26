@@ -1,6 +1,5 @@
 ---
 source: crates/graft-cli/tests/cli.rs
-assertion_line: 141
 expression: text(out.get_output())
 ---
 The graft command-line client.
@@ -11,6 +10,7 @@ Commands:
   login      Store credentials for a named server, or list configured servers
   logout     Remove a named server and its stored token
   config     Inspect user configuration
+  init       Create a local repository and working copy
   clone      Open a workspace and lay out a sparse working copy
   status     Working-copy changes against the head draft, else the base (no server needed)
   diff       Diff the working copy, or two changesets

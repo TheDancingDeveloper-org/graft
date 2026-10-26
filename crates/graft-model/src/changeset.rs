@@ -14,7 +14,7 @@ use crate::codec::{Reader, put_len, put_str};
 use crate::id::{ChangesetId, ObjectId, TreeId};
 use crate::path::{PathError, RepoPath};
 use crate::time::Timestamp;
-use crate::tree::EntryKind;
+use crate::tree::{EntryKind, Tree};
 
 /// The changeset format version byte.
 pub const CHANGESET_VERSION: u8 = 1;
@@ -251,6 +251,33 @@ impl Changeset {
         self.parents.first().copied()
     }
 
+    /// The one valid native empty root (D34). Every field is fixed, so every
+    /// new repository shares this id. Any other native empty changeset stays
+    /// invalid.
+    pub fn canonical_empty_root() -> Self {
+        Changeset {
+            parents: Vec::new(),
+            root: Tree::default().id(),
+            changes: Vec::new(),
+            author: Author {
+                name: String::new(),
+                email: String::new(),
+                kind: AuthorKind::Bot,
+            },
+            authored_at: Timestamp {
+                ms: 0,
+                offset_min: 0,
+            },
+            message: String::new(),
+            metadata: Metadata::new(),
+        }
+    }
+
+    /// Whether this is exactly [`Self::canonical_empty_root`].
+    pub fn is_canonical_empty_root(&self) -> bool {
+        self == &Self::canonical_empty_root()
+    }
+
     /// Checks the validity rules that need no store (design §4.5 rules 2, 3,
     /// 8 and 9, plus the `Put` kind and, when enabled, path portability).
     /// Rules 5 to 7 need the parent snapshot and are checked by
@@ -262,6 +289,7 @@ impl Changeset {
         }
         if self.changes.is_empty()
             && self.parents.len() < 2
+            && !self.is_canonical_empty_root()
             && !self.metadata.contains_key(MIRROR_GIT_COMMIT)
         {
             return Err(Violation::new(None, Rule::EmptyChangeset));

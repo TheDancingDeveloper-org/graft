@@ -5,6 +5,7 @@
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use graft_client::fetch::FetchOptions;
@@ -13,7 +14,7 @@ use graft_client::workcopy::{
     Begun, DEFAULT_CACHE_BYTES, Recovered, WcConfig, WcInfo, WcState, WorkingCopy,
 };
 use graft_client::workspace::DEFAULT_LEASE_MS;
-use graft_client::{ENDPOINT_ENV, Endpoint, NODE_SOCKET, Remote};
+use graft_client::{Backend, ENDPOINT_ENV, Endpoint, LocalRepo, NODE_SOCKET, Remote};
 use graft_model::{ChangesetId, IdPrefix, ObjectKind};
 use graft_proto::ApiError;
 use graft_proto::api::RepoApi;
@@ -30,7 +31,7 @@ pub(crate) const TOKEN_ENV: &str = "GRAFT_TOKEN";
 /// A connected session: the remote, the repository, and the working copy
 /// when the current directory is inside one.
 pub(crate) struct Conn {
-    pub(crate) remote: Remote,
+    pub(crate) remote: Backend,
     pub(crate) repo: String,
     pub(crate) server: Option<String>,
     /// The line a short id is looked for on: the working copy's, else `main`.
@@ -38,6 +39,8 @@ pub(crate) struct Conn {
     /// Changesets the working copy knows (base, head, an unfinished move),
     /// the first place a short id is looked for.
     known: Vec<ChangesetId>,
+    /// Keeps a local repository's exclusive lock for the command lifetime.
+    _local: Option<Arc<LocalRepo>>,
 }
 
 pub(crate) struct ResolvedSettings {
@@ -183,12 +186,30 @@ pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn
             Some(_) => {}
         }
     }
-    let user = crate::config::load()?;
-    let settings = resolve_settings(&g, wc, &user)?;
-    let remote = Remote::connect(settings.endpoint).await?;
-    let remote = match settings.token {
-        Some(token) => remote.with_token(token),
-        None => remote,
+    let local_server = wc
+        .and_then(WcView::server)
+        .and_then(|server| server.strip_prefix("local:"));
+    let endpoint_overridden = g.endpoint.is_some()
+        || env::var(ENDPOINT_ENV)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+    let (remote, server, local) = if let Some(path) = local_server.filter(|_| !endpoint_overridden)
+    {
+        let local = Arc::new(LocalRepo::open(path)?);
+        (
+            Backend::local(local.engine_handle(), repo.clone()),
+            wc.and_then(WcView::server).map(str::to_owned),
+            Some(local),
+        )
+    } else {
+        let user = crate::config::load()?;
+        let settings = resolve_settings(&g, wc, &user)?;
+        let remote = Remote::connect(settings.endpoint).await?;
+        let remote = match settings.token {
+            Some(token) => remote.with_token(token),
+            None => remote,
+        };
+        (Backend::remote(remote), settings.server, None)
     };
     let (line, known) = match wc {
         Some(wc) => {
@@ -206,9 +227,10 @@ pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn
     Ok(Conn {
         remote,
         repo,
-        server: settings.server,
+        server,
         line,
         known,
+        _local: local,
     })
 }
 

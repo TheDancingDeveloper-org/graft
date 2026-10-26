@@ -124,7 +124,7 @@ fn change(g: &Global, prefixes: &[String], how: Change) -> Result<(), Failure> {
 /// Reopens the working copy with the new prefixes and checks them out.
 async fn fetch_slice(
     root: &Path,
-    remote: &graft_client::Remote,
+    remote: &graft_client::Backend,
     cx: &graft_proto::CallContext,
 ) -> Result<WorkingCopy, Failure> {
     let mut fresh = WorkingCopy::open(root)?;

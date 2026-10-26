@@ -13,6 +13,7 @@ use graft_model::{ChangesetId, RepoPath};
 use graft_proto::ApiError;
 use graft_store::StoreError;
 
+pub mod backend;
 pub mod fetch;
 pub mod ignore;
 pub mod local;
@@ -21,6 +22,7 @@ pub mod sparse;
 pub mod workcopy;
 pub mod workspace;
 
+pub use backend::Backend;
 pub use local::LocalRepo;
 pub use remote::Remote;
 pub use sparse::Sparse;

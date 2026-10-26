@@ -55,9 +55,9 @@ the same release.
 
 ## Quick start: local
 
-> **lands in v0.1.0.** `graft init` does not exist yet. A local repository
-> will be a directory the CLI opens in-process: no server, no daemon, no
-> token. The commands below are the ones that mode will accept.
+> Local mode is in. `graft init` creates a repository the CLI opens
+> in-process: no server, no daemon, no token. The commands below are the
+> ones that mode accepts.
 
 ```sh
 graft init demo && cd demo

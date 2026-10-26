@@ -259,6 +259,11 @@ impl From<ClientError> for Failure {
                 "unfinished",
                 "an earlier update did not finish: run `graft sync`",
             ),
+            ClientError::Busy => Failure::new(
+                Exit::Contended,
+                "busy",
+                "another process holds this local repository",
+            ),
             ClientError::Io(e) => e.into(),
             ClientError::Store(e) => {
                 Failure::new(Exit::Failure, "store", format!("object cache: {e:?}"))

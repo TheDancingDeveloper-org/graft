@@ -107,7 +107,8 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
             endpoint: conn
                 .server
                 .is_none()
-                .then(|| conn.remote.endpoint().to_string()),
+                .then(|| conn.remote.endpoint().map(ToString::to_string))
+                .flatten(),
             repo: conn.repo.clone(),
             workspace: None,
         };
@@ -128,7 +129,7 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
         if g.json {
             return print_json(&json!({
                 "repo": conn.repo,
-                "endpoint": conn.remote.endpoint().to_string(),
+                "endpoint": conn.remote.endpoint().map(ToString::to_string),
                 "line": line,
                 "base": base.to_string(),
                 "dir": dest.display().to_string(),

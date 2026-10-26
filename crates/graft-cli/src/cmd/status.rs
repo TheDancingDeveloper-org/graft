@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use graft_client::Remote;
+use graft_client::Backend;
 use graft_client::workcopy::{FileStatus, Ignored, Outcome, Upstream, WorkingCopy};
 use graft_model::RepoPath;
 use graft_proto::ApiError;
@@ -78,7 +78,7 @@ impl Drafts {
 /// The paths `--drafts` asks about: the arguments, else the uncommitted
 /// changes plus the paths the stack (`base..head`) changes, bounded.
 async fn draft_paths(
-    remote: &Remote,
+    remote: &Backend,
     cx: &CallContext,
     repo: &str,
     wc: &WorkingCopy,
@@ -134,7 +134,7 @@ async fn draft_paths(
 /// to its end, and groups the hits by workspace. With `soft`, a refusal
 /// for want of a scope is reported in the answer rather than as an error.
 async fn drafts(
-    remote: &Remote,
+    remote: &Backend,
     cx: &CallContext,
     repo: &str,
     line: &str,

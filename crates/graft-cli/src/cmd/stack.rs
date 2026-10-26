@@ -183,7 +183,7 @@ fn pick(drafts: &[ChangesetId], rev: &str) -> Result<ChangesetId, Failure> {
 #[allow(clippy::too_many_arguments)]
 async fn print_stack(
     g: &Global,
-    remote: &graft_client::Remote,
+    remote: &graft_client::Backend,
     cx: &graft_proto::CallContext,
     repo: &str,
     name: Option<String>,
