@@ -154,3 +154,64 @@ fn json_lists_checks_and_redacts_the_token() {
     assert_redacted(&String::from_utf8_lossy(&out.get_output().stderr));
     assert!(!rendered.contains(&raw));
 }
+
+#[test]
+fn help_lists_exit_status_and_json_status() {
+    let out = graft(scratch().path())
+        .args(["doctor", "--help"])
+        .assert()
+        .success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(text.contains("Exit status"), "{text}");
+    assert!(text.contains("0  every check passes"), "{text}");
+    assert!(text.contains("1  any check fails or is skipped"), "{text}");
+    assert!(
+        text.contains("2  a usage error, or the working copy cannot be read"),
+        "{text}"
+    );
+
+    let served = serve();
+    let home = scratch();
+    let config = home.path().join("config.toml");
+    login(home.path(), &config, &served.url, &minted(4_102_444_800));
+    let out = graft(home.path())
+        .env("GRAFT_CONFIG", &config)
+        .args(["--json", "doctor"])
+        .assert()
+        .success();
+    let value: Value = json_out(out.get_output());
+    let checks = value["checks"].as_array().expect("checks");
+    assert!(
+        checks.iter().all(|check| check["status"] == "pass"),
+        "{value}"
+    );
+
+    let url = "http://127.0.0.1:1".to_owned();
+    let home = scratch();
+    let config = home.path().join("config.toml");
+    let token_path = home.path().join("tokens").join("dev");
+    fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+    write_token(&token_path, TOKEN);
+    let body = format!(
+        "default_server = \"dev\"\n\n[servers.dev]\nendpoint = \"{url}\"\ntoken_file = \"{}\"\n",
+        token_path.display()
+    );
+    fs::write(&config, body).unwrap();
+    let out = graft(home.path())
+        .env("GRAFT_CONFIG", &config)
+        .args(["--json", "doctor"])
+        .assert()
+        .code(1);
+    let value: Value = json_out(out.get_output());
+    let by_name: std::collections::BTreeMap<_, _> = value["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .map(|check| (check["name"].as_str().unwrap().to_owned(), check.clone()))
+        .collect();
+    assert_eq!(by_name["endpoint"]["status"], "fail");
+    assert_eq!(by_name["endpoint"]["ok"], false);
+    assert_eq!(by_name["protocol"]["status"], "skip");
+    assert_eq!(by_name["token"]["status"], "skip");
+    assert_eq!(by_name["config"]["status"], "pass");
+}

@@ -41,6 +41,14 @@ impl Status {
         }
     }
 
+    fn json_status(&self) -> &'static str {
+        match self {
+            Self::Ok => "pass",
+            Self::Fail => "fail",
+            Self::Skip => "skip",
+        }
+    }
+
     fn passed(&self) -> bool {
         matches!(self, Self::Ok)
     }
@@ -340,6 +348,7 @@ fn finish(g: &Global, checks: Vec<Check>) -> Result<(), Failure> {
                 json!({
                     "name": check.name,
                     "ok": check.status.passed(),
+                    "status": check.status.json_status(),
                     "detail": check.detail,
                 })
             })
