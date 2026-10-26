@@ -7,7 +7,7 @@ reporting for this repository: open the **Security** tab and choose
 **Report a vulnerability**. Don't open a public issue, pull request or
 discussion for a security problem.
 
-We aim to acknowledge a report within <N> days.
+We aim to acknowledge a report within 7 days.
 
 ## Supported versions
 
