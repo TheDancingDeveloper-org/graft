@@ -1269,9 +1269,14 @@ as its test oracle and `--verify` mode. GC is journalled.
 
 ### 8.7 Post-land checks on the batch line
 
-**Phase 2.** This section is the phase-2 design. It starts only with the
-graft-primary authority switch; until then D22 stands and graft runs no
-build, test, check or checker anywhere.
+**Phase 2, candidate lines only.** Phase 2 starts per repository with the
+operator's decision to switch it to graft-primary
+([D35](decisions.md#d35-the-roadmap-of-record-and-the-phase-2-trigger)); the
+first is graft itself
+([D40](decisions.md#d40-graft-is-the-first-graft-primary-repository)), whose
+candidate line is its batch integration line. Checks are post-land and never
+gate a land. Every other line, and every repository not named, stays under
+D22: graft runs no build, test, check or checker there.
 
 [D25](decisions.md#d25-post-land-checks-on-the-batch-line) designs phase 2's
 post-land checks for batch integration lines (§11.4) only. The land path is

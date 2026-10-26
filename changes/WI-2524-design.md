@@ -1,0 +1,1 @@
+- design §8.7 reads "candidate lines" per D35 and D40; D25 carries a note pointing to D40.
