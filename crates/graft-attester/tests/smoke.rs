@@ -40,6 +40,11 @@ struct AsAttester {
 struct Faults {
     get_objects: Mutex<u32>,
     attest: Mutex<u32>,
+    /// `GetWorkspace` calls to fail, counted down. `u32::MAX` never runs out.
+    get_workspace: Mutex<u32>,
+    /// `Watch` calls to fail. The reader makes one per page, so one failure
+    /// is one failed per-entry fetch.
+    watch: Mutex<u32>,
 }
 
 impl Faults {
@@ -105,6 +110,7 @@ impl WorkspaceApi for AsAttester {
         self.engine.open_workspace(&self.cx(cx), req).await
     }
     async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
+        Faults::fire(&self.faults.get_workspace)?;
         self.engine.get_workspace(&self.cx(cx), req).await
     }
     async fn list_workspaces(
@@ -188,12 +194,16 @@ impl RepoApi for AsAttester {
     rebase(Rebase) -> ChangesetId;
     revert(Revert) -> ChangesetId;
     land(Land) -> Landed;
-    watch(Watch) -> JournalPage;
     }
 
     async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
         Faults::fire(&self.faults.attest)?;
         self.engine.attest(&self.cx(cx), req).await
+    }
+
+    async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
+        Faults::fire(&self.faults.watch)?;
+        self.engine.watch(&self.cx(cx), req).await
     }
 }
 
@@ -777,6 +787,179 @@ async fn close(engine: &Eng, name: &str) {
         )
         .await
         .expect("close");
+}
+
+/// Drafts the attester has attested, as changeset ids.
+async fn attested_ids(engine: &Eng) -> Vec<String> {
+    attestations(engine)
+        .await
+        .into_iter()
+        .map(|(id, ..)| id)
+        .collect()
+}
+
+/// The saved read position.
+fn saved_lsn(dir: &std::path::Path) -> u64 {
+    std::fs::read_to_string(dir.join("state/lsn"))
+        .expect("state")
+        .trim()
+        .parse()
+        .expect("lsn")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_workspace_lookup_is_retried_and_neighbours_are_processed() {
+    let (engine, root) = repo().await;
+    let before = draft(&engine, root, "before", &[("src.txt", "b\n")]).await;
+    let middle = draft(&engine, root, "middle", &[("src.txt", "m\n")]).await;
+    let after = draft(&engine, root, "after", &[("src.txt", "a\n")]).await;
+    let middle_lsn = created_lsn(&engine, middle).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Start at the middle entry, with `before` already handled.
+    std::fs::create_dir_all(dir.path().join("state")).expect("state dir");
+    std::fs::write(dir.path().join("state/lsn"), format!("{middle_lsn}\n")).expect("state");
+    let (_server, mut a, faults) =
+        attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    *faults.watch.lock().expect("faults") = 1;
+    let err = a.poll(0).await.expect_err("the fetch of entry N failed");
+    assert!(err.to_string().contains("unavailable"), "{err}");
+    assert!(
+        a.run_next()
+            .await
+            .expect("nothing past the failure")
+            .is_none()
+    );
+    assert_eq!(saved_lsn(dir.path()), middle_lsn);
+
+    // Retried, the fetch succeeds: N and the entry after it are processed.
+    // `before` was already handled (the cursor started at N).
+    assert_eq!(a.poll(0).await.expect("retry"), 2);
+    let (id, results) = checked(a.run_next().await.expect("middle"));
+    assert_eq!(id, middle);
+    assert!(results.iter().all(|r| r.outcome.passed()), "{results:?}");
+    let (id, results) = checked(a.run_next().await.expect("after"));
+    assert_eq!(id, after);
+    assert!(results.iter().all(|r| r.outcome.passed()), "{results:?}");
+    assert!(a.run_next().await.expect("nothing left").is_none());
+    let got = attested_ids(&engine).await;
+    assert!(
+        !got.iter().any(|id| id == &before.to_string()),
+        "before was already handled: {got:?}"
+    );
+    for id in [&middle, &after] {
+        assert_eq!(
+            got.iter().filter(|got| *got == &id.to_string()).count(),
+            2,
+            "{id} processed once: {got:?}"
+        );
+    }
+    assert!(saved_lsn(dir.path()) > created_lsn(&engine, after).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_permanently_failing_lookup_does_not_stop_later_entries() {
+    let (engine, root) = repo().await;
+    let before = draft(&engine, root, "before", &[("src.txt", "b\n")]).await;
+    let stuck = draft(&engine, root, "stuck", &[("src.txt", "s\n")]).await;
+    let after = draft(&engine, root, "after", &[("src.txt", "a\n")]).await;
+    let stuck_lsn = created_lsn(&engine, stuck).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Start at the stuck entry, with `before` already handled. The page
+    // then holds the stuck entry and the one after it.
+    std::fs::create_dir_all(dir.path().join("state")).expect("state dir");
+    std::fs::write(dir.path().join("state/lsn"), format!("{stuck_lsn}\n")).expect("state");
+    let (_server, mut a, faults) =
+        attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    // Drop the line the journal already recorded, so the stuck entry's
+    // fetch is a `GetWorkspace` that never succeeds. Past the bound it is
+    // reported and left, and the entry after it is still processed.
+    a.forget_lines();
+    *faults.get_workspace.lock().expect("faults") = u32::MAX;
+    // The first failing lookup is reported and the page continues, so the
+    // entry after the stuck one is queued on that same read.
+    let err = a.poll(0).await.expect_err("lookup fails");
+    assert!(err.to_string().contains("unavailable"), "{err}");
+    let (id, results) = checked(a.run_next().await.expect("after"));
+    assert_eq!(id, after);
+    assert!(results.iter().all(|r| r.outcome.passed()), "{results:?}");
+    assert!(a.run_next().await.expect("stuck is not queued").is_none());
+    for n in 2..8 {
+        let err = a.poll(0).await.expect_err("lookup keeps failing");
+        assert!(err.to_string().contains("unavailable"), "try {n}: {err}");
+        // The saved position stays on the unhandled entry, so this page is
+        // read again. Drain whatever that re-read queued; `stuck` is not in it.
+        while let Some(report) = a.run_next().await.expect("queue") {
+            let (id, _) = checked(Some(report));
+            assert_ne!(id, stuck);
+        }
+    }
+    // Past the bound the stuck entry is left and not asked again. The
+    // saved position is still that entry. The page is re-read from there,
+    // so a later entry may be queued again; the stuck one is not.
+    assert!(a.poll(0).await.expect("past the bound") <= 1);
+    while let Some(report) = a.run_next().await.expect("queue") {
+        let (id, _) = checked(Some(report));
+        assert_ne!(id, stuck);
+    }
+    assert_eq!(saved_lsn(dir.path()), stuck_lsn);
+    let got = attested_ids(&engine).await;
+    assert!(
+        !got.iter().any(|id| id == &before.to_string()),
+        "before was already handled: {got:?}"
+    );
+    assert_eq!(
+        got.iter().filter(|id| *id == &after.to_string()).count(),
+        2,
+        "after processed once: {got:?}"
+    );
+    assert!(
+        !got.iter().any(|id| id == &stuck.to_string()),
+        "the failing entry was not processed: {got:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_mid_page_does_not_skip_an_unprocessed_entry() {
+    let (engine, root) = repo().await;
+    let before = draft(&engine, root, "before", &[("src.txt", "b\n")]).await;
+    let middle = draft(&engine, root, "middle", &[("src.txt", "m\n")]).await;
+    let _after = draft(&engine, root, "after", &[("src.txt", "a\n")]).await;
+    let middle_lsn = created_lsn(&engine, middle).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Start at the middle entry, with `before` already handled.
+    std::fs::create_dir_all(dir.path().join("state")).expect("state dir");
+    std::fs::write(dir.path().join("state/lsn"), format!("{middle_lsn}\n")).expect("state");
+    let (server, mut a, faults) =
+        attester(&engine, dir.path(), &CHECKS, Duration::from_secs(60)).await;
+    *faults.watch.lock().expect("faults") = 1;
+    assert!(a.poll(0).await.is_err(), "the fault fired");
+    // Acknowledged nothing new. The middle entry was fetched and failed.
+    let acknowledged = saved_lsn(dir.path());
+    assert_eq!(acknowledged, middle_lsn);
+    let _ = before;
+
+    // Crash, then restart from the saved position. The fault is spent, so
+    // the unprocessed entry is read again and processed.
+    drop(a);
+    let remote = Remote::connect(Endpoint::Server(server.url().to_owned()))
+        .await
+        .expect("connect");
+    let mut cfg = Config::new(REPO, LINE, dir.path());
+    cfg.checks = CHECKS
+        .iter()
+        .map(|c| Check::parse(c).expect("check"))
+        .collect();
+    cfg.wait_ms = 0;
+    let mut restarted = Attester::new(remote, cfg).expect("restart");
+    assert_eq!(restarted.next_lsn(), middle_lsn);
+    assert_eq!(restarted.poll(0).await.expect("reread"), 2);
+    let (id, results) = checked(restarted.run_next().await.expect("middle"));
+    assert_eq!(id, middle);
+    assert!(results.iter().all(|r| r.outcome.passed()), "{results:?}");
+    assert!(saved_lsn(dir.path()) > middle_lsn);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
