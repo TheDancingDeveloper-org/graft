@@ -52,7 +52,7 @@ fn normalize(mut paths: Vec<RepoPath>) -> Vec<RepoPath> {
 }
 
 /// Whether a kind's blob can be shown as text.
-fn textual(kind: EntryKind) -> bool {
+pub(crate) fn textual(kind: EntryKind) -> bool {
     matches!(kind, EntryKind::File | EntryKind::Exec | EntryKind::Symlink)
 }
 
