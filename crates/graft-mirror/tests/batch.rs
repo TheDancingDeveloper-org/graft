@@ -888,7 +888,7 @@ async fn a_concurrent_batch_branch_push_is_refused_by_the_lease() {
 
     let err = w.batcher().run().await.unwrap_err();
     assert!(
-        matches!(err, MirrorError::Config(ref message) if message.contains("did not fast-forward from leased head")),
+        matches!(err, MirrorError::Append { ref detail, .. } if detail.contains("did not fast-forward from leased head")),
         "{err:?}"
     );
     assert_eq!(support::branch(&w.upstream, &rec.branch).unwrap(), raced);
@@ -1357,7 +1357,7 @@ async fn a_batch_github_is_merging_is_not_closed() {
     assert_eq!(run.dropped.len(), 1, "the line still drops it");
     match run.outcome {
         BatchOutcome::Waiting(rec) => {
-            assert!(rec.detail.contains("waiting for review"), "{}", rec.detail)
+            assert!(rec.detail.starts_with("sealed"), "{}", rec.detail)
         }
         other => panic!("expected to wait, got {other:?}"),
     }
@@ -1934,4 +1934,105 @@ async fn a_retried_push_pushes_the_recorded_shas() {
         recorded.iter().map(|c| c.sha.to_hex()).collect::<Vec<_>>()
     );
     assert_eq!(w.db.batch_commits(rec.number).unwrap(), recorded);
+}
+
+/// WI-2577: every append to one open batch reaches the remote branch, not
+/// only the first.
+#[tokio::test]
+async fn repeated_appends_each_advance_the_batch_branch() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    let mut head = support::branch(&w.upstream, &first.branch).unwrap();
+    for n in 0..3u64 {
+        let file = format!("f{n}.txt");
+        let land = w
+            .land(&[(file.as_str(), "x\n")], "review fix", 2 + n as i64)
+            .await;
+        let run = w.batcher().run().await.unwrap();
+        let BatchOutcome::Waiting(rec) = run.outcome else {
+            panic!(
+                "append {n}: expected the open batch to wait, got {:?}",
+                run.outcome
+            )
+        };
+        let now = support::branch(&w.upstream, &first.branch).unwrap();
+        assert_ne!(now, head, "append {n} did not move the branch");
+        assert_eq!(now, rec.squash_sha.to_hex(), "append {n}");
+        assert_eq!(rec.lands, first.lands + n + 1, "append {n}");
+        assert_eq!(rec.tip, land, "append {n}");
+        assert_eq!(
+            w.db.batch_commits(first.number).unwrap().len() as u64,
+            rec.lands,
+            "append {n}"
+        );
+        let parent = git(&w.upstream, &["rev-parse", &format!("{now}^")]);
+        assert_eq!(parent, head, "append {n} is one commit on the old head");
+        head = now;
+    }
+}
+
+/// WI-2577: a run that takes no append says why. It never repeats the
+/// detail of an earlier append, which read as a push that did not happen.
+#[tokio::test]
+async fn an_append_skipped_after_an_append_reports_this_run() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    w.land(&[("b.txt", "b1\n")], "review fix", 2).await;
+    let BatchOutcome::Waiting(rec) = w.batcher().run().await.unwrap().outcome else {
+        panic!("expected the open batch to wait")
+    };
+    assert!(rec.detail.contains("after appending 1"), "{}", rec.detail);
+    let head = support::branch(&w.upstream, &first.branch).unwrap();
+
+    // Nothing new: an honest no-op.
+    let BatchOutcome::Waiting(rec) = w.batcher().run().await.unwrap().outcome else {
+        panic!("expected the open batch to wait")
+    };
+    assert_eq!(rec.detail, "waiting for review; no new lands to append");
+    assert_eq!(rec.lands, first.lands + 1);
+    assert_eq!(support::branch(&w.upstream, &first.branch).unwrap(), head);
+
+    // Sealed (auto-merge armed): the land waits and the run says so.
+    w.github
+        .merging
+        .lock()
+        .unwrap()
+        .push(first.pr_number.unwrap());
+    w.land(&[("c.txt", "c1\n")], "ci fix", 3).await;
+    let BatchOutcome::Waiting(rec) = w.batcher().run().await.unwrap().outcome else {
+        panic!("expected the open batch to wait")
+    };
+    assert!(rec.detail.starts_with("sealed"), "{}", rec.detail);
+    assert!(!rec.detail.contains("appending"), "{}", rec.detail);
+    assert_eq!(rec.lands, first.lands + 1);
+    assert_eq!(support::branch(&w.upstream, &first.branch).unwrap(), head);
+    let stored = w.db.batch(first.number).unwrap().unwrap();
+    assert_eq!(stored.detail, rec.detail);
+}
+
+/// WI-2577: an append whose lease fails is an error, never "appended".
+#[tokio::test]
+async fn an_append_whose_lease_fails_is_an_error() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    w.land(&[("b.txt", "b1\n")], "review fix", 2).await;
+    w.batcher().run().await.unwrap();
+    let main = support::branch(&w.upstream, "main").unwrap();
+    w.land(&[("c.txt", "c1\n")], "ci fix", 3).await;
+    // Someone moves the branch after the run reads the PR (observe, then
+    // append): the push's lease on the old head must fail.
+    *w.github.race_push.lock().unwrap() = Some((1, first.branch.clone(), main.clone()));
+
+    let err = w.batcher().run().await.unwrap_err();
+    assert!(
+        matches!(err, MirrorError::Append { ref branch, .. } if *branch == first.branch),
+        "{err:?}"
+    );
+    assert_eq!(support::branch(&w.upstream, &first.branch).unwrap(), main);
 }

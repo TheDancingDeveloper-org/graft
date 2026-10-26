@@ -33,6 +33,9 @@ use super::types::{
     sync_base, system_ms,
 };
 
+/// An open batch's detail when the line has nothing past its tip.
+const NOTHING_NEW: &str = "waiting for review; no new lands to append";
+
 /// Batches one integration line into squashed GitHub PRs.
 pub struct Batcher<'a, A, F> {
     api: &'a A,
@@ -1296,14 +1299,21 @@ where
             .pr_number
             .ok_or_else(|| config_err("an open batch has no PR"))?;
         let pull = self.forge.get_pull(number).await?;
-        if pull.merged || !pull.open || self.forge.merging(&pull.node_id).await? {
+        if pull.merged || !pull.open {
             return Ok(false);
+        }
+        if self.forge.merging(&pull.node_id).await? {
+            return self.skip(
+                rec,
+                "sealed: GitHub is merging it (auto-merge or merge queue); \
+                 later lands wait for the next batch",
+            );
         }
         let remote = GitSha::from_hex(&pull.head_sha)
             .ok_or_else(|| config_err("GitHub returned a malformed batch head"))?;
         let recorded = self.db.batch_commits(rec.number)?;
         if recorded.is_empty() {
-            return Ok(false);
+            return self.skip(rec, "not appended: the batch has no per-land commits");
         }
         if remote != rec.squash_sha {
             if !recorded.iter().any(|commit| commit.sha == remote) {
@@ -1323,11 +1333,14 @@ where
 
         let tip = self.tip(&self.config.line.clone()).await?;
         if tip == rec.tip {
-            return Ok(false);
+            return self.skip(rec, NOTHING_NEW);
         }
         let (ids, capped) = self.lands(tip, rec.tip).await?;
         if capped {
-            return Ok(false);
+            return self.skip(
+                rec,
+                format!("not appended: more than {MAX_LANDS} lands since the batch tip"),
+            );
         }
         let views = self.views(&ids).await?;
         let mut expected = rec.tip;
@@ -1336,7 +1349,10 @@ where
                 .get(id)
                 .ok_or_else(|| config_err(format!("changeset {id} is not in graft")))?;
             if is_sync(&view.changeset.metadata) {
-                return Ok(false);
+                return self.skip(
+                    rec,
+                    "not appended: the line has a sync changeset after the batch tip",
+                );
             }
             if view.changeset.parents.first().copied() != Some(expected) {
                 return Err(config_err(format!(
@@ -1359,7 +1375,7 @@ where
             .unwrap_or(MAX_COMMITS)
             .min(MAX_COMMITS);
         if new_lands.is_empty() {
-            return Ok(false);
+            return self.skip(rec, NOTHING_NEW);
         }
         if rec.lands as usize + new_lands.len() > max_lands {
             rec.detail = format!(
@@ -1429,6 +1445,14 @@ where
         );
         self.db.put_batch(rec)?;
         Ok(true)
+    }
+
+    /// Records why an open batch took no append, so the run reports this
+    /// run's outcome and never an earlier append's (WI-2577).
+    fn skip(&self, rec: &mut BatchRecord, why: impl Into<String>) -> Result<bool, MirrorError> {
+        rec.detail = why.into();
+        self.db.put_batch(rec)?;
+        Ok(false)
     }
 
     fn drops_in(&self, lands: &[LandLine]) -> Result<Vec<Dropped>, MirrorError> {
@@ -1528,10 +1552,23 @@ where
             .await?
             == PushOutcome::Rejected
         {
-            return Err(config_err(format!(
-                "batch branch {} did not fast-forward from leased head {lease}",
-                rec.branch
-            )));
+            return Err(MirrorError::Append {
+                branch: rec.branch.clone(),
+                detail: format!("it did not fast-forward from leased head {lease}"),
+            });
+        }
+        // An append is reported only once the remote is at the new head.
+        let there = self.mirror.ls_remote(&[rec.branch.as_str()]).await?;
+        let head = there.first().and_then(|(_, sha)| *sha);
+        if head != Some(rec.squash_sha) {
+            return Err(MirrorError::Append {
+                branch: rec.branch.clone(),
+                detail: format!(
+                    "the push reported success but the branch is at {}, not {}",
+                    head.map_or_else(|| "nothing".to_owned(), |sha| sha.to_hex()),
+                    rec.squash_sha
+                ),
+            });
         }
         Ok(())
     }
