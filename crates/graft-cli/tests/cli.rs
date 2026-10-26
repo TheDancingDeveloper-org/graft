@@ -1013,10 +1013,14 @@ fn login_json_never_prints_the_token() {
 
 #[test]
 fn serve_dev_then_clone_by_the_printed_url() {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
     use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    /// Hang bound only. Readiness is the printed clone line, or process exit.
+    const HANG: Duration = Duration::from_secs(120);
 
     let home = scratch();
     let config_path = home.path().join("config.toml");
@@ -1044,9 +1048,9 @@ fn serve_dev_then_clone_by_the_printed_url() {
     let stdout = child.stdout.take().expect("stdout");
     let stderr = child.stderr.take().expect("stderr");
     let (url_tx, url_rx) = std::sync::mpsc::channel();
-    let captured_out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let captured_err = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let out_buf = std::sync::Arc::clone(&captured_out);
+    let captured_out = Arc::new(Mutex::new(String::new()));
+    let captured_err = Arc::new(Mutex::new(String::new()));
+    let out_buf = Arc::clone(&captured_out);
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -1058,7 +1062,7 @@ fn serve_dev_then_clone_by_the_printed_url() {
             }
         }
     });
-    let err_buf = std::sync::Arc::clone(&captured_err);
+    let err_buf = Arc::clone(&captured_err);
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -1067,11 +1071,54 @@ fn serve_dev_then_clone_by_the_printed_url() {
             err_buf.lock().unwrap().push('\n');
         }
     });
-    let url = url_rx
-        .recv_timeout(Duration::from_secs(30))
-        .expect("clone command");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !config_path.exists() && Instant::now() < deadline {
+    let started = Instant::now();
+    let url = loop {
+        match url_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(url) => break url,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = child.wait();
+                panic!(
+                    "serve --dev exited before printing the clone command\nstderr:\n{}",
+                    captured_err.lock().unwrap()
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(status) = child.try_wait().expect("poll serve --dev") {
+                    panic!(
+                        "serve --dev exited {status} before printing the clone command\nstderr:\n{}",
+                        captured_err.lock().unwrap()
+                    );
+                }
+                if started.elapsed() >= HANG {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!(
+                        "serve --dev hung past {HANG:?} without a clone command\nstderr:\n{}",
+                        captured_err.lock().unwrap()
+                    );
+                }
+            }
+        }
+    };
+    let config_wait = Instant::now();
+    while !config_path.exists() {
+        if config_wait.elapsed() >= HANG {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "serve --dev printed a clone command but never wrote the user config\nstderr:\n{}",
+                captured_err.lock().unwrap()
+            );
+        }
+        if let Some(status) = child.try_wait().expect("poll serve --dev") {
+            if config_path.exists() {
+                break;
+            }
+            panic!(
+                "serve --dev exited {status} before writing the user config\nstderr:\n{}",
+                captured_err.lock().unwrap()
+            );
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
     let config_text = fs::read_to_string(&config_path).expect("user config");
@@ -1095,12 +1142,57 @@ fn serve_dev_then_clone_by_the_printed_url() {
 
     let clone_root = home.path().join("fresh");
     fs::create_dir(&clone_root).unwrap();
-    let cloned = graft(&clone_root)
+    let mut clone = Command::new(env!("CARGO_BIN_EXE_graft"))
+        .current_dir(&clone_root)
         .env("GRAFT_CONFIG", &config_path)
         .args(["clone", &url, "app"])
-        .assert()
-        .success();
-    assert!(!text(cloned.get_output()).contains(token));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn clone");
+    let mut clone_out = clone.stdout.take().expect("clone stdout");
+    let mut clone_err = clone.stderr.take().expect("clone stderr");
+    let clone_stdout = Arc::new(Mutex::new(Vec::new()));
+    let clone_stderr = Arc::new(Mutex::new(Vec::new()));
+    let out_sink = Arc::clone(&clone_stdout);
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = clone_out.read_to_end(&mut buf);
+        *out_sink.lock().unwrap() = buf;
+    });
+    let err_sink = Arc::clone(&clone_stderr);
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = clone_err.read_to_end(&mut buf);
+        *err_sink.lock().unwrap() = buf;
+    });
+    let clone_started = Instant::now();
+    let clone_status = loop {
+        if let Some(status) = clone.try_wait().expect("poll clone") {
+            break status;
+        }
+        if clone_started.elapsed() >= HANG {
+            let _ = clone.kill();
+            let _ = clone.wait();
+            panic!(
+                "clone hung past {HANG:?}\nclone stderr:\n{}\nserve stderr:\n{}",
+                String::from_utf8_lossy(&clone_stderr.lock().unwrap()),
+                captured_err.lock().unwrap()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let clone_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&clone_stdout.lock().unwrap()),
+        String::from_utf8_lossy(&clone_stderr.lock().unwrap())
+    );
+    assert!(
+        clone_status.success(),
+        "clone failed {clone_status}\n{clone_text}\nserve stderr:\n{}",
+        captured_err.lock().unwrap()
+    );
+    assert!(!clone_text.contains(token));
     assert!(clone_root.join("app/.graft/config").is_file());
 
     let _ = child.kill();

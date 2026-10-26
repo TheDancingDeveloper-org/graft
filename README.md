@@ -8,6 +8,10 @@ graft is a server-centric source control system: many clients share one
 history, and the server does the commit, history, diff, rebase and land.
 It is for agent fleets — many short sessions on one codebase — that need
 git-like commands without a branch or a pull request per change.
+Session and work-item identity, when set, come from `GRAFT_SESSION_ID` and
+`GRAFT_WORK_ITEM` (older names are still read), stored as `agent.session` /
+`agent.work_item` / `agent.model` / `agent.coauthors`, and exported as the
+`Graft-Work-Item` trailer.
 
 **Status: pre-v0.1.0, phase 1 (a git alternative).** Local mode
 (`graft init`), a loopback server (`graft serve --dev`), clone, commit,

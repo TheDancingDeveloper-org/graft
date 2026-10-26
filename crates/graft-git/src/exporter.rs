@@ -20,6 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 use graft_model::{BlobId, Change, Changeset, ChangesetId, EntryKind, ObjectKind, Timestamp};
 use graft_proto::CallContext;
 use graft_proto::api::{ObjectApi, RepoApi};
+use graft_proto::attribution::{self, Key};
 use graft_proto::types::{GetChangesets, GetObjects};
 
 use crate::export::{Committer, GitSource, commit_object, commit_sha, export_tree};
@@ -30,20 +31,22 @@ use crate::{GitError, GitSha};
 /// Changesets per `GetChangesets` call.
 const FETCH_MAX: usize = 256;
 
-/// Metadata key for the agent session that wrote a changeset. Exported as a
-/// `Graft-Session` trailer.
-pub const SESSION_KEY: &str = "vogt.session";
-/// Metadata key for the work item a changeset belongs to. Exported as a
-/// `Vogt-Work-Item` trailer.
-pub const WORK_ITEM_KEY: &str = "vogt.work_item";
-/// Metadata key for the model that wrote a changeset. Batch export writes
-/// it as a `Graft-Model` trailer. Native git export does not: that commit
-/// encoding is frozen by golden vectors.
-pub const MODEL_KEY: &str = "vogt.model";
-/// Metadata key for extra co-authors, one `Name <email>` per line. Batch
-/// export writes each as `Co-authored-by`. Not a `graft.` key: those are
-/// reserved for the server.
-pub const COAUTHORS_KEY: &str = "vogt.coauthors";
+/// Legacy metadata key for the session that wrote a changeset. Exported as
+/// a `Graft-Session` trailer. Writers use
+/// [`attribution::SESSION_KEY`]; the exporter reads both (D39).
+pub const SESSION_KEY: &str = attribution::LEGACY_SESSION_KEY;
+/// Legacy metadata key for the work item a changeset belongs to. A
+/// changeset carrying only legacy keys exports it under the legacy
+/// trailer, so its commit sha never moves (D39).
+pub const WORK_ITEM_KEY: &str = attribution::LEGACY_WORK_ITEM_KEY;
+/// Legacy metadata key for the model that wrote a changeset. Batch export
+/// writes it as a `Graft-Model` trailer. Native git export does not: that
+/// commit encoding is frozen by golden vectors.
+pub const MODEL_KEY: &str = attribution::LEGACY_MODEL_KEY;
+/// Legacy metadata key for extra co-authors, one `Name <email>` per line.
+/// Batch export writes each as `Co-authored-by`. Not a `graft.` key: those
+/// are reserved for the server.
+pub const COAUTHORS_KEY: &str = attribution::LEGACY_COAUTHORS_KEY;
 /// Metadata key a merge landing carries: `<src>@<changeset>`, the line and
 /// changeset it merged (D29). Exported as a `Graft-Merged-From` trailer on
 /// a one-parent commit; graft makes no git merge commits.
@@ -485,16 +488,30 @@ fn native_record(
 /// The commit message: the changeset's message, then the trailers in a
 /// block of their own. Only these four keys are ever written. The
 /// `mirror.git-commit` provenance key never is (decision D19).
+///
+/// Session and work item are read through [`attribution::get`]. The work
+/// item trailer's name follows the keys the changeset carries (D39): if it
+/// carries any new attribution key it is `Graft-Work-Item`, otherwise the
+/// legacy trailer. A changeset written before D39 carries only legacy keys,
+/// so its bytes and sha are unchanged; one written after carries new keys
+/// (alone or dual-written with legacy ones) and gets the new name.
 fn message(id: ChangesetId, changeset: &Changeset) -> Result<Vec<u8>, GitError> {
     check_text(&changeset.message, MESSAGE_BAD, "message", id)?;
+    let meta = &changeset.metadata;
     let mut trailers = vec![format!("Graft-Changeset: {id}")];
-    if let Some(session) = changeset.metadata.get(SESSION_KEY) {
+    if let Some(session) = attribution::get(meta, Key::Session) {
         check_text(session, TRAILER_BAD, "trailer", id)?;
         trailers.push(format!("Graft-Session: {session}"));
     }
-    if let Some(item) = changeset.metadata.get(WORK_ITEM_KEY) {
+    if let Some(item) = attribution::get(meta, Key::WorkItem) {
         check_text(item, TRAILER_BAD, "trailer", id)?;
-        trailers.push(format!("Vogt-Work-Item: {item}"));
+        let new = Key::ALL.iter().any(|k| meta.contains_key(k.name()));
+        let name = if new {
+            attribution::WORK_ITEM_TRAILER
+        } else {
+            attribution::LEGACY_WORK_ITEM_TRAILER
+        };
+        trailers.push(format!("{name}: {item}"));
     }
     if let Some(from) = changeset.metadata.get(MERGED_FROM_KEY) {
         check_text(from, TRAILER_BAD, "trailer", id)?;
@@ -549,4 +566,118 @@ fn check_text(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use graft_model::{Author, AuthorKind, Metadata, TreeId};
+    use graft_proto::attribution;
+
+    use super::*;
+    use crate::export::empty_tree_sha;
+
+    struct FixedLands;
+
+    impl LandTimes for FixedLands {
+        fn landed_at(&self, _: ChangesetId) -> Result<Timestamp, GitError> {
+            Ok(Timestamp {
+                ms: 1_700_000_360_000,
+                offset_min: 60,
+            })
+        }
+    }
+
+    fn changeset(pairs: &[(&str, &str)]) -> Changeset {
+        Changeset {
+            parents: Vec::new(),
+            root: TreeId::hash(b""),
+            changes: Vec::new(),
+            author: Author {
+                name: "Zoë Ångström".into(),
+                email: "zoe@example.com".into(),
+                kind: AuthorKind::Agent,
+            },
+            authored_at: Timestamp {
+                ms: 1_700_000_000_000,
+                offset_min: -330,
+            },
+            message: "step 3\n\nbody of step 3\n".into(),
+            metadata: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect::<Metadata>(),
+        }
+    }
+
+    /// The exported commit's sha and message.
+    fn export(cs: &Changeset) -> (String, String) {
+        let committer = Committer {
+            name: "graft".into(),
+            email: "graft@example.com".into(),
+        };
+        let record = native_record(&FixedLands, &committer, cs.id(), cs).unwrap();
+        let sha = commit_sha(empty_tree_sha(), &[], &record, &cs.message);
+        let body = String::from_utf8(record.message.unwrap()).unwrap();
+        (sha.to_hex(), body)
+    }
+
+    /// Legacy keys export byte for byte as before D39: the sha is pinned
+    /// from main before the change, so already-exported history keeps its
+    /// shas and `export verify` keeps passing.
+    #[test]
+    fn legacy_keys_export_the_pinned_sha() {
+        let cs = changeset(&[
+            (attribution::LEGACY_SESSION_KEY, "ses_0003"),
+            (attribution::LEGACY_WORK_ITEM_KEY, "WI-3"),
+        ]);
+        let (sha, body) = export(&cs);
+        assert!(
+            body.ends_with("Graft-Session: ses_0003\nVogt-Work-Item: WI-3\n"),
+            "{body}"
+        );
+        assert_eq!(sha, "ea3d47cbf4600cf03c140c568a735452c85da015");
+    }
+
+    #[test]
+    fn new_keys_export_the_new_trailer() {
+        let cs = changeset(&[
+            (attribution::SESSION_KEY, "ses_0003"),
+            (attribution::WORK_ITEM_KEY, "WI-3"),
+        ]);
+        let (_, body) = export(&cs);
+        assert!(
+            body.ends_with("Graft-Session: ses_0003\nGraft-Work-Item: WI-3\n"),
+            "{body}"
+        );
+    }
+
+    /// The CLI dual-writes both names: the new keys win, values and
+    /// trailer name alike.
+    #[test]
+    fn dual_keys_export_the_new_trailer_and_values() {
+        let cs = changeset(&[
+            (attribution::LEGACY_SESSION_KEY, "ses_old"),
+            (attribution::LEGACY_WORK_ITEM_KEY, "WI-old"),
+            (attribution::SESSION_KEY, "ses_new"),
+            (attribution::WORK_ITEM_KEY, "WI-new"),
+        ]);
+        let (_, body) = export(&cs);
+        assert!(
+            body.ends_with("Graft-Session: ses_new\nGraft-Work-Item: WI-new\n"),
+            "{body}"
+        );
+        assert!(!body.contains("Vogt-Work-Item"), "{body}");
+    }
+
+    /// Any new key switches the trailer name, even when the work item
+    /// itself is only under its legacy key.
+    #[test]
+    fn any_new_key_selects_the_new_trailer() {
+        let cs = changeset(&[
+            (attribution::SESSION_KEY, "ses_new"),
+            (attribution::LEGACY_WORK_ITEM_KEY, "WI-old"),
+        ]);
+        let (_, body) = export(&cs);
+        assert!(body.ends_with("Graft-Work-Item: WI-old\n"), "{body}");
+    }
 }

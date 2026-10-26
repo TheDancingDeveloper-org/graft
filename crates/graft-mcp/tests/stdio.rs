@@ -106,3 +106,31 @@ async fn unknown_arguments_are_refused_by_name() {
         "the error names the unknown field: {text}"
     );
 }
+
+#[tokio::test]
+async fn no_tool_description_names_the_tracker() {
+    let client = connect(Fake::standard()).await;
+    let tools = client.list_all_tools().await.expect("tools/list");
+    assert!(tools.len() > 1, "the server lists its tools");
+    for tool in &tools {
+        let description = tool.description.as_deref().unwrap_or("");
+        assert!(
+            !description.to_ascii_lowercase().contains("vogt"),
+            "{} description names the tracker: {description}",
+            tool.name
+        );
+        let schema = serde_json::to_value(&*tool.input_schema).unwrap();
+        let properties = schema["properties"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        for (name, prop) in properties {
+            let text = prop["description"].as_str().unwrap_or("");
+            assert!(
+                !text.to_ascii_lowercase().contains("vogt"),
+                "{} parameter {name} names the tracker: {text}",
+                tool.name
+            );
+        }
+    }
+}

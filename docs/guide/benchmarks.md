@@ -11,7 +11,7 @@ CLI process for every step (graft and git alike):
 
 | Scale | File | Host | graft commit |
 | --- | --- | --- | --- |
-| 1,000 commits | `bench/results/2026-10-23-scales-10-1000/results.json` | vogt-prod, 24 CPUs, 62.6 GiB | `35c308759e8f` |
+| 1,000 commits | `bench/results/2026-10-23-scales-10-1000/results.json` | 24 CPUs, 62.6 GiB | `35c308759e8f` |
 | 10,000 commits | `bench/results/2026-10-23-scale-10000/results.json` | graft-dev, 4 vCPU, 7.8 GiB | `2c32be2d39a3` |
 
 Bars are p50 milliseconds. Lower is faster. Teal is graft, grey is git.

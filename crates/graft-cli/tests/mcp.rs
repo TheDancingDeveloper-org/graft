@@ -17,14 +17,16 @@ use predicates::str::contains;
 use serde_json::{Value, json};
 use support::*;
 
-/// How long one response may take.
-const WAIT: Duration = Duration::from_secs(60);
+/// Hang bound for one MCP reply. The outcome is a JSON-RPC line or process
+/// exit; this clock only catches a process that never answers.
+const WAIT: Duration = Duration::from_secs(120);
 
 /// A running `graft mcp`, spoken to in newline-delimited JSON-RPC.
 struct Mcp {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
+    stderr: std::sync::Arc<std::sync::Mutex<String>>,
     next_id: u64,
 }
 
@@ -48,6 +50,17 @@ impl Mcp {
         }
         let mut child = cmd.spawn().expect("spawn graft mcp");
         let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let captured_err = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let err_buf = std::sync::Arc::clone(&captured_err);
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                let mut buf = err_buf.lock().unwrap();
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        });
         let (tx, lines) = channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
@@ -62,6 +75,7 @@ impl Mcp {
             child,
             stdin,
             lines,
+            stderr: captured_err,
             next_id: 1,
         };
         let init = mcp.request(
@@ -90,10 +104,18 @@ impl Mcp {
         self.next_id += 1;
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         loop {
-            let line = self
-                .lines
-                .recv_timeout(WAIT)
-                .unwrap_or_else(|_| panic!("no response to {method}"));
+            let line = self.lines.recv_timeout(WAIT).unwrap_or_else(|_| {
+                let stderr = self.stderr.lock().unwrap().clone();
+                if let Some(status) = self.child.try_wait().ok().flatten() {
+                    panic!(
+                        "graft mcp exited {status} before answering {method}\nstderr:\n{stderr}"
+                    );
+                }
+                let _ = self.child.kill();
+                panic!(
+                    "graft mcp hung past {WAIT:?} without answering {method}\nstderr:\n{stderr}"
+                );
+            });
             let message: Value = serde_json::from_str(&line)
                 .unwrap_or_else(|e| panic!("stdout carried a non-JSON line ({e}): {line}"));
             if message["id"] == json!(id) {
