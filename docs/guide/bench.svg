@@ -75,8 +75,8 @@
 <text x="32" y="300" class="sub">5/9 ops faster than git; ratio 0.24–4.56 at 1k. 6/9 ops faster than git; ratio 0.08–4.07 at 10k. Same-file is the merge3 concurrent scenario.</text>
 <rect x="16" y="320" width="430" height="210" rx="8" class="box"/>
 <text x="32" y="344" class="h">Real-PR replay</text>
-<text x="32" y="368" class="sub">115 PRs, 5 cases. Clean merges graft 58 / git 58. Conflicts graft 47 / git 47. Matched outcomes: yes.</text>
-<text x="32" y="392" class="sub">Source: bench/results/2026-10-24-real-prs/results.json. Both tools agreed on every case (graft-only and git-only clean are 0).</text>
+<text x="32" y="368" class="sub">115 PRs, 5 cases. Clean merges graft 58 / git 58. Conflicts graft 47 / git 47.</text>
+<text x="32" y="392" class="sub">Source: bench/results/2026-10-24-real-prs/results.json. Both tools agreed on every case.</text>
 <text x="32" y="418" class="lab">rdpapp-split: 9 PRs, clean 1=1, conflicts 8=8, rt 17/19</text>
 <text x="32" y="434" class="lab">rdpapp-stack: 11 PRs, clean 0=0, conflicts 1=1, rt 2/2</text>
 <text x="32" y="450" class="lab">fluent2-registration: 34 PRs, clean 18=18, conflicts 16=16, rt 50/64</text>

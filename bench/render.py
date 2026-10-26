@@ -131,17 +131,19 @@ def main() -> None:
     clean_t = sum(clean_count(c, "git") for c in cases)
     conf_g = sum(c["graft"]["conflicts"] for c in cases)
     conf_t = sum(c["git"]["conflicts"] for c in cases)
-    matched = all(
-        c["graft"]["conflicts"] == c["git"]["conflicts"]
-        and (
-            c.get("agreement") is None
-            or (
-                c["agreement"]["graft_only_clean"] == 0
-                and c["agreement"]["git_only_clean"] == 0
-            )
-        )
-        for c in cases
-    )
+    def case_matched(case: dict) -> bool:
+        if case["graft"]["conflicts"] != case["git"]["conflicts"]:
+            return False
+        agr = case.get("agreement")
+        if agr is None:
+            return True
+        return agr["graft_only_clean"] == 0 and agr["git_only_clean"] == 0
+
+    matched_n = sum(1 for c in cases if case_matched(c))
+    if matched_n == len(cases):
+        agreement_line = "Both tools agreed on every case."
+    else:
+        agreement_line = f"{matched_n} of {len(cases)} matched."
 
     strategies = []
     for row in branch["results"]:
@@ -193,18 +195,21 @@ def main() -> None:
     parts.append(
         f'<text x="32" y="368" class="sub">{prs} PRs, {len(cases)} cases. '
         f"Clean merges graft {clean_g} / git {clean_t}. "
-        f"Conflicts graft {conf_g} / git {conf_t}. "
-        f"Matched outcomes: {'yes' if matched else 'no'}.</text>"
+        f"Conflicts graft {conf_g} / git {conf_t}.</text>"
     )
     parts.append(
-        '<text x="32" y="392" class="sub">Source: bench/results/2026-10-24-real-prs/results.json. '
-        "Both tools agreed on every case (graft-only and git-only clean are 0).</text>"
+        f'<text x="32" y="392" class="sub">Source: bench/results/2026-10-24-real-prs/results.json. '
+        f'{esc(agreement_line)}</text>'
     )
     # per case rows
     yy = 418
     for c in cases:
+        label = c["id"]
+        if label == "rusttorrent-qbit":
+            # The results id names another project; the chart keeps the public label.
+            label = "qbit-importer"
         parts.append(
-            f'<text x="32" y="{yy}" class="lab">{esc(c["id"])}: '
+            f'<text x="32" y="{yy}" class="lab">{esc(label)}: '
             f'{c["n_prs"]} PRs, clean {clean_count(c, "graft")}='
             f'{clean_count(c, "git")}, conflicts {c["graft"]["conflicts"]}='
             f'{c["git"]["conflicts"]}, rt {c["graft"]["round_trips"]}/'
@@ -227,8 +232,8 @@ def main() -> None:
         )
         yy += 20
     parts.append(
-        '<text x="24" y="548" class="sub">Not on this chart: the WI-2341 twelve-run '
-        "read-path medians (D31 floor). They are in docs/status.md and docs/decisions.md "
+        '<text x="24" y="548" class="sub">Not on this chart: the twelve-run '
+        "read-path medians (the read-latency floor). They are in the engineering record "
         "only, not in a results file.</text>"
     )
     parts.append("</svg>\n")
