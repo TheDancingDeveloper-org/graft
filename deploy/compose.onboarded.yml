@@ -32,6 +32,12 @@ services:
         bind:
           create_host_path: false
 
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
+        read_only: true
+        bind:
+          create_host_path: false
       - graft-dev-mirror-rustnzb:/var/lib/graft/mirror
     healthcheck:
       test: [CMD, bash, -c, "exec 3<>/dev/tcp/127.0.0.1/9465 && printf 'GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]

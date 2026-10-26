@@ -5,6 +5,7 @@
 #
 #   1. Bootstrap secrets under /etc/graft, if missing: the server signing key,
 #      and (after the server is up) the mirror's service token. Both are
+#      github-token (HOMELAB_VOGT_GITHUB_TOKEN) is fetched at deploy time.
 #      written by a throwaway root container from the pinned image, mode 0600,
 #      owned by uid 10001. Neither is ever printed.
 #   2. Pull the pinned image and pre-flight: check deploy/server.toml and
@@ -138,6 +139,19 @@ store_secret() {
 }
 
 command -v curl >/dev/null || die "curl is required"
+
+# GitHub credential for every mirror's [github] token_file (WI-2487).
+# Fetched at deploy time into the secrets directory, mode 0600. The value
+# goes stdin-to-file and is never printed or placed in argv or compose env.
+fetch_github_token() {
+  local wrapper=${GRAFT_SECRET_CMD:-secret}
+  command -v "$wrapper" >/dev/null || die "github token: $wrapper is required to read HOMELAB_VOGT_GITHUB_TOKEN"
+  "$wrapper" get HOMELAB_VOGT_GITHUB_TOKEN     --project 76b1ebe1-3656-4cef-952c-30d5d489c6e7 --env prod     | store_secret github-token
+  log "wrote github-token ($(as_root "wc -c < /s/github-token") bytes, mode 0600, not printed)"
+}
+
+log "github token: fetching HOMELAB_VOGT_GITHUB_TOKEN into $secrets/github-token"
+fetch_github_token
 
 log "pulling $GRAFT_IMAGE"
 # The attester (profile `attester`) is built here, not pulled.

@@ -123,11 +123,28 @@ A private upstream (one anonymous `git ls-remote` cannot read) gets a
 `/etc/graft/github-token` on the host. The mirror's entrypoint is
 `deploy/private-follow.sh`, which reads that file into git's
 `http.extraHeader`. The token is not written into the config, printed, or
-placed in argv. An empty token file fails the mirror. Builtin public mirrors
-stay unauthenticated. Place the host file before onboarding a private
-repository; the file is mode 0600 and owned by uid 10001, like the other
-`/etc/graft` secrets. Generated mirror configs are mode 0644 so that user can
-read them.
+placed in argv. An empty token file fails the mirror. Every mirror, public and private,
+also uses that file as its `[github] token_file` so `pr-batch` can push
+`graft/batch-*` and open a pull request. `up.sh` fetches
+`HOMELAB_VOGT_GITHUB_TOKEN` (Infisical project apps, env prod) at deploy time
+and writes it to `/etc/graft/github-token`, mode 0600, owned by uid 10001.
+The value is never printed, placed in argv, or set as a compose environment
+value. Place the host file before onboarding a private repository if you
+deploy without `up.sh`; otherwise `up.sh` writes it. Generated mirror configs
+are mode 0644 so that user can read them.
+
+### Open a batch pull request
+
+From the graft-dev VM, after the line has lands to export:
+
+```sh
+docker exec graft-dev-mirror-<svc> graft-mirror pr-batch <line> --base <branch> --config /etc/graft/deploy/mirror.toml
+```
+
+`<svc>` is the service name without the `graft-` prefix (`mirror` for
+rustTorrent, `mirror-fluent2`, `mirror-vogt`, `mirror-rustnzb`,
+`mirror-myaiagent`). The command uses `/run/secrets/github-token`, which is
+`HOMELAB_VOGT_GITHUB_TOKEN`. It does not take a token on the command line.
 
 Session credentials follow D10 and `trial/mint-agent-tokens.sh`: one
 `--kind agent` token per session, minted with `--session`, scopes `read`,

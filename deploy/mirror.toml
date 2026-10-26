@@ -3,7 +3,7 @@
 # Parsed by graft_mirror::config::FileConfig. Nothing here is secret: the
 # token comes from /run/secrets/graft-mirror-token, mounted read-only from the
 # host file /etc/graft/mirror-token that up.sh mints.
-# No [github] section, so the mirror follows and imports but does not bridge.
+# [github] token_file is /run/secrets/github-token, the shared host file (WI-2487).
 server = "http://graft-server:7878"
 repo = "rusttorrent"
 upstream = "https://github.com/TheDancingDeveloper-org/rustTorrent.git"
@@ -14,6 +14,11 @@ poll_interval_secs = 15
 metrics_addr = "0.0.0.0:9465"
 json_logs = true
 
+
+[github]
+owner = "TheDancingDeveloper-org"
+repo = "rustTorrent"
+token_file = "/run/secrets/github-token"
 [[lines]]
 branch = "main"
 line = "main"

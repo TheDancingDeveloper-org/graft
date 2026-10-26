@@ -117,6 +117,12 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
+        read_only: true
+        bind:
+          create_host_path: false
       - graft-dev-mirror:/var/lib/graft/mirror
     healthcheck: &mirror-health
       test:
@@ -155,6 +161,12 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
+        read_only: true
+        bind:
+          create_host_path: false
       - graft-dev-mirror-fluent2:/var/lib/graft/mirror
     healthcheck: *mirror-health
 
@@ -178,6 +190,12 @@ services:
       - type: bind
         source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-vogt
         target: /run/secrets/graft-mirror-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
         read_only: true
         bind:
           create_host_path: false
