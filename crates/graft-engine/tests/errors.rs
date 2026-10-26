@@ -311,8 +311,8 @@ fn invalid_change() {
     );
 }
 
-/// A token's session and work item bind the draft's `vogt.*` metadata;
-/// a service token may attribute to anyone.
+/// A token's session and work item bind the draft's attribution metadata,
+/// under either key name; a service token may attribute to anyone.
 #[test]
 fn identity_metadata() {
     let f = memory();
@@ -348,6 +348,79 @@ fn identity_metadata() {
     let mut service = agent.clone();
     service.principal.kind = PrincipalKind::Service;
     create(&service, req("w", "ses_2", "WI-2")).expect("service acts for others");
+}
+
+/// The new `agent.*` keys and the legacy aliases are the same claim: either
+/// matching the token is accepted, and either disagreeing is refused. When
+/// both names are set and one differs, the changeset is refused.
+#[test]
+fn identity_metadata_reads_both_key_names() {
+    let f = memory();
+    let repo = Repo::new(&f, "r");
+    let a = repo.commit(vec![], &[("a", b"a")], &[]).id;
+    repo.upload(&[b"b"]);
+    let mut agent = repo.cx.clone();
+    agent.principal.kind = PrincipalKind::Agent;
+    agent.principal.session = Some("ses_1".to_owned());
+    agent.principal.work_item = Some("WI-1".to_owned());
+    let create = |r| block_on(f.engine.create_changeset(&agent, r));
+    let with = |n: &str, pairs: &[(&str, &str)]| {
+        let mut r = commit_req("r", vec![a], vec![put(n, b"b")]);
+        for (k, v) in pairs {
+            r.metadata.insert((*k).to_owned(), (*v).to_owned());
+        }
+        r
+    };
+
+    for (field, name, own, other, new_key, old_key) in [
+        (
+            "session",
+            "session-metadata",
+            "ses_1",
+            "ses_2",
+            "agent.session",
+            "vogt.session",
+        ),
+        (
+            "work item",
+            "work-item-metadata",
+            "WI-1",
+            "WI-2",
+            "agent.work_item",
+            "vogt.work_item",
+        ),
+    ] {
+        assert_eq!(
+            rule(create(with("n", &[(new_key, other)]))),
+            name,
+            "{field}: new key only"
+        );
+        assert_eq!(
+            rule(create(with("l", &[(old_key, other)]))),
+            name,
+            "{field}: legacy key only"
+        );
+        create(with("ok-new", &[(new_key, own)])).expect(field);
+        create(with("ok-old", &[(old_key, own)])).expect(field);
+        assert_eq!(
+            rule(create(with(
+                "both-new",
+                &[(new_key, other), (old_key, own)],
+            ))),
+            name,
+            "{field}: new key differs"
+        );
+        assert_eq!(
+            rule(create(with(
+                "both-old",
+                &[(new_key, own), (old_key, other)],
+            ))),
+            name,
+            "{field}: legacy key differs"
+        );
+        create(with("both-same", &[(new_key, own), (old_key, own)])).expect(field);
+        create(with("neither", &[])).expect(field);
+    }
 }
 
 #[test]
