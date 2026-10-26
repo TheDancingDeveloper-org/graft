@@ -776,8 +776,10 @@ impl<M: MetaStore> MetaStore for Crashy<M> {
     async fn gc_protection(&self, repo: RepoId) -> StoreResult<bool> {
         self.inner.gc_protection(repo).await
     }
+    async fn journal_tip(&self, repo: RepoId) -> StoreResult<Option<Lsn>> {
+        self.inner.journal_tip(repo).await
+    }
 }
-
 #[test]
 fn a_crash_at_the_commit_point_leaves_all_or_nothing() {
     let meta = Arc::new(Crashy {

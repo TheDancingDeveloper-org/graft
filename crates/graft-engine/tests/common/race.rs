@@ -268,8 +268,11 @@ impl<M: MetaStore> MetaStore for Yielding<M> {
         YieldNow::default().await;
         self.0.gc_protection(repo).await
     }
+    async fn journal_tip(&self, repo: RepoId) -> StoreResult<Option<Lsn>> {
+        YieldNow::default().await;
+        self.0.journal_tip(repo).await
+    }
 }
-
 /// A boxed future the scheduler drives.
 pub type Task<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
