@@ -226,3 +226,7 @@ jobs:
         run: scripts/docs-smoke.sh
         env:
           GRAFT_BIN: ${{ github.workspace }}/target/debug/graft
+      - name: scripted two-agent demo
+        run: scripts/demo/run.sh
+        env:
+          GRAFT_BIN: ${{ github.workspace }}/target/debug/graft
