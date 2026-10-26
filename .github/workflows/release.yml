@@ -55,8 +55,11 @@ jobs:
           while IFS=: read -r file number line; do
             case "$line" in
               *self-hosted*|*"[graft-dev]"*) ;;
+              # Operator decision 2026-10-26: release builds use these hosted
+              # labels exactly. Required checks in ci.yml stay self-hosted.
+              *ubuntu-24.04-arm*|*ubuntu-24.04*|*macos-14*) ;;
               *)
-                echo "::error file=$file,line=$number::job does not name a self-hosted runner"
+                echo "::error file=$file,line=$number::job does not name an allowed runner"
                 bad=1
                 ;;
             esac
@@ -107,7 +110,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -122,18 +125,17 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight]
-    runs-on: [self-hosted, docker]
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cross
       - name: Build static archive
-        run: scripts/release/build-archive.sh x86_64-unknown-linux-musl cross
+        run: scripts/release/build-archive.sh x86_64-unknown-linux-musl cargo
       - name: Verify checksum
         run: sha256sum -c graft-x86_64-unknown-linux-musl.tar.gz.sha256
       - uses: actions/upload-artifact@v4
@@ -149,18 +151,17 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight]
-    runs-on: [self-hosted, docker]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cross
       - name: Build static archive
-        run: scripts/release/build-archive.sh aarch64-unknown-linux-musl cross
+        run: scripts/release/build-archive.sh aarch64-unknown-linux-musl cargo
       - name: Verify checksum
         run: sha256sum -c graft-aarch64-unknown-linux-musl.tar.gz.sha256
       - uses: actions/upload-artifact@v4
@@ -176,7 +177,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight]
-    runs-on: [self-hosted, macos]
+    runs-on: macos-14
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -200,7 +201,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight, binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-aarch64]
-    runs-on: [self-hosted, docker]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -245,7 +246,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight, binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-aarch64, image]
-    runs-on: [self-hosted]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write

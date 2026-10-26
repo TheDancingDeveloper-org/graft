@@ -45,9 +45,15 @@ jobs:
               # The graft-dev runner is self-hosted but registered with
               # --no-default-labels, so its only label is graft-dev.
               *"[graft-dev]"*) ;;
+              # release.yml only (operator decision 2026-10-26). Required PR
+              # checks stay self-hosted; these labels are exact, never dynamic.
               *)
-                echo "::error file=$file,line=$number::job does not name a self-hosted runner"
-                bad=1
+                if [ "$file" = .github/workflows/release.yml ] &&                    printf '%s' "$line" | grep -Eq 'ubuntu-24\.04-arm|ubuntu-24\.04|macos-14'; then
+                  :
+                else
+                  echo "::error file=$file,line=$number::job does not name a self-hosted runner"
+                  bad=1
+                fi
                 ;;
             esac
             case "$line" in
