@@ -4,9 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use graft_git::GitSha;
 use graft_git::export::commit_object;
-use graft_git::exporter::{
-    COAUTHORS_KEY, Exporter, MERGED_FROM_KEY, MODEL_KEY, SESSION_KEY, WORK_ITEM_KEY,
-};
+use graft_git::exporter::{Exporter, MERGED_FROM_KEY};
 use graft_git::map::{ImportedCommit, MirrorMap};
 use graft_model::{Author, AuthorKind, Change, ChangesetId, Metadata, Timestamp};
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
@@ -696,17 +694,16 @@ where
             {
                 wanted.insert(draft, *id);
             }
-            let meta = |key: &str| {
-                cs.metadata
-                    .get(key)
-                    .map(|v| clean_text(v, FIELD_CHARS, false))
-            };
+            // The new agent.* key, else the legacy name (D39). The PR
+            // cells drop `@`; the commit trailers keep it.
+            let shown = |key| attribution_cell(&cs.metadata, key);
+            let trailer = |key| attribution_trailer(&cs.metadata, key);
             let claimed = claimed_author_trailer(&cs.author);
             lands.push(LandLine {
                 id: *id,
                 author: clean_text(&cs.author.name, FIELD_CHARS, false),
-                session: meta(SESSION_KEY),
-                work_item: meta(WORK_ITEM_KEY),
+                session: shown(graft_proto::attribution::Key::Session),
+                work_item: shown(graft_proto::attribution::Key::WorkItem),
                 subject: clean_text(
                     cs.message.lines().next().unwrap_or("").trim(),
                     FIELD_CHARS,
@@ -722,18 +719,11 @@ where
                 ident: ("unknown".to_owned(), "unknown".to_owned()),
                 authored: cs.authored_at,
                 message: clean_message(&cs.message, MESSAGE_CHARS, true),
-                trailer_session: cs
-                    .metadata
-                    .get(SESSION_KEY)
-                    .map(|v| clean_message(v, FIELD_CHARS, false)),
-                trailer_work_item: cs
-                    .metadata
-                    .get(WORK_ITEM_KEY)
-                    .map(|v| clean_message(v, FIELD_CHARS, false)),
-                trailer_model: cs
-                    .metadata
-                    .get(MODEL_KEY)
-                    .map(|v| clean_message(v, FIELD_CHARS, false)),
+                // Trailer values, not names: the new key wins, else the
+                // legacy name. The trailer labels stay Graft-* (WI-2530).
+                trailer_session: trailer(graft_proto::attribution::Key::Session),
+                trailer_work_item: trailer(graft_proto::attribution::Key::WorkItem),
+                trailer_model: trailer(graft_proto::attribution::Key::Model),
                 trailer_coauthors: coauthor_lines(&cs.metadata),
                 trailer_claimed_author: claimed,
                 trailer_merged_from: cs
@@ -1733,11 +1723,33 @@ where
     }
 }
 
-/// `Co-authored-by` values on a land: `vogt.coauthors`, one identity per
-/// line. Lines that cannot be a trailer are dropped, never rewritten into
-/// the commit.
-fn coauthor_lines(metadata: &Metadata) -> Vec<String> {
-    let Some(raw) = metadata.get(COAUTHORS_KEY) else {
+/// The recorded value of an attribution field: the new `agent.*` key, else
+/// the legacy name. The new key wins when both are set.
+fn attribution_raw(metadata: &Metadata, key: graft_proto::attribution::Key) -> Option<&str> {
+    graft_proto::attribution::get(metadata, key)
+}
+
+/// A PR-body cell: bounded, with `@` dropped so a cell cannot look like a mention.
+pub(crate) fn attribution_cell(
+    metadata: &Metadata,
+    key: graft_proto::attribution::Key,
+) -> Option<String> {
+    attribution_raw(metadata, key).map(|v| clean_text(v, FIELD_CHARS, false))
+}
+
+/// A commit-trailer value: bounded, with `@` kept (emails, co-author lines).
+pub(crate) fn attribution_trailer(
+    metadata: &Metadata,
+    key: graft_proto::attribution::Key,
+) -> Option<String> {
+    attribution_raw(metadata, key).map(|v| clean_message(v, FIELD_CHARS, false))
+}
+
+/// `Co-authored-by` values on a land: the new co-authors key, else the
+/// legacy name, one identity per line. Lines that cannot be a trailer are
+/// dropped, never rewritten into the commit.
+pub(crate) fn coauthor_lines(metadata: &Metadata) -> Vec<String> {
+    let Some(raw) = attribution_raw(metadata, graft_proto::attribution::Key::Coauthors) else {
         return Vec::new();
     };
     raw.lines()

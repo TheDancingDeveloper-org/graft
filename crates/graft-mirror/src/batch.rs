@@ -83,6 +83,8 @@ mod types;
 mod tests;
 
 pub use batcher::Batcher;
+#[cfg(test)]
+pub(crate) use batcher::{attribution_cell, attribution_trailer, coauthor_lines};
 pub use types::{
     AuthorIdentity, BATCH, BATCH_TRAILER, BRANCH_PREFIX, BatchCommit, BatchConfig, BatchLine,
     BatchOutcome, BatchRecord, BatchRun, BatchState, CHANGESET_TRAILER, DEFAULT_DROP_REASON,
