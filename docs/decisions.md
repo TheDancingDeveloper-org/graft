@@ -84,7 +84,7 @@ Already decided by the operator (2026-10-22):
 
 | # | Decision | Recommendation | Blocks |
 | --- | --- | --- | --- |
-| D1 | Name | Keep `graft` while private; decide before any publish | Phase 4 (publish), not before |
+| D1 | Name | **Decided:** keep `graft`; publish only `graft-*` crates (never the bare `graft` crate); the binary is `graft` | — |
 | D2 | Licence and visibility | **Decided:** public, AGPL-3.0-only | — |
 | D3 | Storage backend | **Decided:** SQLite + filesystem through phase 3, Litestream for off-box WAL | — |
 | D4 | Wire protocol | **Decided:** gRPC (tonic, prost) plus a read-only JSON facade | — |
@@ -120,6 +120,11 @@ Already decided by the operator (2026-10-22):
 ---
 
 ## D1. Name
+
+**Decided (operator, 2026-10-25): keep `graft`.** No rename. Only the
+`graft-*` crates are ever published to crates.io, never the bare `graft`
+crate (taken by another project); the binary stays `graft`. The analysis
+below is kept for the record.
 
 `graft` is a good fit (in horticulture a scion is *grafted* onto a rootstock).
 But the name is crowded. There is an existing open-source Rust project called
