@@ -39,7 +39,7 @@ at the edge of the system. Git concepts are not part of the core model.
 
 ### Our workload
 
-Today the estate runs git, GitHub, and GitHub merge queues, with Vogt starting
+Today the estate runs git, GitHub, and GitHub merge queues, with an orchestrator starting
 and tracking agent sessions. The work is shaped like this:
 
 - Many short-lived agent sessions and CI jobs share a few hosts (Node B,
@@ -50,7 +50,7 @@ and tracking agent sessions. The work is shaped like this:
 - Landing goes through a merge queue that serializes PRs and re-runs CI. That
   costs minutes per change and causes rebase churn when many workers touch the
   same repository.
-- Orchestration (Vogt), review, and CI ask questions about repositories that
+- Orchestration, review, and CI ask questions about repositories that
   git can only answer from a checkout.
 
 ### What git costs us that graft removes
@@ -60,7 +60,7 @@ and tracking agent sessions. The work is shaped like this:
 | Every session clones, then fetches, then pushes; every shared host holds N copies | A node cache per host shared by every session; sparse checkouts fetch only named objects |
 | A lost push race means `pull --rebase` locally, then push again | `land` rebases on the server and retries the compare-and-swap there; the client makes one call |
 | Branches as work in progress, which pile up stale on the forge | Drafts that are leased to a workspace and collected when the lease lapses |
-| Questions (log, blame, diff, merge base) need a checkout | Every question is an RPC. CI, Vogt and bots need no working copy |
+| Questions (log, blame, diff, merge base) need a checkout | Every question is an RPC. CI, orchestrators and bots need no working copy |
 | Packfiles, `gc`, repacking, shallow and partial-clone edge cases | No packfiles. Objects are stored one per id and never rewritten |
 | Agents parse porcelain text | A typed API, with `--json` on every command, an MCP server, and an LSP server |
 
@@ -101,8 +101,8 @@ If the pilot does not beat git on the paths agents use, we stop.
 7. **Few refs.** Only protected *lines* (`main`, `release/*`) and immutable
    tags are global. Work in progress is drafts in workspaces, not branches.
 8. **Agent-native.** Typed errors, stable exit codes, idempotent operations,
-   bounded and paginated responses, JSON everywhere, and Vogt session
-   identity carried end to end.
+   bounded and paginated responses, JSON everywhere, and session
+   identity carried end to end (set by the caller's orchestrator, if any).
 9. **Small to deploy.** One server process plus one node daemon per host,
    with SQLite and a local filesystem. Bigger backends sit behind ports and
    are not required.
@@ -269,7 +269,7 @@ Canonical payload: `u8 version(1)`, then for each entry
 | `author` | yes | `{ name, email, kind: human \| agent \| bot \| ci }` |
 | `authored_at` | yes | Client-supplied time: ms since epoch and UTC offset in minutes |
 | `message` | yes | Free text |
-| `metadata` | yes | Sorted string map. Keys under `graft.` are reserved (`graft.rebased-from`, `graft.reverts`, `graft.merged-paths`, `graft.merged-from`). Tool keys are namespaced (`vogt.session`, `vogt.work_item`, `review.url`) |
+| `metadata` | yes | Sorted string map. Keys under `graft.` are reserved (`graft.rebased-from`, `graft.reverts`, `graft.merged-paths`, `graft.merged-from`). Tool keys are namespaced (`agent.session`, `agent.work_item`, `agent.model`, `agent.coauthors`, `review.url`). The CLI fills those from `GRAFT_SESSION_ID` and `GRAFT_WORK_ITEM` (the older environment names are still read as a fallback). The older `vogt.*` keys are still read as aliases. |
 
 A change is one of:
 
@@ -393,7 +393,7 @@ LineMerged { src, dst, src_changeset, src_pos, dst_pos }   (§8.9)
 - A changeset's parents always have lower LSNs, so the journal is a
   topological order.
 - `Watch { from_lsn, filter }` streams the journal. The mirror, the node
-  prefetcher, Vogt, and CI triggers all consume it and resume from their last
+  prefetcher, orchestrators, and CI triggers all consume it and resume from their last
   LSN.
 - Retention: ref moves, admin actions and landed-changeset entries are kept
   forever. Draft-only entries are compacted after the retention window.
@@ -465,9 +465,9 @@ are only its own lands.
 ## 5. Architecture: tiers and surfaces
 
 ```text
-  agents · CI jobs · humans · Vogt · editors
+  agents · CI jobs · humans · orchestrators · editors
      │            │              │            │
-   graft CLI   graft mcp      graft lsp    any RPC client (Vogt, bots)
+   graft CLI   graft mcp      graft lsp    any RPC client (orchestrators, bots)
      └────────────┴───── graft-client (lib) ──┘
                     │  same RPCs over a Unix socket
               graft-node (one per host)   ← disk object cache shared by every session
@@ -802,7 +802,7 @@ tested by `kill -9` during load, from the first phase.**
 | --- | --- |
 | `OpenWorkspace` | `name?, line, at?, session?, lease` → workspace (`base` = line tip by default) |
 | `GetWorkspace` / `ListWorkspaces` | by name / owner |
-| `RenewLease` | `name, lease` → `lease_until` (the client heartbeats it; Vogt can renew it for a session) |
+| `RenewLease` | `name, lease` → `lease_until` (the client heartbeats it; an orchestrator can renew it for a session) |
 | `SetHead` | `name, expected_head, new_head` (CAS) — used by `commit` and `stack` ops |
 | `Sync` | `name, onto?` → new `base`, rebased `head`, the list of changed paths, or `Conflict` |
 | `Stack` | `name, op: reorder \| squash \| split \| drop` → new head |
@@ -1059,7 +1059,7 @@ the sweep reads `expires_at` and does not have that gap.
 
 Adopting an abandoned changeset (`SetHead`) makes it a draft again and
 clears `expires_at`. Workspace leases are short (default 2 hours, renewed by
-the client's heartbeat or by Vogt while the session lives,
+the client's heartbeat or by the orchestrator while the session lives,
 [D10](decisions.md#d10-agent-token-issuance)). A crashed session's work is
 still there for the full retention window. A retention change applies to
 records that end after it.
@@ -1550,7 +1550,7 @@ runs in two places:
 - **`graft mcp` (stdio)**, inside a working copy: it knows the workspace, so
   it offers working-copy tools as well as repository tools.
 - **The server's `/mcp` endpoint** (streamable HTTP, bearer token): for agents
-  with no checkout at all, such as review bots, Vogt oversight, and bisect.
+  with no checkout at all, such as review bots, orchestrator oversight, and bisect.
 
 | Tool | Read-only | Maps to |
 | --- | --- | --- |
@@ -1577,7 +1577,7 @@ intelligence on the files being edited:
 
 | LSP feature | graft behaviour |
 | --- | --- |
-| `textDocument/hover` | blame for the line: changeset, author (and whether human or agent), message, Vogt work item |
+| `textDocument/hover` | blame for the line: changeset, author (and whether human or agent), message, work item |
 | `textDocument/codeLens` | "changed N times, last by X" per file or item; "base is K changesets behind main" |
 | `publishDiagnostics` | conflict regions after a failed sync; edits outside the sparse slice; files changed upstream since the base |
 | `workspace/executeCommand` | `graft.commit`, `graft.land`, `graft.sync`, `graft.diffBase`, `graft.blameFile` |
@@ -1643,7 +1643,7 @@ the import with a list of offenders ([D11](decisions.md#d11-path-rules-on-import
   `committer = graft <graft@…>` with the line position's landed time (stored
   in the land record, so it is deterministic after the fact); the message plus
   trailers `Graft-Changeset: <id>` and, when present, `Graft-Session: <ses_…>`
-  and `Vogt-Work-Item: WI-…`. The parents are the git shas of the parents.
+  and `Graft-Work-Item: WI-…` (the older `Vogt-Work-Item` trailer is still read). The parents are the git shas of the parents.
 - **The canonical empty root is not exported**
   ([D34](decisions.md#d34-canonical-empty-root)). Its author is the fixed
   empty identity and it is never landed, so the native commit header would be
@@ -1751,7 +1751,7 @@ ck:  tree      = export(replayed snapshot k); at k = last, = export(integration 
      committer = the mirror identity, land time
      message   = the land's message, then:
        Graft-Changeset: <land id>
-       Graft-Session: <Vogt session or ->
+       Graft-Session: <session or ->
        Graft-Work-Item: <work item or ->
        Graft-Checks: ci/fmt=passed ci/clippy=passed ci/test=passed
        Graft-Batch: <n>
@@ -1907,12 +1907,12 @@ append:         B ── c1 ── … ── ck ── c(k+1) ── … ──
 | Principal | How it gets a token |
 | --- | --- |
 | operator (human) | `graft-server admin token mint` on the server host, stored in Infisical |
-| agent session | Vogt mints per session through `MintToken`, using Vogt's own service token, scoped to the session's repos and work, with a TTL ≤ 12 h. It is delivered to the session like other brokered credentials (see [D10](decisions.md#d10-agent-token-issuance)) |
+| agent session | the caller's orchestrator, if any, mints per session through `MintToken`, using its own service token, scoped to the session's repos and work, with a TTL ≤ 12 h. It is delivered to the session like other brokered credentials (see [D10](decisions.md#d10-agent-token-issuance)) |
 | CI job | phase 2: a per-repo CI token in Infisical. Phase 3: an exchange of a GitHub Actions OIDC token, or a Woodpecker job token, for a short graft token |
 | services (node, mirror) | long-lived service tokens with narrow scopes, rotated through Infisical |
 
 Tokens are signed by the server (Ed25519, PASETO v4.public or an equivalent
-compact format) and carry: `sub`, principal `kind`, `session` (Vogt `ses_…`),
+compact format) and carry: `sub`, principal `kind`, `session` (`ses_…` when the orchestrator sets one),
 `work_item`, `scopes`, `exp`, `jti`. The scopes are:
 
 - `repo:<name>:read`
@@ -1949,7 +1949,7 @@ expiry, plus a `jti` denylist in the MetaStore checked on writes.
 ## 13. Observability
 
 - **Logs:** `tracing` with JSON output, shipped to the estate's Loki. Every
-  span carries `repo`, `op`, `request_id`, `principal`, `session` (Vogt),
+  span carries `repo`, `op`, `request_id`, `principal`, `session`,
   `work_item`, and `tier`. File contents and tokens are never logged.
 - **Metrics:** Prometheus at `/metrics` on the server, node, and mirror, scraped
   by the estate's Prometheus. The `graft-telemetry` registry names:
@@ -1975,9 +1975,9 @@ expiry, plus a `jti` denylist in the MetaStore checked on writes.
 - **Traces:** OTLP export to Tempo, optional, with spans across
   client → node → server.
 - **Audit:** the journal is the audit log for writes. `graft admin journal`
-  and `Watch` expose it, and Vogt can link landed changesets to work items
-  through `vogt.work_item` metadata.
-- **Superfan sessions:** in Scion's spirit, a Vogt watcher session per
+  and `Watch` expose it, and an orchestrator can link landed changesets to work items
+  through `agent.work_item` metadata (the older `vogt.work_item` key is still read).
+- **Superfan sessions:** in Scion's spirit, a watcher session per
   component can read these logs and metrics and flag anomalies the static
   alerts miss. This is optional and comes after the pilot.
 
@@ -1992,7 +1992,7 @@ expiry, plus a `jti` denylist in the MetaStore checked on writes.
 | SQLite writer saturated | Write latency rises | The bounded queue gives `Unavailable{retry_after}` (backpressure), with a metric and an alert. Remedy: tune, or the Postgres port |
 | Lost land race | — | The server retries (§8.1). `Contended` only after the budget is spent |
 | Land conflict | — | `Conflict` with paths. The client never strands (§8.2) |
-| Client or session dies mid-work | The draft is left with a lapsing lease | Retained for 7 days, then collected. Vogt can re-open the workspace for a new session |
+| Client or session dies mid-work | The draft is left with a lapsing lease | Retained for 7 days, then collected. An orchestrator can re-open the workspace for a new session |
 | Token expires mid-land | The retry is refused | Land is idempotent. Re-mint and retry; the result is the same |
 | Node daemon down | Clients cannot reach the socket | The client falls back to the server directly, with its local cache. Logged |
 | Node cache corrupt | Hash mismatches | The node wipes the bad object or its whole cache. It holds no authoritative state |

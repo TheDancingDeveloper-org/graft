@@ -16,7 +16,7 @@
 //!
 //! | LSP | graft |
 //! | --- | --- |
-//! | `textDocument/hover` | blame for the line: changeset, author and kind, subject, state, Vogt work item |
+//! | `textDocument/hover` | blame for the line: changeset, author and kind, subject, state, work item |
 //! | `textDocument/codeLens` | "changed N times, last by X"; "base is K changesets behind `<line>`" |
 //! | `textDocument/publishDiagnostics` | conflict regions after a failed sync or land; files outside the sparse slice; regions changed upstream since the base |
 //! | `workspace/executeCommand` | [`COMMANDS`] |
