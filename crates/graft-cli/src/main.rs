@@ -7,6 +7,8 @@
 mod out;
 
 mod api;
+#[cfg(test)]
+mod build_rev;
 mod cli;
 mod cmd;
 mod config;

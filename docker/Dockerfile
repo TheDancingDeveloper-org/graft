@@ -36,7 +36,11 @@ ARG SCCACHE_BUCKET=
 ARG SCCACHE_ENDPOINT=
 ARG SCCACHE_REGION=
 ARG SCCACHE_S3_USE_SSL=
+# Commit the image was built from. The context has no .git, so build.rs
+# cannot run git describe; an empty value falls through to git, then unknown.
+ARG GRAFT_BUILD_REV=
 ENV CARGO_INCREMENTAL=0 \
+    GRAFT_BUILD_REV=${GRAFT_BUILD_REV} \
     SCCACHE_IGNORE_SERVER_IO_ERROR=1
 # The binaries are copied out of the target cache mount into /out, which is
 # part of this stage's layer, for the runtime stage to copy.
