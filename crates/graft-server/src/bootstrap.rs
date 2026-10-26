@@ -144,25 +144,18 @@ mod tests {
         assert_eq!(fs::read(&path).expect("read again"), first);
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_write_failure_names_the_path_not_the_token() {
-        use std::os::unix::fs::PermissionsExt as _;
+        // The parent is a regular file: creating it fails for root too.
         let temp = graft_testkit::crash::TempDir::new("server-bootstrap-ro");
-        let dir = temp.path().join("ro");
-        fs::create_dir(&dir).expect("mkdir");
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).expect("chmod");
-        let path = dir.join("admin.token");
+        let blocker = temp.path().join("not-a-dir");
+        fs::write(&blocker, b"").expect("write blocker");
+        let path = blocker.join("admin.token");
         let key = SigningKey::from_seed(&[3; 32]);
-        let result = ensure(&path, &["graft".to_owned()], &key);
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod back");
-        if rustix::process::geteuid().is_root() {
-            // Root writes through mode bits; the refusal is not testable.
-            return;
-        }
-        let err = result.expect_err("read-only dir");
+        let err = ensure(&path, &["graft".to_owned()], &key).expect_err("unwritable path");
         let text = format!("{err} {err:?}");
         assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(!text.contains("v4.public."), "token in error: {text}");
         assert!(!path.exists());
     }
 }
