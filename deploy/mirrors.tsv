@@ -2,3 +2,4 @@
 graft-mirror|rusttorrent|TheDancingDeveloper-org/rustTorrent|main|mirror-token|mirror.toml|17890|builtin
 graft-mirror-fluent2|fluent2-egui|TheDancingDeveloper-org/fluent2-egui|main|mirror-token-fluent2|mirror-fluent2.toml|17891|builtin
 graft-mirror-vogt|vogt|TheDancingDeveloper-org/vogt|rust-core|mirror-token-vogt|mirror-vogt.toml|17892|builtin
+graft-mirror-rustnzb|rustnzb|TheDancingDeveloper-org/rustnzb|main|mirror-token-rustnzb|mirror-rustnzb.toml|17893|generated|0
