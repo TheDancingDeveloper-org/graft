@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fail if the user guide names estate hosts, trackers, or internal ids.
-# Run by hand. Not part of CI, and not part of graft's land path.
+# Runs in repository CI on the docs-only path. Never in graft's land path.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
