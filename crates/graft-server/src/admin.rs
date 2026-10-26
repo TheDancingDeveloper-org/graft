@@ -28,7 +28,7 @@ use crate::{backup, fsck, keys, serve};
 
 /// Default `token mint` TTL: 30 days, for operator and service tokens
 /// that live in Infisical and are rotated there.
-const DEFAULT_TTL_S: u64 = 30 * 24 * 3600;
+pub(crate) const DEFAULT_TTL_S: u64 = 30 * 24 * 3600;
 
 /// A command's failure: the message, and the exit code.
 pub(crate) struct Failure(pub(crate) String, pub(crate) u8);

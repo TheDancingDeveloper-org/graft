@@ -99,12 +99,17 @@ impl Site {
 
     /// Starts the server and waits for it to listen.
     pub fn start(&self) -> Server {
+        self.start_with_stderr(Stdio::null())
+    }
+
+    /// Starts the server with its stderr (the log) sent to `stderr`.
+    pub fn start_with_stderr(&self, stderr: Stdio) -> Server {
         let started = Instant::now();
         let mut child = command()
             .arg("--config")
             .arg(&self.config)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .expect("spawn graft-server");
         let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
