@@ -21,7 +21,7 @@ The token is a bearer credential. Never print it, never pass it as an argument, 
 2. **Edit** with ordinary tools. `graft status` lists changes; `graft diff` shows them. `graft status --upstream` asks, without moving anything, how far the line tip is ahead and whether your files would merge or conflict. `graft status --drafts` lists other live workspaces with open drafts on those files (needs the `repo:<r>:drafts` scope).
 3. **Commit** a draft: `graft commit -m "message"`. More edits become another draft, or replace the head with `graft commit --amend`. `graft stack` lists the drafts; `graft stack squash` makes them one. Author defaults to `GRAFT_AUTHOR_NAME` / `GRAFT_AUTHOR_EMAIL`. Kind defaults to `GRAFT_AUTHOR_KIND` when set, else `human`. An agent sets `GRAFT_AUTHOR_KIND=agent`.
 4. **Sync** to pick up other lands: `graft sync`. Exit 0 means the working copy is on the tip (a stack is rebased). Exit 3 means conflicts; see below.
-5. **Land:** `graft land` (add `--squash` to land the stack as one changeset). Before it sends anything, land runs a pre-land check: a dry-run rebase that stops on a real conflict, plus a report of overlapping drafts. `--no-check` skips it. The dry run needs only what a land needs. The overlap part needs `repo:<r>:drafts`; without that scope only that part is skipped (`pre-land: draft overlap not checked` on stderr) and the conflict stop still works. The check builds and tests nothing.
+5. **Land:** `graft land`. To land a stack as one changeset, run `graft stack squash` and then `graft land`. `land --squash` isn't built yet: it exits 5 with `not built yet` and lands nothing. Before it sends anything, land runs a pre-land check: a dry-run rebase that stops on a real conflict, plus a report of overlapping drafts. `--no-check` skips it. The dry run needs only what a land needs. The overlap part needs `repo:<r>:drafts`; without that scope only that part is skipped (`pre-land: draft overlap not checked` on stderr) and the conflict stop still works. The check builds and tests nothing.
 
 When a line is exported to a git host as a batch pull request, a land that arrives while that batch is still open is appended to it as one more commit. Earlier commits keep their identities. A sealed batch (merge already started) takes no more commits; those lands wait for the next batch. graft itself runs no build, test or checker.
 
@@ -56,7 +56,7 @@ The working copy moves onto the tip with your changes on top and the conflicts w
 - Do not `git push`, `git commit` or otherwise use git inside a graft working copy. History moves only through `graft`.
 - Do not print, log or paste the token.
 - Do not land with `--no-check` to skip a conflict you have not looked at.
-- Do not walk around an exit 5 or exit 6. Those need a person or a new token.
+- Do not walk around an exit 5 or exit 6, except an exit 5 whose message says `not built yet`: that means use the documented alternative (for a squash: `graft stack squash` then `graft land`). Any other exit 5 or an exit 6 needs a person or a new token.
 
 ## Copy into AGENTS.md or CLAUDE.md
 
@@ -75,13 +75,13 @@ Loop:
   graft status        # graft diff to see the patch; graft status --upstream before landing
   graft commit -m "what and why"
   graft sync          # exit 3: conflicts, see below
-  graft land          # exit 0: on the line. --squash lands the stack as one changeset
+  graft land          # exit 0: on the line. one changeset: graft stack squash, then graft land. land --squash isn't built yet
 
 Conflicts (exit 3 from sync or land): markers <<<<<<< ======= >>>>>>> in text
 files; a PATH.graft-conflict sidecar otherwise. Edit to the result, delete
 markers and sidecars, then: graft commit -m "resolve" && graft land
 `dirty` on exit 3: commit or discard uncommitted edits first.
-Exit 4: run graft land again. Exit 6 or 5: stop and report the message.
+Exit 4: run graft land again. Exit 5 with `not built yet`: use the documented alternative (squash: graft stack squash, then graft land). Any other exit 5, or exit 6: stop and report the message.
 Exit 7: retry graft land a few times, then stop.
 
 Never print the token. Never pass it as an argument.
