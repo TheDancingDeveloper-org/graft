@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,8 +16,10 @@ use super::PilotError;
 /// The deadline of one ordinary step (a git command, a CLI call, fsck).
 pub const STEP_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The deadline for a server to print its listen address.
-pub const START_TIMEOUT: Duration = Duration::from_secs(30);
+/// A hang bound for a server that never prints a listen address and never
+/// exits. Readiness itself is the "listening on" line (or process exit).
+/// This bound is not a speed check.
+pub const START_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What a finished step printed, and how long it ran (spawn to exit).
 #[derive(Debug)]
@@ -116,6 +119,11 @@ pub fn run(cmd: &mut Command) -> Result<Ran, PilotError> {
     run_with(cmd, STEP_TIMEOUT, false)
 }
 
+fn stderr_tail(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+    let bytes = buf.lock().map(|g| g.clone()).unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes);
+    text.lines().rev().take(8).collect::<Vec<_>>().join(" / ")
+}
 fn drain(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut buf = Vec::new();
@@ -263,8 +271,9 @@ impl Site {
         self.dir.join("objects")
     }
 
-    /// Starts `graft-server serve` and waits (at most [`START_TIMEOUT`])
-    /// for its listen address.
+    /// Starts `graft-server serve` and waits until it prints its listen
+    /// address, or until it exits. [`START_TIMEOUT`] only catches a hang:
+    /// a slow start that still prints the line is ready.
     pub fn start(&self) -> Result<Server, PilotError> {
         let started = Instant::now();
         let mut child = Command::new(&self.bins.server)
@@ -273,10 +282,35 @@ impl Site {
             .arg("serve")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| PilotError::Step(format!("spawn graft-server: {e}")))?;
+        let pid = child.id();
         let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        {
+            let buf = Arc::clone(&stderr);
+            let pipe = child.stderr.take();
+            thread::spawn(move || {
+                if let Some(mut p) = pipe {
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        match p.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if let Ok(mut g) = buf.lock() {
+                                    g.extend_from_slice(&chunk[..n]);
+                                    if g.len() > 16 * 1024 {
+                                        let drop_n = g.len() - 8 * 1024;
+                                        g.drain(..drop_n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let mut lines = BufReader::new(stdout);
@@ -290,6 +324,9 @@ impl Site {
                 }
                 line.clear();
             }
+            if !sent {
+                let _ = tx.send(None);
+            }
         });
         let mut server = Server {
             child: Some(child),
@@ -302,12 +339,25 @@ impl Site {
                 server.startup = started.elapsed();
                 Ok(server)
             }
-            Ok(None) => Err(PilotError::Step(
-                "graft-server printed a bad address".into(),
-            )),
-            Err(_) => Err(PilotError::Timeout(format!(
-                "graft-server did not listen within {START_TIMEOUT:?}"
-            ))),
+            Ok(None) => {
+                let status = server
+                    .child
+                    .as_mut()
+                    .and_then(|c| c.try_wait().ok().flatten());
+                let err = stderr_tail(&stderr);
+                let how = match status {
+                    Some(s) => format!("exited {s}"),
+                    None => "stopped printing without a listen address".into(),
+                };
+                Err(PilotError::Step(format!("graft-server {how}: {err}")))
+            }
+            Err(_) => {
+                kill9(pid);
+                let tail = stderr_tail(&stderr);
+                Err(PilotError::Timeout(format!(
+                    "graft-server hung past {START_TIMEOUT:?}: {tail}"
+                )))
+            }
         }
     }
 
