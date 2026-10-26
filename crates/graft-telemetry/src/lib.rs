@@ -29,9 +29,9 @@ pub mod fields {
     pub const REQUEST_ID: &str = "request_id";
     /// Principal subject.
     pub const PRINCIPAL: &str = "principal";
-    /// Vogt session id.
+    /// Session id (set by the caller's orchestrator, if any).
     pub const SESSION: &str = "session";
-    /// Vogt work item.
+    /// Work item (set by the caller's orchestrator, if any).
     pub const WORK_ITEM: &str = "work_item";
     /// Serving tier (`server`, `node`, `client`).
     pub const TIER: &str = "tier";

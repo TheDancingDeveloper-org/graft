@@ -39,7 +39,7 @@ async fn a_minted_token_is_no_broader_than_its_caller() {
         .await
         .expect("create");
 
-    // Vogt's own token: a service, writing under `src/` only.
+    // The service principal's own token: a service, writing under `src/` only.
     let vogt = site.mint_kind("vogt", "service", &["repo:r:write:src"], 3600);
     let mut c = server.clients(Some(&vogt)).await;
 
@@ -321,7 +321,7 @@ async fn a_token_minted_from_a_minted_token_is_no_broader_and_no_longer() {
     let vogt = site.mint_kind("vogt", "service", &["repo:r:write"], 3600);
     let mut v = server.clients(Some(&vogt)).await;
 
-    // Vogt delegates a short-lived session token.
+    // The orchestrator delegates a short-lived session token.
     let session = v
         .admin
         .mint_token(mint_req(&["repo:r:write:src"], 3))

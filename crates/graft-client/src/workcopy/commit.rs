@@ -87,7 +87,7 @@ pub struct CommitOptions {
     pub author: Author,
     /// The authoring time.
     pub authored_at: Timestamp,
-    /// Extra metadata (tool keys such as `vogt.session`).
+    /// Extra metadata (tool keys such as a session id).
     pub metadata: Metadata,
     /// Replace the head draft instead of stacking on it.
     pub amend: bool,
@@ -219,7 +219,7 @@ impl WorkingCopy {
             }
             // Resolving a conflicting sync replaces the stack's head: keep
             // its message (unless given) and its tool metadata, such as
-            // `vogt.session`, so attribution survives the sync (WI-2414).
+            // the session id, so attribution survives the sync (WI-2414).
             let (message, metadata) = match &conflicts {
                 Some(c) => {
                     let old = self.changeset_of(api, cx, c.head).await?;
