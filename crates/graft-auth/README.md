@@ -58,6 +58,10 @@ then the `jti` denylist. It needs no store lookup; the server backs
 `Denylist` with the MetaStore on writes, and pure readers can pass
 `NoDenylist`.
 
+`Claims::peek_unverified` reads a token's claims without checking the
+signature, expiry or revocation. It is for display only (expiry, scopes,
+subject, as `graft doctor` shows them), never for an authorization decision.
+
 ## Scopes
 
 | Text form | Grants |
