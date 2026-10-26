@@ -102,7 +102,9 @@ pub use protect::{CLAIM_HOLDER, ProtectReport};
 pub use rebase::{MERGED_PATHS, REBASED_FROM, RESOLVED_PATHS};
 pub use refs::MAX_REF_NAME;
 pub use revert::REVERTS;
-pub use review_queue::{LAND_SUMMARY, LINES_UNAVAILABLE, MAX_REVIEW_SCAN, PATHS_UNAVAILABLE};
+pub use review_queue::{
+    LAND_SUMMARY, LINES_UNAVAILABLE, MAX_JOURNAL_PROBE, MAX_REVIEW_SCAN, PATHS_UNAVAILABLE,
+};
 pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
 pub use write::MAX_REPO_NAME;
 

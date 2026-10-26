@@ -13,6 +13,8 @@ pub(crate) struct Counting<M> {
     pub(crate) rows: Arc<AtomicU64>,
     /// Every other read call.
     pub(crate) reads: Arc<AtomicU64>,
+    /// Journal entries returned.
+    pub(crate) entries: Arc<AtomicU64>,
 }
 
 impl<M> Counting<M> {
@@ -21,11 +23,17 @@ impl<M> Counting<M> {
             inner,
             rows: Arc::default(),
             reads: Arc::default(),
+            entries: Arc::default(),
         }
     }
 
     fn tick(&self) {
         self.reads.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Journal entries returned so far.
+    pub(crate) fn journal_entries(&self) -> u64 {
+        self.entries.load(Ordering::Relaxed)
     }
 
     /// (queue rows, other reads) so far.
@@ -208,7 +216,15 @@ impl<M: MetaStore> MetaStore for Counting<M> {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<(Lsn, String, Vec<u8>)>>> + Send {
         self.tick();
-        self.inner.journal(repo, from, limit)
+        let entries = self.entries.clone();
+        let fut = self.inner.journal(repo, from, limit);
+        async move {
+            let got = fut.await;
+            if let Ok(v) = &got {
+                entries.fetch_add(v.len() as u64, Ordering::Relaxed);
+            }
+            got
+        }
     }
     fn list_records(
         &self,

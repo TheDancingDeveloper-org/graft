@@ -47,6 +47,10 @@ pub const LINES_UNAVAILABLE: u64 = u64::MAX;
 /// Journal entries read per probe for a landing's `RefMoved` entry.
 const JOURNAL_PROBE: u32 = 4;
 
+/// The most journal entries read for one landing's `RefMoved` entry. Past
+/// it the landing's summary is unavailable.
+pub const MAX_JOURNAL_PROBE: u32 = 16;
+
 /// The derived kind of a landing's summary, keyed by the landed changeset
 /// and the line.
 pub const LAND_SUMMARY: &str = "land-summary";
@@ -242,23 +246,28 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     /// `RefMoved` entry at the row's LSN, and its first position. The entry
     /// is the first of the land's transaction, after only the
     /// `LandReverted` entries of a revert land, so the probe stops at the
-    /// transaction's `LandAttempt`. Without the entry (it cannot be found)
-    /// the landing is taken as its own changeset alone.
+    /// transaction's `LandAttempt` or the journal's end, and the landing is
+    /// then taken as its own changeset alone. It reads at most
+    /// [`MAX_JOURNAL_PROBE`] entries; `None` when it read that many without
+    /// finding either, and the summary is unavailable.
     async fn landing_start(
         &self,
         repo: RepoId,
         line: &str,
         row: &LandingRow,
-    ) -> Result<(Option<ChangesetId>, u64), ApiError> {
+    ) -> Result<Option<(Option<ChangesetId>, u64)>, ApiError> {
         let mut from = row.lsn;
-        loop {
+        let mut read = 0;
+        while read < MAX_JOURNAL_PROBE {
+            let want = JOURNAL_PROBE.min(MAX_JOURNAL_PROBE - read);
             let entries = self
                 .meta
-                .journal(repo, from, JOURNAL_PROBE)
+                .journal(repo, from, want)
                 .await
                 .map_err(errors::store)?;
-            let short = entries.len() < JOURNAL_PROBE as usize;
+            let short = entries.len() < want as usize;
             for (lsn, kind, body) in entries {
+                read += 1;
                 from = lsn + 1;
                 if kind == REF_MOVED
                     && let Some(old) = ref_moved_old(&body, line, row.changeset)
@@ -269,16 +278,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         .await
                         .map_err(errors::store)?;
                     let first = below.map_or(row.pos, |p| (p + 1).min(row.pos));
-                    return Ok((Some(old), first));
+                    return Ok(Some((Some(old), first)));
                 }
                 if kind == LAND_ATTEMPT {
-                    return Ok((None, row.pos));
+                    return Ok(Some((None, row.pos)));
                 }
             }
             if short {
-                return Ok((None, row.pos));
+                return Ok(Some((None, row.pos)));
             }
         }
+        Ok(None)
     }
 
     /// The landing's summary from `old` (its first parent when unknown) to
@@ -382,16 +392,20 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 scanned += 1;
                 since = row.lsn;
                 let mut summary = self.cached_summary(repo, line, &row).await?;
-                let (old, first_pos) = match summary {
-                    Some(s) => (None, s.first_pos),
+                // Without a start (the probe hit its cap) the path filter
+                // takes the landing's last position alone and the summary
+                // is unavailable.
+                let start = match summary {
+                    Some(s) => Some((None, s.first_pos)),
                     None => self.landing_start(repo, line, &row).await?,
                 };
+                let (old, first_pos) = start.unwrap_or((None, row.pos));
                 if let Some(prefix) = &req.path_prefix
                     && !self.touches(repo, line, prefix, first_pos, row.pos).await?
                 {
                     continue;
                 }
-                if summary.is_none() {
+                if summary.is_none() && start.is_some() {
                     summary = self
                         .compute_summary(repo, line, &row, old, first_pos)
                         .await?;
