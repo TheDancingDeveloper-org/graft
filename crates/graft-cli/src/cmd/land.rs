@@ -126,31 +126,11 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
             ),
         )
         .await;
-        // graft-client writes conflict files only for `ApiError::Conflict`.
-        // A stale base is the same refusal with the tip and the paths to
-        // re-sync; `--sync` still asks the working copy to write them.
-        let out = match landed {
-            Err(graft_client::Error::Api(graft_proto::ApiError::StaleBase(detail))) if args.sync => {
-                let stale = Failure::from(graft_proto::ApiError::StaleBase(detail))
-                    .with_detail("preflight", preflight.clone());
-                match s
-                    .wc
-                    .sync_writing_conflicts(
-                        &s.conn.remote,
-                        &cache,
-                        &s.cx,
-                        DEFAULT_LEASE_MS,
-                        &fetch,
-                    )
-                    .await
-                {
-                    Err(e @ graft_client::Error::Conflicted(_)) => {
-                        return Err(Failure::from(e).with_detail("preflight", preflight));
-                    }
-                    Ok(_) | Err(_) => return Err(stale),
-                }
-            }
-            other => other.map_err(|e| {
+        // graft-client treats `StaleBase` like `Conflict` when `sync` is
+        // set: it syncs once and writes the conflicts. A second sync here
+        // would run only after that already failed, and would hide the
+        // sync's own error behind the stale-base refusal.
+        let out = landed.map_err(|e| {
                 let failure = Failure::from(e);
                 let note = match failure.kind() {
                     "conflict" => Some(
@@ -165,8 +145,7 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
                     None => failure,
                 };
                 failure.with_detail("preflight", preflight.clone())
-            })?,
-        };
+            })?;
         let line = s.wc.state().line.clone();
         match out {
             LandOutcome::Landed {

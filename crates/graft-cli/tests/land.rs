@@ -291,6 +291,30 @@ fn land_results_map_to_exit_codes_and_output() {
     insta::assert_snapshot!("land_results", table);
 }
 
+/// A tip that moved makes `land --sync` sync once. A sync that then
+/// fails with `Unavailable` exits 7 with that error, not the stale-base
+/// refusal the second CLI branch used to hide it behind.
+#[test]
+fn land_sync_reports_an_unavailable_sync_instead_of_stale_base() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let (app, _) = with_draft(&s, dir.path(), None);
+    s.repo.race(put("README.md", "theirs\n"));
+    s.repo.fail(
+        "Sync",
+        Fault::Before(ApiError::Unavailable { retry_after_ms: 0 }),
+    );
+    let a = wc_cmd(&app)
+        .args(["--json", "land", "--sync"])
+        .assert()
+        .code(7);
+    let error = error_of(&a);
+    assert_eq!(error["kind"], json!("unavailable"));
+    let message = error["message"].as_str().unwrap_or("");
+    assert!(!message.to_ascii_lowercase().contains("stale"), "{message}");
+    assert!(s.repo.calls().contains(&"Sync"), "{:?}", s.repo.calls());
+}
+
 #[test]
 fn a_lost_land_reply_is_retried_by_running_land_again() {
     let s = serve(Policy::Direct);
