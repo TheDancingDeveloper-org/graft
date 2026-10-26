@@ -779,6 +779,9 @@ impl<M: MetaStore> MetaStore for FaultyMeta<M> {
             self.inner.journal(repo, from, limit)
         )
     }
+    async fn journal_tip(&self, repo: RepoId) -> StoreResult<Option<Lsn>> {
+        read!(self, "journal_tip".to_owned(), self.inner.journal_tip(repo))
+    }
     async fn list_records(
         &self,
         repo: RepoId,

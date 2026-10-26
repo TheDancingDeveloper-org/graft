@@ -1023,6 +1023,10 @@ impl<M: MetaStore> MetaStore for Hooked<M> {
         self.read();
         self.inner.gc_protection(repo).await
     }
+    async fn journal_tip(&self, repo: RepoId) -> StoreResult<Option<Lsn>> {
+        self.read();
+        self.inner.journal_tip(repo).await
+    }
 }
 
 fn hooked() -> (Arc<Hooked<MemoryStore>>, Fixture<Hooked<MemoryStore>>) {

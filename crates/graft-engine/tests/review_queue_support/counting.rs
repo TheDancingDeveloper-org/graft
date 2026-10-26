@@ -226,6 +226,10 @@ impl<M: MetaStore> MetaStore for Counting<M> {
             got
         }
     }
+    fn journal_tip(&self, repo: RepoId) -> impl Future<Output = StoreResult<Option<Lsn>>> + Send {
+        self.tick();
+        self.inner.journal_tip(repo)
+    }
     fn list_records(
         &self,
         repo: RepoId,

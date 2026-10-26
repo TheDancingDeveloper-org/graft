@@ -374,8 +374,11 @@ impl<M: MetaStore> MetaStore for Probe<M> {
         self.ctl.read().await?;
         self.inner.gc_protection(repo).await
     }
+    async fn journal_tip(&self, repo: RepoId) -> StoreResult<Option<Lsn>> {
+        self.ctl.read().await?;
+        self.inner.journal_tip(repo).await
+    }
 }
-
 /// Frames by repository and id: a standalone object store, which pairs
 /// with any metadata store.
 #[derive(Clone, Debug, Default)]

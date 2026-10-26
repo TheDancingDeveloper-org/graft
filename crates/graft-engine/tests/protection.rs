@@ -308,6 +308,9 @@ impl<M: MetaStore> MetaStore for Spy<M> {
     async fn gc_protection(&self, repo: RepoId) -> StoreResult<bool> {
         self.inner.gc_protection(repo).await
     }
+    async fn journal_tip(&self, repo: RepoId) -> StoreResult<Option<Lsn>> {
+        self.inner.journal_tip(repo).await
+    }
 }
 
 fn spy_memory() -> (Fixture<Spy<MemoryStore>>, Arc<Spy<MemoryStore>>) {
