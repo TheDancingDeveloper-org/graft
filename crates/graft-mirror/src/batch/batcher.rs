@@ -29,7 +29,8 @@ use super::types::{
     Attested, BATCH, BRANCH_PREFIX, BatchCommit, BatchConfig, BatchLine, BatchOutcome, BatchRecord,
     BatchRun, BatchState, DEFAULT_DROP_REASON, Dropped, FETCH, FIELD_CHARS, LandLine,
     MAX_ATTEST_PAGES, MAX_COMMITS, MAX_LANDS, MESSAGE_CHARS, PAGE, REVERTS_KEY, SYNC_KEY, Stamp,
-    TITLE_CHARS, config_err, git_time, is_sync, land_ident, short, sync_base, system_ms,
+    TITLE_CHARS, claimed_author_trailer, config_err, git_time, is_sync, land_ident, short,
+    sync_base, system_ms,
 };
 
 /// Batches one integration line into squashed GitHub PRs.
@@ -555,6 +556,72 @@ where
         Ok((ids, capped))
     }
 
+    /// Authenticated principals (`RefMoved.actor`) for lands in `wanted`,
+    /// keyed by the landed changeset. Missing when the journal has no actor
+    /// (a land recorded before the field, or a move this read did not see).
+    async fn land_actors(
+        &mut self,
+        from_lsn: u64,
+        wanted: &HashMap<ChangesetId, ChangesetId>,
+    ) -> Result<HashMap<ChangesetId, String>, MirrorError> {
+        #[derive(serde::Deserialize)]
+        struct RefMoved {
+            name: String,
+            new: String,
+            #[serde(default)]
+            actor: Option<String>,
+        }
+        let line = self.config.line.clone();
+        let mut out = HashMap::new();
+        let mut lsn = from_lsn;
+        for _ in 0..MAX_ATTEST_PAGES {
+            let cx = self.call("actors");
+            let page = self
+                .api
+                .watch(
+                    &cx,
+                    Watch {
+                        repo: self.config.repo.clone(),
+                        from_lsn: lsn,
+                        kinds: vec!["RefMoved".to_owned()],
+                        limit: PAGE,
+                        wait_ms: 0,
+                    },
+                )
+                .await?;
+            for e in &page.entries {
+                let Ok(moved) = serde_json::from_str::<RefMoved>(&e.body) else {
+                    continue;
+                };
+                if moved.name != line {
+                    continue;
+                }
+                let Ok(id) = ChangesetId::parse(&moved.new) else {
+                    continue;
+                };
+                let Some(land) = wanted.get(&id) else {
+                    continue;
+                };
+                let Some(actor) = moved
+                    .actor
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
+                    continue;
+                };
+                // The subject is a principal id, never a token. Bound it the
+                // same way other journal fields are bounded before use.
+                out.insert(*land, clean_text(actor, FIELD_CHARS, false));
+            }
+            if page.next_lsn <= lsn || out.len() == wanted.len() {
+                return Ok(out);
+            }
+            lsn = page.next_lsn;
+        }
+        Ok(out)
+    }
+
     /// Each land's latest result per check, from the journal's `Attested`
     /// entries at or after `from_lsn`. A land rebased at landing takes its
     /// draft's attestations. `true` when the read stopped at its cap.
@@ -634,6 +701,7 @@ where
                     .get(key)
                     .map(|v| clean_text(v, FIELD_CHARS, false))
             };
+            let claimed = claimed_author_trailer(&cs.author);
             lands.push(LandLine {
                 id: *id,
                 author: clean_text(&cs.author.name, FIELD_CHARS, false),
@@ -651,7 +719,7 @@ where
                     .get(REVERTS_KEY)
                     .and_then(|r| ChangesetId::parse(r).ok()),
                 parent: cs.first_parent(),
-                ident: land_ident(&cs.author, &self.config.authors, &self.config.committer),
+                ident: ("unknown".to_owned(), "unknown".to_owned()),
                 authored: cs.authored_at,
                 message: clean_message(&cs.message, MESSAGE_CHARS, true),
                 trailer_session: cs
@@ -667,6 +735,7 @@ where
                     .get(MODEL_KEY)
                     .map(|v| clean_message(v, FIELD_CHARS, false)),
                 trailer_coauthors: coauthor_lines(&cs.metadata),
+                trailer_claimed_author: claimed,
                 trailer_merged_from: cs
                     .metadata
                     .get(MERGED_FROM_KEY)
@@ -687,10 +756,17 @@ where
             from_lsn = from_lsn.min(v.lsn);
         }
         let (checks, truncated) = self.attestations(from_lsn, &wanted).await?;
+        let actors = self.land_actors(from_lsn, &wanted).await?;
         for land in &mut lands {
             if let Some(c) = checks.get(&land.id) {
                 land.checks = c.clone();
             }
+            land.ident = land_ident(
+                actors.get(&land.id).map(String::as_str),
+                &self.config.authors,
+                self.config.default_author.as_ref(),
+                &self.config.committer,
+            );
         }
         Ok((lands, truncated))
     }
@@ -1657,7 +1733,7 @@ where
     }
 }
 
-/// `Co-authored-by` values on a land: `graft.coauthors`, one identity per
+/// `Co-authored-by` values on a land: `vogt.coauthors`, one identity per
 /// line. Lines that cannot be a trailer are dropped, never rewritten into
 /// the commit.
 fn coauthor_lines(metadata: &Metadata) -> Vec<String> {

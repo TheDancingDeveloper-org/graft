@@ -17,7 +17,7 @@ use graft_model::{
     Author, AuthorKind, Change, ChangesetId, EntryKind, Metadata, ObjectKind, RepoPath, Timestamp,
 };
 use graft_proto::api::{AdminApi, RepoApi};
-use graft_proto::types::{Attest, CreateChangeset};
+use graft_proto::types::{Attest, CreateChangeset, RefKind, UpdateRef};
 use graft_proto::{CallContext, Frame};
 use graft_store::memory::MemoryStore;
 use graft_testkit::clock::FakeClock;
@@ -337,6 +337,13 @@ impl World {
             tags: None,
         };
         let mut config = BatchConfig::new(LINE, base, follow);
+        config.authors.insert(
+            "Tess".to_owned(),
+            graft_mirror::batch::AuthorIdentity {
+                name: "Tess".to_owned(),
+                email: "tess@example.com".to_owned(),
+            },
+        );
         edit(&mut config);
         Batcher::new(
             &self.api,
@@ -368,7 +375,8 @@ impl World {
         n: i64,
         email: &str,
     ) -> ChangesetId {
-        self.land_as("Tess", files, message, n, email, None).await
+        self.land_as_subject("Tess", "Tess", files, message, n, email)
+            .await
     }
 
     /// A land whose author name is `principal` and whose email may be empty.
@@ -430,7 +438,90 @@ impl World {
             .await
             .unwrap()
             .id;
-        move_line(&self.api, LINE, tip, id).await;
+        let mut call = cx();
+        call.principal.subject = principal.to_owned();
+        self.api
+            .update_ref(
+                &call,
+                UpdateRef {
+                    repo: REPO.to_owned(),
+                    name: LINE.to_owned(),
+                    expected: tip,
+                    new: id,
+                    kind: RefKind::Line,
+                },
+            )
+            .await
+            .unwrap();
+        id
+    }
+
+    /// Like [`World::land_as`], but the line moves under token subject
+    /// `subject`. The changeset's author is still the client-supplied name.
+    async fn land_as_subject(
+        &self,
+        subject: &str,
+        claimed: &str,
+        files: &[(&str, &str)],
+        message: &str,
+        n: i64,
+        email: &str,
+    ) -> ChangesetId {
+        let tip = self.tip(LINE).await;
+        let mut changes = Vec::new();
+        let mut inline = Vec::new();
+        for (path, body) in files {
+            changes.push(Change::Put {
+                path: RepoPath::new(path).unwrap(),
+                kind: EntryKind::File,
+                id: graft_model::ObjectId::hash(ObjectKind::Blob, body.as_bytes()),
+            });
+            inline.push(Frame::encode(ObjectKind::Blob, body.as_bytes()));
+        }
+        let mut metadata = Metadata::new();
+        metadata.insert("vogt.session".to_owned(), format!("ses_{n}"));
+        metadata.insert("vogt.work_item".to_owned(), format!("WI-{n}"));
+        let id = self
+            .api
+            .create_changeset(
+                &cx(),
+                CreateChangeset {
+                    repo: REPO.to_owned(),
+                    parents: tip.into_iter().collect(),
+                    changes,
+                    author: Author {
+                        name: claimed.to_owned(),
+                        email: email.to_owned(),
+                        kind: AuthorKind::Agent,
+                    },
+                    authored_at: Timestamp {
+                        ms: 1_700_000_000_000 + n * 1000,
+                        offset_min: 0,
+                    },
+                    message: message.to_owned(),
+                    metadata,
+                    inline_blobs: inline,
+                    workspace: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        let mut call = cx();
+        call.principal.subject = subject.to_owned();
+        self.api
+            .update_ref(
+                &call,
+                UpdateRef {
+                    repo: REPO.to_owned(),
+                    name: LINE.to_owned(),
+                    expected: tip,
+                    new: id,
+                    kind: RefKind::Line,
+                },
+            )
+            .await
+            .unwrap();
         id
     }
 
@@ -1507,10 +1598,165 @@ async fn two_principals_export_as_mapped_authors_with_trailers() {
 }
 
 #[tokio::test]
+async fn claimed_author_is_only_a_trailer_of_the_authenticated_principals() {
+    let w = World::new().await;
+    w.start().await;
+    w.land_as_subject(
+        "subject-a",
+        "Claimed C",
+        &[("a.txt", "a1\n")],
+        "add a",
+        1,
+        "c@example.com",
+    )
+    .await;
+    w.land_as_subject(
+        "subject-b",
+        "Claimed C",
+        &[("b.txt", "b1\n")],
+        "add b",
+        2,
+        "c@example.com",
+    )
+    .await;
+    let rec = opened(
+        w.batcher_with(&w.db, |c| {
+            c.authors = [
+                (
+                    "subject-a".to_owned(),
+                    graft_mirror::batch::AuthorIdentity {
+                        name: "Author A".to_owned(),
+                        email: "a@example.com".to_owned(),
+                    },
+                ),
+                (
+                    "subject-b".to_owned(),
+                    graft_mirror::batch::AuthorIdentity {
+                        name: "Author B".to_owned(),
+                        email: "b@example.com".to_owned(),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect();
+        })
+        .run()
+        .await
+        .unwrap()
+        .outcome,
+    );
+    let commits = w.db.batch_commits(rec.number).unwrap();
+    assert_eq!(commits.len(), 2);
+    let who = |sha: &graft_git::GitSha| {
+        git(
+            &w.upstream,
+            &["log", "-1", "--format=%an <%ae>", &sha.to_hex()],
+        )
+    };
+    let body =
+        |sha: &graft_git::GitSha| git(&w.upstream, &["log", "-1", "--format=%B", &sha.to_hex()]);
+    assert_eq!(who(&commits[0].sha), "Author A <a@example.com>");
+    assert_eq!(who(&commits[1].sha), "Author B <b@example.com>");
+    for sha in [&commits[0].sha, &commits[1].sha] {
+        let message = body(sha);
+        assert!(
+            message.contains("Claimed-Author: Claimed C <c@example.com>"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("c@example.com>") || message.contains("Claimed-Author:"),
+            "{message}"
+        );
+        assert!(!who(sha).contains("Claimed"), "{}", who(sha));
+    }
+}
+
+#[tokio::test]
+async fn an_unmapped_principal_exports_as_default_author() {
+    let w = World::new().await;
+    w.start().await;
+    w.land_as_subject(
+        "subject-z",
+        "Zed",
+        &[("a.txt", "a1\n")],
+        "add a",
+        1,
+        "z@example.com",
+    )
+    .await;
+    let rec = opened(
+        w.batcher_with(&w.db, |c| {
+            c.authors.insert(
+                "graft-mirror".to_owned(),
+                graft_mirror::batch::AuthorIdentity {
+                    name: "Should Not Win".to_owned(),
+                    email: "mirror@example.com".to_owned(),
+                },
+            );
+            c.default_author = Some(graft_mirror::batch::AuthorIdentity {
+                name: "Default Author".to_owned(),
+                email: "default@example.com".to_owned(),
+            });
+        })
+        .run()
+        .await
+        .unwrap()
+        .outcome,
+    );
+    let commits = w.db.batch_commits(rec.number).unwrap();
+    assert_eq!(commits.len(), 1);
+    let who = git(
+        &w.upstream,
+        &["log", "-1", "--format=%an <%ae>", &commits[0].sha.to_hex()],
+    );
+    assert_eq!(who, "Default Author <default@example.com>");
+    let message = git(
+        &w.upstream,
+        &["log", "-1", "--format=%B", &commits[0].sha.to_hex()],
+    );
+    assert!(
+        message.contains("Claimed-Author: Zed <z@example.com>"),
+        "{message}"
+    );
+    assert!(!message.contains("subject-z"), "{message}");
+}
+
+#[tokio::test]
+async fn a_missing_principal_falls_back_to_default_author() {
+    let w = World::new().await;
+    w.start().await;
+    // `land` moves the line as the mirror service, then we export with no
+    // mapping for that subject and a default author.
+    w.land_as_subject("nobody", "nobody", &[("a.txt", "a1\n")], "add a", 1, "")
+        .await;
+    let rec = opened(
+        w.batcher_with(&w.db, |c| {
+            c.default_author = Some(graft_mirror::batch::AuthorIdentity {
+                name: "Old Default".to_owned(),
+                email: "old@example.com".to_owned(),
+            });
+        })
+        .run()
+        .await
+        .unwrap()
+        .outcome,
+    );
+    let commits = w.db.batch_commits(rec.number).unwrap();
+    let who = git(
+        &w.upstream,
+        &["log", "-1", "--format=%an <%ae>", &commits[0].sha.to_hex()],
+    );
+    // The actor is present (the test caller). An unmapped known principal
+    // uses default_author, which is also the fallback when the actor is absent.
+    assert_eq!(who, "Old Default <old@example.com>");
+}
+
+#[tokio::test]
 async fn a_land_with_no_author_email_is_authored_by_the_mirror() {
     let w = World::new().await;
     w.start().await;
-    w.land_by(&[("a.txt", "a1\n")], "add a", 1, "").await;
+    w.land_as_subject("nobody", "nobody", &[("a.txt", "a1\n")], "add a", 1, "")
+        .await;
     opened(w.batcher().run().await.unwrap().outcome);
     let head = support::branch(&w.upstream, "graft/batch-1").unwrap();
     let who = git(&w.upstream, &["log", "-1", "--format=%an <%ae>", &head]);

@@ -119,6 +119,10 @@ pub(crate) fn land_message(number: u64, land: &LandLine) -> String {
     for co in &land.trailer_coauthors {
         m.push_str(&format!("Co-authored-by: {co}\n"));
     }
+    if let Some(claimed) = &land.trailer_claimed_author {
+        m.push_str(claimed);
+        m.push('\n');
+    }
     if let Some(f) = &land.trailer_merged_from {
         m.push_str(&format!("Graft-Merged-From: {f}\n"));
     }

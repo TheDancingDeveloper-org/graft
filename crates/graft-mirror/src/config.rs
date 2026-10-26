@@ -85,9 +85,12 @@ pub struct FileConfig {
 /// [export]
 /// import_pulls = true   # import GitHub PRs as drafts; needs [github]
 ///
-/// # principal (author name when the land has no email) -> git identity
+/// # principal (authenticated token subject) -> git identity
 /// [export.authors]
 /// ada = { name = "Ada Lovelace", email = "ada@example.com" }
+///
+/// # used when the principal has no mapping above
+/// default_author = "Graft Export <export@example.com>"
 /// ```
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,11 +98,14 @@ pub struct ExportFile {
     /// Import open GitHub PRs as drafts in `github-pr/<n>` workspaces.
     #[serde(default)]
     pub import_pulls: bool,
-    /// Git identities for principals whose lands carry no email. The key is
-    /// the author name. The bot committer is used only when a principal is
-    /// absent here.
+    /// Git identities for authenticated principals (`RefMoved.actor`). The
+    /// bot committer is used only when a principal is absent here and
+    /// [`default_author`](Self::default_author) is unset.
     #[serde(default)]
     pub authors: BTreeMap<String, AuthorFile>,
+    /// `Name <email>` used when the authenticated principal has no mapping.
+    #[serde(default)]
+    pub default_author: Option<String>,
 }
 
 /// A git identity in `[export.authors]`.
@@ -282,6 +288,18 @@ impl FileConfig {
             .collect()
     }
 
+    /// The `[export] default_author` identity, when set.
+    pub fn default_author(&self) -> Result<Option<crate::batch::AuthorIdentity>, MirrorError> {
+        let Some(raw) = self
+            .export
+            .as_ref()
+            .and_then(|e| e.default_author.as_deref())
+        else {
+            return Ok(None);
+        };
+        parse_author_identity(raw).map(Some)
+    }
+
     /// Git identities from `[export.authors]`, keyed by principal.
     pub fn author_map(&self) -> BTreeMap<String, crate::batch::AuthorIdentity> {
         let Some(export) = &self.export else {
@@ -330,6 +348,29 @@ impl FileConfig {
     }
 }
 
+/// `Name <email>` as configured for `[export] default_author`.
+fn parse_author_identity(raw: &str) -> Result<crate::batch::AuthorIdentity, MirrorError> {
+    let raw = raw.trim();
+    let Some(open) = raw.rfind('<') else {
+        return Err(bad("[export] default_author must be \"Name <email>\""));
+    };
+    let Some(close) = raw.rfind('>') else {
+        return Err(bad("[export] default_author must be \"Name <email>\""));
+    };
+    if close != raw.len() - 1 || close <= open {
+        return Err(bad("[export] default_author must be \"Name <email>\""));
+    }
+    let name = raw[..open].trim();
+    let email = raw[open + 1..close].trim();
+    if name.is_empty() || email.is_empty() || email.contains('<') || email.contains('>') {
+        return Err(bad("[export] default_author must be \"Name <email>\""));
+    }
+    Ok(crate::batch::AuthorIdentity {
+        name: name.to_owned(),
+        email: email.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +382,21 @@ upstream = "/srv/upstream.git"
 mirror_dir = "/var/lib/m.git"
 db = "/var/lib/m.sqlite"
 "#;
+
+    #[test]
+    fn default_author_is_name_and_email() {
+        let ok = format!(
+            "{BASE}[export]\ndefault_author = \"Export Bot <bot@example.com>\"\n[[lines]]\nbranch = \"main\"\n"
+        );
+        let c = FileConfig::parse(&ok).unwrap();
+        let id = c.default_author().unwrap().unwrap();
+        assert_eq!(id.name, "Export Bot");
+        assert_eq!(id.email, "bot@example.com");
+        let bad = format!(
+            "{BASE}[export]\ndefault_author = \"no-angles\"\n[[lines]]\nbranch = \"main\"\n"
+        );
+        assert!(FileConfig::parse(&bad).unwrap().default_author().is_err());
+    }
 
     #[test]
     fn defaults_follow_d9() {
