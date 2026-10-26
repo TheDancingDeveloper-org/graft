@@ -61,8 +61,19 @@ pub mod server;
 pub mod text;
 
 pub use db::MirrorDb;
+pub use entry::TempClone;
 pub use entry::run;
 pub use git::{GitCliError, Mirror};
+
+/// Clones a git URL into a temp dir, or returns `None` for a local path.
+/// The clone is removed when the returned value is dropped, including after
+/// an import error. URLs with userinfo are refused.
+pub async fn import_source(source: &std::path::Path) -> Result<Option<entry::TempClone>, String> {
+    entry::prepare_clone(source).await.map_err(|e| match e {
+        entry::CmdError::Usage(what) => what,
+        entry::CmdError::Failed(err) => err.to_string(),
+    })
+}
 
 mod entry;
 
