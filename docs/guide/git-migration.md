@@ -1,0 +1,147 @@
+# Migrate a Git repository gradually
+
+Graft can sit beside an existing GitHub repository without changing where the
+repository is authoritative. In the recommended setup for this release, Git
+remains the authority: maintainers continue to protect and merge the default
+branch in GitHub, while `graft-mirror` follows that branch into a graft line.
+Work may land on a separate graft integration line and leave graft as a batch
+pull request.
+
+The examples below use these placeholders:
+
+- `/srv/git/project.git` is a local bare clone of the GitHub repository.
+- `project` is the graft repository name.
+- `main` is both the GitHub default branch and its followed graft line.
+- `integration` is the graft line that accepts native lands.
+- `/etc/graft/mirror.toml` is the mirror configuration file.
+- `/run/secrets/graft-mirror-token` is a file containing the graft token.
+
+## Import once
+
+Start with a bare Git repository that has the branches and tags you want to
+preserve. Import its default branch into the corresponding graft line:
+
+```sh
+graft-mirror import /srv/git/project.git \
+  --repo project \
+  --server https://graft.example.com \
+  --db /var/lib/graft-mirror/project.sqlite \
+  --token-file /run/secrets/graft-mirror-token \
+  --line refs/heads/main=main
+```
+
+Import preserves the reachable commit graph, tags, commit headers, modes, and
+the mapping between Git commit SHAs and graft changesets. It performs a
+fidelity check for every commit: exporting an imported commit must reproduce
+the original SHA. A commit with a path that graft cannot represent, such as a
+non-UTF-8 or non-portable path, stops the import and reports the offenders. If
+an operator deliberately accepts a known exception, repeat `--allow-lossy
+<sha>` for those commits; otherwise do not bypass the fidelity check.
+
+## Follow the GitHub default branch
+
+Create a mirror configuration. Keep credentials in token files, not in this
+file or on the command line:
+
+```toml
+server = "https://graft.example.com"
+repo = "project"
+upstream = "https://github.com/example/project.git"
+mirror_dir = "/var/lib/graft-mirror/project.git"
+db = "/var/lib/graft-mirror/project.sqlite"
+token_file = "/run/secrets/graft-mirror-token"
+poll_interval_secs = 15
+
+[github]
+owner = "example"
+repo = "project"
+token_file = "/run/secrets/github-token"
+
+[export]
+default_author = "Graft Export <graft@example.com>"
+
+[[lines]]
+branch = "main"
+line = "main"
+
+[[lines]]
+branch = "graft/integration"
+line = "integration"
+```
+
+Run the follower as a long-lived service. It fetches GitHub and advances the
+configured graft lines when their Git branches move:
+
+```sh
+graft-mirror follow --config /etc/graft/mirror.toml
+```
+
+The followed `main` line remains Git-primary. Do not land directly on it;
+GitHub remains the place where its protected default branch moves.
+
+## Deliver lands as batch pull requests
+
+Land work on the graft `integration` line. To publish its pending lands, sync
+them onto the followed GitHub base and create or update one batch pull request:
+
+```sh
+graft-mirror pr-batch integration \
+  --base main \
+  --config /etc/graft/mirror.toml
+```
+
+Run the command again when more lands are ready. Each land is exported as one
+commit in the batch. `graft-mirror` creates or updates the pull request but
+never merges it. Review and merge that pull request with your normal process;
+afterward, `follow` imports the resulting GitHub history and settles the batch.
+
+Graft runs no build, test, check, checker, or CI job when work lands. Required
+checks run in the user's forge on the batch pull request, and the user's merge
+process decides when the pull request may enter the protected branch.
+
+## Export the complete repository
+
+A full export is the exit path. It writes every line, tag, and landed
+changeset that graft can reach into a bare Git repository:
+
+```sh
+graft-mirror export \
+  --to /srv/git/project-export.git \
+  --repo project \
+  --db /var/lib/graft-mirror/project.sqlite \
+  --server https://graft.example.com \
+  --token-file /run/secrets/graft-mirror-token
+```
+
+Keep the mirror database with the graft backup while migration is in progress:
+it contains the imported Git headers and SHA mapping used for exact round trips.
+The exported bare repository can be checked with ordinary Git tools and pushed
+to a forge if you decide to leave graft.
+
+## Advanced: switch authority
+
+Switching a line from Git-primary to graft-primary is an advanced operation and
+is not recommended in this release. It changes which system may accept writes,
+so schedule it as an operator-controlled migration rather than a routine part
+of onboarding.
+
+Inspect the current state, freeze writes, verify recent history, flip the
+authority, and unfreeze only after the new authority is ready:
+
+```sh
+graft-mirror authority status --config /etc/graft/mirror.toml --line main
+graft-mirror authority freeze --config /etc/graft/mirror.toml --line main
+graft-mirror authority verify --config /etc/graft/mirror.toml --line main --last 100
+graft-mirror authority flip --config /etc/graft/mirror.toml --line main
+graft-mirror authority unfreeze --config /etc/graft/mirror.toml --line main
+```
+
+After a successful switch, the continuous exporter is the graft-primary bridge
+back to GitHub:
+
+```sh
+graft-mirror export --config /etc/graft/mirror.toml
+```
+
+Do not skip or reorder the authority steps. If verification finds divergence,
+leave the line frozen and resolve it explicitly before flipping authority.
