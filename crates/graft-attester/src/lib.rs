@@ -48,6 +48,12 @@
 //!   draft not yet finished, so a restart re-runs at most what was queued.
 //! - The token is never printed. It lives in the API client (whose `Debug`
 //!   redacts it) and never reaches a check's environment or arguments.
+//!
+//! That is the default [`Mode::Draft`]. [`Mode::PostLand`] (WI-2598, design
+//! §8.7, decision D25) checks what landed on one line instead; see
+//! [`post_land`]. Nothing post-land runs unless that mode is asked for.
+
+pub mod post_land;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -99,6 +105,27 @@ pub const DEFAULT_CHECKS: [&str; 3] = [
     "ci/clippy=cargo clippy --workspace --exclude rtbit-desktop --all-targets --no-default-features --features default-tls -- -D warnings",
     "ci/test=cargo test --workspace --exclude rtbit-desktop --locked --no-default-features --features default-tls",
 ];
+
+/// What the attester checks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// New drafts on a line (the trial attester, WI-2276).
+    #[default]
+    Draft,
+    /// Lands on a checked line, after they land (design §8.7).
+    PostLand,
+}
+
+impl Mode {
+    /// Parses `draft` or `post-land`.
+    pub fn parse(s: &str) -> Result<Mode, String> {
+        match s {
+            "draft" => Ok(Mode::Draft),
+            "post-land" => Ok(Mode::PostLand),
+            _ => Err(format!("mode {s:?}: expected draft or post-land")),
+        }
+    }
+}
 
 /// Most workspace lines remembered; the cache starts over past it.
 const LINE_CACHE: usize = 4096;
@@ -891,11 +918,7 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
                 let transient = is_transient(&e);
                 if transient && tries < self.cfg.max_attempts.max(1) {
                     self.remove_tree(&dir).await;
-                    return Err(match e {
-                        graft_client::Error::Api(e) => Error::Api(e),
-                        graft_client::Error::Io(e) => Error::Io(e),
-                        other => Error::Io(io::Error::other(other.to_string())),
-                    });
+                    return Err(client_error(e));
                 }
                 Some(if transient {
                     format!("{e} (gave up after {tries} tries)")
@@ -1001,98 +1024,12 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
         draft: ChangesetId,
         log_path: &Path,
     ) -> Result<Outcome, Error> {
-        let mut file = File::create(log_path)?;
-        writeln!(file, "# graft-attester: {} on {draft}", check.name)?;
-        writeln!(file, "# command: {}", check.argv.join(" "))?;
-        writeln!(file, "# timeout: {}s", self.cfg.timeout.as_secs())?;
-        let started = Instant::now();
-        let sink = Arc::new(Mutex::new(Sink {
-            file,
-            left: self.cfg.max_log_bytes,
-            truncated: false,
-        }));
-
-        let mut cmd = tokio::process::Command::new(&check.argv[0]);
-        cmd.args(&check.argv[1..])
-            .current_dir(dir)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .process_group(0);
-        if !self.cfg.env.iter().any(|(k, _)| k == "PATH")
-            && let Some(path) = std::env::var_os("PATH")
-        {
-            cmd.env("PATH", path);
-        }
-        cmd.envs(self.cfg.env.iter().map(|(k, v)| (k, v)));
-        if let Some((uid, gid)) = self.cfg.run_as {
-            cmd.uid(uid).gid(gid);
-        }
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let outcome = Outcome::NotStarted(e.kind().to_string());
-                finish_log(&sink, &outcome, started)?;
-                return Ok(outcome);
-            }
-        };
-        let pid = child.id();
-        let out = child
-            .stdout
-            .take()
-            .map(|s| tokio::spawn(copy(s, sink.clone())));
-        let err = child
-            .stderr
-            .take()
-            .map(|s| tokio::spawn(copy(s, sink.clone())));
-
-        let waited = tokio::time::timeout(self.cfg.timeout, child.wait()).await;
-        // Whatever happened, nothing the check started outlives it.
-        if let Some(pid) = pid {
-            kill_group(pid);
-        }
-        let outcome = match waited {
-            Ok(Ok(status)) => status_outcome(status),
-            Ok(Err(e)) => Outcome::NotStarted(e.kind().to_string()),
-            Err(_) => {
-                let _ = child.kill().await;
-                Outcome::TimedOut
-            }
-        };
-        for task in [out, err].into_iter().flatten() {
-            // The group is dead, so the pipes close; don't hang if not.
-            let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
-        }
-        finish_log(&sink, &outcome, started)?;
-        Ok(outcome)
+        run_command(&self.cfg, dir, check, draft, log_path).await
     }
 
-    /// Removes a draft's tree. A tree handed to [`Config::run_as`] is
-    /// removed as that user (the files its checks wrote are theirs).
+    /// Removes a draft's tree.
     async fn remove_tree(&self, dir: &Path) {
-        if !dir.exists() {
-            return;
-        }
-        if let Some((uid, gid)) = self.cfg.run_as {
-            let _ = tokio::process::Command::new("rm")
-                .arg("-rf")
-                .arg("--")
-                .arg(dir)
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .uid(uid)
-                .gid(gid)
-                .stdin(Stdio::null())
-                .status()
-                .await;
-        }
-        if dir.exists()
-            && let Err(e) = fs::remove_dir_all(dir)
-        {
-            log(&format!("removing {}: {e}", dir.display()));
-        }
+        remove_tree(&self.cfg, dir).await;
     }
 
     /// Removes the log directories older than [`Config::log_retention`].
@@ -1132,8 +1069,112 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
     }
 }
 
+/// Runs `check` in `dir` for `at` (a draft, or a landed snapshot) in its
+/// own process group, with the configured environment only and the
+/// configured timeout, its output capped into `log_path`.
+pub(crate) async fn run_command(
+    cfg: &Config,
+    dir: &Path,
+    check: &Check,
+    at: ChangesetId,
+    log_path: &Path,
+) -> Result<Outcome, Error> {
+    let mut file = File::create(log_path)?;
+    writeln!(file, "# graft-attester: {} on {at}", check.name)?;
+    writeln!(file, "# command: {}", check.argv.join(" "))?;
+    writeln!(file, "# timeout: {}s", cfg.timeout.as_secs())?;
+    let started = Instant::now();
+    let sink = Arc::new(Mutex::new(Sink {
+        file,
+        left: cfg.max_log_bytes,
+        truncated: false,
+    }));
+
+    let mut cmd = tokio::process::Command::new(&check.argv[0]);
+    cmd.args(&check.argv[1..])
+        .current_dir(dir)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .process_group(0);
+    if !cfg.env.iter().any(|(k, _)| k == "PATH")
+        && let Some(path) = std::env::var_os("PATH")
+    {
+        cmd.env("PATH", path);
+    }
+    cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
+    if let Some((uid, gid)) = cfg.run_as {
+        cmd.uid(uid).gid(gid);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let outcome = Outcome::NotStarted(e.kind().to_string());
+            finish_log(&sink, &outcome, started)?;
+            return Ok(outcome);
+        }
+    };
+    let pid = child.id();
+    let out = child
+        .stdout
+        .take()
+        .map(|s| tokio::spawn(copy(s, sink.clone())));
+    let err = child
+        .stderr
+        .take()
+        .map(|s| tokio::spawn(copy(s, sink.clone())));
+
+    let waited = tokio::time::timeout(cfg.timeout, child.wait()).await;
+    // Whatever happened, nothing the check started outlives it.
+    if let Some(pid) = pid {
+        kill_group(pid);
+    }
+    let outcome = match waited {
+        Ok(Ok(status)) => status_outcome(status),
+        Ok(Err(e)) => Outcome::NotStarted(e.kind().to_string()),
+        Err(_) => {
+            let _ = child.kill().await;
+            Outcome::TimedOut
+        }
+    };
+    for task in [out, err].into_iter().flatten() {
+        // The group is dead, so the pipes close; don't hang if not.
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+    }
+    finish_log(&sink, &outcome, started)?;
+    Ok(outcome)
+}
+
+/// Removes a checked-out tree. A tree handed to [`Config::run_as`] is
+/// removed as that user (the files its checks wrote are theirs).
+pub(crate) async fn remove_tree(cfg: &Config, dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
+    if let Some((uid, gid)) = cfg.run_as {
+        let _ = tokio::process::Command::new("rm")
+            .arg("-rf")
+            .arg("--")
+            .arg(dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .uid(uid)
+            .gid(gid)
+            .stdin(Stdio::null())
+            .status()
+            .await;
+    }
+    if dir.exists()
+        && let Err(e) = fs::remove_dir_all(dir)
+    {
+        log(&format!("removing {}: {e}", dir.display()));
+    }
+}
+
 /// Reads the saved position; 1 (the journal's start) when there is none.
-fn read_lsn(path: &Path) -> io::Result<u64> {
+pub(crate) fn read_lsn(path: &Path) -> io::Result<u64> {
     match fs::read_to_string(path) {
         Ok(text) => text.trim().parse::<u64>().map(|n| n.max(1)).map_err(|_| {
             io::Error::new(
@@ -1225,11 +1266,20 @@ pub fn chown_tree(root: &Path, uid: u32, gid: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// A client failure as the attester's error.
+pub(crate) fn client_error(e: graft_client::Error) -> Error {
+    match e {
+        graft_client::Error::Api(e) => Error::Api(e),
+        graft_client::Error::Io(e) => Error::Io(e),
+        other => Error::Io(io::Error::other(other.to_string())),
+    }
+}
+
 /// Whether a checkout failure may pass on another try: the server or the
 /// network, the token (it is re-minted and the attester restarted), or the
 /// local disk. A bad tree, a budget or a refused path fails the same way
 /// every time.
-fn is_transient(e: &graft_client::Error) -> bool {
+pub(crate) fn is_transient(e: &graft_client::Error) -> bool {
     match e {
         graft_client::Error::Api(e) => {
             e.is_retryable()
@@ -1243,7 +1293,7 @@ fn is_transient(e: &graft_client::Error) -> bool {
     }
 }
 
-fn backoff(errors: u32) -> Duration {
+pub(crate) fn backoff(errors: u32) -> Duration {
     Duration::from_secs(1u64 << errors.min(6))
 }
 
