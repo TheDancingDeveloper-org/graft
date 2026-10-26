@@ -10,6 +10,7 @@ mod admin;
 mod admission;
 mod app;
 mod backup;
+mod bootstrap;
 mod ci;
 mod config;
 mod denylist;

@@ -19,6 +19,8 @@
 //! put_buffer_bytes = 536870912       # PutObjects buffered by all calls
 //! put_wait_ms = 10000                # longest wait for that budget (≤ 1 h)
 //! put_idle_ms = 30000                # longest gap between PutObjects messages (≤ 1 h)
+//! bootstrap_admin_token_file = "/var/lib/graft/secrets/admin.token"  # optional: see `bootstrap.rs`
+//! bootstrap_admin_repos = ["graft"]  # the repositories that token administers
 //!
 //! [ci]                               # CI token exchange: see `ci.rs`
 //!
@@ -115,6 +117,11 @@ pub(crate) struct ServerConfig {
     pub(crate) default_line: Option<crate::lines::LineSpec>,
     /// The GC sweep scheduler.
     pub(crate) gc: GcSection,
+    /// Where start-up writes a one-time admin token (mode 0600) when the
+    /// file does not exist. Unset: no token is written.
+    pub(crate) bootstrap_admin_token_file: Option<PathBuf>,
+    /// The repositories the bootstrap token administers.
+    pub(crate) bootstrap_admin_repos: Vec<String>,
 }
 
 /// `[gc]`: the sweep scheduler. It is off by default, and even when it is
@@ -212,6 +219,8 @@ impl Default for ServerConfig {
             lines: Vec::new(),
             default_line: None,
             gc: GcSection::default(),
+            bootstrap_admin_token_file: None,
+            bootstrap_admin_repos: Vec::new(),
         }
     }
 }
@@ -286,7 +295,28 @@ impl ServerConfig {
         }
         crate::lines::check(&self.lines, self.default_line.as_ref()).map_err(ConfigError)?;
         self.gc.check()?;
+        self.check_bootstrap()?;
         self.ci.check().map_err(ConfigError)
+    }
+
+    fn check_bootstrap(&self) -> Result<(), ConfigError> {
+        if self.bootstrap_admin_token_file.is_none() {
+            return Ok(());
+        }
+        if self.bootstrap_admin_repos.is_empty() {
+            return Err(ConfigError(
+                "bootstrap_admin_token_file needs at least one repository in bootstrap_admin_repos"
+                    .into(),
+            ));
+        }
+        for repo in &self.bootstrap_admin_repos {
+            graft_auth::Scope::parse(&format!("repo:{repo}:admin")).map_err(|_| {
+                ConfigError(format!(
+                    "bootstrap_admin_repos: invalid repository {repo:?}"
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     /// The engine configuration: the defaults with the line sections applied.

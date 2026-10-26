@@ -46,7 +46,7 @@ use crate::denylist::Denylist;
 use crate::exports::Exports;
 use crate::grpc::{self, Services};
 use crate::watch::Watches;
-use crate::{http, keys, mcp};
+use crate::{bootstrap, http, keys, mcp};
 
 /// Set by the start-up tests (only): start-up pauses after the handlers are
 /// armed until a stop is requested. Unset in production.
@@ -141,6 +141,12 @@ async fn run(
     let (meta, objects) = open_stores(&config, Some(telemetry.clone()))?;
     let signing =
         keys::load_or_create(&config.key_path()).map_err(|e| format!("signing key: {e}"))?;
+    if let Some(path) = &config.bootstrap_admin_token_file
+        && bootstrap::ensure(path, &config.bootstrap_admin_repos, &signing)
+            .map_err(|e| e.to_string())?
+    {
+        tracing::info!("wrote bootstrap admin token to {}", path.display());
+    }
     let engine = Arc::new(
         Engine::new(
             Arc::new(meta),
