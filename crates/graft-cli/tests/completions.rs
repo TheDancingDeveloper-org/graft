@@ -6,13 +6,12 @@ use std::fs;
 
 use support::{assert_no_internal_references, graft, scratch};
 
-const HIDDEN_COMMANDS: &[&str] = &["attest", "ci", "serve", "node", "mirror", "man"];
+const HIDDEN_COMMANDS: &[&str] = &["attest", "ci", "serve", "node", "man"];
 const HIDDEN_DESCRIPTIONS: &[&str] = &[
     "Record a check result for a changeset",
     "CI helpers",
     "Run the authoritative server",
     "Run the host cache daemon",
-    "Import, follow, batch or export git repositories",
     "Generate manual pages",
     "Commands designed but not built yet",
 ];

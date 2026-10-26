@@ -11,6 +11,7 @@ Generated from `graft --help`. Hidden commands are left out.
 - [`graft config`](#config)
 - [`graft config show`](#config-show)
 - [`graft doctor`](#doctor)
+- [`graft import`](#import)
 - [`graft init`](#init)
 - [`graft clone`](#clone)
 - [`graft status`](#status)
@@ -54,6 +55,7 @@ Generated from `graft --help`. Hidden commands are left out.
 - [`graft mcp`](#mcp)
 - [`graft lsp`](#lsp)
 - [`graft completions`](#completions)
+- [`graft mirror`](#mirror)
 
 ## `graft login`
 
@@ -166,6 +168,28 @@ Options:
 
   -h, --help
           Print help (see a summary with '-h')
+```
+
+## `graft import`
+
+```text
+Import a git repository into a graft repository on the configured server
+
+Usage: graft import [OPTIONS] --repo <NAME> <SOURCE>
+
+Arguments:
+  <SOURCE>  A local git directory, or a `file://`, `https://`, `ssh://` or `git@` URL
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --repo <NAME>        Graft repository to create or update
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --line <NAME>        Graft line the default git branch lands on [default: main]
+      --db <FILE>          Mirror database file. A URL import needs one; a path defaults to `<source>/graft-mirror.sqlite`
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
 ```
 
 ## `graft init`
@@ -1202,6 +1226,26 @@ Usage: graft completions [OPTIONS] <SHELL>
 
 Arguments:
   <SHELL>  Shell to generate completions for [possible values: bash, elvish, fish, powershell, zsh]
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft mirror`
+
+```text
+Import, follow, batch or export git repositories
+
+Usage: graft mirror [OPTIONS] [ARGS]...
+
+Arguments:
+  [ARGS]...  Arguments passed to the role
 
 Options:
       --json               Print stable JSON; its schema is published with the release
