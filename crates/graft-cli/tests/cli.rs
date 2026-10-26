@@ -155,6 +155,16 @@ fn top_level_help_snapshot() {
 }
 
 #[test]
+fn completions_help_snapshot() {
+    let dir = scratch();
+    let out = graft(dir.path())
+        .args(["completions", "--help"])
+        .assert()
+        .success();
+    insta::assert_snapshot!("completions_help", text(out.get_output()));
+}
+
+#[test]
 fn experimental_commands_are_hidden_and_gated() {
     let dir = scratch();
     let help = graft(dir.path()).arg("--help").assert().success();
@@ -172,45 +182,6 @@ fn experimental_commands_are_hidden_and_gated() {
         .assert()
         .code(2)
         .stderr(contains("experimental; enable with GRAFT_EXPERIMENTAL=1"));
-}
-
-fn assert_no_internal_references(command: &[&str], help: &str) {
-    const LITERALS: &[&str] = &[
-        "pr bridge",
-        "crates/",
-        "owned by",
-        "vogt",
-        "trial",
-        "graft-dev",
-        "phase",
-    ];
-    let lowercase = help.to_ascii_lowercase();
-    for leak in LITERALS {
-        assert!(
-            !lowercase.contains(leak),
-            "graft {} --help leaked {leak:?}:\n{help}",
-            command.join(" ")
-        );
-    }
-    for word in help.split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-    {
-        let numbered = (word.starts_with("WI-")
-            && word.len() > 3
-            && word[3..]
-                .chars()
-                .all(|character| character.is_ascii_digit()))
-            || ((word.starts_with('D') || word.starts_with('G'))
-                && word.len() > 1
-                && word[1..]
-                    .chars()
-                    .next()
-                    .is_some_and(|character| character.is_ascii_digit()));
-        assert!(
-            !numbered,
-            "graft {} --help leaked internal reference {word:?}:\n{help}",
-            command.join(" ")
-        );
-    }
 }
 
 #[test]

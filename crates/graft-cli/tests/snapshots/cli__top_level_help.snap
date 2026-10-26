@@ -1,6 +1,6 @@
 ---
 source: crates/graft-cli/tests/cli.rs
-assertion_line: 153
+assertion_line: 154
 expression: text(out.get_output())
 ---
 The graft command-line client.
@@ -8,33 +8,34 @@ The graft command-line client.
 Usage: graft [OPTIONS] <COMMAND>
 
 Commands:
-  login      Store credentials for a named server, or list configured servers
-  logout     Remove a named server and its stored token
-  config     Inspect user configuration
-  init       Create a local repository and working copy
-  clone      Open a workspace and lay out a sparse working copy
-  status     Working-copy changes against the head draft, else the base (no server needed)
-  diff       Diff the working copy, or two changesets
-  log        First-parent history
-  show       A changeset with its patch
-  blame      Line origins for a file
-  cat        Print a file at a changeset
-  ls         List a directory at a changeset
-  sparse     List, add or remove the slice's path prefixes
-  commit     Upload the slice's changes and create a draft on the server
-  workspace  Show, list, open, renew or close workspaces
-  line       Create or list lines
-  tag        Create or list immutable tags
-  stack      List, squash, reorder, split or drop the drafts between the base and the head
-  sync       Move the base to the line tip (the server rebases a stack; conflicts are written into the files)
-  land       Land the stack on the line
-  revert     Add a draft that inverts a changeset
-  pick       Add a draft that re-applies a landed changeset (a cherry-pick; conflicts are written into the files)
-  api        Call a read operation of the API, with JSON in and out
-  version    Print versions
-  mcp        Run the MCP server over stdio, for agents
-  lsp        Run the LSP server over stdio
-  help       Print this message or the help of the given subcommand(s)
+  login        Store credentials for a named server, or list configured servers
+  logout       Remove a named server and its stored token
+  config       Inspect user configuration
+  init         Create a local repository and working copy
+  clone        Open a workspace and lay out a sparse working copy
+  status       Working-copy changes against the head draft, else the base (no server needed)
+  diff         Diff the working copy, or two changesets
+  log          First-parent history
+  show         A changeset with its patch
+  blame        Line origins for a file
+  cat          Print a file at a changeset
+  ls           List a directory at a changeset
+  sparse       List, add or remove the slice's path prefixes
+  commit       Upload the slice's changes and create a draft on the server
+  workspace    Show, list, open, renew or close workspaces
+  line         Create or list lines
+  tag          Create or list immutable tags
+  stack        List, squash, reorder, split or drop the drafts between the base and the head
+  sync         Move the base to the line tip (the server rebases a stack; conflicts are written into the files)
+  land         Land the stack on the line
+  revert       Add a draft that inverts a changeset
+  pick         Add a draft that re-applies a landed changeset (a cherry-pick; conflicts are written into the files)
+  api          Call a read operation of the API, with JSON in and out
+  version      Print versions
+  mcp          Run the MCP server over stdio, for agents
+  lsp          Run the LSP server over stdio
+  completions  Print a shell completion script
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
       --json               Print stable JSON; its schema is published with the release

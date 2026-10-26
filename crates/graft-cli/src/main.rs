@@ -295,6 +295,8 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
             Exit::Ok => Ok(()),
             code => Err(Failure::silent(code)),
         },
+        Command::Completions { shell } => cmd::completions::run(*shell),
+        Command::Man { out } => cmd::completions::man(out),
         Command::Serve(_) | Command::Node(_) | Command::Mirror(_) => {
             unreachable!("role command")
         }
