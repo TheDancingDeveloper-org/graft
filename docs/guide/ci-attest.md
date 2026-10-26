@@ -36,7 +36,7 @@ unset oidc_token
 
 graft --endpoint "$GRAFT_ENDPOINT" --repo "$GRAFT_REPO" \
   --token-file "$token_file" attest "$changeset" \
-  --check "ci/rehearsal" --pass --url "$run_url"
+  --check "ci/github-oidc-rehearsal" --pass --url "$run_url"
 ```
 
 The identity token stays in a masked shell variable only long enough to feed
@@ -46,6 +46,6 @@ step output, artifacts, or an environment variable.
 
 Keep the attestation job separate from jobs that execute untrusted repository
 code. Pin the allowed workflow in server configuration, and protect the ref
-that contains it. A manual sample is available at
-[`ci/github/graft-ci-attest.yml`](../../ci/github/graft-ci-attest.yml); copy it
-to `.github/workflows/graft-ci-attest.yml` before enabling its binding.
+that contains it. The manual workflow is installed at
+`.github/workflows/graft-ci-attest.yml`, and an identical reusable sample is
+available at [`ci/github/graft-ci-attest.yml`](../../ci/github/graft-ci-attest.yml).

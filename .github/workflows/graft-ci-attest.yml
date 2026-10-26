@@ -1,0 +1,51 @@
+# Manual, non-required rehearsal for the graft development deployment.
+# Also installed at .github/workflows/graft-ci-attest.yml; the server binding
+# pins that exact job_workflow_ref on the main branch.
+name: graft CI attestation rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      changeset:
+        description: Landed graft changeset ID exported at this commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    name: Attest landed changeset
+    runs-on: [graft-dev]
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GRAFT_ENDPOINT: http://127.0.0.1:17888
+      GRAFT_REPO: graft
+      OIDC_AUDIENCE: graft-dev
+      CHANGESET: ${{ inputs.changeset }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Exchange identity and attest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          audience=$(jq -rn --arg value "$OIDC_AUDIENCE" '$value | @uri')
+          oidc_token=$(printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" | \
+            curl -fsS --max-time 30 -H @- \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}" | jq -er '.value')
+          echo "::add-mask::$oidc_token"
+
+          umask 077
+          token_file=$(mktemp "$RUNNER_TEMP/graft-token.XXXXXX")
+          trap 'rm -f "$token_file"' EXIT
+          printf '%s' "$oidc_token" | graft --endpoint "$GRAFT_ENDPOINT" \
+            ci exchange --provider github --changeset "$CHANGESET" --out "$token_file"
+          unset oidc_token
+
+          graft --endpoint "$GRAFT_ENDPOINT" --repo "$GRAFT_REPO" \
+            --token-file "$token_file" attest "$CHANGESET" \
+            --check "ci/github-oidc-rehearsal" --pass --url "$RUN_URL"
