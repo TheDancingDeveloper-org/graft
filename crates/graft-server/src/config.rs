@@ -32,6 +32,13 @@
 //! retention_s = 604800               # abandoned and superseded drafts kept
 //! verify = true                      # check the plan before each pass
 //!
+//! [[webhooks]]                       # outbound journal delivery: see `webhooks.rs`
+//! url = "https://hooks.example/graft"
+//! kinds = ["LandAttempt"]            # empty = every kind
+//! lines = ["main"]                   # empty = every line
+//! secret_env = "GRAFT_WEBHOOK_SECRET"  # HMAC key, read from the environment
+//! repos = ["graft"]                  # repositories this endpoint delivers
+//!
 //! [[lines]]                          # per-line land policy: see `lines.rs`
 //! name = "trial-1"
 //! policy = "attested"
@@ -122,6 +129,8 @@ pub(crate) struct ServerConfig {
     pub(crate) bootstrap_admin_token_file: Option<PathBuf>,
     /// The repositories the bootstrap token administers.
     pub(crate) bootstrap_admin_repos: Vec<String>,
+    /// Outbound journal webhooks. Empty: none run.
+    pub(crate) webhooks: Vec<crate::webhooks::WebhookSpec>,
 }
 
 /// `[gc]`: the sweep scheduler. It is off by default, and even when it is
@@ -221,6 +230,7 @@ impl Default for ServerConfig {
             gc: GcSection::default(),
             bootstrap_admin_token_file: None,
             bootstrap_admin_repos: Vec::new(),
+            webhooks: Vec::new(),
         }
     }
 }
@@ -296,6 +306,7 @@ impl ServerConfig {
         crate::lines::check(&self.lines, self.default_line.as_ref()).map_err(ConfigError)?;
         self.gc.check()?;
         self.check_bootstrap()?;
+        crate::webhooks::check(&self.webhooks).map_err(ConfigError)?;
         self.ci.check().map_err(ConfigError)
     }
 
