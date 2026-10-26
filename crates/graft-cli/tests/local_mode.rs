@@ -222,6 +222,8 @@ fn land_then_kill(cwd: &Path, config_root: &Path, delay: Duration) -> LandEnd {
         .args(["land", "--json"])
         .env_remove("GRAFT_ENDPOINT")
         .env_remove("GRAFT_TOKEN")
+        .env_remove("GRAFT_SESSION_ID")
+        .env_remove("GRAFT_WORK_ITEM")
         .env_remove("VOGT_SESSION_ID")
         .env_remove("VOGT_WORK_ITEM")
         .env("GRAFT_AUTHOR_NAME", "Test Author")

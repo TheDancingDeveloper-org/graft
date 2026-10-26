@@ -1,54 +1,58 @@
-//! Who is working: the Vogt session and work item from `VOGT_SESSION_ID`
-//! and `VOGT_WORK_ITEM`, and the default author. Drafts carry the session
-//! and work item as `vogt.session` and `vogt.work_item` metadata, which the
-//! land keeps and `pr-batch` and the exporter read.
+//! Who is working: the session and work item from `GRAFT_SESSION_ID` and
+//! `GRAFT_WORK_ITEM` (the legacy names are a fallback), and the default
+//! author. Drafts carry the session and work item as `agent.session` and
+//! `agent.work_item` metadata, which the land keeps and `pr-batch` and
+//! the exporter read.
 
 use std::env;
 
 use graft_model::{Author, AuthorKind, Metadata};
+use graft_proto::attribution::{self, Key};
 
-/// Metadata key for the Vogt session.
-pub(crate) const SESSION_KEY: &str = "vogt.session";
-/// Metadata key for the Vogt work item.
-pub(crate) const WORK_ITEM_KEY: &str = "vogt.work_item";
-
-/// A non-empty, trimmed environment variable.
-fn var(name: &str) -> Option<String> {
-    let v = env::var(name).ok()?;
-    let v = v.trim();
-    (!v.is_empty()).then(|| v.to_owned())
-}
-
-/// The Vogt session (`VOGT_SESSION_ID`), if set.
+/// The session (`GRAFT_SESSION_ID`, else the legacy name), if set.
 pub(crate) fn session() -> Option<String> {
-    var("VOGT_SESSION_ID")
+    attribution::env(Key::Session)
 }
 
-/// The Vogt work item (`VOGT_WORK_ITEM`), if set.
+/// The work item (`GRAFT_WORK_ITEM`, else the legacy name), if set.
 pub(crate) fn work_item() -> Option<String> {
-    var("VOGT_WORK_ITEM")
+    attribution::env(Key::WorkItem)
 }
 
 /// Adds the session and work item to `meta`, unless `--meta` already set
-/// them.
-pub(crate) fn add_vogt_metadata(meta: &mut Metadata) {
-    for (key, value) in [(SESSION_KEY, session()), (WORK_ITEM_KEY, work_item())] {
+/// them. Writes both the `agent.*` keys and the legacy keys, with the same
+/// values, because some readers still read only the legacy keys. The legacy
+/// write is removed once every reader uses the alias (WI-2523).
+pub(crate) fn add_session_metadata(meta: &mut Metadata) {
+    add_metadata(meta, session(), work_item());
+}
+
+fn add_metadata(meta: &mut Metadata, session: Option<String>, work_item: Option<String>) {
+    for (key, value) in [(Key::Session, session), (Key::WorkItem, work_item)] {
         if let Some(value) = value {
-            meta.entry(key.to_owned()).or_insert(value);
+            for name in [key.name(), key.legacy()] {
+                meta.entry(name.to_owned()).or_insert_with(|| value.clone());
+            }
         }
     }
 }
 
-/// The default author kind: `GRAFT_AUTHOR_KIND`, else `agent` inside a
-/// Vogt session, else `fallback`.
+/// The default author kind: `GRAFT_AUTHOR_KIND`, else `agent` when a
+/// session id is present, else `fallback`.
 pub(crate) fn default_kind_text(fallback: &str) -> String {
-    var("GRAFT_AUTHOR_KIND").unwrap_or_else(|| {
+    env_trimmed("GRAFT_AUTHOR_KIND").unwrap_or_else(|| {
         if session().is_some() {
             "agent".to_owned()
         } else {
             fallback.to_owned()
         }
     })
+}
+
+fn env_trimmed(name: &str) -> Option<String> {
+    let v = env::var(name).ok()?;
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.to_owned())
 }
 
 /// Parses an author kind.
@@ -67,7 +71,7 @@ pub(crate) fn parse_kind(text: &str) -> Option<AuthorKind> {
 /// email the email is empty, so `pr-batch` gives the land the mirror
 /// identity (WI-2412); it is never made up.
 pub(crate) fn default_name_email() -> (String, String) {
-    pick_name_email(var)
+    pick_name_email(env_trimmed)
 }
 
 fn pick_name_email(env: impl Fn(&str) -> Option<String>) -> (String, String) {
@@ -88,6 +92,9 @@ pub(crate) fn default_author(kind: AuthorKind) -> Author {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use graft_proto::attribution::{
+        LEGACY_SESSION_ENV, LEGACY_WORK_ITEM_ENV, SESSION_ENV, WORK_ITEM_ENV,
+    };
 
     #[test]
     fn kinds_parse() {
@@ -99,9 +106,9 @@ mod tests {
     #[test]
     fn explicit_meta_wins_over_the_environment() {
         let mut m = Metadata::new();
-        m.insert(SESSION_KEY.to_owned(), "ses_given".to_owned());
-        add_vogt_metadata(&mut m);
-        assert_eq!(m[SESSION_KEY], "ses_given");
+        m.insert(Key::Session.name().to_owned(), "ses_given".to_owned());
+        add_session_metadata(&mut m);
+        assert_eq!(m[Key::Session.name()], "ses_given");
     }
 
     fn lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -135,5 +142,92 @@ mod tests {
         let (name, email) = pick_name_email(lookup(&[]));
         assert_eq!(name, "graft");
         assert!(email.is_empty(), "never @localhost");
+    }
+
+    fn attribution(pairs: &[(&str, &str)]) -> (Option<String>, Option<String>) {
+        let lookup = lookup(pairs);
+        (
+            attribution::env_with(Key::Session, &lookup),
+            attribution::env_with(Key::WorkItem, &lookup),
+        )
+    }
+
+    #[test]
+    fn new_env_names_win() {
+        assert_eq!(
+            attribution(&[
+                (SESSION_ENV, "s-new"),
+                (WORK_ITEM_ENV, "w-new"),
+                (LEGACY_SESSION_ENV, "s-old"),
+                (LEGACY_WORK_ITEM_ENV, "w-old"),
+            ]),
+            (Some("s-new".into()), Some("w-new".into()))
+        );
+    }
+
+    #[test]
+    fn legacy_env_names_are_the_fallback() {
+        assert_eq!(
+            attribution(&[
+                (LEGACY_SESSION_ENV, "s-old"),
+                (LEGACY_WORK_ITEM_ENV, "w-old")
+            ]),
+            (Some("s-old".into()), Some("w-old".into()))
+        );
+    }
+
+    #[test]
+    fn neither_env_is_unset() {
+        assert_eq!(attribution(&[]), (None, None));
+    }
+
+    fn written(pairs: &[(&str, &str)]) -> Metadata {
+        let (s, w) = attribution(pairs);
+        let mut m = Metadata::new();
+        add_metadata(&mut m, s, w);
+        m
+    }
+
+    fn assert_both(m: &Metadata, session: &str, work_item: &str) {
+        for (key, want) in [(Key::Session, session), (Key::WorkItem, work_item)] {
+            assert_eq!(m[key.name()], want);
+            assert_eq!(m[key.legacy()], want);
+        }
+        assert_eq!(m.len(), 4);
+    }
+
+    #[test]
+    fn written_keys_are_the_new_ones_and_the_legacy_ones() {
+        assert_eq!(Key::Session.name(), "agent.session");
+        assert_eq!(Key::WorkItem.name(), "agent.work_item");
+        assert_eq!(Key::Session.legacy(), "vogt.session");
+    }
+
+    #[test]
+    fn both_keys_are_written_for_each_env_case() {
+        assert_both(
+            &written(&[(SESSION_ENV, "s-new"), (WORK_ITEM_ENV, "w-new")]),
+            "s-new",
+            "w-new",
+        );
+        assert_both(
+            &written(&[
+                (LEGACY_SESSION_ENV, "s-old"),
+                (LEGACY_WORK_ITEM_ENV, "w-old"),
+            ]),
+            "s-old",
+            "w-old",
+        );
+        assert_both(
+            &written(&[
+                (SESSION_ENV, "s-new"),
+                (WORK_ITEM_ENV, "w-new"),
+                (LEGACY_SESSION_ENV, "s-old"),
+                (LEGACY_WORK_ITEM_ENV, "w-old"),
+            ]),
+            "s-new",
+            "w-new",
+        );
+        assert!(written(&[]).is_empty());
     }
 }

@@ -1288,8 +1288,8 @@ fn a_conflicted_line_merge_with_sync_is_three_commands() {
     assert_eq!(json_out(again.get_output())["outcome"], json!("up_to_date"));
 }
 
-/// A draft committed in a Vogt session lands with `vogt.session` and
-/// `vogt.work_item`, though the caller's principal holds no session (an
+/// A draft committed in a session lands with `agent.session` and
+/// `agent.work_item`, though the caller's principal holds no session (an
 /// unbound token), and keeps them through a conflicting sync whose
 /// resolving commit runs without the environment (WI-2414).
 #[test]
@@ -1314,6 +1314,9 @@ fn the_vogt_session_survives_land_and_a_conflicting_sync() {
     in_session(&["commit", "-m", "one"]);
     let landed = in_session(&["land"])["landed"].clone();
     let meta = meta_of(landed.as_str().unwrap());
+    assert_eq!(meta["agent.session"], json!("ses_trial"));
+    assert_eq!(meta["agent.work_item"], json!("WI-1"));
+    // Legacy keys are still written for readers that have not moved (WI-2523).
     assert_eq!(meta["vogt.session"], json!("ses_trial"));
     assert_eq!(meta["vogt.work_item"], json!("WI-1"));
 
@@ -1335,11 +1338,11 @@ fn the_vogt_session_survives_land_and_a_conflicting_sync() {
     .unwrap();
     let draft = json_run(&app, &["commit"]);
     let meta = meta_of(draft["id"].as_str().unwrap());
-    assert_eq!(meta["vogt.session"], json!("ses_trial"));
+    assert_eq!(meta["agent.session"], json!("ses_trial"));
     let landed = json_run(&app, &["land"])["landed"].clone();
     let meta = meta_of(landed.as_str().unwrap());
-    assert_eq!(meta["vogt.session"], json!("ses_trial"));
-    assert_eq!(meta["vogt.work_item"], json!("WI-1"));
+    assert_eq!(meta["agent.session"], json!("ses_trial"));
+    assert_eq!(meta["agent.work_item"], json!("WI-1"));
 }
 
 /// The same after a sync that rebases cleanly: the server's rebase keeps
@@ -1360,11 +1363,11 @@ fn the_vogt_session_survives_a_clean_sync_rebase() {
     let landed = json_run(&app, &["land"])["landed"].clone();
     run(&app, &["sync"]).success();
     let shown = json_run(&app, &["show", landed.as_str().unwrap()]);
-    assert_eq!(shown["metadata"]["vogt.session"], json!("ses_trial"));
+    assert_eq!(shown["metadata"]["agent.session"], json!("ses_trial"));
 }
 
 /// A pending draft that `g sync` rebases client-side onto a land that
-/// arrived after the commit keeps its `vogt.*` metadata through the sync
+/// arrived after the commit keeps its `agent.*` metadata through the sync
 /// and the land.
 #[test]
 fn the_vogt_session_survives_a_client_sync_rebase_of_a_pending_draft() {
@@ -1392,8 +1395,8 @@ fn the_vogt_session_survives_a_client_sync_rebase_of_a_pending_draft() {
     );
     let landed = json_run(&app, &["land"])["landed"].clone();
     let meta = json_run(&app, &["show", landed.as_str().unwrap()])["metadata"].clone();
-    assert_eq!(meta["vogt.session"], json!("ses_trial"));
-    assert_eq!(meta["vogt.work_item"], json!("WI-1"));
+    assert_eq!(meta["agent.session"], json!("ses_trial"));
+    assert_eq!(meta["agent.work_item"], json!("WI-1"));
 }
 
 /// WI-2439: a changeset that has just landed shows by its full id and by
