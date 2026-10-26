@@ -432,13 +432,7 @@ async fn revisions_check(
     let mut ids = vec![state.base];
     ids.extend(state.head);
     let page = match remote
-        .get_changesets(
-            &cx,
-            GetChangesets {
-                repo,
-                ids: ids.clone(),
-            },
-        )
+        .get_changesets(&cx, GetChangesets { repo, ids })
         .await
     {
         Ok(page) => page,
@@ -461,7 +455,6 @@ async fn revisions_check(
     if state.head.is_some_and(|head| !found.contains(&head)) {
         missing.push("head");
     }
-    let _ = ids;
     if missing.is_empty() {
         let which = if state.head.is_some() {
             "base and head resolve"
@@ -529,12 +522,19 @@ async fn lease_check(
         }
         Err(failure) => {
             let failure = Failure::from(failure);
-            if failure.kind() == "lease_expired" || failure.kind() == "not_found" {
+            if failure.kind() == "lease_expired" {
                 push(
                     checks,
                     "lease",
                     Status::Fail,
                     "workspace lease expired; run `graft workspace renew`".to_owned(),
+                );
+            } else if failure.kind() == "not_found" {
+                push(
+                    checks,
+                    "lease",
+                    Status::Fail,
+                    "workspace not found; clone again or run `graft workspace list`".to_owned(),
                 );
             } else {
                 push(checks, "lease", Status::Fail, failure.to_string());
@@ -578,6 +578,8 @@ async fn node_check(checks: &mut Vec<Check>) {
         ),
         Err(failure) => {
             let failure = Failure::from(failure);
+            // `unavailable` is a transport failure: the socket did not
+            // answer. Any other typed API error means the daemon did answer.
             if failure.kind() == "unavailable" {
                 push(
                     checks,
