@@ -54,6 +54,13 @@ pub(crate) const HOLD_START_UP_ENV: &str = "GRAFT_TEST_HOLD_START_UP";
 
 /// Runs the server until a shutdown signal.
 pub(crate) fn serve(config: ServerConfig) -> Result<(), String> {
+    serve_ready(config, |_| Ok(()))
+}
+
+pub(crate) fn serve_ready(
+    config: ServerConfig,
+    ready: impl FnOnce(SocketAddr) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
     // Panics (an operation not built yet is a `todo!`) go to the log as one
     // line, not as raw text between JSON log lines.
     std::panic::set_hook(Box::new(|info| tracing::error!(panic = %info, "panic")));
@@ -62,7 +69,7 @@ pub(crate) fn serve(config: ServerConfig) -> Result<(), String> {
         .thread_name("graft-server")
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
-    let result = runtime.block_on(run(config));
+    let result = runtime.block_on(run(config, ready));
     // Calls still running past the grace period are abandoned here.
     runtime.shutdown_timeout(Duration::from_secs(1));
     result
@@ -107,7 +114,10 @@ pub(crate) fn open_stores(
     Ok((meta, objects))
 }
 
-async fn run(config: ServerConfig) -> Result<(), String> {
+async fn run(
+    config: ServerConfig,
+    ready: impl FnOnce(SocketAddr) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
     // Handlers first, before telemetry, stores or any listener. The forwarder
     // turns a signal into a flag that every later step can see.
     let mut shutdown = Shutdown::install()?;
@@ -202,7 +212,6 @@ async fn run(config: ServerConfig) -> Result<(), String> {
         tracing::info!("stopped during start-up");
         return Ok(());
     }
-
     let (stop_tx, stop_rx) = watch::channel(false);
     let stopped = |mut rx: watch::Receiver<bool>| async move {
         let _ = rx.wait_for(|stop| *stop).await;
@@ -231,6 +240,7 @@ async fn run(config: ServerConfig) -> Result<(), String> {
     }
 
     app.set_ready(true);
+    ready(addr)?;
     tracing::info!(
         %addr,
         metrics = ?metrics_addr,
