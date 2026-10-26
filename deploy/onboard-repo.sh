@@ -184,6 +184,9 @@ poll_interval_secs = 15
 metrics_addr = "0.0.0.0:9465"
 json_logs = true
 $github_section
+
+[export]
+default_author = "thedancingdeveloper <306930456+thedancingdeveloper@users.noreply.github.com>"
 [[lines]]
 branch = "$base"
 line = "$base"
