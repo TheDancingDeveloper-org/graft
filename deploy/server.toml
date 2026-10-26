@@ -17,6 +17,27 @@ json_logs = true
 max_token_ttl_s = 2592000
 shutdown_grace_s = 20
 
+# GitHub Actions identity exchange for the graft repository. The exchanged
+# token is short-lived, pinned to one exported changeset, and can only attest.
+[ci]
+max_token_ttl_s = 900
+
+[[ci.issuers]]
+provider = "github"
+issuer = "https://token.actions.githubusercontent.com"
+audience = "graft-dev"
+jwks_url = "https://token.actions.githubusercontent.com/.well-known/jwks"
+jwks_refresh_s = 3600
+
+[[ci.bindings]]
+provider = "github"
+ci_repo = "TheDancingDeveloper-org/graft"
+repo_id = "1429435571"
+graft_repo = "graft"
+refs = ["refs/heads/main"]
+workflows = ["TheDancingDeveloper-org/graft/.github/workflows/graft-ci-attest.yml@refs/heads/main"]
+scopes = ["repo:graft:attest"]
+
 # Per-line land policy (WI-2288, WI-2298). Decision D22: phase 1 is a git
 # alternative, so every line, `main` included, lands `direct` by default, with
 # no build, test or CI in the land path. A [[lines]] entry replaces the
