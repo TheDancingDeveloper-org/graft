@@ -1,5 +1,7 @@
 //! `graft-attester`: builds and tests a repository's new drafts and posts
-//! `Attest` per check (WI-2276). See the library docs and `deploy/README.md`.
+//! `Attest` per check (WI-2276). With `--mode post-land --line <name>` it
+//! checks what landed on a checked line instead, and reverts the first bad
+//! land (WI-2598). See the library docs and `deploy/README.md`.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -8,7 +10,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use graft_attester::{Attester, Check, Config, DEFAULT_CHECKS, DEFAULT_LINE, DEFAULT_REPO, log};
+use graft_attester::post_land::{DEFAULT_WINDOW, PostLand, ProcessRunner};
+use graft_attester::{
+    Attester, Check, Config, DEFAULT_CHECKS, DEFAULT_LINE, DEFAULT_REPO, Mode, log,
+};
 use graft_client::{Endpoint, Remote};
 
 /// Builds and tests new drafts and posts `Attest` per check.
@@ -18,12 +23,25 @@ struct Args {
     /// Server endpoint (`http://host:port`).
     #[arg(long, default_value = "http://graft-server:7878")]
     endpoint: String,
+    /// `draft` checks new drafts; `post-land` checks what landed on
+    /// `--line` and reverts the first bad land (design §8.7).
+    #[arg(long, default_value = "draft", value_parser = Mode::parse)]
+    mode: Mode,
     /// Repository to watch and attest.
     #[arg(long, default_value = DEFAULT_REPO)]
     repo: String,
-    /// Line whose drafts are attested (drafts in workspaces tracking it).
-    #[arg(long, default_value = DEFAULT_LINE)]
-    line: String,
+    /// Line whose drafts are attested (drafts in workspaces tracking it;
+    /// default `trial-1`), or, in post-land mode, whose lands are checked
+    /// (required there).
+    #[arg(long)]
+    line: Option<String>,
+    /// Post-land: times a failed check is run again before the land is bad
+    /// (the line's `retries` on the server).
+    #[arg(long, default_value_t = 1)]
+    retries: u32,
+    /// Post-land: most lands held at once.
+    #[arg(long, default_value_t = DEFAULT_WINDOW)]
+    window: usize,
     /// File holding the token (mode 0600 or stricter). It needs `read` and
     /// `attest` on the repository.
     #[arg(long, default_value = "/run/secrets/graft-attester-token")]
@@ -99,7 +117,16 @@ fn read_token(path: &Path) -> Result<String, String> {
 }
 
 fn config(args: &Args) -> Result<Config, String> {
-    let mut cfg = Config::new(args.repo.clone(), args.line.clone(), &args.root);
+    let line = match (args.mode, &args.line) {
+        (_, Some(line)) => line.clone(),
+        (Mode::Draft, None) => DEFAULT_LINE.to_owned(),
+        (Mode::PostLand, None) => return Err("--mode post-land needs --line".to_owned()),
+    };
+    let mut cfg = Config::new(args.repo.clone(), line, &args.root);
+    if args.mode == Mode::PostLand {
+        // Its own position: the two modes read the journal apart.
+        cfg.state_file = Some(args.root.join("state").join("post-land-lsn"));
+    }
     cfg.stop_on_failure = !args.keep_going;
     let specs: Vec<&str> = if args.checks.is_empty() {
         DEFAULT_CHECKS.to_vec()
@@ -156,6 +183,39 @@ async fn main() -> ExitCode {
         }
     };
     let checks: Vec<&str> = cfg.checks.iter().map(|c| c.name.as_str()).collect();
+    if args.mode == Mode::PostLand {
+        log(&format!(
+            "checking lands on {} line {} on {}; checks {}, retries {}",
+            cfg.repo,
+            cfg.line,
+            args.endpoint,
+            checks.join(", "),
+            args.retries
+        ));
+        let runner = ProcessRunner::new(cfg.clone());
+        let mut checker = match PostLand::new(remote, runner, cfg, args.retries) {
+            Ok(c) => c,
+            Err(e) => {
+                log(&format!("error: {e}"));
+                return ExitCode::FAILURE;
+            }
+        };
+        checker.set_window(args.window);
+        return tokio::select! {
+            r = checker.run(None) => match r {
+                // Reported by the run; the operator decides.
+                Ok(_) => ExitCode::from(3),
+                Err(e) => {
+                    log(&format!("error: {e}"));
+                    ExitCode::FAILURE
+                }
+            },
+            _ = shutdown() => {
+                log("stopping");
+                ExitCode::SUCCESS
+            }
+        };
+    }
     log(&format!(
         "watching {} line {} on {} for drafts; checks {}",
         cfg.repo,
@@ -192,5 +252,41 @@ async fn shutdown() {
     tokio::select! {
         _ = term.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_mode_checks_drafts_on_the_trial_line() {
+        let args = Args::parse_from(["graft-attester"]);
+        assert_eq!(args.mode, Mode::Draft);
+        let cfg = config(&args).expect("config");
+        assert_eq!(cfg.line, DEFAULT_LINE);
+        assert!(cfg.state_file.expect("state").ends_with("state/lsn"));
+    }
+
+    #[test]
+    fn post_land_needs_its_line_and_keeps_its_own_position() {
+        let args = Args::parse_from(["graft-attester", "--mode", "post-land"]);
+        assert!(config(&args).is_err());
+        let args = Args::parse_from([
+            "graft-attester",
+            "--mode",
+            "post-land",
+            "--line",
+            "integration",
+        ]);
+        assert_eq!(args.mode, Mode::PostLand);
+        let cfg = config(&args).expect("config");
+        assert_eq!(cfg.line, "integration");
+        assert!(
+            cfg.state_file
+                .expect("state")
+                .ends_with("state/post-land-lsn")
+        );
+        assert!(Args::try_parse_from(["graft-attester", "--mode", "revert"]).is_err());
     }
 }
