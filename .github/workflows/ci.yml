@@ -230,3 +230,15 @@ jobs:
         run: scripts/demo/run.sh
         env:
           GRAFT_BIN: ${{ github.workspace }}/target/debug/graft
+
+  # Not a required check (WI-2556). Builds the image, brings up
+  # examples/compose, and lands one file. Merge queue only, so it never
+  # runs on a pull request push. The bootstrap token is a mode-0600 file.
+  compose-smoke:
+    runs-on: [self-hosted]
+    timeout-minutes: 60
+    if: github.event_name == 'merge_group'
+    steps:
+      - uses: actions/checkout@v4
+      - name: compose smoke
+        run: scripts/compose-smoke.sh
