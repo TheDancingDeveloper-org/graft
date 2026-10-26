@@ -140,6 +140,26 @@ impl RepoApi for Backend {
     async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
         forward!(self.attest(cx, req))
     }
+    async fn attest_v2(&self, cx: &CallContext, req: AttestV2) -> ApiResult<()> {
+        forward!(self.attest_v2(cx, req))
+    }
+    async fn get_attestations(
+        &self,
+        cx: &CallContext,
+        req: GetAttestations,
+    ) -> ApiResult<AttestationPage> {
+        forward!(self.get_attestations(cx, req))
+    }
+    async fn get_land_checks(
+        &self,
+        cx: &CallContext,
+        req: GetLandChecks,
+    ) -> ApiResult<LandCheckPage> {
+        forward!(self.get_land_checks(cx, req))
+    }
+    async fn review_queue(&self, cx: &CallContext, req: ReviewQueue) -> ApiResult<ReviewQueuePage> {
+        forward!(self.review_queue(cx, req))
+    }
     async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
         forward!(self.watch(cx, req))
     }

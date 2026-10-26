@@ -21,6 +21,7 @@ use graft_proto::frame::{HEADER_LEN, MAX_FRAME_PAYLOAD};
 use graft_proto::pb;
 use graft_proto::pb::object_service_client::ObjectServiceClient;
 use graft_proto::pb::repo_service_client::RepoServiceClient;
+use graft_proto::pb::review_service_client::ReviewServiceClient;
 use graft_proto::pb::workspace_service_client::WorkspaceServiceClient;
 use graft_proto::types::*;
 use graft_proto::{
@@ -167,6 +168,14 @@ impl Remote {
 
     fn repo(&self) -> RepoServiceClient<Channel> {
         RepoServiceClient::new(self.channel.clone())
+            .send_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .max_decoding_message_size(MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_MESSAGE_BYTES)
+    }
+
+    fn review(&self) -> ReviewServiceClient<Channel> {
+        ReviewServiceClient::new(self.channel.clone())
             .send_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Gzip)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
@@ -531,6 +540,52 @@ impl RepoApi for Remote {
     async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
         unary!(self, cx, repo, attest, pb::AttestRequest::from(req));
         Ok(())
+    }
+
+    async fn attest_v2(&self, cx: &CallContext, req: AttestV2) -> ApiResult<()> {
+        unary!(self, cx, repo, attest, pb::AttestRequest::from(req));
+        Ok(())
+    }
+
+    async fn get_attestations(
+        &self,
+        cx: &CallContext,
+        req: GetAttestations,
+    ) -> ApiResult<AttestationPage> {
+        let r = unary!(
+            self,
+            cx,
+            review,
+            get_attestations,
+            pb::GetAttestationsRequest::from(req)
+        );
+        AttestationPage::try_from(r).map_err(wire_error)
+    }
+
+    async fn get_land_checks(
+        &self,
+        cx: &CallContext,
+        req: GetLandChecks,
+    ) -> ApiResult<LandCheckPage> {
+        let r = unary!(
+            self,
+            cx,
+            review,
+            get_land_checks,
+            pb::GetLandChecksRequest::from(req)
+        );
+        LandCheckPage::try_from(r).map_err(wire_error)
+    }
+
+    async fn review_queue(&self, cx: &CallContext, req: ReviewQueue) -> ApiResult<ReviewQueuePage> {
+        let r = unary!(
+            self,
+            cx,
+            review,
+            review_queue,
+            pb::ReviewQueueRequest::from(req)
+        );
+        ReviewQueuePage::try_from(r).map_err(wire_error)
     }
 
     /// Returns the first page of the journal stream.
