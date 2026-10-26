@@ -25,5 +25,8 @@ if [ -n "$base" ] \
     esac
   done <<<"$files"
 fi
+if [ "$result" = true ]; then
+  scripts/check-guide-names.sh
+fi
 echo "docs_only=$result" >>"$out"
 echo "docs-only: $result" >&2
