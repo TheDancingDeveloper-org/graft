@@ -354,7 +354,7 @@ wait_for_refs() {
       rc=$?
     fi
     if [ "$rc" -eq 0 ]; then
-      count=$(printf '%s' "$body" | grep -o '"name"' | wc -l)
+      count=$(printf '%s' "$body" | { grep -o '"name"' || true; } | wc -l)
       rm -f "$err"
       if [ "$count" -gt 0 ]; then
         log "ok: $mrepo has $count ref(s)"
