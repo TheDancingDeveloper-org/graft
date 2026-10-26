@@ -34,16 +34,3 @@ quarantine together, under the same Vogt item.
 - **Fix (host-side, operator):** a 16–20 GiB memory limit on `vogt-prod`,
   and look into Node B's full swap. Then remove the retry, the script and
   this entry.
-
-## `test` / `import_kill9_restart_fetch_fsck`
-
-- **Vogt item:** WI-2469 (quarantined 2026-10-25 under WI-2467).
-- **Symptom:** the ~75s graft-server kill-9 import, restart, fetch and fsck
-  test failed on merge-queue run for PR #196 (attempt 1) and passed on retry.
-  No assertion or panic was stable enough to fix the same day.
-- **Quarantine:** the test is `#[ignore]`d, so the required `test` job's
-  nextest run skips it. A separate `slow` job in `.github/workflows/ci.yml`
-  runs only that test, only on `merge_group`, with `continue-on-error: true`.
-  It is not a required check, so a flake there does not fail the merge queue.
-- **Fix:** WI-2469. Find the kill-9 race, then drop the `#[ignore]`, the
-  `slow` job and this entry together.

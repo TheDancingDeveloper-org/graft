@@ -5,7 +5,6 @@
 mod common;
 
 use std::collections::{BTreeMap, HashSet};
-use std::time::Duration;
 
 use common::{Site, SynthSpec, generate};
 use graft_model::{ChangesetId, EntryKind, ObjectId, ObjectKind, Tree, TreeId};
@@ -60,12 +59,12 @@ async fn fetch_snapshot(
     files
 }
 
-// Quarantine (WI-2469, recorded under WI-2467): ~75s kill-9 import/fetch/fsck
-// failed once on an unrelated merge-queue run (PR #196) and passed on retry,
-// with no stable cause. nextest skips `#[ignore]`d tests, so the required
-// `test` job no longer flakes on it. The non-required merge-queue `slow` job
-// runs it with `--run-ignored only`; see docs/known-flakes.md.
-#[ignore = "slow kill-9 e2e; non-required merge-queue slow job (WI-2469)"]
+/// Import, `kill -9`, restart, fetch and fsck (G1.12).
+///
+/// Restart latency is not asserted here. Merge-queue run 40186983726
+/// failed this test at 2.008s against a 2s bound, before fetch or fsck,
+/// while the rest of the job was still running. Startup time is
+/// `restart_to_serving_is_under_two_seconds`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn import_kill9_restart_fetch_fsck() {
     let site = Site::new("server-e2e", "");
@@ -134,14 +133,12 @@ async fn import_kill9_restart_fetch_fsck() {
     assert_eq!(imported.created.len(), created.len());
     drop(c);
 
-    // kill -9: every acknowledged write must survive.
+    // kill -9 after the writes above were acknowledged. Restart time is
+    // not part of this assertion: on a loaded merge-queue runner it once
+    // took 2.008s (run 40186983726) and the data checks never ran. How
+    // fast an empty site starts is `restart_to_serving_is_under_two_seconds`.
     server.kill9();
     let server = site.start();
-    assert!(
-        server.startup < Duration::from_secs(2),
-        "restart to serving took {:?}",
-        server.startup
-    );
 
     let mut c = server.clients(Some(&token)).await;
     let main = c
