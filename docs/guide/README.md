@@ -1,5 +1,6 @@
 # User guide
 
+- [CLI](cli.md): every visible command, generated from `graft --help`.
 - [Concepts](concepts.md): glossary and the git-to-graft table.
 - [MCP](mcp.md): every MCP tool, with its arguments and results.
 - [Server](server.md): config, tokens, repositories, lines, metrics and upgrades.

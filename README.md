@@ -183,6 +183,7 @@ on short-lived branches through the merge queue. See
 
 User guide:
 
+- [CLI](docs/guide/cli.md): every visible command, generated from `graft --help`.
 - [Concepts](docs/guide/concepts.md): glossary and the git-to-graft table.
 - [MCP](docs/guide/mcp.md): every MCP tool, with its arguments and results.
 - [Server](docs/guide/server.md): config, tokens, repositories, lines, metrics and upgrades.
