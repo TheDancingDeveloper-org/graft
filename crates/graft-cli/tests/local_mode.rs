@@ -11,7 +11,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use graft_client::local::{LocalRepo, META_FILE, OBJECTS_DIR};
 use graft_model::ChangesetId;
@@ -112,12 +112,20 @@ fn kill_during_local_land_keeps_the_acknowledged_write() {
     let repo_dir = demo.join(".graft").join("repo");
     let mut acked: Vec<String> = Vec::new();
     let mut killed = 0u32;
-    // Fixed seed so a failure repeats. Delays are short enough that some
-    // lands finish and some are cut off.
+    // Keep going until several lands die mid-operation. A land that
+    // finishes before the kill does not count. Hitting the bound is the
+    // failure; there is no minimum that a short fixed loop can miss.
+    const KILLS: u32 = 3;
+    const BOUND: u32 = 40;
     let mut seed: u64 = 0x2366;
-    for n in 0..12u32 {
+    let mut n = 0u32;
+    while killed < KILLS {
+        assert!(
+            n < BOUND,
+            "stopped after {BOUND} lands with only {killed} mid-land kills"
+        );
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let delay = Duration::from_millis(5 + (seed % 40));
+        let delay = Duration::from_millis(15 + (seed % 30));
         fs::write(demo.join("file.txt"), format!("base\nedit {n}\n")).unwrap();
         run(&demo, dir.path(), &["commit", "-m", &format!("edit {n}")]).success();
         match land_then_kill(&demo, dir.path(), delay) {
@@ -130,11 +138,8 @@ fn kill_during_local_land_keeps_the_acknowledged_write() {
             }
             LandEnd::Failed(code) => panic!("land exited {code} before a kill"),
         }
+        n += 1;
     }
-    assert!(
-        killed >= 3,
-        "most of the window must actually kill a land, got {killed}"
-    );
     assert!(!acked.is_empty(), "at least one land was acknowledged");
 
     let repo = LocalRepo::open(&repo_dir).expect("lock is recoverable");
@@ -184,7 +189,7 @@ fn kill_during_local_land_keeps_the_acknowledged_write() {
         );
     });
     drop(repo);
-    assert!(repo_dir.join(META_FILE).is_file());
+    assert_eq!(integrity_check(&repo_dir.join(META_FILE)), "ok");
     assert!(repo_dir.join(OBJECTS_DIR).is_dir());
     // A later open is the lock recovery: the killed process must not leave
     // the repository unopenable.
@@ -218,10 +223,16 @@ fn land_then_kill(cwd: &Path, config_root: &Path, delay: Duration) -> LandEnd {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn land");
-    thread::sleep(delay);
-    let finished = child.try_wait().expect("poll");
-    if finished.is_none() {
-        let _ = child.kill();
+    let started = Instant::now();
+    loop {
+        if child.try_wait().expect("poll").is_some() {
+            break;
+        }
+        if started.elapsed() >= delay {
+            let _ = child.kill();
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
     }
     let status = child.wait().expect("wait");
     let mut out = String::new();
@@ -245,4 +256,10 @@ fn land_then_kill(cwd: &Path, config_root: &Path, delay: Duration) -> LandEnd {
     } else {
         LandEnd::Failed(status.code().unwrap_or(1))
     }
+}
+
+fn integrity_check(meta: &Path) -> String {
+    let conn = rusqlite::Connection::open(meta).expect("open meta");
+    conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("integrity_check")
 }
