@@ -30,9 +30,13 @@ use graft_proto::{CallContext, Principal, PrincipalKind};
 use graft_telemetry::{Telemetry, TelemetryConfig};
 
 const USAGE: &str = "usage: graft-mirror <command> [args]
-  import <git-dir> --repo <name>        lossless import with fidelity check
+  import <git-dir-or-url> --repo <name>
+                                        lossless import with fidelity check
          [--server <url>] [--db <file>] [--token-file <file>]
          [--line <git-ref>=<line>]... [--no-tags] [--allow-lossy <sha>]...
+         A https://, ssh://, git@ or file:// URL is cloned bare into a
+         temp dir (removed afterwards). Credentials come from git's own
+         configuration; a URL with userinfo is refused.
   init-config [--out <file>]            write a commented sample mirror.toml
   follow --config <file>                git-primary: follow GitHub main
   export --config <file>                graft-primary: export lines to GitHub
@@ -108,7 +112,8 @@ fn execute(f: impl Future<Output = Result<(), CmdError>>) -> ExitCode {
     }
 }
 
-enum CmdError {
+#[derive(Debug)]
+pub(crate) enum CmdError {
     Usage(String),
     Failed(MirrorError),
 }
@@ -179,14 +184,25 @@ async fn cmd_import(args: &[String]) -> Result<(), CmdError> {
             s => return Err(CmdError::Usage(format!("unexpected argument {s}"))),
         }
     }
-    let git_dir = git_dir.ok_or_else(|| CmdError::Usage("import needs <git-dir>".into()))?;
+    let source =
+        git_dir.ok_or_else(|| CmdError::Usage("import needs <git-dir> or a URL".into()))?;
     let repo = repo.ok_or_else(|| CmdError::Usage("import needs --repo".into()))?;
     let server = server.ok_or_else(|| {
         CmdError::Usage("no server: pass --server, GRAFT_ENDPOINT, or local:<repo>".into())
     })?;
-    let db = db.unwrap_or_else(|| git_dir.join("graft-mirror.sqlite"));
+    let cloned = prepare_clone(&source).await?;
+    let git_dir = cloned.as_ref().map(|c| c.path()).unwrap_or(&source);
+    let db = match db {
+        Some(path) => path,
+        None if cloned.is_some() => {
+            return Err(CmdError::Usage(
+                "import of a URL needs --db (the clone is removed afterwards)".into(),
+            ));
+        }
+        None => source.join("graft-mirror.sqlite"),
+    };
 
-    let mut config = ImportConfig::new(&git_dir, &repo);
+    let mut config = ImportConfig::new(git_dir, &repo);
     if !lines.is_empty() {
         config.lines = lines;
     }
@@ -195,7 +211,13 @@ async fn cmd_import(args: &[String]) -> Result<(), CmdError> {
 
     let api = Server::open(&server, token(token_file.as_deref())?).await?;
     let map = MirrorDb::open(&db).map_err(MirrorError::from)?;
-    let out = import_repo(&api, &mirror_cx(&repo), &map, &config).await?;
+    let out = match import_repo(&api, &mirror_cx(&repo), &map, &config).await {
+        Ok(out) => out,
+        Err(e) => {
+            report_import_failure(&e);
+            return Err(e.into());
+        }
+    };
     let r = &out.report;
     println!(
         "imported {} commits ({} blobs, {} verified, {} lossy, {} raw trees)",
@@ -221,6 +243,129 @@ async fn cmd_import(args: &[String]) -> Result<(), CmdError> {
         println!("tag {}: skipped, names a {} not a commit", t.name, t.kind);
     }
     Ok(())
+}
+
+/// A bare clone held only for the import. Dropped (and removed) when the
+/// command returns, including on error.
+#[derive(Debug)]
+pub struct TempClone {
+    path: PathBuf,
+}
+
+impl TempClone {
+    /// The bare clone. Removed when this value is dropped.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempClone {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// `https://`, `ssh://`, `file://` and `git@host:path` are cloned. Anything
+/// else is a local directory. Userinfo is refused: credentials stay in
+/// git's own configuration, never in argv or a URL.
+pub(crate) async fn prepare_clone(source: &Path) -> Result<Option<TempClone>, CmdError> {
+    let raw = source.to_str().unwrap_or("");
+    if !is_git_url(raw) {
+        return Ok(None);
+    }
+    if url_has_userinfo(raw) {
+        return Err(CmdError::Usage(
+            "refusing a URL with userinfo; credentials come from git's configuration".into(),
+        ));
+    }
+    let dest = std::env::temp_dir().join(format!(
+        "graft-mirror-import-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    crate::git::Mirror::clone_mirror(raw, &dest)
+        .await
+        .map_err(|e| CmdError::Failed(MirrorError::from(redact_cli(e, raw))))?;
+    Ok(Some(TempClone { path: dest }))
+}
+
+/// Drops userinfo if git echoed the URL. The URL git was given has none.
+fn redact_cli(err: crate::git::GitCliError, url: &str) -> crate::git::GitCliError {
+    let crate::git::GitCliError(msg) = err;
+    crate::git::GitCliError(msg.replace(url, "<url>"))
+}
+
+fn is_git_url(raw: &str) -> bool {
+    raw.starts_with("https://")
+        || raw.starts_with("ssh://")
+        || raw.starts_with("file://")
+        || raw.starts_with("git@")
+}
+
+/// `scheme://user@host` or `scheme://user:secret@host`.
+fn url_has_userinfo(raw: &str) -> bool {
+    let Some(rest) = raw.split("://").nth(1) else {
+        return false;
+    };
+    rest.split('/')
+        .next()
+        .is_some_and(|host| host.contains('@'))
+}
+
+/// How many offenders an end-of-run report lists before a count.
+const REPORT_CAP: usize = 100;
+
+/// `<sha> <reason>` lines, the first [`REPORT_CAP`], then `N more`.
+fn capped_lines(rows: impl IntoIterator<Item = (String, String)>) -> Vec<String> {
+    let rows: Vec<(String, String)> = rows.into_iter().collect();
+    let mut lines: Vec<String> = rows
+        .iter()
+        .take(REPORT_CAP)
+        .map(|(sha, reason)| format!("{sha} {reason}"))
+        .collect();
+    if rows.len() > REPORT_CAP {
+        lines.push(format!("{} more", rows.len() - REPORT_CAP));
+    }
+    lines
+}
+
+/// Prints the fidelity, path-rule and unrepresentable reports before the
+/// command fails.
+fn report_import_failure(err: &MirrorError) {
+    let MirrorError::Git(git) = err else {
+        return;
+    };
+    let (heading, lines) = match git {
+        graft_git::GitError::Fidelity(shas) => (
+            format!("fidelity check failed: {} commits", shas.len()),
+            capped_lines(shas.iter().map(|sha| (sha.to_string(), "fidelity".into()))),
+        ),
+        graft_git::GitError::BadPaths(paths) => (
+            format!("path rules: {} paths", paths.len()),
+            capped_lines(paths.iter().map(|path| {
+                (
+                    path.commit.to_string(),
+                    format!("{} {}", path.path, path.reason),
+                )
+            })),
+        ),
+        graft_git::GitError::Unrepresentable(commits) => (
+            format!("unrepresentable: {} commits", commits.len()),
+            capped_lines(
+                commits
+                    .iter()
+                    .map(|c| (c.commit.to_string(), c.reason.to_owned())),
+            ),
+        ),
+        _ => return,
+    };
+    eprintln!("{heading}");
+    for line in lines {
+        eprintln!("{line}");
+    }
 }
 
 /// The commented sample `mirror.toml` (`init-config`).
@@ -1064,5 +1209,39 @@ mod tests {
         let code = cmd_init_config(&["--out".into(), path.display().to_string()]);
         assert_eq!(code, std::process::ExitCode::from(super::EXIT_USAGE));
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_url_with_userinfo_is_refused() {
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(super::prepare_clone(std::path::Path::new(
+                "https://user:secret@example.test/repo.git",
+            )))
+            .expect_err("userinfo");
+        let super::CmdError::Usage(msg) = err else {
+            panic!("usage");
+        };
+        assert!(!msg.contains("secret"));
+        assert!(msg.contains("userinfo"));
+    }
+
+    #[test]
+    fn a_path_is_not_a_url() {
+        let none = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(super::prepare_clone(std::path::Path::new("/tmp/repo")))
+            .unwrap();
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn unrepresentable_lines_cap_at_one_hundred() {
+        let rows = (0..105).map(|n| (format!("{n:040x}"), "commit-shape".to_owned()));
+        let lines = super::capped_lines(rows);
+        assert_eq!(lines.len(), 101);
+        assert!(lines[0].ends_with("commit-shape"));
+        assert_eq!(lines.last().unwrap(), "5 more");
+        assert!(!lines.iter().any(|l| l.contains("secret")));
     }
 }

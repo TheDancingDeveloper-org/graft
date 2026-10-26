@@ -196,6 +196,30 @@ async fn ok(dir: Option<&Path>, args: &[&str]) -> Result<Vec<u8>, GitCliError> {
 }
 
 impl Mirror {
+    /// Clones `url` as a bare mirror into `dir`.
+    ///
+    /// `url` is passed to git as an argument, never rewritten with a
+    /// credential. Callers refuse userinfo first, so a password cannot
+    /// arrive here or land in git's error text.
+    pub async fn clone_mirror(url: &str, dir: &Path) -> Result<(), GitCliError> {
+        if dir.exists() {
+            return Err(GitCliError(format!(
+                "clone destination {} already exists",
+                dir.display()
+            )));
+        }
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| GitCliError(format!("creating {}: {e}", parent.display())))?;
+        }
+        ok(
+            None,
+            &["clone", "--mirror", "--", url, &dir.display().to_string()],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// The mirror at `dir` of `upstream` (a URL or a local path).
     pub fn new(dir: impl Into<PathBuf>, upstream: impl Into<String>) -> Mirror {
         Mirror {
