@@ -4,8 +4,8 @@
 #
 # Image tag: GRAFT_IMAGE, default ghcr.io/thedancingdeveloper-org/graft:v0.1.0.
 # Listeners bind 0.0.0.0 inside the container. Host ports are 127.0.0.1 only.
-# Data, metadata, secrets, the node cache and the mirror store are named volumes.
-# No host paths are mounted.
+# The only host files mounted are server.toml, node.toml and mirror.toml,
+# read-only, from beside this compose file. All state lives in named volumes.
 #
 # The mirror service starts only with `--profile mirror`, after you copy
 # mirror.toml.example to mirror.toml. That file is not a secret; the token
