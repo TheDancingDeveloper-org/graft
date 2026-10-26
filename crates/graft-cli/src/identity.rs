@@ -19,10 +19,9 @@ pub(crate) fn work_item() -> Option<String> {
     attribution::env(Key::WorkItem)
 }
 
-/// Adds the session and work item to `meta`, unless `--meta` already set
-/// them. Writes both the `agent.*` keys and the legacy keys, with the same
-/// values, because some readers still read only the legacy keys. The legacy
-/// write is removed once every reader uses the alias (WI-2523).
+/// Adds the session and work item to `meta` as `agent.session` and
+/// `agent.work_item`, unless `--meta` already set them. Reads still accept
+/// the legacy keys; this path does not write them (WI-2583).
 pub(crate) fn add_session_metadata(meta: &mut Metadata) {
     add_metadata(meta, session(), work_item());
 }
@@ -30,9 +29,8 @@ pub(crate) fn add_session_metadata(meta: &mut Metadata) {
 fn add_metadata(meta: &mut Metadata, session: Option<String>, work_item: Option<String>) {
     for (key, value) in [(Key::Session, session), (Key::WorkItem, work_item)] {
         if let Some(value) = value {
-            for name in [key.name(), key.legacy()] {
-                meta.entry(name.to_owned()).or_insert_with(|| value.clone());
-            }
+            meta.entry(key.name().to_owned())
+                .or_insert_with(|| value.clone());
         }
     }
 }
@@ -188,29 +186,29 @@ mod tests {
         m
     }
 
-    fn assert_both(m: &Metadata, session: &str, work_item: &str) {
-        for (key, want) in [(Key::Session, session), (Key::WorkItem, work_item)] {
-            assert_eq!(m[key.name()], want);
-            assert_eq!(m[key.legacy()], want);
-        }
-        assert_eq!(m.len(), 4);
+    fn assert_agent_only(m: &Metadata, session: &str, work_item: &str) {
+        assert_eq!(m[Key::Session.name()], session);
+        assert_eq!(m[Key::WorkItem.name()], work_item);
+        assert!(!m.contains_key(Key::Session.legacy()));
+        assert!(!m.contains_key(Key::WorkItem.legacy()));
+        assert_eq!(m.len(), 2);
     }
 
     #[test]
-    fn written_keys_are_the_new_ones_and_the_legacy_ones() {
+    fn written_keys_are_agent_only() {
         assert_eq!(Key::Session.name(), "agent.session");
         assert_eq!(Key::WorkItem.name(), "agent.work_item");
         assert_eq!(Key::Session.legacy(), "vogt.session");
     }
 
     #[test]
-    fn both_keys_are_written_for_each_env_case() {
-        assert_both(
+    fn only_agent_keys_are_written_for_each_env_case() {
+        assert_agent_only(
             &written(&[(SESSION_ENV, "s-new"), (WORK_ITEM_ENV, "w-new")]),
             "s-new",
             "w-new",
         );
-        assert_both(
+        assert_agent_only(
             &written(&[
                 (LEGACY_SESSION_ENV, "s-old"),
                 (LEGACY_WORK_ITEM_ENV, "w-old"),
@@ -218,7 +216,7 @@ mod tests {
             "s-old",
             "w-old",
         );
-        assert_both(
+        assert_agent_only(
             &written(&[
                 (SESSION_ENV, "s-new"),
                 (WORK_ITEM_ENV, "w-new"),

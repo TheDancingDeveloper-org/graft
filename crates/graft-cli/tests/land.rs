@@ -1316,9 +1316,8 @@ fn the_vogt_session_survives_land_and_a_conflicting_sync() {
     let meta = meta_of(landed.as_str().unwrap());
     assert_eq!(meta["agent.session"], json!("ses_trial"));
     assert_eq!(meta["agent.work_item"], json!("WI-1"));
-    // Legacy keys are still written for readers that have not moved (WI-2523).
-    assert_eq!(meta["vogt.session"], json!("ses_trial"));
-    assert_eq!(meta["vogt.work_item"], json!("WI-1"));
+    assert!(meta.get("vogt.session").is_none());
+    assert!(meta.get("vogt.work_item").is_none());
 
     // Commit, conflict, sync, resolve outside the session, land.
     fs::write(
