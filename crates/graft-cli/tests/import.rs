@@ -237,6 +237,47 @@ fn missing_server_names_login() {
 }
 
 #[test]
+fn failed_import_removes_token_file() {
+    let home = scratch();
+    let dev = spawn_dev(home.path(), "demo");
+    let config = home.path().join("config.toml");
+    let before = import_token_dirs();
+    let import = Command::new(env!("CARGO_BIN_EXE_graft"))
+        .current_dir(home.path())
+        .env("GRAFT_CONFIG", &config)
+        .env_remove("GRAFT_ENDPOINT")
+        .env_remove("GRAFT_TOKEN")
+        .args([
+            "import",
+            "file:///tmp/no-such-git-repo",
+            "--repo",
+            "demo",
+            "--db",
+            home.path().join("mirror.sqlite").to_str().unwrap(),
+        ])
+        .output()
+        .expect("import");
+    assert!(
+        !import.status.success(),
+        "bad source should fail\n{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&import.stdout);
+    let stderr = String::from_utf8_lossy(&import.stderr);
+    assert!(!stdout.contains(&dev.token), "token on stdout");
+    assert!(!stderr.contains(&dev.token), "token on stderr");
+    assert!(
+        !dev.captured_err.lock().unwrap().contains(&dev.token),
+        "token on serve stderr"
+    );
+    let leaked: Vec<_> = import_token_dirs().difference(&before).cloned().collect();
+    assert!(
+        leaked.is_empty(),
+        "token file remains after a failed import: {leaked:?}"
+    );
+}
+
+#[test]
 fn import_file_url_then_clone_matches() {
     let home = scratch();
     let dev = spawn_dev(home.path(), "demo");
@@ -283,6 +324,7 @@ fn import_file_url_then_clone_matches() {
     )
     .unwrap();
 
+    let before_import = import_token_dirs();
     let import = Command::new(env!("CARGO_BIN_EXE_graft"))
         .current_dir(home.path())
         .env("GRAFT_CONFIG", &import_config)
@@ -309,17 +351,24 @@ fn import_file_url_then_clone_matches() {
         dev.captured_err.lock().unwrap()
     );
     assert!(stdout.contains("imported "), "{stdout}");
-    assert!(!stdout.contains(&dev.token), "token on stdout");
-    assert!(!stderr.contains(&dev.token), "token on stderr");
+    assert!(!stdout.contains(&import_token), "token on stdout");
+    assert!(!stderr.contains(&import_token), "token on stderr");
     assert!(
-        !dev.captured_err.lock().unwrap().contains(&dev.token),
+        !dev.captured_err.lock().unwrap().contains(&import_token),
         "token on serve stderr"
     );
-
-    // No child of this test process was started with the token in argv.
-    // The import command's own argv is the URL and flags, checked here.
+    // The parent only sees this process's argv (the URL and flags), not the
+    // mirror child's. The token must not appear in that output.
     let joined = format!("{url} {stdout} {stderr}");
-    assert!(!joined.contains(&dev.token));
+    assert!(!joined.contains(&import_token));
+    let leaked: Vec<_> = import_token_dirs()
+        .difference(&before_import)
+        .cloned()
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "token file remains after a successful import: {leaked:?}"
+    );
 
     let clone_root = home.path().join("fresh");
     fs::create_dir(&clone_root).unwrap();
@@ -366,7 +415,23 @@ fn import_file_url_then_clone_matches() {
         String::from_utf8_lossy(&err_buf.lock().unwrap())
     );
     assert!(status.success(), "clone failed {status}\n{clone_text}");
-    assert!(!clone_text.contains(&dev.token));
+    assert!(!clone_text.contains(&import_token));
     let hello = fs::read_to_string(clone_root.join("app/hello.txt")).expect("cloned file");
     assert_eq!(hello, "hello graft\n");
+}
+
+/// Names of `graft_import_*` directories in the process temp dir.
+fn import_token_dirs() -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("graft_import_") {
+            names.insert(name.to_owned());
+        }
+    }
+    names
 }
