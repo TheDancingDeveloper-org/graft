@@ -13,6 +13,7 @@ mod backup;
 mod ci;
 mod config;
 mod denylist;
+mod dev;
 mod exports;
 mod fsck;
 mod grpc;
@@ -28,6 +29,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use config::ServerConfig;
+
+pub use dev::{DevOptions, DevServer};
 
 const USAGE: &str = "usage: graft-server [--config <file>] <serve|admin> [args]
   serve                          run the server

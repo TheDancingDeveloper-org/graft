@@ -154,12 +154,17 @@ fn token_revoke(config: &ServerConfig) -> Result<(), Failure> {
 }
 
 fn repo_create(config: &ServerConfig, name: &str) -> Result<(), Failure> {
+    repo_create_quiet(config, name).map_err(Failure::failed)?;
+    println!("repository {name} exists");
+    Ok(())
+}
+
+pub(crate) fn repo_create_quiet(config: &ServerConfig, name: &str) -> Result<(), String> {
     if let Some(dir) = config.meta_db.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| Failure::failed(format!("create {}: {e}", dir.display())))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
     let meta = SqliteMetaStore::open(SqliteConfig::new(&config.meta_db))
-        .map_err(|e| Failure::failed(format!("open {}: {e:?}", config.meta_db.display())))?;
+        .map_err(|e| format!("open {}: {e:?}", config.meta_db.display()))?;
     // Only metadata changes; the object store stays with the server.
     let engine = Engine::new(
         Arc::new(meta),
@@ -168,11 +173,10 @@ fn repo_create(config: &ServerConfig, name: &str) -> Result<(), Failure> {
         EngineConfig::default(),
     );
     let cx = operator(&format!("repo:{name}:admin"));
-    runtime()?
+    runtime()
+        .map_err(|failure| failure.0)?
         .block_on(engine.create_repo(&cx, name.to_owned()))
-        .map_err(|e| Failure::failed(e.to_string()))?;
-    println!("repository {name} exists");
-    Ok(())
+        .map_err(|e| e.to_string())
 }
 
 fn fsck(config: &ServerConfig, repo: &str) -> Result<(), Failure> {

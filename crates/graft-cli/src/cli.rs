@@ -135,7 +135,7 @@ pub(crate) enum Command {
     },
     /// Run the authoritative server
     #[command(hide = true)]
-    Serve(RoleArgs),
+    Serve(ServeArgs),
     /// Run the host cache daemon
     #[command(hide = true)]
     Node(RoleArgs),
@@ -163,6 +163,34 @@ pub(crate) struct McpArgs {
     /// Print the registration snippet for this client and exit. Never prints a token.
     #[arg(long, value_enum, value_name = "CLIENT")]
     pub(crate) print_config: Option<McpClient>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ServeArgs {
+    /// Zero-config loopback server: generated key, admin token in the user config
+    #[arg(long)]
+    pub(crate) dev: bool,
+    /// Data directory (objects and metadata). Dev default: `./.graft-serve`
+    #[arg(long, value_name = "DIR")]
+    pub(crate) data: Option<std::path::PathBuf>,
+    /// State directory for the signing key. Dev default: `./.graft-serve-state`
+    #[arg(long, value_name = "DIR")]
+    pub(crate) state: Option<std::path::PathBuf>,
+    /// Repository to create. Dev default: `dev`
+    #[arg(long, value_name = "NAME")]
+    pub(crate) repo: Option<String>,
+    /// Listen address. Dev default: `127.0.0.1:0`
+    #[arg(long, value_name = "ADDR")]
+    pub(crate) listen: Option<String>,
+    /// Allow a non-loopback listen address in dev mode
+    #[arg(long)]
+    pub(crate) insecure_bind: bool,
+    /// Named server written into the user config. Dev default: the repository name
+    #[arg(long, value_name = "NAME")]
+    pub(crate) server: Option<String>,
+    /// Arguments passed to the production server role
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub(crate) args: Vec<String>,
 }
 
 #[derive(Debug, Args)]
