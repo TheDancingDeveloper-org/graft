@@ -105,73 +105,66 @@ fn kill_during_local_land_keeps_the_acknowledged_write() {
     fs::create_dir(&root).unwrap();
     let demo = root.join("demo");
     run(&root, dir.path(), &["init", "demo", "--repo", "demo"]).success();
-    fs::write(demo.join("file.txt"), "one\n").unwrap();
+    fs::write(demo.join("file.txt"), "base\n").unwrap();
     run(&demo, dir.path(), &["commit", "-m", "start"]).success();
-    run(&demo, dir.path(), &["land"]).success();
+    run(&demo, dir.path(), &["land", "--json"]).success();
 
     let repo_dir = demo.join(".graft").join("repo");
-    let before = open_main(&repo_dir);
-    fs::write(demo.join("file.txt"), "one\ntwo\n").unwrap();
-    run(&demo, dir.path(), &["commit", "-m", "two"]).success();
-
-    let bin = assert_cmd::cargo::cargo_bin("graft");
-    let mut child = Command::new(bin)
-        .current_dir(&demo)
-        .args(["land"])
-        .env_remove("GRAFT_ENDPOINT")
-        .env_remove("GRAFT_TOKEN")
-        .env("GRAFT_AUTHOR_NAME", "Test Author")
-        .env("GRAFT_AUTHOR_EMAIL", "author@example.com")
-        .env("GRAFT_AUTHOR_KIND", "agent")
-        .env("GRAFT_AUTHOR_DATE", "1700000001000")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn land");
-    thread::sleep(Duration::from_millis(20));
-    let _ = child.kill();
-    let _ = child.wait();
-
-    let after = open_main(&repo_dir);
-    if after != before {
-        let after = after.expect("moved tip");
-        let repo = LocalRepo::open(&repo_dir).expect("reopen");
-        let cx = LocalRepo::context("demo", "kill-check");
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let got = repo
-                .engine()
-                .get_changesets(
-                    &cx,
-                    graft_proto::types::GetChangesets {
-                        repo: "demo".into(),
-                        ids: vec![after],
-                    },
-                )
-                .await
-                .expect("acknowledged changeset is readable");
-            assert_eq!(got.missing, Vec::<ChangesetId>::new());
-            assert_eq!(got.found.len(), 1);
-        });
+    let mut acked: Vec<String> = Vec::new();
+    let mut killed = 0u32;
+    // Fixed seed so a failure repeats. Delays are short enough that some
+    // lands finish and some are cut off.
+    let mut seed: u64 = 0x2366;
+    for n in 0..12u32 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let delay = Duration::from_millis(5 + (seed % 40));
+        fs::write(demo.join("file.txt"), format!("base\nedit {n}\n")).unwrap();
+        run(&demo, dir.path(), &["commit", "-m", &format!("edit {n}")]).success();
+        match land_then_kill(&demo, dir.path(), delay) {
+            LandEnd::Ack(id) => acked.push(id),
+            LandEnd::Killed { id } => {
+                killed += 1;
+                if let Some(id) = id {
+                    acked.push(id);
+                }
+            }
+            LandEnd::Failed(code) => panic!("land exited {code} before a kill"),
+        }
     }
-    // Either the land had not started (tip unchanged) or it committed
-    // atomically: the tip still resolves and the stores reopen.
-    let _ = (META_FILE, OBJECTS_DIR);
-    assert!(repo_dir.join(META_FILE).is_file());
-    assert!(repo_dir.join(OBJECTS_DIR).is_dir());
-}
+    assert!(
+        killed >= 3,
+        "most of the window must actually kill a land, got {killed}"
+    );
+    assert!(!acked.is_empty(), "at least one land was acknowledged");
 
-fn open_main(repo_dir: &Path) -> Option<ChangesetId> {
-    let repo = LocalRepo::open(repo_dir).expect("open");
-    let cx = LocalRepo::context("demo", "tip");
+    let repo = LocalRepo::open(&repo_dir).expect("lock is recoverable");
+    let cx = LocalRepo::context("demo", "kill-check");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
+        let ids: Vec<ChangesetId> = acked
+            .iter()
+            .map(|id| ChangesetId::parse(id).expect("changeset id"))
+            .collect();
+        let got = repo
+            .engine()
+            .get_changesets(
+                &cx,
+                graft_proto::types::GetChangesets {
+                    repo: "demo".into(),
+                    ids: ids.clone(),
+                },
+            )
+            .await
+            .expect("reopen");
+        assert!(
+            got.missing.is_empty(),
+            "acknowledged changesets missing after kill: {:?}",
+            got.missing
+        );
+        assert_eq!(got.found.len(), ids.len());
         let refs = repo
             .engine()
             .list_refs(
@@ -183,9 +176,73 @@ fn open_main(repo_dir: &Path) -> Option<ChangesetId> {
                 },
             )
             .await
-            .expect("list refs");
-        refs.into_iter()
-            .find(|r| r.name == "main" || r.name.ends_with("/main"))
-            .map(|r| r.target)
-    })
+            .expect("main ref");
+        assert!(
+            refs.iter()
+                .any(|r| r.name == "main" || r.name.ends_with("/main")),
+            "main ref survived"
+        );
+    });
+    drop(repo);
+    assert!(repo_dir.join(META_FILE).is_file());
+    assert!(repo_dir.join(OBJECTS_DIR).is_dir());
+    // A later open is the lock recovery: the killed process must not leave
+    // the repository unopenable.
+    let _again = LocalRepo::open(&repo_dir).expect("second open after kill");
+}
+
+enum LandEnd {
+    Ack(String),
+    Killed { id: Option<String> },
+    Failed(i32),
+}
+
+/// Runs `graft land --json`, kills it after `delay` from spawn, and returns
+/// the landed id only when a complete JSON line named it.
+fn land_then_kill(cwd: &Path, config_root: &Path, delay: Duration) -> LandEnd {
+    let bin = assert_cmd::cargo::cargo_bin("graft");
+    let mut child = Command::new(bin)
+        .current_dir(cwd)
+        .args(["land", "--json"])
+        .env_remove("GRAFT_ENDPOINT")
+        .env_remove("GRAFT_TOKEN")
+        .env_remove("VOGT_SESSION_ID")
+        .env_remove("VOGT_WORK_ITEM")
+        .env("GRAFT_AUTHOR_NAME", "Test Author")
+        .env("GRAFT_AUTHOR_EMAIL", "author@example.com")
+        .env("GRAFT_AUTHOR_KIND", "agent")
+        .env("GRAFT_AUTHOR_DATE", "1700000001000")
+        .env("GRAFT_CONFIG", config_root.join(".graft-test-config.toml"))
+        .env("USER", "graft-test")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn land");
+    thread::sleep(delay);
+    let finished = child.try_wait().expect("poll");
+    if finished.is_none() {
+        let _ = child.kill();
+    }
+    let status = child.wait().expect("wait");
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        use std::io::Read;
+        let _ = stdout.read_to_string(&mut out);
+    }
+    let id = serde_json::from_str::<serde_json::Value>(out.trim())
+        .ok()
+        .filter(|value| value.get("outcome").and_then(|v| v.as_str()) == Some("landed"))
+        .and_then(|value| {
+            value
+                .get("landed")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+    if status.success() {
+        LandEnd::Ack(id.expect("acknowledged land prints landed"))
+    } else if status.code().is_none() {
+        LandEnd::Killed { id }
+    } else {
+        LandEnd::Failed(status.code().unwrap_or(1))
+    }
 }

@@ -143,6 +143,16 @@ async fn connect(
             Ok((session.remote, session._local))
         }
         None => {
+            if let Some(path) = g.server.as_deref().and_then(crate::conn::local_repo_path) {
+                if crate::conn::endpoint_is_overridden(g) {
+                    return Err(Failure::usage(
+                        "a local: server does not take --endpoint or GRAFT_ENDPOINT",
+                    ));
+                }
+                let local = std::sync::Arc::new(LocalRepo::open(path)?);
+                let repo = g.repo.clone().unwrap_or_else(|| "local".to_owned());
+                return Ok((Backend::local(local.engine_handle(), repo), Some(local)));
+            }
             let user = crate::config::load()?;
             let settings = resolve_settings(g, None::<&WorkingCopy>, &user)?;
             let remote = graft_client::Remote::connect(settings.endpoint).await?;
