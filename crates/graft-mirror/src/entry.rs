@@ -612,6 +612,7 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
         ));
     }
     let mut batch = BatchConfig::new(line, base, file.follow()?);
+    batch.authors = file.author_map();
     batch.exclude = exclude;
     batch.drop_reason = reason;
     batch.max_lands = max_lands;

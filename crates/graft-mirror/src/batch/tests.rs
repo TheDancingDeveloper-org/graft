@@ -9,8 +9,8 @@ use crate::text::clean_message;
 
 use super::render::{BatchHeader, land_commit, land_message, land_row, parse_commit, render};
 use super::types::{
-    BatchState, CHANGESET_TRAILER, LandLine, MAX_LANDS, MAX_PR_BODY, MESSAGE_CHARS, git_time,
-    git_time_at, ident_part, land_ident, short,
+    AuthorIdentity, BatchState, CHANGESET_TRAILER, LandLine, MAX_LANDS, MAX_PR_BODY, MESSAGE_CHARS,
+    git_time, git_time_at, ident_part, land_ident, short,
 };
 
 #[test]
@@ -76,6 +76,8 @@ fn land(n: u32, long: bool) -> LandLine {
         message: text("subject "),
         trailer_session: Some(text("ses_x")),
         trailer_work_item: Some(text("WI-1")),
+        trailer_model: None,
+        trailer_coauthors: Vec::new(),
         trailer_merged_from: None,
     }
 }
@@ -209,9 +211,25 @@ fn idents_and_offsets_are_safe() {
         email: String::new(),
         kind: AuthorKind::Human,
     };
+    let authors = BTreeMap::from([(
+        "ada".to_owned(),
+        AuthorIdentity {
+            name: "Ada".to_owned(),
+            email: "ada@example.com".to_owned(),
+        },
+    )]);
     assert_eq!(
-        land_ident(&token, &bot),
+        land_ident(&token, &BTreeMap::new(), &bot),
         ("graft".to_owned(), "graft@graft.invalid".to_owned())
+    );
+    let ada = Author {
+        name: "ada".to_owned(),
+        email: String::new(),
+        ..token.clone()
+    };
+    assert_eq!(
+        land_ident(&ada, &authors, &bot),
+        ("Ada".to_owned(), "ada@example.com".to_owned())
     );
     let tess = Author {
         email: "tess@example.com".to_owned(),
@@ -219,7 +237,7 @@ fn idents_and_offsets_are_safe() {
         ..token
     };
     assert_eq!(
-        land_ident(&tess, &bot),
+        land_ident(&tess, &authors, &bot),
         ("Tess".to_owned(), "tess@example.com".to_owned())
     );
     let t = Timestamp {
