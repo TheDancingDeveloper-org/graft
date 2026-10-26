@@ -486,6 +486,10 @@ fn session_and_work_item_reach_the_draft() {
             "agent.session=ses_test",
             "--meta",
             "agent.work_item=WI-9",
+            "--meta",
+            "vogt.session=ses_test",
+            "--meta",
+            "vogt.work_item=WI-9",
         ],
     );
     let bare = commit(false, &[]);
@@ -521,6 +525,10 @@ fn the_environment_alone_sets_the_session_work_item_and_author() {
                 "agent.session=ses_env",
                 "--meta",
                 "agent.work_item=WI-7",
+                "--meta",
+                "vogt.session=ses_env",
+                "--meta",
+                "vogt.work_item=WI-7",
             ]);
         }
         let out = cmd.assert().success();
