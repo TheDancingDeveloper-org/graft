@@ -194,6 +194,28 @@ fn rule_9_empty_changeset_needs_several_parents() {
 }
 
 #[test]
+fn rule_9_canonical_empty_root_is_the_only_native_exception() {
+    let root = Changeset::canonical_empty_root();
+    let opts = CheckOptions {
+        allow_root: true,
+        ..CheckOptions::default()
+    };
+    assert_eq!(root.check(&opts), Ok(()));
+    let mut other = root.clone();
+    other.message = "not the root".into();
+    assert_eq!(rule_of(&other, &opts), Some(Rule::EmptyChangeset));
+    let mut with_parent = root.clone();
+    with_parent.parents = vec![ChangesetId(ObjectId([1; 32]))];
+    assert_eq!(rule_of(&with_parent, &opts), Some(Rule::EmptyChangeset));
+    let mut imported = root.clone();
+    imported
+        .metadata
+        .insert("mirror.git-commit".into(), "abc".into());
+    assert_eq!(imported.check(&opts), Ok(()));
+    assert!(!imported.is_canonical_empty_root());
+}
+
+#[test]
 fn put_kind_is_never_tree() {
     let bad = Change::Put {
         path: path("x"),

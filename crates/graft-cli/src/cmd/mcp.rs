@@ -20,7 +20,7 @@ use graft_client::workcopy::{
     CommitLimits, CommitOptions, DEFAULT_CACHE_BYTES, LandOptions, LandOutcome, WorkingCopy,
 };
 use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat};
-use graft_client::{Error as ClientError, Remote};
+use graft_client::{Backend, Error as ClientError, LocalRepo};
 use graft_mcp::{
     McpServer, WorkingCopyCommit, WorkingCopyError, WorkingCopyFuture, WorkingCopyLand,
     WorkingCopySync, WorkingCopyTools, WorkingCopyUpstream,
@@ -33,7 +33,9 @@ use tokio::sync::Mutex;
 
 use crate::cli::{Global, McpArgs, McpClient};
 use crate::cmd::status::{change_json, upstream_json};
-use crate::conn::{call_context, resolve_settings, runtime, working_copy};
+use crate::conn::{
+    call_context, connect as connect_session, resolve_settings, runtime, working_copy,
+};
 use crate::error::Failure;
 use crate::identity;
 use crate::render;
@@ -50,15 +52,28 @@ pub(crate) fn run(g: &Global, args: &McpArgs) -> Result<(), Failure> {
     }
     let wc = working_copy()?;
     runtime()?.block_on(async {
-        let remote = Arc::new(connect(g, wc.as_ref()).await?);
-        let principal = call_context().principal;
-        let mut server = McpServer::new(Arc::clone(&remote), principal)
-            .with_endpoint(remote.endpoint().to_string());
+        let (backend, local) = connect(g, wc.as_ref()).await?;
+        let remote = Arc::new(backend);
+        let principal = match local.as_ref() {
+            Some(_) => {
+                LocalRepo::context(
+                    wc.as_ref().map(|w| w.config().repo.as_str()).unwrap_or(""),
+                    "mcp",
+                )
+                .principal
+            }
+            None => call_context().principal,
+        };
+        let mut server = McpServer::new(Arc::clone(&remote), principal);
+        if let Some(endpoint) = remote.endpoint() {
+            server = server.with_endpoint(endpoint.to_string());
+        }
         if let Some(wc) = wc {
             server = server.with_working_copy(Arc::new(Served {
                 repo: wc.config().repo.clone(),
                 wc: Mutex::new(wc),
                 remote,
+                _local: local,
             }));
         }
         server.serve_stdio().await?;
@@ -118,14 +133,36 @@ fn registration_snippet(client: McpClient, cwd: Option<&std::path::Path>) -> Str
 
 /// Connects to the endpoint the other commands would use. Unlike them it
 /// needs no repository: every tool names its own.
-async fn connect(g: &Global, wc: Option<&WorkingCopy>) -> Result<Remote, Failure> {
-    let user = crate::config::load()?;
-    let settings = resolve_settings(g, wc, &user)?;
-    let remote = Remote::connect(settings.endpoint).await?;
-    Ok(match settings.token {
-        Some(token) => remote.with_token(token),
-        None => remote,
-    })
+async fn connect(
+    g: &Global,
+    wc: Option<&WorkingCopy>,
+) -> Result<(Backend, Option<std::sync::Arc<LocalRepo>>), Failure> {
+    match wc {
+        Some(wc) => {
+            let session = connect_session(g, Some(wc)).await?;
+            Ok((session.remote, session._local))
+        }
+        None => {
+            if let Some(path) = g.server.as_deref().and_then(crate::conn::local_repo_path) {
+                if crate::conn::endpoint_is_overridden(g) {
+                    return Err(Failure::usage(
+                        "a local: server does not take --endpoint or GRAFT_ENDPOINT",
+                    ));
+                }
+                let local = std::sync::Arc::new(LocalRepo::open(path)?);
+                let repo = g.repo.clone().unwrap_or_else(|| "local".to_owned());
+                return Ok((Backend::local(local.engine_handle(), repo), Some(local)));
+            }
+            let user = crate::config::load()?;
+            let settings = resolve_settings(g, None::<&WorkingCopy>, &user)?;
+            let remote = graft_client::Remote::connect(settings.endpoint).await?;
+            let remote = match settings.token {
+                Some(token) => remote.with_token(token),
+                None => remote,
+            };
+            Ok((Backend::remote(remote), None))
+        }
+    }
 }
 
 /// The working copy `graft mcp` started in, served to the MCP tools. One
@@ -133,7 +170,8 @@ async fn connect(g: &Global, wc: Option<&WorkingCopy>) -> Result<Remote, Failure
 struct Served {
     repo: String,
     wc: Mutex<WorkingCopy>,
-    remote: Arc<Remote>,
+    remote: Arc<Backend>,
+    _local: Option<Arc<LocalRepo>>,
 }
 
 impl Served {

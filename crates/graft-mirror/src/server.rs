@@ -11,7 +11,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use graft_client::remote::{DEFAULT_TIMEOUT, MAX_MESSAGE_BYTES, REQUEST_ID_HEADER};
-use graft_client::{Endpoint, Remote};
+use graft_client::{Endpoint, LocalRepo, Remote};
 use graft_git::GitSha;
 use graft_model::{ChangesetId, ObjectId};
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi, WorkspaceApi};
@@ -21,6 +21,8 @@ use graft_proto::pb::admin_service_client::AdminServiceClient;
 use graft_proto::pb::mirror_service_client::MirrorServiceClient;
 use graft_proto::types::*;
 use graft_proto::{ApiError, CallContext, PROTOCOL_VERSION, VERSION_HEADER};
+use std::path::Path;
+use std::sync::Arc;
 use tonic::codec::CompressionEncoding;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
@@ -38,6 +40,14 @@ pub struct Server {
     remote: Remote,
     admin: Channel,
     token: Option<String>,
+}
+
+/// A graft API: a remote server, or a local repository opened in-process.
+pub enum Api {
+    /// gRPC to a graft server.
+    Remote(Server),
+    /// The engine of a `local:` repository. The lock lives as long as this does.
+    Local(Arc<LocalRepo>),
 }
 
 impl fmt::Debug for Server {
@@ -103,6 +113,19 @@ impl Server {
             admin,
             token,
         })
+    }
+
+    /// Opens `local:<path>` in-process, or connects to a server URL.
+    pub async fn open(target: &str, token: Option<String>) -> Result<Api, MirrorError> {
+        if let Some(path) = target.strip_prefix("local:") {
+            if path.is_empty() {
+                return Err(MirrorError::Config("local: needs a repository path".into()));
+            }
+            let repo =
+                LocalRepo::open(Path::new(path)).map_err(|e| MirrorError::Config(e.to_string()))?;
+            return Ok(Api::Local(Arc::new(repo)));
+        }
+        Ok(Api::Remote(Server::connect(target, token).await?))
     }
 
     fn admin(&self) -> AdminServiceClient<Channel> {
@@ -330,5 +353,94 @@ impl WorkspaceApi for Server {
         _req: graft_proto::types::Resolve,
     ) -> graft_proto::error::ApiResult<graft_proto::types::Resolved> {
         Err(graft_proto::ApiError::unimplemented("Resolve"))
+    }
+}
+
+macro_rules! api_delegate {
+    ($($name:ident($req:ty) -> $out:ty;)*) => {
+        $(
+            async fn $name(&self, cx: &CallContext, req: $req) -> ApiResult<$out> {
+                match self {
+                    Api::Remote(server) => server.$name(cx, req).await,
+                    Api::Local(repo) => repo.engine().$name(cx, req).await,
+                }
+            }
+        )*
+    };
+}
+
+impl ObjectApi for Api {
+    api_delegate! {
+        get_objects(GetObjects) -> Objects;
+        has_objects(HasObjects) -> Vec<ObjectId>;
+        put_objects(PutObjects) -> Vec<ObjectId>;
+    }
+}
+
+impl RepoApi for Api {
+    api_delegate! {
+        create_changeset(CreateChangeset) -> Created;
+        get_changesets(GetChangesets) -> Changesets;
+        resolve_ref(ResolveRef) -> RefView;
+        list_refs(ListRefs) -> Vec<RefView>;
+        update_ref(UpdateRef) -> RefView;
+        stat(PathAt) -> EntryView;
+        list_tree(ListTree) -> Entries;
+        read_file(PathAt) -> FileContent;
+        log(Log) -> History;
+        is_ancestor(Pair) -> bool;
+        merge_base(Pair) -> Option<ChangesetId>;
+        diff(Diff) -> DiffResult;
+        blame(Blame) -> BlameResult;
+        rebase(Rebase) -> ChangesetId;
+        revert(Revert) -> ChangesetId;
+        land(Land) -> Landed;
+        attest(Attest) -> ();
+        watch(Watch) -> JournalPage;
+    }
+}
+
+impl AdminApi for Api {
+    async fn create_repo(&self, cx: &CallContext, name: String) -> ApiResult<()> {
+        match self {
+            Api::Remote(server) => server.create_repo(cx, name).await,
+            Api::Local(repo) => repo.engine().create_repo(cx, name).await,
+        }
+    }
+    async fn import_changesets(
+        &self,
+        cx: &CallContext,
+        req: ImportChangesets,
+    ) -> ApiResult<Vec<Created>> {
+        match self {
+            Api::Remote(server) => server.import_changesets(cx, req).await,
+            Api::Local(repo) => repo.engine().import_changesets(cx, req).await,
+        }
+    }
+    async fn gc(&self, cx: &CallContext, req: Gc) -> ApiResult<GcReport> {
+        match self {
+            Api::Remote(server) => server.gc(cx, req).await,
+            Api::Local(repo) => repo.engine().gc(cx, req).await,
+        }
+    }
+    async fn mint_token(&self, cx: &CallContext, req: MintToken) -> ApiResult<String> {
+        match self {
+            Api::Remote(server) => server.mint_token(cx, req).await,
+            Api::Local(_) => Err(ApiError::unimplemented("mint_token")),
+        }
+    }
+}
+
+impl ExportLog for Api {
+    fn record_exports<'s>(
+        &'s self,
+        cx: &'s CallContext,
+        repo: &'s str,
+        exports: &'s [(ChangesetId, graft_git::GitSha)],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApiResult<()>> + Send + 's>> {
+        match self {
+            Api::Remote(server) => server.record_exports(cx, repo, exports),
+            Api::Local(_) => Box::pin(async { Ok(()) }),
+        }
     }
 }

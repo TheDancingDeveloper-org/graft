@@ -13,13 +13,17 @@ use graft_model::{ChangesetId, RepoPath};
 use graft_proto::ApiError;
 use graft_store::StoreError;
 
+pub mod backend;
 pub mod fetch;
 pub mod ignore;
+pub mod local;
 pub mod remote;
 pub mod sparse;
 pub mod workcopy;
 pub mod workspace;
 
+pub use backend::Backend;
+pub use local::LocalRepo;
 pub use remote::Remote;
 pub use sparse::Sparse;
 
@@ -122,6 +126,8 @@ pub enum Error {
     Store(StoreError),
     /// An endpoint that can't be used, described.
     Endpoint(String),
+    /// Another process holds this local repository's lock.
+    Busy,
     /// Local state (`.graft/`) is malformed, described.
     State(String),
     /// These paths have local changes an update would overwrite.
@@ -186,6 +192,7 @@ impl fmt::Display for Error {
             Error::Io(e) => e.fmt(f),
             Error::Store(e) => write!(f, "object cache: {e:?}"),
             Error::Endpoint(what) => write!(f, "endpoint: {what}"),
+            Error::Busy => f.write_str("repository is in use by another process"),
             Error::State(what) => write!(f, "working copy state: {what}"),
             Error::Dirty(paths) => write!(f, "{} paths have local changes", paths.len()),
             Error::UnsafePath(path) => {
