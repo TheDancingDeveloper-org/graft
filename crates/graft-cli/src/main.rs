@@ -62,6 +62,8 @@ fn main() -> ExitCode {
     if let Some(code) = role_entry(&cli.command) {
         return code;
     }
+    let mut cli = cli;
+    mark_explicit_line(&mut cli);
     let result = dispatch(&cli);
     let code = match result {
         Ok(()) => Exit::Ok,
@@ -122,6 +124,17 @@ fn enter_directory(g: &cli::Global) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Records that `--line` was written on the command line. Clap's default
+/// is the same string, so the clone conflict check cannot see the difference
+/// from the parsed value alone.
+fn mark_explicit_line(cli: &mut Cli) {
+    if let Command::Clone(args) = &mut cli.command
+        && std::env::args_os().any(|arg| arg == "--line")
+    {
+        args.line_explicit = true;
+    }
+}
+
 fn dispatch(cli: &Cli) -> Result<(), Failure> {
     let g = &cli.global;
     if matches!(cli.command, Command::Attest(_) | Command::Ci(_)) && !experimental_enabled(g) {
@@ -155,7 +168,7 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         Command::Ci(args) => cmd::ci::run(g, args),
         Command::Api(args) => api::run(g, args),
         Command::Version => cmd::version::run(g),
-        Command::Mcp => cmd::mcp::run(g),
+        Command::Mcp(args) => cmd::mcp::run(g, args),
         Command::Lsp { args } => match cmd::lsp::run(args) {
             Exit::Ok => Ok(()),
             code => Err(Failure::silent(code)),
