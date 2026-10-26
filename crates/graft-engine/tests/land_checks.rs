@@ -203,8 +203,8 @@ fn two_required_checks<M: MetaStore>(f: &Fixture<M>) {
     assert!(rows[0].pos < rows[1].pos);
 }
 
-// Accept 4: an old-shape `Attest` still works and journals the old keys
-// plus `kind = check`.
+// Accept 4: an old-shape `Attest` still works and journals exactly the
+// v0.1 body (frozen).
 fn old_attest_journals_old_keys_and_kind<M: MetaStore>(f: &Fixture<M>) {
     let t = T::new(f);
     let a = t.land(t.commit(t.root, "b", b"b1"), "chk");
@@ -224,7 +224,7 @@ fn old_attest_journals_old_keys_and_kind<M: MetaStore>(f: &Fixture<M>) {
     assert_eq!(
         last.body,
         format!(
-            "{{\"changeset\":\"{a}\",\"check\":\"build\",\"passed\":true,\"url\":\"https://ci/1\",\"actor\":\"tester\",\"kind\":\"check\",\"status\":\"pass\",\"by\":null}}"
+            "{{\"changeset\":\"{a}\",\"check\":\"build\",\"passed\":true,\"url\":\"https://ci/1\",\"actor\":\"tester\"}}"
         )
     );
     let got = t.attestations(AttestationSelector::ByChangeset(a), Vec::new());
