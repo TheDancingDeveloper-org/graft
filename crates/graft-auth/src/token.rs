@@ -31,6 +31,22 @@ pub struct Claims {
     pub jti: String,
 }
 
+impl Claims {
+    /// Reads a token's claims WITHOUT checking its signature, expiry or
+    /// revocation. For display only (expiry, scopes, subject), e.g. by
+    /// `graft doctor`; never for an authorization decision. Use [`verify`]
+    /// for that.
+    ///
+    /// Fails with `Malformed` on a token `verify` would reject for its shape
+    /// or claims. The error never carries any part of the token.
+    pub fn peek_unverified(token: &Token) -> Result<Self, AuthError> {
+        let (m, _sig) = split(token.expose())?;
+        let payload: Payload = serde_json::from_slice(&m).map_err(|_| AuthError::Malformed)?;
+        check_payload(&payload)?;
+        Ok(payload.into())
+    }
+}
+
 /// The signed JSON payload. Field order is the encoding order, and is frozen
 /// by the golden tokens.
 #[derive(Serialize, Deserialize)]
@@ -222,17 +238,23 @@ pub fn verify(
     if deny.is_revoked(&payload.jti) {
         return Err(AuthError::Revoked);
     }
-    Ok(Claims {
-        principal: Principal {
-            subject: payload.sub,
-            kind: payload.kind.into(),
-            session: payload.session,
-            work_item: payload.work_item,
-            scopes: payload.scopes,
-        },
-        exp: payload.exp,
-        jti: payload.jti,
-    })
+    Ok(payload.into())
+}
+
+impl From<Payload> for Claims {
+    fn from(p: Payload) -> Self {
+        Self {
+            principal: Principal {
+                subject: p.sub,
+                kind: p.kind.into(),
+                session: p.session,
+                work_item: p.work_item,
+                scopes: p.scopes,
+            },
+            exp: p.exp,
+            jti: p.jti,
+        }
+    }
 }
 
 fn check_payload(p: &Payload) -> Result<(), AuthError> {
@@ -277,6 +299,15 @@ fn sign(key: &ed25519_dalek::SigningKey, m: &[u8], f: &[u8], i: &[u8]) -> String
 /// `v4.public` verify; returns the message. graft never issues a footer, so
 /// a token carrying one is malformed.
 fn open(key: &ed25519_dalek::VerifyingKey, token: &str, i: &[u8]) -> Result<Vec<u8>, AuthError> {
+    let (raw, sig) = split(token)?;
+    key.verify_strict(&pae(&[HEADER.as_bytes(), &raw, b"", i]), &sig)
+        .map_err(|_| AuthError::BadSignature)?;
+    Ok(raw)
+}
+
+/// Checks a `v4.public` token's size and shape and splits it into message
+/// and signature, without verifying the signature.
+fn split(token: &str) -> Result<(Vec<u8>, Signature), AuthError> {
     if token.len() > MAX_TOKEN_LEN {
         return Err(AuthError::Malformed);
     }
@@ -292,9 +323,7 @@ fn open(key: &ed25519_dalek::VerifyingKey, token: &str, i: &[u8]) -> Result<Vec<
     }
     let sig = raw.split_off(raw.len() - SIG_LEN);
     let sig = Signature::from_slice(&sig).map_err(|_| AuthError::Malformed)?;
-    key.verify_strict(&pae(&[HEADER.as_bytes(), &raw, b"", i]), &sig)
-        .map_err(|_| AuthError::BadSignature)?;
-    Ok(raw)
+    Ok((raw, sig))
 }
 
 #[cfg(test)]
