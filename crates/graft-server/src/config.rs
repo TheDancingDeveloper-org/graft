@@ -604,9 +604,69 @@ post_land = { checks = ["ci/build", "ci/test"], auto_revert = true }
             "[[lines]]\nname = \"a\"\npath_rules = [{ prefix = \"x\", merge = \"union\" }]",
             "[[lines]]\nname = \"a\"\npost_land = { auto_revert = true }",
             "[default_line]\npolicy = \"attested\"",
+            // Tracking is not a land gate, and an unknown mode is a load error.
+            "[[lines]]\nname = \"integration\"\nchecks = \"post-land\"",
+            "[[lines]]\nname = \"integration\"\nchecks = \"before-land\"\nrequired = [\"ci/test\"]",
+            "[default_line]\nchecks = \"post-land\"",
+            "[[lines]]\nname = \"integration\"\nrequired = [\"ci/test\"]",
         ];
         for text in bad {
             assert!(ServerConfig::parse(text).is_err(), "accepted: {text}");
         }
+    }
+
+    #[test]
+    fn post_land_tracking_loads_without_gating_the_line() {
+        use graft_engine::policy::{LandPolicy, LineChecks};
+        let c = ServerConfig::parse(
+            r#"
+[[lines]]
+name = "integration"
+policy = "direct"
+checks = "post-land"
+required = ["ci/fmt", "ci/clippy", "ci/test"]
+retries = 1
+
+[default_line]
+policy = "direct"
+checks = "post-land"
+required = ["ci/test"]
+"#,
+        )
+        .expect("parses");
+        let e = c.engine_config();
+        assert_eq!(e.lines[0].policy, LandPolicy::Direct);
+        assert_eq!(
+            e.lines[0].checks,
+            LineChecks::PostLand {
+                required: vec!["ci/fmt".into(), "ci/clippy".into(), "ci/test".into()],
+                retries: 1,
+            }
+        );
+        assert_eq!(
+            e.default_line.checks,
+            LineChecks::PostLand {
+                required: vec!["ci/test".into()],
+                retries: 0,
+            }
+        );
+        let err = ServerConfig::parse(
+            r#"[[lines]]
+name = "integration"
+checks = "post-land"
+required = []
+"#,
+        )
+        .expect_err("empty required");
+        let msg = err.to_string();
+        assert!(msg.contains("line integration"), "{msg}");
+        let err = ServerConfig::parse(
+            r#"[default_line]
+checks = "post-land"
+required = []
+"#,
+        )
+        .expect_err("empty default required");
+        assert!(err.to_string().contains("default_line"), "{err}");
     }
 }
