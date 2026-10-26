@@ -176,8 +176,8 @@ def main() -> None:
         "</style>",
         f'<text x="24" y="28" class="h">graft vs git, p50 ms (lower is faster)</text>',
         '<text x="24" y="48" class="sub">teal graft, grey git. '
-        "1k: vogt-prod, seed 2294, 5 iterations. "
-        "10k: graft-dev, seed 2294, 5 iterations. "
+        "1k host A: 24 CPUs, 62.6 GiB, seed 2294, 5 iterations. "
+        "10k host B: 4 vCPUs, 7.8 GiB, seed 2294, 5 iterations. "
         "Fresh CLI process per step.</text>",
         f'<rect x="16" y="64" width="888" height="250" rx="8" class="box"/>',
     ]

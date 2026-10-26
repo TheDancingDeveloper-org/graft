@@ -13,7 +13,7 @@ export GRAFT_AUTHOR_NAME="Name" GRAFT_AUTHOR_EMAIL="name@example"
 
 The token is a bearer credential. Never print it, never pass it as an argument, never copy it into the checkout or a prompt. `graft login` copies it into a private token file and stores only that file's path in the user config. For command overrides, endpoint and token resolve independently in this order: `--endpoint` / `--token-file`, `GRAFT_ENDPOINT` / `GRAFT_TOKEN`, the working copy's named server, then the user's `default_server`.
 
-`graft serve --dev` (a local server with a dev token) is also coming in v0.1.0.
+`graft serve --dev` starts a local server with a dev token.
 
 ## The loop
 
