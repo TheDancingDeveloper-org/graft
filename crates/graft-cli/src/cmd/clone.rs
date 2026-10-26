@@ -251,6 +251,63 @@ mod tests {
         assert_eq!(default_dir("app"), PathBuf::from("app"));
     }
 
+    fn parsed_clone(argv: &[&str]) -> (crate::cli::Global, crate::cli::CloneArgs) {
+        use clap::{CommandFactory, FromArgMatches};
+
+        use crate::cli::Cli;
+
+        let matches = Cli::command().try_get_matches_from(argv).unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let crate::cli::Command::Clone(mut args) = cli.command else {
+            panic!("clone");
+        };
+        args.line_explicit = crate::cli::clone_line_from_command_line(&matches);
+        (cli.global, args)
+    }
+
+    #[test]
+    fn line_flag_conflicts_with_url_line_in_either_syntax() {
+        for argv in [
+            [
+                "graft",
+                "clone",
+                "graft://host/repo?line=trial",
+                "--line",
+                "other",
+            ]
+            .as_slice(),
+            [
+                "graft",
+                "clone",
+                "graft://host/repo?line=trial",
+                "--line=other",
+            ]
+            .as_slice(),
+        ] {
+            let (global, args) = parsed_clone(argv);
+            assert!(args.line_explicit, "{argv:?}");
+            let err = run(&global, &args).unwrap_err();
+            assert!(
+                err.message.contains("the URL already names a line"),
+                "{argv:?}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn url_line_alone_is_not_a_conflict() {
+        let (global, args) = parsed_clone(&["graft", "clone", "graft://host/repo?line=trial"]);
+        assert!(!args.line_explicit);
+        assert_eq!(args.line, "main");
+        let err = run(&global, &args).unwrap_err();
+        assert!(
+            !err.message.contains("the URL already names a line"),
+            "{}",
+            err.message
+        );
+    }
+
     #[test]
     fn url_sets_repo_endpoint_and_line() {
         let target = clone_target("graft://graft-dev:17888/rusttorrent?line=trial").unwrap();
