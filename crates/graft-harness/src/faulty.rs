@@ -370,7 +370,10 @@ impl Faults {
     }
 
     fn dead() -> StoreError {
-        StoreError::Backend("harness: process crashed".to_owned())
+        // A crash and a lost ack are transient: the client must retry.
+        // `Busy` is the only store error the engine reports as retryable
+        // (WI-2484). The hint is a test value, not a sleep.
+        StoreError::Busy(5)
     }
 
     /// Yields, then fails a read if the process is down or the read is
@@ -609,7 +612,7 @@ impl<M: MetaStore> MetaStore for FaultyMeta<M> {
         match action {
             Action::LostAck => {
                 self.faults.fire(key, FaultKind::LostAck, &what);
-                Err(StoreError::Backend("harness: lost ack".to_owned()))
+                Err(StoreError::Busy(5))
             }
             Action::CrashAfter => {
                 self.faults.fire(key, FaultKind::CrashAfter, &what);

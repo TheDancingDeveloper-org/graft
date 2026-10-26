@@ -10,15 +10,15 @@ pub(crate) const BACKEND_RETRY_MS: u64 = 1_000;
 
 /// A storage failure.
 ///
-/// Only a saturated store (`Busy`, the locked case) is retryable. Disk,
-/// corruption, constraint and unknown backend faults are not: a client that
-/// retries them hides a durable failure. `ApiError` has no internal variant,
-/// so those travel as `Rejected` with policy `store`, except corruption,
-/// which is `CorruptObject`. The message names the kind only, never the
-/// store's detail string (file contents and tokens stay out).
-///
-/// Corruption is not `CorruptObject`: that variant names one object id, and
-/// a store fault has none.
+/// Only a saturated store (`Busy`, the locked case) is retryable. Disk full,
+/// corruption, a uniqueness clash, an invalid call and an unknown backend
+/// fault are not: a client that retries them hides a durable failure.
+/// `ApiError` has no internal variant, so those travel as `Rejected` with
+/// policy `store` and a detail that is the kind name (`full`, `corrupt`,
+/// `exists`, `invalid`, `backend`). Corruption is not `CorruptObject`: that
+/// variant names one object id, and a store fault has none. The message
+/// never carries the store's detail string, so file contents and tokens stay
+/// out.
 pub(crate) fn store(e: StoreError) -> ApiError {
     match e {
         StoreError::Busy(retry_after_ms) => ApiError::Unavailable { retry_after_ms },
