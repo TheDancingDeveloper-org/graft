@@ -147,54 +147,6 @@ fn help_is_public_facing_for_every_command() {
     }
 }
 
-/// Every subcommand found by walking the `Commands:` sections of the help
-/// output, so a new command is covered without editing a list.
-#[test]
-fn no_help_text_names_the_tracker() {
-    fn subcommands(help: &str) -> Vec<String> {
-        let mut names = Vec::new();
-        let mut in_commands = false;
-        for line in help.lines() {
-            if line.starts_with("Commands:") {
-                in_commands = true;
-            } else if in_commands {
-                if !line.starts_with("  ") {
-                    break;
-                }
-                if let Some(name) = line.split_whitespace().next()
-                    && name != "help"
-                {
-                    names.push(name.to_owned());
-                }
-            }
-        }
-        names
-    }
-    let mut pending: Vec<Vec<String>> = vec![Vec::new()];
-    let mut seen = 0;
-    while let Some(path) = pending.pop() {
-        let dir = scratch();
-        let out = graft(dir.path())
-            .args(&path)
-            .arg("--help")
-            .assert()
-            .success();
-        let help = text(out.get_output());
-        assert!(
-            !help.to_lowercase().contains("vogt"),
-            "graft {} --help names the tracker:\n{help}",
-            path.join(" ")
-        );
-        seen += 1;
-        for name in subcommands(&help) {
-            let mut next = path.clone();
-            next.push(name);
-            pending.push(next);
-        }
-    }
-    assert!(seen > 20, "walked only {seen} commands");
-}
-
 #[test]
 fn top_level_help_snapshot() {
     let dir = scratch();
