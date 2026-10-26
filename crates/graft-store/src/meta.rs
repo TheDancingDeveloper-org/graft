@@ -385,7 +385,15 @@ pub enum Write {
     /// complete protection, so a sweep may run on it.
     SetGcProtection(bool),
     /// Records a land. The first record for `(draft, line)` is kept, so a
-    /// retried land returns the same result.
+    /// retried land returns the same result and writes no new rows.
+    ///
+    /// With `pos`, the landing is also indexed by LSN on the line (the
+    /// review queue, [`MetaStore::review_queue`]) under the LSN of the
+    /// transaction's first `Journal` write; a transaction without one is
+    /// `StoreError::Invalid`. With `checked` (a checked line), a `Pending`
+    /// [`LandCheckRow`] is inserted at `(line, pos)` in the same
+    /// transaction; `checked` without `pos`, or a row already at that
+    /// position, is `StoreError::Invalid`.
     PutLand {
         /// Draft head.
         draft: ChangesetId,
@@ -393,6 +401,45 @@ pub enum Write {
         line: String,
         /// Result.
         landed: ChangesetId,
+        /// Position of `landed` on the line.
+        pos: Option<u64>,
+        /// The line is checked: insert a pending land-checks row.
+        checked: bool,
+    },
+    /// Records an attestation (v0.2). It must share its transaction with
+    /// the `Attested` journal entry: the row takes the LSN of the
+    /// transaction's first `Journal` write, and a transaction without one is
+    /// `StoreError::Invalid`. Rows of one transaction are numbered in write
+    /// order (`seq`). A `Review` attestation takes the changeset's landings
+    /// out of the review queue.
+    PutAttestation {
+        /// The changeset attested.
+        changeset: ChangesetId,
+        /// Its `(line, position)`, when the attester names one; indexes the
+        /// row for [`MetaStore::attestations_by_line`].
+        line_pos: Option<(String, u64)>,
+        /// What is recorded.
+        kind: AttestKind,
+        /// Check or review name.
+        name: String,
+        /// The outcome.
+        status: AttestStatus,
+        /// Display name of the attester.
+        by: Option<String>,
+        /// Link to the run or review.
+        url: String,
+    },
+    /// Updates the land-checks row at `(line, pos)` (on attest, or on a
+    /// revert). A position with no row is `StoreError::Invalid`.
+    SetLandCheck {
+        /// Line.
+        line: String,
+        /// Position.
+        pos: u64,
+        /// New state.
+        state: LandCheckState,
+        /// The reverting changeset, for `Reverted`.
+        revert: Option<ChangesetId>,
     },
     /// Append a journal entry. The store assigns the next LSN of the
     /// repository (LSNs start at 1 and have no gaps).
@@ -756,6 +803,140 @@ pub trait MetaStore: Send + Sync {
     fn gc_protection(&self, _repo: RepoId) -> impl Future<Output = StoreResult<bool>> + Send {
         async { Err(unsupported("gc_protection")) }
     }
+    /// A changeset's attestations in `(lsn, seq)` order after `after`, up to
+    /// `limit`. One index range by changeset, never a journal scan.
+    fn attestations_by_changeset(
+        &self,
+        _repo: RepoId,
+        _changeset: ChangesetId,
+        _after: Option<(Lsn, u32)>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<AttestationRow>>> + Send {
+        async { Err(unsupported("attestations_by_changeset")) }
+    }
+    /// Attestations naming a position in `from_pos..=to_pos` on `line`, in
+    /// `(pos, lsn, seq)` order after `after`, up to `limit`. One index range
+    /// by `(line, pos)`.
+    fn attestations_by_line(
+        &self,
+        _repo: RepoId,
+        _line: &str,
+        _from_pos: u64,
+        _to_pos: u64,
+        _after: Option<(u64, Lsn, u32)>,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<AttestationRow>>> + Send {
+        async { Err(unsupported("attestations_by_line")) }
+    }
+    /// Land-checks rows of `line` at positions from `from_pos`, in position
+    /// order, up to `limit`. Continue from the last position plus one.
+    fn land_checks(
+        &self,
+        _repo: RepoId,
+        _line: &str,
+        _from_pos: u64,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<LandCheckRow>>> + Send {
+        async { Err(unsupported("land_checks")) }
+    }
+    /// Landings on `line` with an LSN after `since` and no `Review`
+    /// attestation, in LSN order, up to `limit`. Reviewed landings leave
+    /// the index, so the cost follows the page, not the line.
+    fn review_queue(
+        &self,
+        _repo: RepoId,
+        _line: &str,
+        _since: Lsn,
+        _limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<LandingRow>>> + Send {
+        async { Err(unsupported("review_queue")) }
+    }
+}
+
+/// What an attestation records (v0.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AttestKind {
+    /// An automated check.
+    Check,
+    /// A reviewer's verdict.
+    Review,
+    /// An approval to land.
+    Approval,
+}
+
+/// The outcome an attestation reports (v0.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AttestStatus {
+    /// Passed, or approved.
+    Pass,
+    /// Failed, or changes requested.
+    Fail,
+    /// Started, no verdict yet.
+    Pending,
+    /// The attester itself failed.
+    Error,
+}
+
+/// The check state of one landing (v0.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LandCheckState {
+    /// Checks not all reported.
+    Pending,
+    /// Every check passed.
+    Good,
+    /// A check failed.
+    Bad,
+    /// Reverted on the line.
+    Reverted,
+}
+
+/// A stored attestation (v0.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttestationRow {
+    /// LSN of its `Attested` journal entry.
+    pub lsn: Lsn,
+    /// Its order among its transaction's attestations.
+    pub seq: u32,
+    /// The changeset attested.
+    pub changeset: ChangesetId,
+    /// Its `(line, position)`, when named.
+    pub line_pos: Option<(String, u64)>,
+    /// What is recorded.
+    pub kind: AttestKind,
+    /// Check or review name.
+    pub name: String,
+    /// The outcome.
+    pub status: AttestStatus,
+    /// Display name of the attester.
+    pub by: Option<String>,
+    /// Link to the run or review.
+    pub url: String,
+}
+
+/// A land-checks row (v0.2): the check state of the landing at `pos`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LandCheckRow {
+    /// Line.
+    pub line: String,
+    /// Position.
+    pub pos: u64,
+    /// The landed changeset.
+    pub changeset: ChangesetId,
+    /// Its state.
+    pub state: LandCheckState,
+    /// The reverting changeset, for `Reverted`.
+    pub revert: Option<ChangesetId>,
+}
+
+/// A landing still to review (v0.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LandingRow {
+    /// LSN of the land.
+    pub lsn: Lsn,
+    /// Position on the line.
+    pub pos: u64,
+    /// The landed changeset.
+    pub changeset: ChangesetId,
 }
 
 /// One merge point row (D29, `docs/design.md` §8.9).
@@ -1040,5 +1221,43 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
     }
     fn gc_protection(&self, repo: RepoId) -> impl Future<Output = StoreResult<bool>> + Send {
         (**self).gc_protection(repo)
+    }
+    fn attestations_by_changeset(
+        &self,
+        repo: RepoId,
+        changeset: ChangesetId,
+        after: Option<(Lsn, u32)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<AttestationRow>>> + Send {
+        (**self).attestations_by_changeset(repo, changeset, after, limit)
+    }
+    fn attestations_by_line(
+        &self,
+        repo: RepoId,
+        line: &str,
+        from_pos: u64,
+        to_pos: u64,
+        after: Option<(u64, Lsn, u32)>,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<AttestationRow>>> + Send {
+        (**self).attestations_by_line(repo, line, from_pos, to_pos, after, limit)
+    }
+    fn land_checks(
+        &self,
+        repo: RepoId,
+        line: &str,
+        from_pos: u64,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<LandCheckRow>>> + Send {
+        (**self).land_checks(repo, line, from_pos, limit)
+    }
+    fn review_queue(
+        &self,
+        repo: RepoId,
+        line: &str,
+        since: Lsn,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<LandingRow>>> + Send {
+        (**self).review_queue(repo, line, since, limit)
     }
 }

@@ -937,6 +937,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             draft: req.head,
             line: req.line.clone(),
             landed: candidate,
+            pos: None,
+            checked: false,
         });
         txn.writes.push(Write::PutDerived {
             kind: LAND_RESULT.to_owned(),
