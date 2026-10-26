@@ -241,10 +241,14 @@ fn failed_import_removes_token_file() {
     let home = scratch();
     let dev = spawn_dev(home.path(), "demo");
     let config = home.path().join("config.toml");
-    let before = import_token_dirs();
+    let temp_root = home.path().join("tmp");
+    fs::create_dir(&temp_root).unwrap();
     let import = Command::new(env!("CARGO_BIN_EXE_graft"))
         .current_dir(home.path())
         .env("GRAFT_CONFIG", &config)
+        .env("TMPDIR", &temp_root)
+        .env("TMP", &temp_root)
+        .env("TEMP", &temp_root)
         .env_remove("GRAFT_ENDPOINT")
         .env_remove("GRAFT_TOKEN")
         .args([
@@ -270,7 +274,7 @@ fn failed_import_removes_token_file() {
         !dev.captured_err.lock().unwrap().contains(&dev.token),
         "token on serve stderr"
     );
-    let leaked: Vec<_> = import_token_dirs().difference(&before).cloned().collect();
+    let leaked = import_token_dirs(&temp_root);
     assert!(
         leaked.is_empty(),
         "token file remains after a failed import: {leaked:?}"
@@ -324,10 +328,14 @@ fn import_file_url_then_clone_matches() {
     )
     .unwrap();
 
-    let before_import = import_token_dirs();
+    let temp_root = home.path().join("tmp");
+    fs::create_dir(&temp_root).unwrap();
     let import = Command::new(env!("CARGO_BIN_EXE_graft"))
         .current_dir(home.path())
         .env("GRAFT_CONFIG", &import_config)
+        .env("TMPDIR", &temp_root)
+        .env("TMP", &temp_root)
+        .env("TEMP", &temp_root)
         .env_remove("GRAFT_ENDPOINT")
         .env_remove("GRAFT_TOKEN")
         .args([
@@ -361,10 +369,7 @@ fn import_file_url_then_clone_matches() {
     // mirror child's. The token must not appear in that output.
     let joined = format!("{url} {stdout} {stderr}");
     assert!(!joined.contains(&import_token));
-    let leaked: Vec<_> = import_token_dirs()
-        .difference(&before_import)
-        .cloned()
-        .collect();
+    let leaked = import_token_dirs(&temp_root);
     assert!(
         leaked.is_empty(),
         "token file remains after a successful import: {leaked:?}"
@@ -420,11 +425,11 @@ fn import_file_url_then_clone_matches() {
     assert_eq!(hello, "hello graft\n");
 }
 
-/// Names of `graft_import_*` directories in the process temp dir.
-fn import_token_dirs() -> std::collections::BTreeSet<String> {
+/// Names of `graft_import_*` directories in an import's private temp root.
+fn import_token_dirs(temp_root: &Path) -> Vec<String> {
     let mut names = std::collections::BTreeSet::new();
-    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
-        return names;
+    let Ok(entries) = fs::read_dir(temp_root) else {
+        return Vec::new();
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -433,5 +438,5 @@ fn import_token_dirs() -> std::collections::BTreeSet<String> {
             names.insert(name.to_owned());
         }
     }
-    names
+    names.into_iter().collect()
 }
