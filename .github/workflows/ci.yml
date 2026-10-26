@@ -90,7 +90,15 @@ jobs:
       - if: steps.scope.outputs.docs_only == 'true'
         run: echo "docs-only change; skipping the Rust build"
       - if: steps.scope.outputs.docs_only == 'true'
-        run: python3 bench/render.py docs/guide/bench.svg
+        run: |
+          tmp=$(mktemp)
+          python3 bench/render.py "$tmp"
+          cmp -s "$tmp" docs/guide/bench.svg || {
+            echo "::error::docs/guide/bench.svg is stale; run python3 bench/render.py docs/guide/bench.svg"
+            rm -f "$tmp"
+            exit 1
+          }
+          rm -f "$tmp"
       - if: steps.scope.outputs.docs_only == 'true'
         run: scripts/check-guide-names.sh
       - uses: dtolnay/rust-toolchain@stable
