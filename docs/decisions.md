@@ -1305,3 +1305,34 @@ Rejected:
   user would see them in `--help`, metadata and git history.
 - A hard rename with no aliases. It would break the estate's own sessions
   and the per-commit mapping in follow for already-exported history.
+
+## D40. graft is the first graft-primary repository
+
+**Decided (operator, 2026-10-26, on WI-2445): the graft repository itself is
+the first repository to switch to graft-primary. This is the D35 trigger.
+Phase 2 starts for graft only; every other repository stays git-primary
+under phase 1 ([D22](#d22-phase-1-is-a-git-alternative)), unchanged.**
+
+- **What starts.** v0.2 (verification without gates) and then v0.3 (gates
+  as policy) are built for graft's own candidate lines, switched off
+  everywhere else ([D35](#d35-the-roadmap-of-record-and-the-phase-2-trigger)).
+  On graft's lines v0.2 is post-land and non-gating
+  ([D25](#d25-post-land-checks-on-the-batch-line),
+  [D37](#d37-checks-are-decoupled-from-the-forge)).
+- **What does not start.** The authority switch itself is a separate item
+  (v0.4) and runs only after v0.2 and v0.3 meet their exit criteria. Until it
+  runs, graft stays git-primary: GitHub `main` is authoritative, delivery is
+  the batch pull request (D21, D26, D28), and nothing runs in the land path
+  of a git-primary line.
+- **No encoding changes** follow from this decision.
+
+Why: graft is the repository its own team works in every day, so its
+sessions exercise the verification and gate primitives first, and a failure
+costs only graft.
+
+Rejected:
+
+- Waiting for an outside repository. It delays v0.2 with no gain in what it
+  measures.
+- Starting phase 2 for every repository at once. D35 switches one named
+  repository at a time.
