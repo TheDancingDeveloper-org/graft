@@ -518,10 +518,12 @@ pub struct Attester<A> {
     lines: HashMap<String, String>,
     /// Failed line lookups for one entry, counted by its LSN.
     lookup_tries: HashMap<u64, u32>,
-    /// Entries whose line lookup failed [`LOOKUP_TRIES`] times. They are
-    /// recorded as failed and the cursor moves past them; a restart asks
-    /// again, so they are not remembered on disk.
+    /// Entries whose line lookup failed [`LOOKUP_TRIES`] times and that
+    /// this read has not yet passed. Once the cursor moves past one it is
+    /// dropped: a restart does not ask about it again.
     deferred: HashMap<u64, ()>,
+    /// Line lookups given up and dropped, counted by their LSN.
+    dropped: u64,
     /// Drafts already queued or checked. A failed lookup keeps the cursor
     /// on that entry, so the same page is read again; these are not queued
     /// a second time. Entries below the saved cursor are dropped.
@@ -549,6 +551,7 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
             lines: HashMap::new(),
             lookup_tries: HashMap::new(),
             deferred: HashMap::new(),
+            dropped: 0,
             seen: HashMap::new(),
         })
     }
@@ -579,6 +582,11 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
     /// The next journal position to read.
     pub fn next_lsn(&self) -> u64 {
         self.next_lsn
+    }
+
+    /// Line lookups given up and dropped.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
     }
 
     /// Reads journal pages into the queue until it is full or a page brings
@@ -666,10 +674,11 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
                         // past it. A given-up entry is handled, so one that
                         // never resolves does not pin the cursor.
                         log(&format!(
-                            "line lookup for lsn {} failed {LOOKUP_TRIES} times; recorded as failed",
+                            "line lookup for lsn {} failed {LOOKUP_TRIES} times; dropping it",
                             entry.lsn
                         ));
                         self.deferred.insert(entry.lsn, ());
+                        self.dropped += 1;
                         continue;
                     }
                 }
@@ -697,6 +706,7 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
             };
             // The cursor will not return below here.
             self.seen.retain(|lsn, _| *lsn >= self.next_lsn);
+            self.deferred.retain(|lsn, _| *lsn >= self.next_lsn);
             if let Some(e) = failed {
                 self.save()?;
                 return Err(Error::Api(e));
