@@ -85,6 +85,14 @@ pub enum MirrorError {
     Fetch(String),
     /// An authority switch step refused, described.
     Switch(String),
+    /// A D30 append to an open batch was recorded but its branch did not
+    /// move: the lease failed, or the remote is not at the new head.
+    Append {
+        /// The batch branch.
+        branch: String,
+        /// What the remote showed, described.
+        detail: String,
+    },
     /// The mirror DB has no git commit for a line's tip, and has not
     /// followed the line in this repo: the DB is empty, or belongs to
     /// another repo.
@@ -108,6 +116,9 @@ impl fmt::Display for MirrorError {
             MirrorError::Forge(e) => e.fmt(f),
             MirrorError::Fetch(what) => write!(f, "git fetch failed: {what}"),
             MirrorError::Switch(what) => write!(f, "authority switch: {what}"),
+            MirrorError::Append { branch, detail } => {
+                write!(f, "batch append to {branch} was not pushed: {detail}")
+            }
             MirrorError::Unmapped {
                 db,
                 line,
