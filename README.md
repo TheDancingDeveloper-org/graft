@@ -151,6 +151,7 @@ How it was measured, and what is not on the chart, is in
 
 | Document | What it covers |
 | --- | --- |
+| [docs/roadmap.md](docs/roadmap.md) | where graft is going: the pull request as a bridge, verification, gates as policy, the authority switch |
 | [docs/design.md](docs/design.md) | goals, data model, storage, API, landing, git interop |
 | [docs/status.md](docs/status.md) | what is delivered, measured numbers, and what is still open |
 | [docs/plan.md](docs/plan.md) | phases, backlog, and the build waves as history |

@@ -81,6 +81,12 @@ Already decided by the operator (2026-10-22):
   post-land CI and auto-revert on failure (D6 is the phase-2 setting under
   D22, not the default); line-level merge in rebase for text
   files under 1 MiB. Each section below names the rejected options.
+- **D35 to D39** (operator, 2026-10-26): [roadmap.md](roadmap.md) is the
+  product roadmap of record; the pull request is confined to the git
+  bridge; phase 2 starts with the decision to switch a named repository;
+  parked lands; checks decoupled from the forge; a read-only web UI in
+  v0.3; independence from any orchestrator (generic session and
+  work-item names).
 
 | # | Decision | Recommendation | Blocks |
 | --- | --- | --- | --- |
@@ -1107,3 +1113,195 @@ adds one new golden vector for the canonical root; this decision does not.
 
 The model change and `graft init` writing this root are later PRs. This
 decision does not implement them.
+
+## D35. The roadmap of record, and the phase-2 trigger
+
+**Decided (operator, 2026-10-26): [roadmap.md](roadmap.md) is the product
+roadmap of record. graft's development continues away from the pull request:
+the pull request is a git-interop artefact confined to `graft-mirror`, kept
+for as long as a repository's authority is on a git host, and nothing inside
+graft may depend on one existing. Phase 2 (v0.2, verification) starts with
+the decision to switch a named repository to graft-primary, taken at the end
+of v0.1; it builds, on candidate lines only, what that switch needs. Nothing
+runs in the land path of a git-primary line at any point.**
+
+- **What the pull request did, and what replaces it.** Integration is
+  `Land`. Verification is attestations posted after the land by a separate
+  checker (v0.2). Authorisation is line and path policy satisfied by
+  attestations (v0.3). Provenance is changeset metadata and the journal.
+  Notification is `Watch`. The diff view is the API, the LSP and the v0.3
+  web UI. The conversation is not graft's: it lives in whatever tracker or
+  review tool the user runs, reading graft's API.
+- **The agent contract is fixed.** Clone, commit, sync, land, in every
+  release. `Land` gains only a more informative `Rejected` in v0.3. An agent
+  never opens a proposal, polls a forge or waits on a page.
+- **The trigger, sharpened.** D22 said phase 2 "starts only with the
+  graft-primary authority switch". Read literally that makes the switch
+  impossible, because the switch needs post-land checks first. The trigger
+  is the operator's decision to switch a named repository. From that
+  decision, v0.2 and v0.3 build the verification and gate primitives for
+  that repository's lines, switched off everywhere else, and v0.4 performs
+  the switch. The no-checks rule for git-primary lines is unchanged.
+- **Releases ship on exit criteria, not dates.** Each release in roadmap.md
+  names its own.
+
+Why: a reviewer asked why agents should care about pull requests. They
+should not. The estate's own practice already shows it: reviews were posted
+to the tracker, the merge was done by a script, and the pull request was a
+CI-and-merge vehicle whose costs (a red batch rejected whole, a fix-forward
+that could not join, hours waiting on a button) were all forge-shaped.
+Anthropic's account of Scion kept review and dropped the pull request; graft
+does the same.
+
+Rejected:
+
+- Keeping the pull request as graft's unit of review after the authority
+  switch. It re-imports human pace into an agent loop and ties graft to one
+  forge's object model.
+- Starting verification only after the switch (the literal reading of D22).
+  Circular; see above.
+- Building the conversation into graft (review threads, comments). D26
+  already rejected review state in graft; attestations are the only review
+  state graft holds.
+
+## D36. Parked lands
+
+**Decided (operator, 2026-10-26): a land that is `Rejected` for a missing
+attestation can be parked on the server, and the server completes it when
+the attestation arrives: rebase onto the current tip, compare-and-swap,
+done. The proposal that humans gate is a parked land, not a new object.**
+The mechanics are a v0.3 design PR (design §8.3 and a new §8.9).
+
+- **Shape.** `Land { ..., park: true }` (or a server default per line)
+  returns `Parked { land_id, missing: [kind:name...], who: [...] }`. The
+  draft stack stays held by a park record, not the workspace lease, so the
+  agent's session may end. `GetAttestations` and the proposals query show it.
+- **Completion.** When every required attestation for the stack's head is
+  present, the server runs the ordinary land: rebase (line merge) onto the
+  tip, then CAS. A conflict at completion leaves the park in place with a
+  `Conflict` reason; a client (the author's next session, or anyone with
+  write scope) resolves it as today. Re-attestation after a rebase follows
+  the line's `attest_merged` setting.
+- **Lifecycle.** A park expires (default 7 days) into an abandoned draft,
+  journalled. The author, an admin, or a principal named by the path rule can
+  cancel it. Every transition is a journal entry.
+- **Idempotent.** A second `Land` for the same head returns the existing
+  park. Completion is one transaction with the land record, as any land.
+
+Why: it keeps one integration primitive, keeps the human gate invisible to
+the agent, and gives people a thing to look at (the proposals query, the web
+UI) without a pull request.
+
+Rejected:
+
+- A separate `Proposal` object with its own state machine. Two integration
+  paths to keep consistent; a pull request by another name.
+- Making the agent poll until attested. Human attestation takes hours; an
+  agent session does not.
+- Pre-land `attested` without parking (the G3.1 shape). It works for CI
+  checks that take minutes and fails for people.
+
+## D37. Checks are decoupled from the forge
+
+**Decided (operator, 2026-10-26): where a repository's checks run is the
+repository's choice, made when it switches to graft-primary, and can change
+later without graft noticing. Runner migration is not a roadmap item.**
+
+- **git-primary (v0.1 to v0.3):** the git host's runners keep running on the
+  batch pull request. graft is not involved.
+- **Candidate lines (v0.2):** a checker on the user's infrastructure watches
+  the journal and posts attestations. The reference checker is
+  `graft-attester` in post-land mode (D25).
+- **graft-primary (v0.4):** either the git host's runners run on the
+  export-mirror push and attest back through the CI token exchange (zero
+  migration), or runners are triggered from the journal. Both post the same
+  attestations; policy sees no difference.
+- **Release builds** that need platforms the user does not host (macOS,
+  signed artefacts, code scanning) stay wherever they run today.
+- **Retirement** of a runner happens when nothing needs it, per repository,
+  never as a milestone.
+
+Why: the decision to leave a forge is expensive and has nothing to do with
+source control. Decoupling checks from where they run lets each repository
+move at its own pace and keeps graft's surface to attestations.
+
+Rejected:
+
+- A "GitHub-free" release that moves every check onto estate runners. It
+  needs capacity (macOS) the estate does not have and couples the roadmap to
+  an infrastructure migration.
+- Naming a runner in graft's configuration. graft names checks, not runners.
+
+## D38. A read-only web UI in the server
+
+**Decided (operator, 2026-10-26): v0.3 ships a small server-rendered web UI
+in `graft-server`, over its JSON facade: browse a snapshot, log, diff,
+blame, the review queue and the proposals. It can post an attestation. It
+holds no conversation and no review threads.**
+
+- **Why then.** Until a repository switches, its git host is the browser for
+  files, history and diffs. The day it switches (v0.4) that browser is gone.
+  The UI is built in v0.3 so it exists on the first switch.
+- **Scope.** Read paths plus one write: posting an attestation (an existing
+  RPC, with the caller's token and scope). No comments, no threads, no
+  approvals beyond attestations, no settings. Bounded and paginated like
+  every other response (rule 7).
+- **Where the conversation lives.** In the user's tracker or review tool,
+  reading graft's API. graft never grows review state beyond attestations
+  (D26). The estate's tracker is one such consumer and is not special.
+- **Not a replacement for the LSP or MCP.** Those stay the surfaces for
+  agents and editors.
+
+Rejected:
+
+- No UI, relying on CLI, MCP and LSP. People reviewing an agent's day need a
+  browser.
+- Putting the UI in the estate's tracker. It would make graft unusable for
+  anyone else (D39).
+- A full forge (threads, approvals, settings). Scope graft has declined
+  since D26.
+
+## D39. Independence from any orchestrator
+
+**Decided (operator, 2026-10-26): graft depends on no orchestrator or
+tracker. No user is expected to run or integrate with the estate's tracker.
+Session and work-item identity are generic fields; the names that leaked the
+estate's tracker into user-visible surfaces are renamed, with the old names
+accepted as aliases.**
+
+Validation on 2026-10-26, main at f91ee22: graft has no functional
+dependency on the estate's tracker (no crate calls it, imports it or needs it
+running). The coupling is vocabulary on user-visible surfaces:
+
+| Surface | Today | Becomes |
+| --- | --- | --- |
+| CLI environment | `VOGT_SESSION_ID`, `VOGT_WORK_ITEM` | `GRAFT_SESSION_ID`, `GRAFT_WORK_ITEM`; the old names read as a fallback |
+| Changeset metadata keys | `vogt.session`, `vogt.work_item`, `vogt.model`, `vogt.coauthors` | `agent.session`, `agent.work_item`, `agent.model`, `agent.coauthors`; the engine's token-matching rule and the LSP hover read both |
+| Git export trailer | `Vogt-Work-Item` | `Graft-Work-Item`, beside the existing `Graft-Session`; follow reads both |
+| MCP and LSP text | "Vogt sessions", "Vogt work item" | "sessions", "work item" |
+| Doc comments and docs | "Vogt session" | "session (set by the caller's orchestrator, if any)" |
+
+- **Token claims** (`session`, `work_item`) are already generic and
+  unchanged. The engine's rule that metadata must match a session-bound token
+  is unchanged in substance.
+- **No encoding changes.** Metadata keys are free-form strings and trailers
+  are commit text; existing changesets keep their old keys and are read
+  through the alias. No golden vector moves.
+- **The estate's deploy docs** (`deploy/`, trial notes) may name the
+  estate's tracker, because they describe one deployment. `design.md`,
+  `plan.md`, `roadmap.md`, `docs/agents.md`, `docs/guide/` and every
+  user-visible string do not.
+- **Integration surface for any orchestrator:** mint a scoped token per
+  session (`MintToken` under a service principal), set the two environment
+  variables, consume the journal through `Watch` or webhooks (v0.2), post
+  attestations, and read diffs over the API. Nothing else.
+
+Why: the operator's tracker is a personal tool. A source control system that
+presumes it is not a product.
+
+Rejected:
+
+- Leaving the names and documenting them as "estate conventions". Every
+  user would see them in `--help`, metadata and git history.
+- A hard rename with no aliases. It would break the estate's own sessions
+  and the per-commit mapping in follow for already-exported history.
