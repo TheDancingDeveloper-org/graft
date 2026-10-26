@@ -206,3 +206,12 @@ User guide:
 ## Licence
 
 [AGPL-3.0-only](LICENSE).
+
+Running an unmodified graft server inside your organisation adds no
+obligations; they arise when you offer a modified server over a network to
+others, who must then be able to get its source. See the
+[FSF GNU licences FAQ](https://www.gnu.org/licenses/gpl-faq.html#UnreleasedModsAGPL).
+
+<!-- OPERATOR: commercial licence sentence -->
+
+See [SECURITY.md](SECURITY.md) to report a vulnerability.
