@@ -18,7 +18,7 @@ use crate::error::Failure;
 pub(crate) fn run(g: &Global, args: &ImportArgs) -> Result<(), Failure> {
     let user = config::load()?;
     let (endpoint, token) = endpoint_and_token(g, &user)?;
-    let token_path = write_token_file(&token)?;
+    let token_file = TokenFile::create(&token)?;
     let mut argv = vec![
         "import".to_owned(),
         args.source.display().to_string(),
@@ -27,7 +27,7 @@ pub(crate) fn run(g: &Global, args: &ImportArgs) -> Result<(), Failure> {
         "--server".to_owned(),
         endpoint,
         "--token-file".to_owned(),
-        token_path.display().to_string(),
+        token_file.path.display().to_string(),
     ];
     // The mirror default is `refs/heads/main` → `main`. Passing that same
     // pair replaces the default; any other line name is explicit.
@@ -40,7 +40,7 @@ pub(crate) fn run(g: &Global, args: &ImportArgs) -> Result<(), Failure> {
         argv.push(db.display().to_string());
     }
     let code = graft_mirror::run(argv);
-    let _ = fs::remove_file(&token_path);
+    drop(token_file);
     let status = exit_status(code);
     if status == 0 {
         Ok(())
@@ -74,27 +74,37 @@ fn endpoint_and_token(g: &Global, user: &UserConfig) -> Result<(String, String),
     Ok((settings.endpoint.to_string(), token))
 }
 
-/// Writes the token where only this user can read it. The path, not the
-/// token, is what the mirror sees on its argument list.
-fn write_token_file(token: &str) -> Result<std::path::PathBuf, Failure> {
-    let dir = std::env::temp_dir().join(format!("graft-import-{}", std::process::id()));
-    fs::create_dir_all(&dir)
-        .map_err(|e| Failure::new(crate::Exit::Failure, "import", e.to_string()))?;
-    let path = dir.join("token");
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| Failure::new(crate::Exit::Failure, "import", e.to_string()))?;
-    file.write_all(token.as_bytes())
-        .map_err(|e| Failure::new(crate::Exit::Failure, "import", e.to_string()))?;
-    if !token.ends_with('\n') {
-        file.write_all(b"\n")
+/// A token file in an unpredictable private directory. Drop removes both,
+/// including when import fails or panics. The path, not the token, is what
+/// the mirror sees on its argument list.
+struct TokenFile {
+    // Kept so Drop removes the private directory.
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl TokenFile {
+    /// Creates the file with create_new and mode 0600 inside a 0700 temp dir.
+    fn create(token: &str) -> Result<Self, Failure> {
+        let dir = tempfile::Builder::new()
+            .prefix("graft_import_")
+            .tempdir()
             .map_err(|e| Failure::new(crate::Exit::Failure, "import", e.to_string()))?;
+        let path = dir.path().join("token");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| Failure::new(crate::Exit::Failure, "import", e.to_string()))?;
+        file.write_all(token.as_bytes())
+            .map_err(|e| Failure::new(crate::Exit::Failure, "import", e.to_string()))?;
+        if token.as_bytes().last() != Some(&b'\n') {
+            file.write_all(b"\n")
+                .map_err(|e| Failure::new(crate::Exit::Failure, "import", e.to_string()))?;
+        }
+        Ok(Self { _dir: dir, path })
     }
-    Ok(path)
 }
 
 fn exit_status(code: std::process::ExitCode) -> u8 {
@@ -105,5 +115,21 @@ fn exit_status(code: std::process::ExitCode) -> u8 {
         64
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokenFile;
+
+    #[test]
+    fn token_file_is_removed_on_drop() {
+        let path = {
+            let file = TokenFile::create("sekret").expect("wrote");
+            assert!(file.path.is_file());
+            file.path.clone()
+        };
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
     }
 }
