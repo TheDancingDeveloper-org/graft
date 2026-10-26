@@ -445,6 +445,109 @@ message AttestRequest {
   string check = 3;
   bool passed = 4;
   string url = 5;
+  // v0.2 (WI-2590). Absent (UNSPECIFIED) on an old client's request: the
+  // kind is CHECK and the status follows `passed`.
+  AttestKind kind = 6;
+  AttestStatus status = 7;
+  // Display name only; the subject comes from the token.
+  optional string by = 8;
+}
+
+enum AttestKind {
+  ATTEST_KIND_UNSPECIFIED = 0;
+  ATTEST_KIND_CHECK = 1;
+  ATTEST_KIND_REVIEW = 2;
+  ATTEST_KIND_APPROVAL = 3;
+}
+
+enum AttestStatus {
+  ATTEST_STATUS_UNSPECIFIED = 0;
+  ATTEST_STATUS_PASS = 1;
+  ATTEST_STATUS_FAIL = 2;
+  ATTEST_STATUS_PENDING = 3;
+  ATTEST_STATUS_ERROR = 4;
+}
+
+// ---- review and land checks (v0.2, WI-2590) --------------------------------
+
+message AttestLineRange {
+  string line = 1;
+  uint64 from_pos = 2;
+  uint64 to_pos = 3;
+}
+
+message GetAttestationsRequest {
+  string repo = 1;
+  oneof selector {
+    bytes changeset = 2;
+    AttestLineRange line_range = 3;
+  }
+  repeated AttestKind kinds = 4;
+  Page page = 5;
+}
+
+message Attestation {
+  bytes changeset = 1;
+  AttestKind kind = 2;
+  string check = 3;
+  AttestStatus status = 4;
+  optional string by = 5;
+  string url = 6;
+}
+
+message AttestationPage {
+  repeated Attestation attestations = 1;
+  optional string next = 2;
+}
+
+message GetLandChecksRequest {
+  string repo = 1;
+  string line = 2;
+  uint64 from_pos = 3;
+  Page page = 4;
+}
+
+enum LandCheckState {
+  LAND_CHECK_STATE_UNSPECIFIED = 0;
+  LAND_CHECK_STATE_PENDING = 1;
+  LAND_CHECK_STATE_GOOD = 2;
+  LAND_CHECK_STATE_BAD = 3;
+  LAND_CHECK_STATE_REVERTED = 4;
+}
+
+message LandCheck {
+  uint64 pos = 1;
+  bytes changeset = 2;
+  LandCheckState state = 3;
+  optional bytes revert = 4;
+}
+
+message LandCheckPage {
+  repeated LandCheck rows = 1;
+  optional string next = 2;
+}
+
+message ReviewQueueRequest {
+  string repo = 1;
+  string line = 2;
+  uint64 since_lsn = 3;
+  optional string path_prefix = 4;
+  optional uint32 max_lines = 5;
+  Page page = 6;
+}
+
+message ReviewItem {
+  bytes changeset = 1;
+  uint64 pos = 2;
+  uint64 lsn = 3;
+  Author author = 4;
+  uint32 paths_touched = 5;
+  uint64 lines_changed = 6;
+}
+
+message ReviewQueuePage {
+  repeated ReviewItem items = 1;
+  optional uint64 next_lsn = 2;
 }
 
 message WatchRequest {
@@ -839,4 +942,11 @@ service CiService {
 // Called by graft-mirror with an admin token. Served by graft-server only.
 service MirrorService {
   rpc RecordExports(RecordExportsRequest) returns (Empty);
+}
+
+// Review and land-check reads (v0.2, WI-2590). Not served yet.
+service ReviewService {
+  rpc GetAttestations(GetAttestationsRequest) returns (AttestationPage);
+  rpc GetLandChecks(GetLandChecksRequest) returns (LandCheckPage);
+  rpc ReviewQueue(ReviewQueueRequest) returns (ReviewQueuePage);
 }

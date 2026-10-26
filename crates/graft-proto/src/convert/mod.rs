@@ -1387,6 +1387,7 @@ impl From<Attest> for pb::AttestRequest {
             check: r.check,
             passed: r.passed,
             url: r.url,
+            ..Default::default()
         }
     }
 }
@@ -1400,6 +1401,334 @@ impl TryFrom<pb::AttestRequest> for Attest {
             check: r.check,
             passed: r.passed,
             url: r.url,
+        })
+    }
+}
+
+fn attest_kind(k: AttestKind) -> i32 {
+    (match k {
+        AttestKind::Check => pb::AttestKind::Check,
+        AttestKind::Review => pb::AttestKind::Review,
+        AttestKind::Approval => pb::AttestKind::Approval,
+    }) as i32
+}
+
+/// `UNSPECIFIED` is an old client's request, which only checks.
+fn attest_kind_from(v: i32, field: &'static str) -> R<AttestKind> {
+    match pb::AttestKind::try_from(v) {
+        Ok(pb::AttestKind::Unspecified | pb::AttestKind::Check) => Ok(AttestKind::Check),
+        Ok(pb::AttestKind::Review) => Ok(AttestKind::Review),
+        Ok(pb::AttestKind::Approval) => Ok(AttestKind::Approval),
+        Err(_) => Err(bad(field, "unknown attest kind")),
+    }
+}
+
+fn attest_status(s: AttestStatus) -> i32 {
+    (match s {
+        AttestStatus::Pass => pb::AttestStatus::Pass,
+        AttestStatus::Fail => pb::AttestStatus::Fail,
+        AttestStatus::Pending => pb::AttestStatus::Pending,
+        AttestStatus::Error => pb::AttestStatus::Error,
+    }) as i32
+}
+
+/// `UNSPECIFIED` takes the status from the old `passed` flag.
+fn attest_status_from(v: i32, passed: bool, field: &'static str) -> R<AttestStatus> {
+    match pb::AttestStatus::try_from(v) {
+        Ok(pb::AttestStatus::Unspecified) => Ok(AttestStatus::from_passed(passed)),
+        Ok(pb::AttestStatus::Pass) => Ok(AttestStatus::Pass),
+        Ok(pb::AttestStatus::Fail) => Ok(AttestStatus::Fail),
+        Ok(pb::AttestStatus::Pending) => Ok(AttestStatus::Pending),
+        Ok(pb::AttestStatus::Error) => Ok(AttestStatus::Error),
+        Err(_) => Err(bad(field, "unknown attest status")),
+    }
+}
+
+fn land_check_state(s: LandCheckState) -> i32 {
+    (match s {
+        LandCheckState::Pending => pb::LandCheckState::Pending,
+        LandCheckState::Good => pb::LandCheckState::Good,
+        LandCheckState::Bad => pb::LandCheckState::Bad,
+        LandCheckState::Reverted => pb::LandCheckState::Reverted,
+    }) as i32
+}
+
+fn land_check_state_from(v: i32) -> R<LandCheckState> {
+    match pb::LandCheckState::try_from(v) {
+        Ok(pb::LandCheckState::Pending) => Ok(LandCheckState::Pending),
+        Ok(pb::LandCheckState::Good) => Ok(LandCheckState::Good),
+        Ok(pb::LandCheckState::Bad) => Ok(LandCheckState::Bad),
+        Ok(pb::LandCheckState::Reverted) => Ok(LandCheckState::Reverted),
+        _ => Err(bad("state", "unknown land check state")),
+    }
+}
+
+/// A v0.2 review page, with its limit clamped to [`MAX_REVIEW_PAGE`].
+fn review_page_from(p: Option<pb::Page>) -> Page {
+    let mut page = page_from(p);
+    page.limit = page.limit.min(MAX_REVIEW_PAGE);
+    page
+}
+
+impl From<AttestV2> for pb::AttestRequest {
+    fn from(r: AttestV2) -> Self {
+        pb::AttestRequest {
+            repo: r.repo,
+            changeset: cb(r.changeset),
+            check: r.check,
+            // Kept for servers that read only the v0.1 fields.
+            passed: r.status == AttestStatus::Pass,
+            url: r.url,
+            kind: attest_kind(r.kind),
+            status: attest_status(r.status),
+            by: r.by,
+        }
+    }
+}
+
+impl TryFrom<pb::AttestRequest> for AttestV2 {
+    type Error = WireError;
+    fn try_from(r: pb::AttestRequest) -> R<Self> {
+        Ok(AttestV2 {
+            repo: r.repo,
+            changeset: cid(r.changeset, "changeset")?,
+            kind: attest_kind_from(r.kind, "kind")?,
+            check: r.check,
+            status: attest_status_from(r.status, r.passed, "status")?,
+            by: r.by,
+            url: r.url,
+        })
+    }
+}
+
+impl From<GetAttestations> for pb::GetAttestationsRequest {
+    fn from(r: GetAttestations) -> Self {
+        use pb::get_attestations_request::Selector;
+        pb::GetAttestationsRequest {
+            repo: r.repo,
+            selector: Some(match r.selector {
+                AttestationSelector::ByChangeset(id) => Selector::Changeset(cb(id)),
+                AttestationSelector::ByLineRange {
+                    line,
+                    from_pos,
+                    to_pos,
+                } => Selector::LineRange(pb::AttestLineRange {
+                    line,
+                    from_pos,
+                    to_pos,
+                }),
+            }),
+            kinds: r.kinds.into_iter().map(attest_kind).collect(),
+            page: Some(r.page.into()),
+        }
+    }
+}
+
+impl TryFrom<pb::GetAttestationsRequest> for GetAttestations {
+    type Error = WireError;
+    fn try_from(r: pb::GetAttestationsRequest) -> R<Self> {
+        use pb::get_attestations_request::Selector;
+        Ok(GetAttestations {
+            repo: r.repo,
+            selector: match req(r.selector, "selector")? {
+                Selector::Changeset(b) => AttestationSelector::ByChangeset(cid(b, "changeset")?),
+                Selector::LineRange(l) => AttestationSelector::ByLineRange {
+                    line: l.line,
+                    from_pos: l.from_pos,
+                    to_pos: l.to_pos,
+                },
+            },
+            kinds: r
+                .kinds
+                .into_iter()
+                .map(|k| attest_kind_from(k, "kinds"))
+                .collect::<R<_>>()?,
+            page: review_page_from(r.page),
+        })
+    }
+}
+
+impl From<Attestation> for pb::Attestation {
+    fn from(a: Attestation) -> Self {
+        pb::Attestation {
+            changeset: cb(a.changeset),
+            kind: attest_kind(a.kind),
+            check: a.check,
+            status: attest_status(a.status),
+            by: a.by,
+            url: a.url,
+        }
+    }
+}
+
+impl TryFrom<pb::Attestation> for Attestation {
+    type Error = WireError;
+    fn try_from(a: pb::Attestation) -> R<Self> {
+        if a.status == pb::AttestStatus::Unspecified as i32 {
+            return Err(bad("status", "missing"));
+        }
+        Ok(Attestation {
+            changeset: cid(a.changeset, "changeset")?,
+            kind: attest_kind_from(a.kind, "kind")?,
+            check: a.check,
+            status: attest_status_from(a.status, false, "status")?,
+            by: a.by,
+            url: a.url,
+        })
+    }
+}
+
+impl From<AttestationPage> for pb::AttestationPage {
+    fn from(r: AttestationPage) -> Self {
+        pb::AttestationPage {
+            attestations: r.attestations.into_iter().map(Into::into).collect(),
+            next: r.next,
+        }
+    }
+}
+
+impl TryFrom<pb::AttestationPage> for AttestationPage {
+    type Error = WireError;
+    fn try_from(r: pb::AttestationPage) -> R<Self> {
+        Ok(AttestationPage {
+            attestations: r
+                .attestations
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<R<_>>()?,
+            next: r.next,
+        })
+    }
+}
+
+impl From<GetLandChecks> for pb::GetLandChecksRequest {
+    fn from(r: GetLandChecks) -> Self {
+        pb::GetLandChecksRequest {
+            repo: r.repo,
+            line: r.line,
+            from_pos: r.from_pos,
+            page: Some(r.page.into()),
+        }
+    }
+}
+
+impl TryFrom<pb::GetLandChecksRequest> for GetLandChecks {
+    type Error = WireError;
+    fn try_from(r: pb::GetLandChecksRequest) -> R<Self> {
+        Ok(GetLandChecks {
+            repo: r.repo,
+            line: r.line,
+            from_pos: r.from_pos,
+            page: review_page_from(r.page),
+        })
+    }
+}
+
+impl From<LandCheckPage> for pb::LandCheckPage {
+    fn from(r: LandCheckPage) -> Self {
+        pb::LandCheckPage {
+            rows: r
+                .rows
+                .into_iter()
+                .map(|c| pb::LandCheck {
+                    pos: c.pos,
+                    changeset: cb(c.changeset),
+                    state: land_check_state(c.state),
+                    revert: c.revert.map(cb),
+                })
+                .collect(),
+            next: r.next,
+        }
+    }
+}
+
+impl TryFrom<pb::LandCheckPage> for LandCheckPage {
+    type Error = WireError;
+    fn try_from(r: pb::LandCheckPage) -> R<Self> {
+        Ok(LandCheckPage {
+            rows: r
+                .rows
+                .into_iter()
+                .map(|c| -> R<LandCheck> {
+                    Ok(LandCheck {
+                        pos: c.pos,
+                        changeset: cid(c.changeset, "changeset")?,
+                        state: land_check_state_from(c.state)?,
+                        revert: opt_cid(c.revert, "revert")?,
+                    })
+                })
+                .collect::<R<_>>()?,
+            next: r.next,
+        })
+    }
+}
+
+impl From<ReviewQueue> for pb::ReviewQueueRequest {
+    fn from(r: ReviewQueue) -> Self {
+        pb::ReviewQueueRequest {
+            repo: r.repo,
+            line: r.line,
+            since_lsn: r.since_lsn,
+            path_prefix: r.path_prefix.map(|p| p.as_str().to_owned()),
+            max_lines: r.max_lines,
+            page: Some(r.page.into()),
+        }
+    }
+}
+
+impl TryFrom<pb::ReviewQueueRequest> for ReviewQueue {
+    type Error = WireError;
+    fn try_from(r: pb::ReviewQueueRequest) -> R<Self> {
+        Ok(ReviewQueue {
+            repo: r.repo,
+            line: r.line,
+            since_lsn: r.since_lsn,
+            path_prefix: r.path_prefix.map(|p| path(p, "path_prefix")).transpose()?,
+            max_lines: r.max_lines,
+            page: review_page_from(r.page),
+        })
+    }
+}
+
+impl From<ReviewQueuePage> for pb::ReviewQueuePage {
+    fn from(r: ReviewQueuePage) -> Self {
+        pb::ReviewQueuePage {
+            items: r
+                .items
+                .into_iter()
+                .map(|i| pb::ReviewItem {
+                    changeset: cb(i.changeset),
+                    pos: i.pos,
+                    lsn: i.lsn,
+                    author: Some(i.author.into()),
+                    paths_touched: i.paths_touched,
+                    lines_changed: i.lines_changed,
+                })
+                .collect(),
+            next_lsn: r.next_lsn,
+        }
+    }
+}
+
+impl TryFrom<pb::ReviewQueuePage> for ReviewQueuePage {
+    type Error = WireError;
+    fn try_from(r: pb::ReviewQueuePage) -> R<Self> {
+        Ok(ReviewQueuePage {
+            items: r
+                .items
+                .into_iter()
+                .map(|i| -> R<ReviewItem> {
+                    Ok(ReviewItem {
+                        changeset: cid(i.changeset, "changeset")?,
+                        pos: i.pos,
+                        lsn: i.lsn,
+                        author: author_from(i.author)?,
+                        paths_touched: i.paths_touched,
+                        lines_changed: i.lines_changed,
+                    })
+                })
+                .collect::<R<_>>()?,
+            next_lsn: r.next_lsn,
         })
     }
 }
