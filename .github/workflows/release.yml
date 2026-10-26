@@ -256,6 +256,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+          build-args: GRAFT_BUILD_REV=${{ github.sha }}
 
   release-assembly:
     if: >-

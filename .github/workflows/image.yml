@@ -65,6 +65,7 @@ jobs:
             echo "SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT:-}"
             echo "SCCACHE_REGION=${SCCACHE_REGION:-}"
             echo "SCCACHE_S3_USE_SSL=${SCCACHE_S3_USE_SSL:-}"
+            echo "GRAFT_BUILD_REV=${GITHUB_SHA}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
