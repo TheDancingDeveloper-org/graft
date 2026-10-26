@@ -20,9 +20,9 @@ pub struct Principal {
     pub subject: String,
     /// Kind of principal.
     pub kind: PrincipalKind,
-    /// Vogt session id (`ses_…`), when the caller is a session.
+    /// Session id, set by the caller's orchestrator, if any.
     pub session: Option<String>,
-    /// Vogt work item (`WI-…`), when known.
+    /// Work item, set by the caller's orchestrator, if any.
     pub work_item: Option<String>,
     /// Granted scopes, in the text form of design §12.1.
     pub scopes: Vec<String>,

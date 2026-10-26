@@ -690,7 +690,7 @@ pub struct WorkspaceView {
     pub name: String,
     /// Owner subject.
     pub owner: String,
-    /// Vogt session, if any.
+    /// Session (set by the caller's orchestrator), if any.
     pub session: Option<String>,
     /// Line it tracks.
     pub line: String,
@@ -805,9 +805,9 @@ pub struct MintToken {
     pub scopes: Vec<String>,
     /// Lifetime in seconds.
     pub ttl_s: u64,
-    /// Vogt session.
+    /// Session (set by the caller's orchestrator, if any).
     pub session: Option<String>,
-    /// Vogt work item.
+    /// Work item (set by the caller's orchestrator, if any).
     pub work_item: Option<String>,
 }
 
@@ -928,9 +928,9 @@ pub struct DraftWorkspace {
     pub workspace: String,
     /// Owner subject.
     pub owner: String,
-    /// Vogt session, if any.
+    /// Session (set by the caller's orchestrator), if any.
     pub session: Option<String>,
-    /// Vogt work item, if any.
+    /// Work item (set by the caller's orchestrator), if any.
     pub work_item: Option<String>,
     /// How long ago its head draft was written, ms.
     pub draft_age_ms: u64,
