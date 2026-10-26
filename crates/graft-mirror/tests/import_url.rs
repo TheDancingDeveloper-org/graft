@@ -128,12 +128,51 @@ async fn a_rejected_commit_is_named_and_the_clone_is_removed() {
         .iter()
         .find(|b| b.reason.contains("reserved-name"))
         .expect("reserved-name");
-    let line = format!("{} {}", hit.commit.to_hex(), hit.reason);
+    // The command's own report, not a line the test assembled.
+    let printed = graft_mirror::report_import_failure_lines(&graft_mirror::MirrorError::Git(
+        GitError::BadPaths(list.clone()),
+    ));
+    let line = printed
+        .iter()
+        .find(|line| line.contains("reserved-name"))
+        .expect("the report names the reserved path");
     let (sha, reason) = line.split_once(' ').expect("sha then reason");
     assert_eq!(sha.len(), 40);
     assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
-    assert_eq!(reason, hit.reason);
+    assert_eq!(*sha, hit.commit.to_string());
     assert!(reason.contains("reserved-name"));
     drop(held);
     assert!(!dest.exists(), "temp clone is gone after the rejection");
+}
+
+#[tokio::test]
+async fn a_failed_clone_leaves_no_temp_dir() {
+    let missing = tempfile::tempdir().unwrap();
+    let url = format!("file://{}/no-such-repo.git", missing.path().display());
+    let before: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("graft-mirror-import-"))
+        })
+        .collect();
+    let err = import_source(Path::new(&url))
+        .await
+        .expect_err("clone fails");
+    assert!(err.contains("git"), "{err}");
+    let after: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("graft-mirror-import-"))
+                && !before.contains(p)
+        })
+        .collect();
+    assert!(after.is_empty(), "failed clone left temp dirs: {after:?}");
 }
