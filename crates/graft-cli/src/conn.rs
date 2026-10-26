@@ -247,6 +247,14 @@ pub(crate) async fn connect(g: &Global, wc: Option<&impl WcView>) -> Result<Conn
     })
 }
 
+/// Resolves the endpoint and token with no working copy in scope.
+pub(crate) fn resolve_settings_no_wc(
+    g: &Global,
+    user: &UserConfig,
+) -> Result<ResolvedSettings, Failure> {
+    resolve_settings(g, None::<&WorkingCopy>, user)
+}
+
 pub(crate) fn resolve_settings(
     g: &Global,
     wc: Option<&impl WcView>,

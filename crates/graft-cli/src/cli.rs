@@ -70,6 +70,8 @@ pub(crate) enum Command {
     /// * 1  any check fails or is skipped
     /// * 2  a usage error, or the working copy cannot be read, before the checks run
     Doctor,
+    /// Import a git repository into a graft repository on the configured server
+    Import(ImportArgs),
     /// Create a local repository and working copy
     Init(InitArgs),
     /// Open a workspace and lay out a sparse working copy
@@ -163,7 +165,6 @@ pub(crate) enum Command {
     #[command(hide = true)]
     Node(RoleArgs),
     /// Import, follow, batch or export git repositories
-    #[command(hide = true)]
     Mirror(RoleArgs),
     /// Commands designed but not built yet
     #[command(external_subcommand)]
@@ -207,6 +208,22 @@ pub(crate) struct McpArgs {
     /// Print the registration snippet for this client and exit. Never prints a token.
     #[arg(long, value_enum, value_name = "CLIENT")]
     pub(crate) print_config: Option<McpClient>,
+}
+
+/// `graft import <path-or-url>`.
+#[derive(Debug, Args)]
+pub(crate) struct ImportArgs {
+    /// A local git directory, or a `file://`, `https://`, `ssh://` or `git@` URL
+    pub(crate) source: PathBuf,
+    /// Graft repository to create or update
+    #[arg(long, value_name = "NAME")]
+    pub(crate) repo: String,
+    /// Graft line the default git branch lands on
+    #[arg(long, value_name = "NAME", default_value = "main")]
+    pub(crate) line: String,
+    /// Mirror database file. A URL import needs one; a path defaults to `<source>/graft-mirror.sqlite`
+    #[arg(long, value_name = "FILE")]
+    pub(crate) db: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
