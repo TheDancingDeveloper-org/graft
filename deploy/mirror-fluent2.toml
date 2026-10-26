@@ -21,6 +21,10 @@ json_logs = true
 owner = "TheDancingDeveloper-org"
 repo = "fluent2-egui"
 token_file = "/run/secrets/github-token"
+[export]
+# Batch commits with no [export.authors] mapping for the land principal (WI-2511).
+default_author = "thedancingdeveloper <306930456+thedancingdeveloper@users.noreply.github.com>"
+
 [[lines]]
 branch = "main"
 line = "main"
