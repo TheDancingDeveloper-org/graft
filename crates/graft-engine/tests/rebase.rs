@@ -1175,7 +1175,13 @@ fn a_crash_mid_sync_leaves_no_partial_state() {
     // Killed before the commit point: the workspace and its draft are as
     // they were. The rebased changeset is stored, but nothing holds it.
     meta.crash.store(1, Ordering::SeqCst);
-    assert!(matches!(r.sync("w"), Err(ApiError::Unavailable { .. })));
+    assert!(matches!(
+        r.sync("w"),
+        Err(ApiError::Rejected {
+            policy,
+            detail,
+        }) if policy == "store" && detail == "backend"
+    ));
     assert_eq!(r.get("w"), before);
     assert_eq!(r.view(d1).state, DraftState::Draft);
     let gauges = block_on(r.repo.e().gauges("r")).expect("gauges");

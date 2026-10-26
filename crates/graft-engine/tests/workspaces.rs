@@ -793,7 +793,10 @@ fn a_crash_at_the_commit_point_leaves_all_or_nothing() {
     meta.arm(1);
     assert!(matches!(
         w.commit_in("w", w.root, b"1"),
-        Err(ApiError::Unavailable { .. })
+        Err(ApiError::Rejected {
+            policy,
+            detail,
+        }) if policy == "store" && detail == "backend"
     ));
     assert_eq!(w.get("w").expect("get").head, None);
     assert_eq!(w.repo.journal(), journal);
