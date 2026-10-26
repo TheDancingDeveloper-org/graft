@@ -731,4 +731,9 @@ impl MetaStore for SqliteMetaStore {
         self.read("journal", move |c| reader::journal(c, repo, from, limit))
             .await
     }
+
+    async fn journal_tip(&self, repo: RepoId) -> StoreResult<Option<Lsn>> {
+        self.read("journal_tip", move |c| reader::journal_tip(c, repo))
+            .await
+    }
 }

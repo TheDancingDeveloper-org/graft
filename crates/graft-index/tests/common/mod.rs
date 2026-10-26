@@ -231,6 +231,10 @@ impl MetaStore for Counting {
         bump(&self.reads.other);
         self.inner.journal(repo, from, limit)
     }
+    fn journal_tip(&self, repo: RepoId) -> impl Future<Output = StoreResult<Option<Lsn>>> + Send {
+        bump(&self.reads.other);
+        self.inner.journal_tip(repo)
+    }
 }
 
 /// An index over a fresh memory store with one repository.

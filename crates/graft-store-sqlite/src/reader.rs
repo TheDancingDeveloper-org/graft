@@ -545,6 +545,15 @@ pub(crate) fn journal(
     .collect()
 }
 
+pub(crate) fn journal_tip(conn: &Connection, repo: RepoId) -> StoreResult<Option<Lsn>> {
+    check_repo(conn, repo)?;
+    let max: Option<i64> = conn
+        .prepare_cached("SELECT max(lsn) FROM journal WHERE repo = ?1")
+        .and_then(|mut s| s.query_row(params![repo.0], |r| r.get(0)))
+        .map_err(sql_err)?;
+    max.map(uint).transpose()
+}
+
 pub(crate) fn list_records(
     conn: &Connection,
     repo: RepoId,

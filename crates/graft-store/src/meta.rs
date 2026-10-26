@@ -663,6 +663,9 @@ pub trait MetaStore: Send + Sync {
         from: Lsn,
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<(Lsn, String, Vec<u8>)>>> + Send;
+    /// The highest journal LSN, or `None` when the journal is empty.
+    /// One indexed lookup: it does not read journal bodies.
+    fn journal_tip(&self, repo: RepoId) -> impl Future<Output = StoreResult<Option<Lsn>>> + Send;
     /// Changesets whose record is in `state`, in id order after `after`
     /// (from the start for `None`), up to `limit`. The cost follows that
     /// population, never the whole changeset table (design §8.6). A store
@@ -1114,6 +1117,9 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<(Lsn, String, Vec<u8>)>>> + Send {
         (**self).journal(repo, from, limit)
+    }
+    fn journal_tip(&self, repo: RepoId) -> impl Future<Output = StoreResult<Option<Lsn>>> + Send {
+        (**self).journal_tip(repo)
     }
     fn list_records(
         &self,

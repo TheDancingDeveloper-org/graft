@@ -38,6 +38,7 @@
 //! lines = ["main"]                   # empty = every line
 //! secret_env = "GRAFT_WEBHOOK_SECRET"  # HMAC key, read from the environment
 //! repos = ["graft"]                  # repositories this endpoint delivers
+//! start = "tip"                     # or an LSN, to replay from there
 //!
 //! [[lines]]                          # per-line land policy: see `lines.rs`
 //! name = "trial-1"

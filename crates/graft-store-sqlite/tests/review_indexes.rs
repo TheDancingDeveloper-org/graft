@@ -500,3 +500,15 @@ fn a_version_7_database_upgrades_with_its_rows_intact() {
         1
     );
 }
+
+/// `journal_tip` is `max(lsn)` on the journal primary key `(repo, lsn)`,
+/// not a table scan and not a walk of the rows.
+#[test]
+fn journal_tip_uses_the_primary_key() {
+    let dir = TempDir::new("journal-tip-plan");
+    let _store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
+    let conn = Connection::open(dir.db()).expect("inspect");
+    let p = plan(&conn, "SELECT max(lsn) FROM journal WHERE repo = 1");
+    assert!(p.contains("SEARCH") && p.contains("journal"), "{p}");
+    assert!(!p.contains("SCAN"), "no scan: {p}");
+}
