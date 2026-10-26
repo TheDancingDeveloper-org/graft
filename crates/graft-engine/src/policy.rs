@@ -104,6 +104,32 @@ pub struct PostLand {
     pub auto_revert: bool,
 }
 
+/// Post-land check tracking of a line (v0.2, D25, D37): which checks a
+/// landing waits on for its `land_checks` state. It never gates a land: no
+/// land is refused, delayed or queued because of it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum LineChecks {
+    /// No land-checks rows (the default, and every git-primary line).
+    #[default]
+    Off,
+    /// Each landing gets a `pending` row, made `good` when every required
+    /// check passed, or `bad` once a required check failed more than
+    /// `retries` times.
+    PostLand {
+        /// Check names a landing must pass.
+        required: Vec<String>,
+        /// Failures of one check tolerated (re-runs) before it is `bad`.
+        retries: u32,
+    },
+}
+
+impl LineChecks {
+    /// Whether landings on the line get land-checks rows.
+    pub fn is_post_land(&self) -> bool {
+        matches!(self, LineChecks::PostLand { .. })
+    }
+}
+
 /// A line's configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineConfig {
@@ -117,6 +143,8 @@ pub struct LineConfig {
     pub path_rules: Vec<PathRule>,
     /// Post-land testing, if any.
     pub post_land: Option<PostLand>,
+    /// Post-land check tracking (non-gating).
+    pub checks: LineChecks,
 }
 
 impl LineConfig {
@@ -128,6 +156,7 @@ impl LineConfig {
             authority: Authority::GraftPrimary,
             path_rules: Vec::new(),
             post_land: None,
+            checks: LineChecks::Off,
         }
     }
 
@@ -147,6 +176,7 @@ impl LineConfig {
                 checks,
                 auto_revert: true,
             }),
+            checks: LineChecks::Off,
         }
     }
 

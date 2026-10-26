@@ -53,7 +53,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use graft_auth::oidc::pinned_changeset;
 use graft_model::{Changeset, ChangesetId, ObjectId, ObjectKind, RepoPath};
 use graft_proto::error::{MAX_STALE_PATHS, StaleBase};
 use graft_proto::types::{Attest, Land, Landed};
@@ -67,8 +66,7 @@ use crate::access::{Need, require, require_changes};
 use crate::journal::{self, LandOutcome};
 use crate::merge::MergeSource;
 use crate::policy::{
-    Authority, Candidate, HUMAN_REVIEW, HookFuture, LandPolicy, LandedEvent, LineConfig,
-    RevertRequest, Verdict,
+    Authority, Candidate, HUMAN_REVIEW, HookFuture, LandPolicy, LandedEvent, LineConfig, Verdict,
 };
 use crate::rebase::{MERGED_PATHS, REBASED_FROM, Step};
 use crate::refs::check_ref_name;
@@ -83,7 +81,7 @@ pub const LAND_RESULT: &str = "land";
 pub const ATTESTATION: &str = "attest";
 
 /// Version of both derived kinds.
-const KIND_VERSION: u32 = 1;
+pub(crate) const KIND_VERSION: u32 = 1;
 
 /// The longest check name, in bytes.
 pub const MAX_CHECK_NAME: usize = 128;
@@ -268,7 +266,7 @@ fn kind_byte(kind: PrincipalKind) -> u8 {
     }
 }
 
-fn encode_attestation(
+pub(crate) fn encode_attestation(
     passed: bool,
     kind: PrincipalKind,
     at_ms: i64,
@@ -336,7 +334,7 @@ impl<'a> Reader<'a> {
 }
 
 /// `changeset(32) ‖ text`: the key of both derived kinds.
-fn key(id: ChangesetId, text: &str) -> Vec<u8> {
+pub(crate) fn key(id: ChangesetId, text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 + text.len());
     out.extend_from_slice(&id.0.0);
     out.extend_from_slice(text.as_bytes());
@@ -351,7 +349,7 @@ fn rejected(policy: &str, detail: String) -> ApiError {
 }
 
 /// A check name: 1 to 128 bytes, no whitespace or control characters.
-fn check_check_name(check: &str) -> Result<(), ApiError> {
+pub(crate) fn check_check_name(check: &str) -> Result<(), ApiError> {
     let ok = !check.is_empty()
         && check.len() <= MAX_CHECK_NAME
         && !check.chars().any(|c| c.is_whitespace() || c.is_control());
@@ -933,12 +931,20 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             txn.writes = rows;
         }
         self.supersede(repo, &steps, tip, &mut txn).await?;
+        // On a post-land checked line a landing that moves the line gets a
+        // `pending` land-checks row, and a revert marks what it reverts
+        // (D25, D37). Neither ever refuses or delays the land.
+        let checked = config.checks.is_post_land() && candidate != tip;
+        if checked {
+            let reverted = self.revert_writes(repo, config, stack, &steps).await?;
+            txn.writes.extend(reverted);
+        }
         txn.writes.push(Write::PutLand {
             draft: req.head,
             line: req.line.clone(),
             landed: candidate,
-            pos: None,
-            checked: false,
+            pos: checked.then_some(result.pos),
+            checked,
         });
         txn.writes.push(Write::PutDerived {
             kind: LAND_RESULT.to_owned(),
@@ -1023,100 +1029,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         Ok(())
     }
 
-    /// Records a check result. It needs `attest` or `admin` on the
-    /// repository (`write` is not enough). CI, services and people attest;
-    /// an agent never does, so a session cannot attest its own draft, and a
-    /// CI token attests only the changeset it is pinned to. A failing
-    /// post-land check on a landed changeset of a line with `auto_revert`
-    /// also journals `RevertRequested` in the same transaction (D6).
+    /// Records a check result: the pre-v0.2 `Attest`, as a `check`
+    /// attestation with status `pass` or `fail` (see
+    /// [`Engine::do_attest_v2`]).
     pub(crate) async fn do_attest(&self, cx: &CallContext, req: Attest) -> Result<(), ApiError> {
-        require(cx, &req.repo, Need::Attest)?;
-        let pinned_here = || {
-            pinned_changeset(&cx.principal.subject)
-                .is_some_and(|pin| pin == req.changeset.to_string())
-        };
-        // Agents never attest. A CI token attests only the changeset its
-        // exchange pinned it to (`ci:<provider>:<repo>#<changeset>`); an
-        // unpinned one attests nothing.
-        let refused = match cx.principal.kind {
-            PrincipalKind::Agent => true,
-            PrincipalKind::Ci => !pinned_here(),
-            PrincipalKind::Human | PrincipalKind::Service => false,
-        };
-        if refused {
-            return Err(ApiError::PermissionDenied {
-                scope: format!("repo:{}:attest", req.repo),
-                path: None,
-            });
-        }
-        check_check_name(&req.check)?;
-        if req.url.len() > MAX_ATTEST_URL {
-            return Err(errors::limit("attest-url", MAX_ATTEST_URL as u64));
-        }
-        let repo = self.repo_id(&req.repo).await?;
-        let (_, record) = self.changeset(repo, req.changeset).await?;
-
-        let mut writes = vec![
-            Write::PutDerived {
-                kind: ATTESTATION.to_owned(),
-                version: KIND_VERSION,
-                key: key(req.changeset, &req.check),
-                value: encode_attestation(
-                    req.passed,
-                    cx.principal.kind,
-                    self.clock.now().ms,
-                    &req.url,
-                    &cx.principal.subject,
-                ),
-            },
-            journal::attested(
-                req.changeset,
-                &req.check,
-                req.passed,
-                &req.url,
-                &cx.principal.subject,
-            ),
-        ];
-        let mut reverts = Vec::new();
-        if !req.passed && record.state == RecordState::Landed {
-            for line in &self.config.lines {
-                let Some(post) = &line.post_land else {
-                    continue;
-                };
-                if !post.auto_revert || !post.checks.contains(&req.check) {
-                    continue;
-                }
-                let on_line = self
-                    .meta
-                    .line_pos(repo, &line.name, req.changeset)
-                    .await
-                    .map_err(errors::store)?;
-                if on_line.is_some() {
-                    writes.push(journal::revert_requested(
-                        &line.name,
-                        req.changeset,
-                        &req.check,
-                        &req.url,
-                    ));
-                    reverts.push(RevertRequest {
-                        repo: req.repo.clone(),
-                        line: line.name.clone(),
-                        changeset: req.changeset,
-                        check: req.check.clone(),
-                        url: req.url.clone(),
-                    });
-                }
-            }
-        }
-        let txn = MetaTxn {
-            preconditions: Vec::new(),
-            writes,
-        };
-        self.meta.commit(repo, txn).await.map_err(errors::store)?;
-        for request in &reverts {
-            self.hooks.revert_requested(request);
-        }
-        Ok(())
+        self.do_attest_v2(cx, req.into()).await
     }
 }
 

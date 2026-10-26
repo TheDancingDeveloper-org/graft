@@ -19,9 +19,14 @@
 //!   in the land's CAS transaction, or `{"draft":"c…","line":"main","outcome":"conflict","onto":"c…"}`
 //! - `LineMerged`: `{"src":"develop","dst":"main","src_changeset":"c…","src_pos":4,"dst_pos":9}`
 //!   in a merge landing's CAS transaction, after its `RefMoved` (D29)
-//! - `Attested`: `{"changeset":"c…","check":"ci/test","passed":true,"url":"…","actor":"…"}`
+//! - `Attested`: `{"changeset":"c…","check":"ci/test","passed":true,"url":"…","actor":"…","kind":"check","status":"pass","by":"…"|null}`
+//!   (`kind` is `check`, `review` or `approval`; `status` is `pass`, `fail`,
+//!   `pending` or `error`; `passed` is `status == pass`)
 //! - `RevertRequested`: `{"line":"main","changeset":"c…","check":"ci/test","url":"…"}`,
 //!   with the failing `Attested` entry of a post-land check (decision D6)
+//! - `LandReverted`: `{"line":"main","land":"c…","revert":"c…","check":"ci/test"|null}`
+//!   in the revert's land transaction, on a line with post-land checks
+//!   (`check` is the required check that failed, if one did)
 
 use std::fmt::Write as _;
 
@@ -64,6 +69,9 @@ pub const ATTESTED: &str = "Attested";
 
 /// Kind of the entry that asks for a landed changeset to be reverted.
 pub const REVERT_REQUESTED: &str = "RevertRequested";
+
+/// Kind of the entry written when a land reverts a checked landing.
+pub const LAND_REVERTED: &str = "LandReverted";
 
 /// A JSON string literal.
 pub(crate) fn json_str(out: &mut String, s: &str) {
@@ -169,21 +177,57 @@ pub(crate) fn land_attempt(draft: ChangesetId, line: &str, outcome: LandOutcome)
 }
 
 /// The `Attested` entry.
-pub(crate) fn attested(
-    changeset: ChangesetId,
-    check: &str,
-    passed: bool,
-    url: &str,
-    actor: &str,
-) -> Write {
-    let mut body = format!("{{\"changeset\":\"{changeset}\",\"check\":");
-    json_str(&mut body, check);
-    let _ = write!(body, ",\"passed\":{passed},\"url\":");
-    json_str(&mut body, url);
+pub(crate) fn attested(a: &AttestedEntry<'_>) -> Write {
+    let mut body = format!("{{\"changeset\":\"{}\",\"check\":", a.changeset);
+    json_str(&mut body, a.check);
+    let _ = write!(body, ",\"passed\":{},\"url\":", a.status == "pass");
+    json_str(&mut body, a.url);
     body.push_str(",\"actor\":");
-    json_str(&mut body, actor);
+    json_str(&mut body, a.actor);
+    let _ = write!(
+        body,
+        ",\"kind\":\"{}\",\"status\":\"{}\",\"by\":",
+        a.kind, a.status
+    );
+    match a.by {
+        Some(by) => json_str(&mut body, by),
+        None => body.push_str("null"),
+    }
     body.push('}');
     entry(ATTESTED, body)
+}
+
+/// The fields of an `Attested` entry; `kind` and `status` are their
+/// lower-case names.
+pub(crate) struct AttestedEntry<'a> {
+    pub(crate) changeset: ChangesetId,
+    pub(crate) kind: &'a str,
+    pub(crate) check: &'a str,
+    pub(crate) status: &'a str,
+    pub(crate) url: &'a str,
+    pub(crate) actor: &'a str,
+    pub(crate) by: Option<&'a str>,
+}
+
+/// The `LandReverted` entry.
+pub(crate) fn land_reverted(
+    line: &str,
+    land: ChangesetId,
+    revert: ChangesetId,
+    check: Option<&str>,
+) -> Write {
+    let mut body = String::from("{\"line\":");
+    json_str(&mut body, line);
+    let _ = write!(
+        body,
+        ",\"land\":\"{land}\",\"revert\":\"{revert}\",\"check\":"
+    );
+    match check {
+        Some(check) => json_str(&mut body, check),
+        None => body.push_str("null"),
+    }
+    body.push('}');
+    entry(LAND_REVERTED, body)
 }
 
 /// The `RevertRequested` entry.
@@ -394,10 +438,42 @@ mod tests {
             )
         );
         assert_eq!(
-            text(attested(id, "ci/test", false, "https://ci/1", "ci-bot")),
+            text(attested(&AttestedEntry {
+                changeset: id,
+                kind: "check",
+                check: "ci/test",
+                status: "fail",
+                url: "https://ci/1",
+                actor: "ci-bot",
+                by: None,
+            })),
             format!(
-                "{{\"changeset\":\"{id}\",\"check\":\"ci/test\",\"passed\":false,\"url\":\"https://ci/1\",\"actor\":\"ci-bot\"}}"
+                "{{\"changeset\":\"{id}\",\"check\":\"ci/test\",\"passed\":false,\"url\":\"https://ci/1\",\"actor\":\"ci-bot\",\"kind\":\"check\",\"status\":\"fail\",\"by\":null}}"
             )
+        );
+        assert_eq!(
+            text(attested(&AttestedEntry {
+                changeset: id,
+                kind: "review",
+                check: "review/x",
+                status: "pass",
+                url: "u",
+                actor: "a",
+                by: Some("Ann"),
+            })),
+            format!(
+                "{{\"changeset\":\"{id}\",\"check\":\"review/x\",\"passed\":true,\"url\":\"u\",\"actor\":\"a\",\"kind\":\"review\",\"status\":\"pass\",\"by\":\"Ann\"}}"
+            )
+        );
+        assert_eq!(
+            text(land_reverted("main", id, id, Some("ci/test"))),
+            format!(
+                "{{\"line\":\"main\",\"land\":\"{id}\",\"revert\":\"{id}\",\"check\":\"ci/test\"}}"
+            )
+        );
+        assert_eq!(
+            text(land_reverted("main", id, id, None)),
+            format!("{{\"line\":\"main\",\"land\":\"{id}\",\"revert\":\"{id}\",\"check\":null}}")
         );
         assert_eq!(
             text(revert_requested("main", id, "ci/test", "u")),
