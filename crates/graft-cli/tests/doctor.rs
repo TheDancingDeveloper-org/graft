@@ -306,3 +306,82 @@ fn outside_a_working_copy_the_extra_checks_are_skipped() {
         assert_eq!(row["detail"], "not in a working copy");
     }
 }
+
+#[test]
+fn help_lists_exit_status_and_json_status() {
+    let out = graft(scratch().path())
+        .args(["doctor", "--help"])
+        .assert()
+        .success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(text.contains("Exit status"), "{text}");
+    assert!(text.contains("0  every check passes"), "{text}");
+    assert!(text.contains("1  any check fails or is skipped"), "{text}");
+    assert!(
+        text.contains("2  a usage error, or the working copy cannot be read"),
+        "{text}"
+    );
+
+    let served = serve();
+    let home = scratch();
+    let config = home.path().join("config.toml");
+    let raw = minted(4_102_444_800);
+    login(home.path(), &config, &served.url, &raw);
+    let dir = scratch();
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config)
+        .args(["--endpoint", &served.url, "clone", support::REPO, "app"])
+        .assert()
+        .success();
+    let app = dir.path().join("app");
+    let out = graft(&app)
+        .env("GRAFT_CONFIG", &config)
+        .args(["--json", "doctor"])
+        .assert()
+        .success();
+    let value: Value = json_out(out.get_output());
+    let checks = value["checks"].as_array().expect("checks");
+    assert!(
+        checks.iter().all(|check| check["status"] == "pass"),
+        "{value}"
+    );
+
+    let url = "http://127.0.0.1:1".to_owned();
+    let down = scratch();
+    let down_config = down.path().join("config.toml");
+    let token_path = down.path().join("tokens").join("dev");
+    fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+    write_token(&token_path, TOKEN);
+    let body = format!(
+        "default_server = \"dev\"\n\n[servers.dev]\nendpoint = \"{url}\"\ntoken_file = \"{}\"\n",
+        token_path.display()
+    );
+    fs::write(&down_config, body).unwrap();
+    let out = graft(down.path())
+        .env("GRAFT_CONFIG", &down_config)
+        .args(["--json", "doctor"])
+        .assert()
+        .code(1);
+    let value: Value = json_out(out.get_output());
+    let checks = value["checks"].as_array().expect("checks");
+    let row = |name: &str| {
+        checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing in {value}"))
+    };
+    let endpoint = row("endpoint");
+    assert_eq!(endpoint["ok"], false);
+    assert_eq!(endpoint["status"], "fail");
+    assert_eq!(row("protocol")["status"], "skip");
+    assert_eq!(row("token")["status"], "skip");
+    assert_eq!(row("config")["status"], "pass");
+    for name in ["workcopy", "revisions", "lease", "node", "ignore"] {
+        let check = row(name);
+        assert_eq!(check["status"], "skip", "{check}");
+        assert_eq!(check["detail"], "not in a working copy", "{check}");
+    }
+    let rendered = value.to_string();
+    assert_redacted(&rendered);
+    assert_redacted(&String::from_utf8_lossy(&out.get_output().stderr));
+}
