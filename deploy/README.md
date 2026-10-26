@@ -120,10 +120,12 @@ first imported ref before the command creates the integration line.
 
 A private upstream (one anonymous `git ls-remote` cannot read) gets a
 `[github] token_file` pointing at `/run/secrets/github-token`, mounted from
-`/etc/graft/github-token` on the host. The mirror's entrypoint is
-`deploy/private-follow.sh`, which reads that file into git's
-`http.extraHeader`. The token is not written into the config, printed, or
-placed in argv. With an empty token file a private mirror still starts, but its
+`/etc/graft/github-token` on the host. graft-mirror reads that file itself
+and sends it as git's `http.extraHeader`, in the environment of each git
+command it runs against upstream (ls-remote, fetch and push), so `follow` and
+a separately exec'd `pr-batch` authenticate the same way (WI-2571). The
+mirror's entrypoint, `deploy/private-follow.sh`, only warns when the file is
+empty. The token is not written into the config, printed, or placed in argv. With an empty token file a private mirror still starts, but its
 polls fail and retry until the file is placed. Every mirror, public and private,
 also uses that file as its `[github] token_file` so `pr-batch` can push
 `graft/batch-*` and open a pull request. The graft-dev runner does not talk

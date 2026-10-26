@@ -79,6 +79,11 @@ impl StaticToken {
             .ok_or_else(|| MirrorError::Config("the GitHub token file is empty".to_owned()))
     }
 
+    /// The token, for wiring that needs it outside a provider.
+    pub fn into_secret(self) -> SecretToken {
+        self.0
+    }
+
     /// A provider for a token already in hand (tests and wiring).
     pub fn new(token: SecretToken) -> StaticToken {
         StaticToken(token)

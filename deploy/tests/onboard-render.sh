@@ -23,9 +23,9 @@ if grep -F 'tmpfs: [' "$out"; then exit 1; fi
 grep -q 'private-follow.sh' "$out"
 grep -q '/run/secrets/github-token' "$out"
 ! grep -q 'x-access-token:' "$out" || true
-# The literal token value must not be baked in. The header name is fine.
-grep -q 'http.extraHeader' "$root/deploy/private-follow.sh"
-echo "render: private overlay uses a block tmpfs and a file-backed header"
+# graft-mirror reads the token file itself (WI-2571); the entrypoint sets no header.
+grep -q 'GIT_CONFIG_VALUE' "$root/deploy/private-follow.sh" && exit 1
+echo "render: private overlay uses a block tmpfs and a file-backed token"
 
 # Config mode: exercise onboard-repo.sh with external work stubbed out.
 fixture=$tmp/deploy

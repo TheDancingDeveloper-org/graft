@@ -201,9 +201,13 @@ printf '%s\n' "$pout" | grep -q '^header=none$' || fail "private-follow set a he
 grep -q 'warning' "$tmp/perr" || fail "private-follow did not warn"
 printf '%s\n' "$token" >"$tmp/empty-token"
 pout=$(PATH="$bin:$PATH" bash "$pf" 2>"$tmp/perr")
-printf '%s\n' "$pout" | grep -q '^header=Authorization: Basic ' || fail "private-follow lost its header with a token"
+printf '%s\n' "$pout" | grep -q '^graft-mirror follow --config /etc/graft/deploy/mirror.toml$' || fail "private-follow did not start follow with a token"
+# graft-mirror sends the token per git command (WI-2571); the script adds none.
+printf '%s\n' "$pout" | grep -q '^header=none$' || fail "private-follow set a header itself"
+grep -q 'warning' "$tmp/perr" && fail "private-follow warned with a token"
 grep -F -- "$token" "$tmp/perr" && fail "private-follow printed the token"
-echo "ok: private mirrors start with an empty token and authenticate with one"
+printf '%s\n' "$pout" | grep -F -- "$token" && fail "private-follow passed the token on"
+echo "ok: private mirrors start with an empty token; with one, graft-mirror authenticates itself"
 
 # --- rollback restores exactly the mounted configs of the last good deploy --
 new_host rollback

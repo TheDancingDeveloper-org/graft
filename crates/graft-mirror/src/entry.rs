@@ -23,7 +23,7 @@ use crate::land::NativeLand;
 use crate::pulls::PrImporter;
 use crate::reconcile::{Resolution, reconcile};
 use crate::server::Server;
-use crate::{Mirror, MirrorDb, MirrorError};
+use crate::{MirrorDb, MirrorError};
 use graft_git::import::ImportConfig;
 use graft_model::ChangesetId;
 use graft_proto::{CallContext, Principal, PrincipalKind};
@@ -242,7 +242,7 @@ async fn cmd_follow(args: &[String]) -> Result<(), CmdError> {
 
     let api = Server::connect(&file.server, token(file.token_file.as_deref())?).await?;
     let db = MirrorDb::open(&file.db).map_err(MirrorError::from)?;
-    let mirror = Mirror::new(&file.mirror_dir, &file.upstream);
+    let mirror = file.mirror();
     tracing::info!(
         repo = %follow.repo, lines = follow.lines.len(),
         interval_secs = follow.interval.as_secs(), "mirror follow starting"
@@ -340,7 +340,7 @@ struct RunExport<'a> {
 impl AsyncCredentialFn<()> for RunExport<'_> {
     async fn call<C: CredentialProvider>(self, credentials: &C) -> Result<(), CmdError> {
         let file = self.file;
-        let mirror = Mirror::new(&file.mirror_dir, &file.upstream);
+        let mirror = file.mirror();
         let config = file.export();
         tracing::info!(
             repo = %config.repo, lines = config.lines.len(),
@@ -511,7 +511,7 @@ struct RunReconcile<'a> {
 
 impl AsyncCredentialFn<()> for RunReconcile<'_> {
     async fn call<C: CredentialProvider>(self, credentials: &C) -> Result<(), CmdError> {
-        let mirror = Mirror::new(&self.file.mirror_dir, &self.file.upstream);
+        let mirror = self.file.mirror();
         let lander = NativeLand::new(self.api);
         let out = reconcile(
             self.api,
@@ -658,7 +658,7 @@ impl AsyncCredentialFn<()> for RunBatch<'_> {
             self.api,
             mirror_cx(&file.repo),
             self.db,
-            Mirror::new(&file.mirror_dir, &file.upstream),
+            file.mirror(),
             &forge,
             self.batch,
         )?;
@@ -839,7 +839,7 @@ impl RunAuthority<'_> {
             self.api,
             mirror_cx(&file.repo),
             self.db,
-            Mirror::new(&file.mirror_dir, &file.upstream),
+            file.mirror(),
             gate,
             file.repo.clone(),
             self.line.clone(),

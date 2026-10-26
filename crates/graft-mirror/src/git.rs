@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use graft_git::GitSha;
+
+use crate::credentials::SecretToken;
 use tokio::process::Command;
 
 /// The longest any one git command may run.
@@ -84,6 +86,8 @@ fn is_rejection(stderr: &str) -> bool {
 pub struct Mirror {
     dir: PathBuf,
     upstream: String,
+    /// The HTTPS credential every network command carries (WI-2571).
+    credential: Option<SecretToken>,
 }
 
 /// The exit status and stdout of a finished command.
@@ -197,7 +201,16 @@ impl Mirror {
         Mirror {
             dir: dir.into(),
             upstream: upstream.into(),
+            credential: None,
         }
+    }
+
+    /// This mirror, with `credential` sent on every git network command
+    /// (ls-remote, fetch and push) to an HTTPS upstream. It travels in the
+    /// environment as a git `http.extraHeader`, never in argv (WI-2571).
+    pub fn with_credential(mut self, credential: Option<SecretToken>) -> Mirror {
+        self.credential = credential;
+        self
     }
 
     /// Whether the upstream is reached over HTTPS (where a token is needed).
@@ -235,7 +248,7 @@ impl Mirror {
         let refs: Vec<String> = branches.iter().map(|b| format!("refs/heads/{b}")).collect();
         let mut args = vec!["ls-remote", self.upstream.as_str()];
         args.extend(refs.iter().map(String::as_str));
-        let out = ok(Some(&self.dir), &args).await?;
+        let out = self.remote(&args).await?;
         let text = String::from_utf8_lossy(&out);
         let mut found = Vec::new();
         for line in text.lines() {
@@ -262,11 +275,9 @@ impl Mirror {
     /// annotated tags) and the object its ref names.
     pub async fn ls_remote_tags(&self, pattern: &str) -> Result<Vec<UpstreamTag>, GitCliError> {
         let spec = format!("refs/tags/{pattern}");
-        let out = ok(
-            Some(&self.dir),
-            &["ls-remote", "--tags", self.upstream.as_str(), &spec],
-        )
-        .await?;
+        let out = self
+            .remote(&["ls-remote", "--tags", self.upstream.as_str(), &spec])
+            .await?;
         let text = String::from_utf8_lossy(&out);
         let mut objects: std::collections::BTreeMap<String, GitSha> = Default::default();
         let mut peeled: std::collections::HashMap<String, GitSha> = Default::default();
@@ -343,7 +354,7 @@ impl Mirror {
             .collect();
         let mut args = vec!["fetch", "-q", "--no-tags", self.upstream.as_str()];
         args.extend(specs.iter().map(String::as_str));
-        ok(Some(&self.dir), &args).await?;
+        self.remote(&args).await?;
         Ok(())
     }
 
@@ -417,7 +428,7 @@ impl Mirror {
             .collect();
         let mut args = vec!["fetch", "-q", "--no-tags", self.upstream.as_str()];
         args.extend(specs.iter().map(String::as_str));
-        ok(Some(&self.dir), &args).await?;
+        self.remote(&args).await?;
         Ok(())
     }
 
@@ -437,11 +448,30 @@ impl Mirror {
         ))
     }
 
-    /// The environment of a push: [`MIRROR_PUSH_ENV`], and the
-    /// `http.extraHeader` for an HTTPS bearer token.
+    /// Runs a read-only network command (ls-remote, fetch) against
+    /// upstream with the mirror's credential; succeeds only on exit 0.
+    async fn remote(&self, args: &[&str]) -> Result<Vec<u8>, GitCliError> {
+        let out = git_env(Some(&self.dir), args, &self.credential_env(None)).await?;
+        if out.code == Some(0) {
+            Ok(out.stdout)
+        } else {
+            Err(failed(args.first().copied().unwrap_or("git"), &out))
+        }
+    }
+
+    /// The environment of a push: [`MIRROR_PUSH_ENV`], and the credential.
     fn auth_env(&self, bearer: Option<&str>) -> Vec<(String, String)> {
         let mut env = vec![(MIRROR_PUSH_ENV.to_owned(), "1".to_owned())];
-        if let Some(token) = bearer
+        env.extend(self.credential_env(bearer));
+        env
+    }
+
+    /// The `http.extraHeader` for an HTTPS upstream: `bearer` if given,
+    /// else the mirror's own credential. Every network command builds its
+    /// credential here, so follow, export and pr-batch agree (WI-2571).
+    fn credential_env(&self, bearer: Option<&str>) -> Vec<(String, String)> {
+        let mut env = Vec::new();
+        if let Some(token) = bearer.or(self.credential.as_ref().map(SecretToken::expose))
             && self.is_https()
         {
             let basic =
