@@ -40,6 +40,10 @@ use crate::refs::check_ref_name;
 use crate::revert::REVERTS;
 use crate::{Engine, errors};
 
+/// Most attestation rows one land-state recompute reads: the page bound
+/// of the review reads.
+pub(crate) const MAX_REPORTS: u32 = MAX_REVIEW_PAGE;
+
 /// The longest attester display name, in bytes.
 pub const MAX_ATTEST_BY: usize = 256;
 
@@ -206,33 +210,26 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .filter(|r| r.pos == pos && r.changeset == changeset))
     }
 
-    /// Every `check` attestation of `changeset`, oldest first: one index
-    /// range by changeset, paged. Its cost follows the changeset's own
-    /// attestations.
+    /// The `check` attestations of `changeset`, oldest first: at most
+    /// [`MAX_REPORTS`] rows of one index range by changeset, so each attest
+    /// reads a bounded page however often the changeset was attested. Past
+    /// the cap the state counts the first page and the attestation being
+    /// written.
     async fn check_reports(
         &self,
         repo: RepoId,
         changeset: ChangesetId,
     ) -> Result<Vec<(String, AttestStatus)>, ApiError> {
-        let mut out = Vec::new();
-        let mut after = None;
-        loop {
-            let rows = self
-                .meta
-                .attestations_by_changeset(repo, changeset, after, MAX_REVIEW_PAGE)
-                .await
-                .map_err(errors::store)?;
-            let full = rows.len() == MAX_REVIEW_PAGE as usize;
-            after = rows.last().map(|r| (r.lsn, r.seq));
-            out.extend(
-                rows.into_iter()
-                    .filter(|r| r.kind == AttestKind::Check)
-                    .map(|r| (r.name, r.status)),
-            );
-            if !full {
-                return Ok(out);
-            }
-        }
+        let rows = self
+            .meta
+            .attestations_by_changeset(repo, changeset, None, MAX_REPORTS)
+            .await
+            .map_err(errors::store)?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| r.kind == AttestKind::Check)
+            .map(|r| (r.name, r.status))
+            .collect())
     }
 
     /// Records an attestation (v0.2). It needs `attest` or `admin`; agents
@@ -635,6 +632,62 @@ mod tests {
         assert_eq!(failed_check(&two, &[("test", Fail)]), Some("test"));
         assert_eq!(failed_check(&two, &[("test", Fail), ("test", Pass)]), None);
         assert_eq!(failed_check(&two, &[]), None);
+    }
+
+    #[test]
+    fn check_reports_read_at_most_one_page() {
+        use std::sync::Arc;
+
+        use graft_store::memory::MemoryStore;
+        use graft_testkit::clock::FakeClock;
+
+        use crate::EngineConfig;
+
+        // The memory store answers at once: one poll completes a call.
+        fn block_on<F: std::future::Future>(f: F) -> F::Output {
+            let mut f = std::pin::pin!(f);
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            match f.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(v) => v,
+                std::task::Poll::Pending => panic!("memory store call pending"),
+            }
+        }
+
+        let meta = Arc::new(MemoryStore::new());
+        let repo = block_on(meta.create_repo("r")).expect("repo");
+        let id = ChangesetId(graft_model::ObjectId([9; 32]));
+        let total = MAX_REPORTS as usize + 5;
+        for _ in 0..total {
+            let txn = MetaTxn {
+                preconditions: Vec::new(),
+                writes: vec![
+                    Write::Journal {
+                        kind: "Attested".to_owned(),
+                        body: Vec::new(),
+                    },
+                    Write::PutAttestation {
+                        changeset: id,
+                        line_pos: None,
+                        kind: AttestKind::Check,
+                        name: "build".to_owned(),
+                        status: AttestStatus::Fail,
+                        by: None,
+                        url: String::new(),
+                    },
+                ],
+            };
+            block_on(meta.commit(repo, txn)).expect("commit");
+        }
+        let engine = Engine::new(
+            meta.clone(),
+            meta.clone(),
+            Arc::new(FakeClock::at(0)),
+            EngineConfig::default(),
+        );
+        let before = meta.rows_visited();
+        let reports = block_on(engine.check_reports(repo, id)).expect("reports");
+        assert_eq!(reports.len(), MAX_REPORTS as usize);
+        assert_eq!(meta.rows_visited() - before, u64::from(MAX_REPORTS));
     }
 
     #[test]

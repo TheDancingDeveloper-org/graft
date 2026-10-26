@@ -19,9 +19,10 @@
 //!   in the land's CAS transaction, or `{"draft":"c…","line":"main","outcome":"conflict","onto":"c…"}`
 //! - `LineMerged`: `{"src":"develop","dst":"main","src_changeset":"c…","src_pos":4,"dst_pos":9}`
 //!   in a merge landing's CAS transaction, after its `RefMoved` (D29)
-//! - `Attested`: `{"changeset":"c…","check":"ci/test","passed":true,"url":"…","actor":"…","kind":"check","status":"pass","by":"…"|null}`
-//!   (`kind` is `check`, `review` or `approval`; `status` is `pass`, `fail`,
-//!   `pending` or `error`; `passed` is `status == pass`)
+//! - `Attested`: `{"changeset":"c…","check":"ci/test","passed":true,"url":"…","actor":"…"}`
+//!   for a check that passed or failed with no display name (v0.1, frozen);
+//!   otherwise extended with `"kind":"check"|"review"|"approval","status":"pass"|"fail"|"pending"|"error","by":"…"|null`,
+//!   and `passed` only for a check that passed or failed
 //! - `RevertRequested`: `{"line":"main","changeset":"c…","check":"ci/test","url":"…"}`,
 //!   with the failing `Attested` entry of a post-land check (decision D6)
 //! - `LandReverted`: `{"line":"main","land":"c…","revert":"c…","check":"ci/test"|null}`
@@ -177,21 +178,36 @@ pub(crate) fn land_attempt(draft: ChangesetId, line: &str, outcome: LandOutcome)
 }
 
 /// The `Attested` entry.
+///
+/// A `check` that passed or failed, with no display name, writes exactly
+/// the v0.1 body (`changeset`, `check`, `passed`, `url`, `actor`): that
+/// encoding is frozen. Any other attestation writes the extended body,
+/// which adds `kind`, `status` and `by`. The extended body carries
+/// `passed` only for a `check` that passed or failed. A pending or
+/// errored check, a review and an approval leave it out, so a v0.1 reader
+/// (which requires `passed`) skips the entry instead of taking it for a
+/// failed check.
 pub(crate) fn attested(a: &AttestedEntry<'_>) -> Write {
+    let verdict = a.kind == "check" && matches!(a.status, "pass" | "fail");
     let mut body = format!("{{\"changeset\":\"{}\",\"check\":", a.changeset);
     json_str(&mut body, a.check);
-    let _ = write!(body, ",\"passed\":{},\"url\":", a.status == "pass");
+    if verdict {
+        let _ = write!(body, ",\"passed\":{}", a.status == "pass");
+    }
+    body.push_str(",\"url\":");
     json_str(&mut body, a.url);
     body.push_str(",\"actor\":");
     json_str(&mut body, a.actor);
-    let _ = write!(
-        body,
-        ",\"kind\":\"{}\",\"status\":\"{}\",\"by\":",
-        a.kind, a.status
-    );
-    match a.by {
-        Some(by) => json_str(&mut body, by),
-        None => body.push_str("null"),
+    if !verdict || a.by.is_some() {
+        let _ = write!(
+            body,
+            ",\"kind\":\"{}\",\"status\":\"{}\",\"by\":",
+            a.kind, a.status
+        );
+        match a.by {
+            Some(by) => json_str(&mut body, by),
+            None => body.push_str("null"),
+        }
     }
     body.push('}');
     entry(ATTESTED, body)
@@ -448,7 +464,37 @@ mod tests {
                 by: None,
             })),
             format!(
-                "{{\"changeset\":\"{id}\",\"check\":\"ci/test\",\"passed\":false,\"url\":\"https://ci/1\",\"actor\":\"ci-bot\",\"kind\":\"check\",\"status\":\"fail\",\"by\":null}}"
+                "{{\"changeset\":\"{id}\",\"check\":\"ci/test\",\"passed\":false,\"url\":\"https://ci/1\",\"actor\":\"ci-bot\"}}"
+            )
+        );
+        // The extended body (v0.2): a check with a display name keeps
+        // `passed`; a pending check, a review and an approval leave it out.
+        assert_eq!(
+            text(attested(&AttestedEntry {
+                changeset: id,
+                kind: "check",
+                check: "ci/test",
+                status: "pass",
+                url: "u",
+                actor: "a",
+                by: Some("Ann"),
+            })),
+            format!(
+                "{{\"changeset\":\"{id}\",\"check\":\"ci/test\",\"passed\":true,\"url\":\"u\",\"actor\":\"a\",\"kind\":\"check\",\"status\":\"pass\",\"by\":\"Ann\"}}"
+            )
+        );
+        assert_eq!(
+            text(attested(&AttestedEntry {
+                changeset: id,
+                kind: "check",
+                check: "ci/test",
+                status: "pending",
+                url: "u",
+                actor: "a",
+                by: None,
+            })),
+            format!(
+                "{{\"changeset\":\"{id}\",\"check\":\"ci/test\",\"url\":\"u\",\"actor\":\"a\",\"kind\":\"check\",\"status\":\"pending\",\"by\":null}}"
             )
         );
         assert_eq!(
@@ -456,13 +502,13 @@ mod tests {
                 changeset: id,
                 kind: "review",
                 check: "review/x",
-                status: "pass",
+                status: "fail",
                 url: "u",
                 actor: "a",
                 by: Some("Ann"),
             })),
             format!(
-                "{{\"changeset\":\"{id}\",\"check\":\"review/x\",\"passed\":true,\"url\":\"u\",\"actor\":\"a\",\"kind\":\"review\",\"status\":\"pass\",\"by\":\"Ann\"}}"
+                "{{\"changeset\":\"{id}\",\"check\":\"review/x\",\"url\":\"u\",\"actor\":\"a\",\"kind\":\"review\",\"status\":\"fail\",\"by\":\"Ann\"}}"
             )
         );
         assert_eq!(
