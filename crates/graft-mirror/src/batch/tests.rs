@@ -10,7 +10,7 @@ use crate::text::clean_message;
 use super::render::{BatchHeader, land_commit, land_message, land_row, parse_commit, render};
 use super::types::{
     AuthorIdentity, BatchState, CHANGESET_TRAILER, LandLine, MAX_LANDS, MAX_PR_BODY, MESSAGE_CHARS,
-    git_time, git_time_at, ident_part, land_ident, short,
+    claimed_author_trailer, git_time, git_time_at, ident_part, land_ident, short,
 };
 
 #[test]
@@ -78,6 +78,7 @@ fn land(n: u32, long: bool) -> LandLine {
         trailer_work_item: Some(text("WI-1")),
         trailer_model: None,
         trailer_coauthors: Vec::new(),
+        trailer_claimed_author: None,
         trailer_merged_from: None,
     }
 }
@@ -219,26 +220,41 @@ fn idents_and_offsets_are_safe() {
         },
     )]);
     assert_eq!(
-        land_ident(&token, &BTreeMap::new(), &bot),
+        land_ident(None, &BTreeMap::new(), None, &bot),
         ("graft".to_owned(), "graft@graft.invalid".to_owned())
     );
-    let ada = Author {
-        name: "ada".to_owned(),
-        email: String::new(),
-        ..token.clone()
-    };
     assert_eq!(
-        land_ident(&ada, &authors, &bot),
+        land_ident(Some("ada"), &authors, None, &bot),
         ("Ada".to_owned(), "ada@example.com".to_owned())
     );
-    let tess = Author {
+    let fallback = AuthorIdentity {
+        name: "Export".to_owned(),
+        email: "export@example.com".to_owned(),
+    };
+    assert_eq!(
+        land_ident(Some("unmapped"), &authors, Some(&fallback), &bot),
+        ("Export".to_owned(), "export@example.com".to_owned())
+    );
+    assert_eq!(
+        land_ident(None, &authors, Some(&fallback), &bot),
+        ("Export".to_owned(), "export@example.com".to_owned())
+    );
+    let claimed = Author {
         email: "tess@example.com".to_owned(),
         name: "Tess".to_owned(),
         ..token
     };
     assert_eq!(
-        land_ident(&tess, &authors, &bot),
-        ("Tess".to_owned(), "tess@example.com".to_owned())
+        claimed_author_trailer(&claimed).as_deref(),
+        Some("Claimed-Author: Tess <tess@example.com>")
+    );
+    assert!(
+        claimed_author_trailer(&Author {
+            name: "ada".to_owned(),
+            email: String::new(),
+            kind: AuthorKind::Human,
+        })
+        .is_none()
     );
     let t = Timestamp {
         ms: 1_000,

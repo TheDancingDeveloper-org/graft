@@ -217,10 +217,14 @@ pub struct BatchConfig {
     /// `base`).
     pub follow: FollowConfig,
     /// The identity of the squashed commit and of sync changesets, and the
-    /// fallback author when a principal has no mapping.
+    /// last-resort author when neither the principal map nor
+    /// [`default_author`] names one.
     pub committer: Committer,
-    /// Git identities for principals whose lands carry no email.
+    /// Git identities for authenticated principals (`[export.authors]`).
     pub authors: BTreeMap<String, AuthorIdentity>,
+    /// Per-repo author when the authenticated principal has no mapping
+    /// (`[export] default_author`).
+    pub default_author: Option<AuthorIdentity>,
     /// Lands to drop from the line's batches: each is reverted on the line.
     pub exclude: Vec<ChangesetId>,
     /// Why the lands are dropped (named in the PR body).
@@ -243,6 +247,7 @@ impl BatchConfig {
             follow,
             committer: default_committer(),
             authors: BTreeMap::new(),
+            default_author: None,
             exclude: Vec::new(),
             drop_reason: None,
             max_lands: None,
@@ -329,6 +334,8 @@ pub(crate) struct LandLine {
     pub(crate) trailer_model: Option<String>,
     /// `Co-authored-by` values recorded on the land, already one line each.
     pub(crate) trailer_coauthors: Vec<String>,
+    /// Client-supplied author, only as a trailer (`Claimed-Author`).
+    pub(crate) trailer_claimed_author: Option<String>,
     /// The `<src>@<changeset>` a merge landing merged (D29).
     pub(crate) trailer_merged_from: Option<String>,
 }
@@ -408,22 +415,41 @@ pub struct AuthorIdentity {
 
 /// The git ident of a land's per-land commit (D26).
 ///
-/// An author that already has an email is that identity. Otherwise the
-/// author's name is the principal, and `authors` maps it to a git
-/// identity. The configured bot `committer` is used only when there is no
-/// mapping, so a token subject never becomes `subject <unknown>`.
+/// The author is the land's authenticated principal (`RefMoved.actor`),
+/// mapped through `[export.authors]`, then `[export] default_author`, then
+/// the bot `committer`. A client-supplied name or email is never the git
+/// author. `principal` is `None` when the journal has no actor for the land
+/// (a land recorded before the actor field, or a no-op land that did not
+/// move the ref); that falls through the same defaults.
 pub(crate) fn land_ident(
-    author: &Author,
+    principal: Option<&str>,
     authors: &BTreeMap<String, AuthorIdentity>,
+    default_author: Option<&AuthorIdentity>,
     committer: &Committer,
 ) -> (String, String) {
-    if !author.email.trim().is_empty() {
-        return (ident_part(&author.name), ident_part(&author.email));
-    }
-    if let Some(mapped) = authors.get(author.name.trim()) {
+    let key = principal.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(mapped) = key.and_then(|k| authors.get(k)) {
         return (ident_part(&mapped.name), ident_part(&mapped.email));
     }
+    if let Some(fallback) = default_author {
+        return (ident_part(&fallback.name), ident_part(&fallback.email));
+    }
     (ident_part(&committer.name), ident_part(&committer.email))
+}
+
+/// A claimed author as a trailer, only when it is not empty and not the
+/// identity already written as the git author. Never a token.
+pub(crate) fn claimed_author_trailer(author: &Author) -> Option<String> {
+    let name = ident_part(&author.name);
+    let email = author.email.trim();
+    if email.is_empty() {
+        return None;
+    }
+    let email = ident_part(email);
+    if name == "unknown" && email == "unknown" {
+        return None;
+    }
+    Some(format!("Claimed-Author: {name} <{email}>"))
 }
 
 /// A short form of a changeset id for listings.
