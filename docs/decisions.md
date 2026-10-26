@@ -669,6 +669,10 @@ graft-primary authority switch. Until then
 build, test, check or checker anywhere (operator, 2026-10-24, WI-2349). The
 design is [design.md §8.7](design.md#87-post-land-checks-on-the-batch-line).
 
+*Note (2026-10-26):* the trigger is now the operator's decision to switch a
+named repository (D35), and graft is the first (D40). The checks start on
+graft's batch integration line before its authority switch.
+
 - **Where.** Only a line with `checks = "post-land"` in its `[[lines]]`
   entry, which `pr-batch` requires of its integration line once the feature
   ships. `direct` lines and the followed base line are unchanged; nothing
