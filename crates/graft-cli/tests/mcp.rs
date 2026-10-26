@@ -7,7 +7,7 @@ mod engine;
 mod support;
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
@@ -164,6 +164,166 @@ fn tool_names(mcp: &mut Mcp) -> Vec<String> {
         .iter()
         .map(|t| t["name"].as_str().unwrap().to_owned())
         .collect()
+}
+
+fn subcommands(help: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_commands = false;
+    for line in help.lines() {
+        if line.starts_with("Commands:") {
+            in_commands = true;
+        } else if in_commands {
+            if !line.starts_with("  ") {
+                break;
+            }
+            if let Some(name) = line.split_whitespace().next()
+                && name != "help"
+            {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+fn description_leaks(value: &Value, path: &str, leaks: &mut Vec<String>) {
+    match value {
+        Value::Object(fields) => {
+            for (name, child) in fields {
+                let child_path = if path.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{path}.{name}")
+                };
+                if name == "description"
+                    && child
+                        .as_str()
+                        .is_some_and(|text| text.to_ascii_lowercase().contains("vogt"))
+                {
+                    leaks.push(child_path.clone());
+                }
+                description_leaks(child, &child_path, leaks);
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                description_leaks(child, &format!("{path}[{index}]"), leaks);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn markdown_files(path: &Path, files: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(path).unwrap_or_else(|error| {
+        panic!("read {}: {error}", path.display());
+    }) {
+        let entry = entry.unwrap_or_else(|error| panic!("read {} entry: {error}", path.display()));
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            markdown_files(&entry_path, files);
+        } else if entry_path
+            .extension()
+            .is_some_and(|extension| extension == "md")
+        {
+            files.push(entry_path);
+        }
+    }
+}
+
+/// D39's user-visible vocabulary boundary. This deliberately exercises the
+/// CLI and MCP protocol rather than inspecting their implementation strings.
+#[test]
+fn user_visible_surfaces_do_not_name_the_tracker() {
+    let mut leaks = Vec::new();
+    let mut pending: Vec<Vec<String>> = vec![Vec::new()];
+    let mut seen = 0;
+    while let Some(path) = pending.pop() {
+        let dir = scratch();
+        let out = graft(dir.path())
+            .args(&path)
+            .arg("--help")
+            .assert()
+            .success();
+        let help = String::from_utf8_lossy(&out.get_output().stdout);
+        if help.to_ascii_lowercase().contains("vogt") {
+            let command = if path.is_empty() {
+                "graft --help".to_owned()
+            } else {
+                format!("graft {} --help", path.join(" "))
+            };
+            leaks.push(format!("command {command:?} contains \"vogt\""));
+        }
+        seen += 1;
+        for name in subcommands(&help) {
+            let mut next = path.clone();
+            next.push(name);
+            pending.push(next);
+        }
+    }
+    assert!(seen > 20, "walked only {seen} commands");
+
+    let served = serve();
+    let dir = scratch();
+    graft(dir.path())
+        .args(["--endpoint", &served.url, "clone", REPO, "app"])
+        .assert()
+        .success();
+    let mut mcp = Mcp::start(&dir.path().join("app"), &["--endpoint", &served.url], &[]);
+    let tools = mcp.request("tools/list", json!({}));
+    for tool in tools["tools"].as_array().expect("tools") {
+        let name = tool["name"].as_str().expect("tool name");
+        let mut paths = Vec::new();
+        description_leaks(tool, "", &mut paths);
+        leaks.extend(
+            paths
+                .into_iter()
+                .map(|path| format!("MCP tool {name:?} {path} contains \"vogt\"")),
+        );
+    }
+    let resources = mcp.request("resources/templates/list", json!({}));
+    for resource in resources["resourceTemplates"]
+        .as_array()
+        .expect("resource templates")
+    {
+        let name = resource["name"].as_str().expect("resource name");
+        let uri = resource["uriTemplate"]
+            .as_str()
+            .expect("resource URI template");
+        let mut paths = Vec::new();
+        description_leaks(resource, "", &mut paths);
+        leaks.extend(
+            paths
+                .into_iter()
+                .map(|path| format!("MCP resource {name:?} ({uri}) {path} contains \"vogt\"")),
+        );
+    }
+    mcp.finish();
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut docs = vec![root.join("docs/agents.md")];
+    markdown_files(&root.join("docs/guide"), &mut docs);
+    docs.sort();
+    for file in docs {
+        let text = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("read {}: {error}", file.display()));
+        for (index, line) in text.lines().enumerate() {
+            if line.to_ascii_lowercase().contains("vogt") {
+                let relative = file.strip_prefix(&root).unwrap_or(&file);
+                leaks.push(format!(
+                    "file {}:{} contains \"vogt\"",
+                    relative.display(),
+                    index + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        leaks.is_empty(),
+        "user-visible surfaces name the tracker:\n{}",
+        leaks.join("\n")
+    );
 }
 
 #[test]
