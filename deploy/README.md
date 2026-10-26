@@ -123,7 +123,8 @@ A private upstream (one anonymous `git ls-remote` cannot read) gets a
 `/etc/graft/github-token` on the host. The mirror's entrypoint is
 `deploy/private-follow.sh`, which reads that file into git's
 `http.extraHeader`. The token is not written into the config, printed, or
-placed in argv. An empty token file fails the mirror. Every mirror, public and private,
+placed in argv. With an empty token file a private mirror still starts, but its
+polls fail and retry until the file is placed. Every mirror, public and private,
 also uses that file as its `[github] token_file` so `pr-batch` can push
 `graft/batch-*` and open a pull request. The graft-dev runner does not talk
 to Infisical. Someone with access places the token once on the VM, outside
@@ -133,11 +134,16 @@ the deploy (the value is never put on argv):
 secret get HOMELAB_VOGT_GITHUB_TOKEN --project apps | install -m 0600 /dev/stdin /etc/graft/github-token
 ```
 
-`up.sh` copies that file into the secrets directory, mode 0600, owned by uid
-10001. If it is missing or empty, the deploy still succeeds: it logs one
-warning, leaves the mount pointing at an empty file, and starts the mirrors
-without `[github]`. `pr-batch` then fails with `pr-batch opens PRs: configure
-[github]` until the file is placed. The value is never printed or set as a
+`up.sh` never reads that file as the runner user. Its root helper
+(`as_root`, a throwaway root container) sets it to mode 0600, owned by uid
+10001, like the other secrets, so the mirrors can read it. If it is missing
+or empty, the deploy still succeeds: it logs one warning, leaves an empty
+0600 file for the mount, and starts every mirror without `[github]` (private
+mirrors poll without credentials and retry). `pr-batch` then fails with
+`pr-batch opens PRs: configure [github]` until the file is placed and the
+deploy re-run. The configs the mirrors mount are written by the same helper
+to `/etc/graft/mirror-configs`, and the last good deploy records those
+mounted copies. The value is never printed or set as a
 compose environment value. Place the host file before onboarding a private
 repository if you deploy without `up.sh`. Generated mirror configs are mode
 0644 so that user can read them.

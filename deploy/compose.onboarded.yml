@@ -116,7 +116,7 @@ services:
     ports:
       - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_RDPAPP_METRICS_PORT:-17895}:9465"
     volumes:
-      - ./mirror-rdpapp.toml:/etc/graft/deploy/mirror.toml:ro
+      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-rdpapp.toml:/etc/graft/deploy/mirror.toml:ro
       - type: bind
         source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-rdpapp
         target: /run/secrets/graft-mirror-token
