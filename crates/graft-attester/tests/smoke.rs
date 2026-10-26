@@ -284,14 +284,17 @@ async fn commit(
 
 /// A repository whose `main` holds the check scripts, and an engine.
 async fn repo() -> (Arc<Eng>, ChangesetId) {
+    repo_with(EngineConfig::default()).await
+}
+
+/// A repository whose journal pages are `default_page` entries. A request
+/// that asks for page size 0 gets this size, so a test can place drafts on
+/// later pages.
+async fn repo_with(mut config: EngineConfig) -> (Arc<Eng>, ChangesetId) {
+    config.default_page = config.default_page.max(1);
     let store = Arc::new(MemoryStore::new());
     let clock = Arc::new(FakeClock::at(1_700_000_000_000));
-    let engine = Arc::new(Engine::new(
-        store.clone(),
-        store,
-        clock,
-        EngineConfig::default(),
-    ));
+    let engine = Arc::new(Engine::new(store.clone(), store, clock, config));
     engine
         .create_repo(&admin(), REPO.to_owned())
         .await
@@ -1017,7 +1020,13 @@ async fn a_failed_lookup_then_a_full_queue_keeps_the_failed_entry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_given_up_entry_does_not_hide_a_later_page() {
-    let (engine, root) = repo().await;
+    // Eight entries a page, so the stuck draft is on the first page and
+    // drafts recorded after it land on later pages.
+    let (engine, root) = repo_with(EngineConfig {
+        default_page: 8,
+        ..EngineConfig::default()
+    })
+    .await;
     let stuck = draft(&engine, root, "stuck", &[("src.txt", "s\n")]).await;
     let mut later = Vec::new();
     for n in 0..40 {
@@ -1062,10 +1071,15 @@ async fn a_given_up_entry_does_not_hide_a_later_page() {
         }
     }
     assert!(saved_lsn(dir.path()) > stuck_lsn);
+    assert!(a.dropped() >= 1, "the given-up lookup was counted");
+    // Page 3 starts after two pages of eight. Those drafts ran, so the
+    // given-up entry did not pin the read to its own page.
+    let later_page = &later[16..];
     assert!(
-        seen.len() >= 16,
-        "entries after the given-up one ran: {}",
-        seen.len()
+        later_page.iter().any(|id| seen.contains(id)),
+        "a draft on a later page ran: {} of {}",
+        seen.len(),
+        later.len()
     );
     let attested = attested_ids(&engine).await;
     assert!(
