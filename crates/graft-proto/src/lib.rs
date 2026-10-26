@@ -8,6 +8,7 @@
 //! `convert` maps between them and the Rust types.
 
 pub mod api;
+pub mod attribution;
 pub mod context;
 pub mod convert;
 pub mod error;
