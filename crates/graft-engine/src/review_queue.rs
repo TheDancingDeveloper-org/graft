@@ -1,33 +1,51 @@
 //! `ReviewQueue` (v0.2, `docs/roadmap.md`): the landings on a line since an
 //! LSN that have no `review` attestation, filtered by path and size. It is a
-//! query, not a gate: nothing in the land path reads it, and it works on
-//! every line whatever its `checks` setting.
+//! query, not a gate: it works on every line whatever its `checks` setting,
+//! and nothing in the land path computes or reads anything for it.
 //!
-//! Every land that moves a line writes, in its own transaction, the store's
-//! review queue row ([`Write::PutLand`] with a position) and the landing's
-//! summary, a derived value with the landing's first position on the line,
-//! the paths it touches and the lines it changes. A `review` attestation
-//! takes the landing out of the store's index, so the query pages that
-//! index by LSN and never sees reviewed landings.
+//! A land that moves a line writes only the store's review queue index row
+//! ([`Write::PutLand`] with a position: position, LSN, changeset). A
+//! `review` attestation takes the landing out of that index, so the query
+//! pages it by LSN and never sees reviewed landings.
 //!
-//! Each queue row costs one summary read and, with a path filter, one read
-//! of the line path index (is there a row for the prefix at a position of
-//! this landing?). A call reads at most [`MAX_REVIEW_SCAN`] queue rows, the
-//! page included, and answers `next_lsn` to resume, so its cost is the page
-//! plus the landings it filtered out, never the line or the journal. No
-//! snapshot is materialized.
+//! A landing's summary (its first position on the line, the paths it
+//! touches, the lines it changes) is computed when the queue is read, and
+//! cached as a derived value. The land's old tip comes from its own
+//! `RefMoved` entry, read at the row's LSN (a point read, not a scan); the
+//! summary is then one id-pruned tree diff of the two snapshots and the
+//! changed blobs. When those objects are missing or corrupt the item's
+//! summary is unavailable ([`PATHS_UNAVAILABLE`], [`LINES_UNAVAILABLE`])
+//! and the rest of the page is answered as usual.
+//!
+//! The path filter reads the line path index (is there a row for the prefix
+//! at a position of this landing?), and needs no blob. A call reads at most
+//! [`MAX_REVIEW_SCAN`] queue rows, the page included, and answers
+//! `next_lsn` to resume, so its cost is the page plus the landings it
+//! filtered out, never the line or the journal. No snapshot is materialized.
 use graft_model::{Change, ChangesetId, EntryKind, ObjectId, ObjectKind, TreeId, diff_trees_after};
 use graft_proto::types::{MAX_REVIEW_PAGE, ReviewItem, ReviewQueue, ReviewQueuePage};
 use graft_proto::{ApiError, CallContext, Frame};
-use graft_store::{LandingRow, MetaStore, ObjectStore, RepoId, Write};
+use graft_store::{LandingRow, MetaStore, MetaTxn, ObjectStore, RepoId, Write};
 use imara_diff::{Algorithm, InternedInput};
 
 use crate::access::{Need, require};
 use crate::diff::textual;
+use crate::journal::{LAND_ATTEMPT, REF_MOVED, ref_moved_old};
 use crate::land::{KIND_VERSION, key};
 use crate::refs::check_ref_name;
 use crate::source::{Trees, empty_tree, model_root};
 use crate::{Engine, errors};
+
+/// `paths_touched` of an item whose summary is unavailable (its objects
+/// are missing or corrupt).
+pub const PATHS_UNAVAILABLE: u32 = u32::MAX;
+
+/// `lines_changed` of an item whose summary is unavailable. A `max_lines`
+/// filter leaves such an item out.
+pub const LINES_UNAVAILABLE: u64 = u64::MAX;
+
+/// Journal entries read per probe for a landing's `RefMoved` entry.
+const JOURNAL_PROBE: u32 = 4;
 
 /// The derived kind of a landing's summary, keyed by the landed changeset
 /// and the line.
@@ -43,7 +61,7 @@ const SUMMARY_DIFF_PAGE: usize = 1_000;
 /// Queue rows read per store call when a filter may drop some.
 const FILTERED_BATCH: usize = 64;
 
-/// What a landing changed, recorded when it lands.
+/// What a landing changed, computed when the queue is first read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LandSummary {
     /// The landing's first position on the line (a stack lands several).
@@ -121,28 +139,6 @@ fn changed_lines(old: &Side, new: &Side) -> u64 {
 }
 
 impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
-    /// The summary write of a landing that moves `line` from `from` to
-    /// `to`, starting at `first_pos`: one id-pruned tree diff of the two
-    /// snapshots and the changed blobs, so the cost follows the change.
-    pub(crate) async fn land_summary_write(
-        &self,
-        repo: RepoId,
-        line: &str,
-        from: ChangesetId,
-        to: ChangesetId,
-        first_pos: u64,
-    ) -> Result<Write, ApiError> {
-        let from_root = self.root_of(repo, from).await?;
-        let to_root = self.root_of(repo, to).await?;
-        let summary = self.summarize(repo, from_root, to_root, first_pos).await?;
-        Ok(Write::PutDerived {
-            kind: LAND_SUMMARY.to_owned(),
-            version: KIND_VERSION,
-            key: key(to, line),
-            value: summary.encode(),
-        })
-    }
-
     async fn summarize(
         &self,
         repo: RepoId,
@@ -168,7 +164,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .await
             .map_err(errors::source)?;
             for change in &page.changes {
-                summary.paths = summary.paths.saturating_add(1);
+                // The sentinels stay out of reach of a real count.
+                summary.paths = summary.paths.saturating_add(1).min(PATHS_UNAVAILABLE - 1);
                 let old = trees
                     .lookup(from, change.path())
                     .await
@@ -181,7 +178,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 };
                 let old = self.side(repo, old).await?;
                 let new = self.side(repo, new).await?;
-                summary.lines = summary.lines.saturating_add(changed_lines(&old, &new));
+                summary.lines = summary
+                    .lines
+                    .saturating_add(changed_lines(&old, &new))
+                    .min(LINES_UNAVAILABLE - 1);
             }
             match page.next {
                 Some(next) => after = Some(next),
@@ -223,28 +223,104 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .map_or(Side::Binary, Side::Text))
     }
 
-    /// A landing's summary: the one its land stored, or, for a landing from
-    /// before summaries were stored, its changeset against its first parent.
-    async fn summary_of(
+    /// The landing's cached summary, if a read already computed it.
+    async fn cached_summary(
         &self,
         repo: RepoId,
         line: &str,
         row: &LandingRow,
-    ) -> Result<LandSummary, ApiError> {
+    ) -> Result<Option<LandSummary>, ApiError> {
         let stored = self
             .meta
             .derived(repo, LAND_SUMMARY, KIND_VERSION, &key(row.changeset, line))
             .await
             .map_err(errors::store)?;
-        if let Some(summary) = stored.as_deref().and_then(LandSummary::decode) {
-            return Ok(summary);
+        Ok(stored.as_deref().and_then(LandSummary::decode))
+    }
+
+    /// Where the landing starts: the line's tip before it, from the land's
+    /// `RefMoved` entry at the row's LSN, and its first position. The entry
+    /// is the first of the land's transaction, after only the
+    /// `LandReverted` entries of a revert land, so the probe stops at the
+    /// transaction's `LandAttempt`. Without the entry (it cannot be found)
+    /// the landing is taken as its own changeset alone.
+    async fn landing_start(
+        &self,
+        repo: RepoId,
+        line: &str,
+        row: &LandingRow,
+    ) -> Result<(Option<ChangesetId>, u64), ApiError> {
+        let mut from = row.lsn;
+        loop {
+            let entries = self
+                .meta
+                .journal(repo, from, JOURNAL_PROBE)
+                .await
+                .map_err(errors::store)?;
+            let short = entries.len() < JOURNAL_PROBE as usize;
+            for (lsn, kind, body) in entries {
+                from = lsn + 1;
+                if kind == REF_MOVED
+                    && let Some(old) = ref_moved_old(&body, line, row.changeset)
+                {
+                    let below = self
+                        .meta
+                        .line_pos(repo, line, old)
+                        .await
+                        .map_err(errors::store)?;
+                    let first = below.map_or(row.pos, |p| (p + 1).min(row.pos));
+                    return Ok((Some(old), first));
+                }
+                if kind == LAND_ATTEMPT {
+                    return Ok((None, row.pos));
+                }
+            }
+            if short {
+                return Ok((None, row.pos));
+            }
         }
-        let (cs, _) = self.changeset(repo, row.changeset).await?;
-        let from = match cs.first_parent() {
-            Some(p) => self.root_of(repo, p).await?,
-            None => empty_tree(),
+    }
+
+    /// The landing's summary from `old` (its first parent when unknown) to
+    /// what landed, cached for the next read; `None` when its objects are
+    /// missing or corrupt.
+    async fn compute_summary(
+        &self,
+        repo: RepoId,
+        line: &str,
+        row: &LandingRow,
+        old: Option<ChangesetId>,
+        first_pos: u64,
+    ) -> Result<Option<LandSummary>, ApiError> {
+        let got = async {
+            let (cs, _) = self.changeset(repo, row.changeset).await?;
+            let from = match old.or(cs.first_parent()) {
+                Some(p) => self.root_of(repo, p).await?,
+                None => empty_tree(),
+            };
+            self.summarize(repo, from, cs.root, first_pos).await
+        }
+        .await;
+        let summary = match got {
+            Ok(s) => s,
+            Err(ApiError::MissingObjects { .. } | ApiError::CorruptObject { .. }) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
         };
-        self.summarize(repo, from, cs.root, row.pos).await
+        // A cache: derived data, recomputable, so a failed write only
+        // means the next read computes it again.
+        let txn = MetaTxn {
+            preconditions: Vec::new(),
+            writes: vec![Write::PutDerived {
+                kind: LAND_SUMMARY.to_owned(),
+                version: KIND_VERSION,
+                key: key(row.changeset, line),
+                value: summary.encode(),
+            }],
+        };
+        let _ = self.meta.commit(repo, txn).await;
+        Ok(Some(summary))
     }
 
     /// Whether the landing touched `prefix`: the line path index's newest
@@ -282,6 +358,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let limit = self.review_page(req.page.limit) as usize;
         let filtered = req.path_prefix.is_some() || req.max_lines.is_some();
         let repo = self.repo_id(&req.repo).await?;
+        let line = req.line.as_str();
 
         let mut items = Vec::new();
         let mut since = req.since_lsn;
@@ -297,41 +374,47 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .min(cap - scanned);
             let rows = self
                 .meta
-                .review_queue(repo, &req.line, since, batch as u32)
+                .review_queue(repo, line, since, batch as u32)
                 .await
                 .map_err(errors::store)?;
             let caught_up = rows.len() < batch;
             for row in rows {
                 scanned += 1;
                 since = row.lsn;
-                let summary = self.summary_of(repo, &req.line, &row).await?;
-                let small = req
-                    .max_lines
-                    .is_none_or(|max| summary.lines <= u64::from(max));
-                let matched = small
-                    && match &req.path_prefix {
-                        None => true,
-                        Some(prefix) => {
-                            self.touches(repo, &req.line, prefix, summary.first_pos, row.pos)
-                                .await?
-                        }
-                    };
-                if matched {
-                    let (cs, _) = self.changeset(repo, row.changeset).await?;
-                    items.push(ReviewItem {
-                        changeset: row.changeset,
-                        pos: row.pos,
-                        lsn: row.lsn,
-                        author: cs.author,
-                        paths_touched: summary.paths,
-                        lines_changed: summary.lines,
+                let mut summary = self.cached_summary(repo, line, &row).await?;
+                let (old, first_pos) = match summary {
+                    Some(s) => (None, s.first_pos),
+                    None => self.landing_start(repo, line, &row).await?,
+                };
+                if let Some(prefix) = &req.path_prefix
+                    && !self.touches(repo, line, prefix, first_pos, row.pos).await?
+                {
+                    continue;
+                }
+                if summary.is_none() {
+                    summary = self
+                        .compute_summary(repo, line, &row, old, first_pos)
+                        .await?;
+                }
+                if let Some(max) = req.max_lines
+                    && !summary.is_some_and(|s| s.lines <= u64::from(max))
+                {
+                    continue;
+                }
+                let (cs, _) = self.changeset(repo, row.changeset).await?;
+                items.push(ReviewItem {
+                    changeset: row.changeset,
+                    pos: row.pos,
+                    lsn: row.lsn,
+                    author: cs.author,
+                    paths_touched: summary.map_or(PATHS_UNAVAILABLE, |s| s.paths),
+                    lines_changed: summary.map_or(LINES_UNAVAILABLE, |s| s.lines),
+                });
+                if items.len() == limit {
+                    return Ok(ReviewQueuePage {
+                        items,
+                        next_lsn: Some(since),
                     });
-                    if items.len() == limit {
-                        return Ok(ReviewQueuePage {
-                            items,
-                            next_lsn: Some(since),
-                        });
-                    }
                 }
             }
             if caught_up {

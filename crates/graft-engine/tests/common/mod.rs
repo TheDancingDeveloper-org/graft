@@ -182,6 +182,14 @@ pub fn sqlite_with(config: EngineConfig) -> Fixture<SqliteMetaStore> {
     build(Arc::new(meta), config, Some(dir))
 }
 
+/// A SQLite store in a fresh directory, for a fixture built over a wrapper.
+pub fn sqlite_meta() -> (SqliteMetaStore, TempDir) {
+    let dir = TempDir::new("sqlite");
+    let meta = SqliteMetaStore::open(SqliteConfig::new(dir.0.join("meta.sqlite")))
+        .expect("open sqlite store");
+    (meta, dir)
+}
+
 pub fn build<M: MetaStore>(meta: Arc<M>, config: EngineConfig, dir: Option<TempDir>) -> Fixture<M> {
     build_over(meta, Faulty::default(), config, dir)
 }
