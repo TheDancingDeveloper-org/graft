@@ -195,7 +195,7 @@ CREATE INDEX line_pos_changeset ON line_pos (repo, changeset, line);
 /// Version 6 (WI-2310): the draft path index (`docs/notes/draft-overlap.md`
 /// §3, D24). One row per path a live workspace's stack changes, keyed for
 /// the overlap range scan, with a reverse index by workspace for removal.
-/// Workspaces get the Vogt work item from the opening token. No back-fill:
+/// Workspaces get the work item (set by the caller's orchestrator, if any) from the opening token. No back-fill:
 /// existing workspaces gain rows at their next draft write.
 const V6: &str = "
 ALTER TABLE workspaces ADD COLUMN work_item TEXT;

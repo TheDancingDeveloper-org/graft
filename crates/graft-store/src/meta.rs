@@ -71,7 +71,7 @@ pub struct WorkspaceRecord {
     pub name: String,
     /// Owner subject.
     pub owner: String,
-    /// Vogt session.
+    /// Session (set by the caller's orchestrator, if any).
     pub session: Option<String>,
     /// Tracked line.
     pub line: String,
@@ -81,7 +81,7 @@ pub struct WorkspaceRecord {
     pub head: Option<ChangesetId>,
     /// Lease expiry, ms.
     pub lease_until_ms: i64,
-    /// Vogt work item, from the opening token's claims.
+    /// Work item (set by the caller's orchestrator, if any), from the opening token's claims.
     pub work_item: Option<String>,
 }
 

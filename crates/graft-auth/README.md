@@ -19,8 +19,8 @@ are left out when absent):
 | --- | --- |
 | `sub` | subject: user, session or service name |
 | `kind` | `human`, `agent`, `ci` or `service` |
-| `session` | Vogt session id (`ses_…`), optional |
-| `work_item` | Vogt work item (`WI-…`), optional |
+| `session` | session id (set by the caller's orchestrator, if any), optional |
+| `work_item` | work item (set by the caller's orchestrator, if any), optional |
 | `scopes` | scope strings, design §12.1 text forms |
 | `exp` | expiry, integer seconds since the epoch |
 | `jti` | unique token id, for the denylist |

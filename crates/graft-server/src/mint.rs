@@ -68,7 +68,7 @@ const MAX_FIELD_BYTES: usize = 128;
 /// - **Life**: the TTL is at most the server's `max_ttl_s` and the caller's
 ///   remaining life (`caller_exp_s`), so the new token never outlives the
 ///   one that minted it. 0 asks for that maximum.
-/// - **Identity**: only a service principal (Vogt) delegates: it names the
+/// - **Identity**: only a service principal (an orchestrator) delegates: it names the
 ///   subject, session and work item of the token it mints, which is an
 ///   agent token. Any other caller mints for itself: an empty subject means
 ///   its own, a different one is refused, and the session and work item are
