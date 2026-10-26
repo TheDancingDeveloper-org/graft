@@ -187,6 +187,8 @@ where
     ) -> Result<(Vec<ChangesetId>, HashMap<ChangesetId, Changeset>), GitError> {
         let mut fetched = HashMap::new();
         let mut present = HashSet::new();
+        let canonical = Changeset::canonical_empty_root().id();
+        present.insert(canonical);
         let mut seen = HashSet::new();
         let mut frontier: Vec<ChangesetId> = tips.to_vec();
         while !frontier.is_empty() {
@@ -220,6 +222,12 @@ where
                 }
                 for view in got.found {
                     let changeset = view.changeset;
+                    // D34: the canonical empty root is not a git commit. Its
+                    // children export as parentless roots, so it is treated as
+                    // already resolved and never fetched further.
+                    if changeset.is_canonical_empty_root() {
+                        continue;
+                    }
                     next.extend(changeset.parents.iter().copied());
                     fetched.insert(changeset.id(), changeset);
                 }
@@ -290,6 +298,10 @@ where
     async fn write(&mut self, id: ChangesetId, changeset: &Changeset) -> Result<GitSha, GitError> {
         let mut parents = Vec::with_capacity(changeset.parents.len());
         for p in &changeset.parents {
+            // The canonical empty root is omitted. A child of it is a git root.
+            if p == &Changeset::canonical_empty_root().id() {
+                continue;
+            }
             parents.push(self.sha_of(*p)?);
         }
         let parent_tree = match parents.first() {

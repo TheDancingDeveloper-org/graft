@@ -118,6 +118,7 @@ fn help_is_public_facing_for_every_command() {
         &["login"],
         &["logout"],
         &["config"],
+        &["init"],
         &["mcp"],
         &["lsp"],
         &["serve"],

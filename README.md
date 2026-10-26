@@ -9,11 +9,11 @@ history, and the server does the commit, history, diff, rebase and land.
 It is for agent fleets — many short sessions on one codebase — that need
 git-like commands without a branch or a pull request per change.
 
-**Status: pre-v0.1.0, phase 1 (a git alternative).** Clone, commit,
-sync, line-merge land, named-server login and git export work today through
-the CLI, MCP and LSP. `graft init` (local mode) and `graft serve --dev` are
-not in the binary yet. graft does not run builds, tests or checkers.
-What is delivered is in [docs/status.md](docs/status.md).
+**Status: pre-v0.1.0, phase 1 (a git alternative).** Local mode
+(`graft init`), a loopback server (`graft serve --dev`), clone, commit,
+sync, line-merge land, named-server login and git export work through the
+CLI, MCP and LSP. graft does not run builds, tests or checkers. What is
+delivered is in [docs/status.md](docs/status.md).
 
 ## Install
 
@@ -41,15 +41,13 @@ docker run --rm ghcr.io/thedancingdeveloper-org/graft:vX.Y.Z version
 ```
 
 Archives are Linux x86_64, Linux aarch64 and macOS Apple Silicon. There is
-no Intel macOS archive. Do not `cargo install graft` or `graft-cli` from
-crates.io: those names are not published.
+no Intel macOS archive. crates.io is not available yet; install with the
+git command above.
 
 ## Quick start: local
 
-`graft init` is specified and not built yet. When it lands, a local
-repository is a directory the CLI opens in-process: no server, no daemon,
-no token. The commands below are the ones that mode will accept. Until
-then, use the server quick start.
+`graft init` creates a repository the CLI opens in-process: no server, no
+daemon, no token. A second working copy is `graft clone` of the first.
 
 ```sh
 graft init demo && cd demo
@@ -68,25 +66,29 @@ edit exits 3 with conflict markers in the file.
 
 ## Quick start: server
 
-`graft serve --dev` is not built yet. Clone by URL works today against a
-server you already run: `graft clone graft://HOST:PORT/REPO`. The token
-comes from `graft login`, never from the URL.
+`graft serve --dev` starts a loopback server, creates a repository named
+`dev`, stores an admin token in the user config (never on stdout or the
+command line) and prints the clone command. It keeps running.
 
 ```sh
-graft login dev
-graft clone graft://HOST:PORT/REPO
-cd REPO
+graft serve --dev
+# prints: graft clone graft://127.0.0.1:PORT/dev
+```
+
+In another terminal, clone with the printed command, then commit and land.
+The working copy uses the named server `dev`, so no token is an argument.
+
+```sh
+graft clone graft://127.0.0.1:PORT/dev
+cd dev
 printf 'hello\n' > readme.txt
 graft commit -m "hello"
 graft sync
 graft land
 ```
 
-`graft login` reads the token from stdin or `--token-file`, checks the
-server, and stores a private token-file reference. It never takes the token
-as an argument. When `graft serve --dev` lands it will bind loopback, write
-that token into the user config (never on stdout or the command line) and
-print the clone command. Running a server today is
+`graft login NAME` stores a server you already run: the token is read from
+stdin or `--token-file`, never taken as an argument. A longer stack is
 [docs/dev-stack.md](docs/dev-stack.md).
 
 ## Using it with agents
@@ -116,10 +118,9 @@ Git stays in the mirror. Nothing else in graft speaks git.
 | Batch export | `graft-mirror pr-batch` | Deliver lands to GitHub as one pull request, one commit per land |
 | Full export | `graft-mirror export` | Write the history back out to git. This is the exit path |
 
-`graft import` and `graft mirror` as subcommands of the one binary are
-not built yet. Until then the commands are the `graft-mirror` binary,
-which is hidden behind `graft mirror` only when experimental commands are
-enabled. Build it with `cargo build -p graft-mirror`.
+Those commands are the `graft-mirror` binary. `graft mirror` runs
+the same binary when experimental commands are enabled. Build it with
+`cargo build -p graft-mirror`.
 
 ## How it compares
 

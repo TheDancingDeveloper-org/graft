@@ -60,6 +60,8 @@ pub(crate) enum Command {
     Logout(LogoutArgs),
     /// Inspect user configuration
     Config(ConfigArgs),
+    /// Create a local repository and working copy
+    Init(InitArgs),
     /// Open a workspace and lay out a sparse working copy
     Clone(CloneArgs),
     /// Working-copy changes against the head draft, else the base (no server needed)
@@ -219,6 +221,16 @@ pub(crate) struct CloneArgs {
     /// With `--path`, also include the files at the repository root
     #[arg(long)]
     pub(crate) root_files: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct InitArgs {
+    /// Directory to create (default: the current directory)
+    #[arg(value_name = "DIR")]
+    pub(crate) dir: Option<PathBuf>,
+    /// Repository name (default: the directory name)
+    #[arg(long, value_name = "NAME")]
+    pub(crate) repo: Option<String>,
 }
 
 #[derive(Debug, Args)]

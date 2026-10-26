@@ -118,6 +118,22 @@ fn golden_changeset_encoding_and_id() {
 }
 
 #[test]
+fn golden_canonical_empty_root() {
+    let cs = Changeset::canonical_empty_root();
+    assert!(cs.is_canonical_empty_root());
+    assert_eq!(cs.root, Tree::default().id());
+    assert_eq!(
+        cs.id().to_string(),
+        "c64afdc2aa9e1166e5d4c23a11d34f73bee99f9cb7a46e0a9e5ea8e37ba44bc9b"
+    );
+    assert_eq!(
+        hex(&cs.encode()),
+        "0100000000d0a89364d3af4e3469f3f4f545b3fb47ef2c72f9f2daddeedbd1821d18a4234a00000000000000000000000002000000000000000000000000000000000000"
+    );
+    assert_eq!(Changeset::decode(&cs.encode()).unwrap(), cs);
+}
+
+#[test]
 fn kinds_are_separated() {
     let payload = Tree::default().encode();
     let as_blob = ObjectId::hash(ObjectKind::Blob, &payload);
