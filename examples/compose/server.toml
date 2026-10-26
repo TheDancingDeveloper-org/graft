@@ -1,0 +1,21 @@
+# graft serve for examples/compose. Unknown keys are refused at start-up.
+# 0.0.0.0 is the container's own namespace; compose publishes the ports on
+# 127.0.0.1 only.
+listen = "0.0.0.0:7878"
+metrics = "0.0.0.0:9464"
+objects_dir = "/var/lib/graft/objects"
+meta_db = "/var/lib/graft/meta/meta.db"
+key_file = "/var/lib/graft/meta/signing.key"
+min_free_fraction = 0.05
+json_logs = true
+max_token_ttl_s = 43200
+shutdown_grace_s = 20
+
+# First start writes a one-time admin token (mode 0600) when the file is
+# absent. The value is never logged. The repositories it administers:
+bootstrap_admin_token_file = "/var/lib/graft/secrets/admin.token"
+bootstrap_admin_repos = ["example"]
+
+[[lines]]
+name = "main"
+policy = "direct"

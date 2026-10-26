@@ -1,0 +1,16 @@
+# Copy to mirror.toml and start with: docker compose --profile mirror up -d
+# Nothing here is a secret. The bearer token is the file the server writes
+# at bootstrap_admin_token_file, mounted read-only from the secrets volume.
+server = "http://server:7878"
+repo = "example"
+upstream = "https://example.com/example.git"
+mirror_dir = "/var/lib/graft/mirror/example.git"
+db = "/var/lib/graft/mirror/example.sqlite"
+token_file = "/run/secrets/admin.token"
+poll_interval_secs = 60
+metrics_addr = "0.0.0.0:9465"
+json_logs = true
+
+[[lines]]
+branch = "main"
+line = "main"

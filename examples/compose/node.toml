@@ -1,0 +1,12 @@
+# graft node for examples/compose.
+# server_public_key is the server's Ed25519 verifying key: 64 hex characters,
+# printed by `graft serve admin` after the signing key exists in graft-meta.
+# Replace the placeholder before the node can start. The socket is inside the
+# graft-run volume, not a host path.
+socket = "/run/graft/node.sock"
+socket_mode = "0660"
+cache_dir = "/var/cache/graft"
+upstream = "http://server:7878"
+server_public_key = "0000000000000000000000000000000000000000000000000000000000000000"
+metrics = "127.0.0.1:9465"
+json_logs = true

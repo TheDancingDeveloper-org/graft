@@ -1,0 +1,108 @@
+# A graft server and a host cache node, plus an optional git mirror.
+#
+#   docker compose -f examples/compose/compose.yaml up -d
+#
+# Image tag: GRAFT_IMAGE, default ghcr.io/thedancingdeveloper-org/graft:v0.1.0.
+# Listeners bind 0.0.0.0 inside the container. Host ports are 127.0.0.1 only.
+# Data, metadata, secrets, the node cache and the mirror store are named volumes.
+# No host paths are mounted.
+#
+# The mirror service starts only with `--profile mirror`, after you copy
+# mirror.toml.example to mirror.toml. That file is not a secret; the token
+# it names is the admin token the server writes into the secrets volume.
+
+name: graft
+
+x-graft: &graft
+  image: ${GRAFT_IMAGE:-ghcr.io/thedancingdeveloper-org/graft:v0.1.0}
+  user: "10001:10001"
+  read_only: true
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 30s
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  networks: [graft]
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "3"
+
+services:
+  server:
+    <<: *graft
+    command: ["graft", "serve", "--config", "/etc/example/server.toml"]
+    ports:
+      - "127.0.0.1:${GRAFT_SERVER_PORT:-7878}:7878"
+      - "127.0.0.1:${GRAFT_METRICS_PORT:-9464}:9464"
+    volumes:
+      - ./server.toml:/etc/example/server.toml:ro
+      - graft-data:/var/lib/graft/objects
+      - graft-meta:/var/lib/graft/meta
+      - graft-secrets:/var/lib/graft/secrets
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9464 &&
+          printf 'GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          head -n1 <&3 | grep -q ' 200 '
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  node:
+    <<: *graft
+    depends_on:
+      server:
+        condition: service_healthy
+    command: ["graft", "node", "--config", "/etc/example/node.toml"]
+    volumes:
+      - ./node.toml:/etc/example/node.toml:ro
+      - graft-cache:/var/cache/graft
+      - graft-run:/run/graft
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9465 &&
+          printf 'GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          head -n1 <&3 | grep -q ' 200 '
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  mirror:
+    <<: *graft
+    profiles: ["mirror"]
+    depends_on:
+      server:
+        condition: service_healthy
+    command: ["graft", "mirror", "follow", "--config", "/etc/example/mirror.toml"]
+    ports:
+      - "127.0.0.1:${GRAFT_MIRROR_METRICS_PORT:-9465}:9465"
+    volumes:
+      - ./mirror.toml:/etc/example/mirror.toml:ro
+      - graft-secrets:/run/secrets:ro
+      - graft-mirror:/var/lib/graft/mirror
+
+volumes:
+  graft-data:
+  graft-meta:
+  graft-secrets:
+  graft-cache:
+  graft-run:
+  graft-mirror:
+
+networks:
+  graft:
