@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# WI-2487: up.sh writes the GitHub token via store_secret, mode 0600, and
-# the value never appears on stdout or stderr.
+# WI-2487: up.sh copies /etc/graft/github-token (mode 0600) and does not
+# fail the deploy when that file is missing. The token never appears on
+# stdout or stderr.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -8,35 +9,23 @@ root=$(cd "$here/../.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-secrets=$tmp/secrets
-mkdir -p "$secrets"
 token='ghs_test_token_value_not_a_real_one'
-bin=$tmp/bin
-mkdir -p "$bin"
 
-cat >"$bin/secret" << 'SH'
-#!/usr/bin/env bash
-[[ ${1:-} == get && ${2:-} == HOMELAB_VOGT_GITHUB_TOKEN ]] || exit 2
-printf '%s' "$STUB_TOKEN"
-SH
-chmod +x "$bin/secret"
-
-# The live fetch_github_token pipes through docker as_root/store_secret.
-# This test runs the same fetch against a local writer that matches store_secret
-# (umask 077, empty-refused, 0600, atomic mv) and asserts the invocation in
-# deploy/up.sh still matches.
-fn=$(sed -n '/^fetch_github_token()/,/^}/p' "$root/deploy/up.sh")
-printf '%s\n' "$fn" | grep -q 'HOMELAB_VOGT_GITHUB_TOKEN'
-printf '%s\n' "$fn" | grep -q -- '--project 76b1ebe1-3656-4cef-952c-30d5d489c6e7'
-printf '%s\n' "$fn" | grep -q -- '--env prod'
+fn=$(sed -n '/^install_github_token()/,/^}/p' "$root/deploy/up.sh")
+printf '%s\n' "$fn" | grep -q '/etc/graft/github-token'
 printf '%s\n' "$fn" | grep -q 'store_secret github-token'
-printf '%s\n' "$fn" | grep -q 'GRAFT_SECRET_CMD:-secret'
-store=$(sed -n '/^store_secret()/,/^}/p' "$root/deploy/up.sh")
-printf '%s\n' "$store" | grep -q 'umask 077'
-printf '%s\n' "$store" | grep -q 'chmod 0600'
+if printf '%s\n' "$fn" | grep -q 'HOMELAB_VOGT_GITHUB_TOKEN'; then
+  echo 'install_github_token still fetches from Infisical' >&2
+  exit 1
+fi
+strip=$(sed -n '/^strip_github_table()/,/^}/p' "$root/deploy/up.sh")
+printf '%s\n' "$strip" | grep -q 'github'
 
 log() { printf 'up.sh: %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
+
+# Local stand-in for as_root: the script's /s is the secrets directory.
+as_root() { sh -c "${1//\/s/$secrets}"; }
 store_secret() {
   local dest=$secrets/$1 tmpf=$secrets/.$1.tmp
   umask 077
@@ -45,13 +34,31 @@ store_secret() {
   chmod 0600 "$tmpf"
   mv "$tmpf" "$dest"
 }
-as_root() { sh -c "${1//\/s/$secrets}"; }
-eval "$(sed -n '/^fetch_github_token()/,/^}/p' "$root/deploy/up.sh")"
+eval "$(sed -n '/^install_github_token()/,/^}/p' "$root/deploy/up.sh")"
+eval "$(sed -n '/^strip_github_table()/,/^}/p' "$root/deploy/up.sh")"
+
+present=$tmp/present
+missing=$tmp/missing
+mkdir -p "$present" "$missing"
+
+# Rewrite the hardcoded source path for the present case, then the missing one.
+run_install() {
+  local src=$1
+  secrets=$2
+  mkdir -p "$secrets"
+  install_github_token "$src"
+}
 
 out=$tmp/out
 err=$tmp/err
-export GRAFT_SECRET_CMD=$bin/secret STUB_TOKEN=$token
-PATH="$bin:$PATH" fetch_github_token >"$out" 2>"$err"
+
+# Present: copied, mode 0600, value absent from both streams.
+mkdir -p "$(dirname "$present/src")"
+printf '%s' "$token" >"$present/src"
+secrets=$present/secrets
+mkdir -p "$secrets"
+run_install "$present/src" "$secrets" >"$out" 2>"$err"
+[ "${github_ready:-0}" = 1 ]
 mode=$(stat -c '%a' "$secrets/github-token")
 [ "$mode" = 600 ]
 cmp -s "$secrets/github-token" <(printf '%s' "$token")
@@ -60,4 +67,44 @@ if grep -F "$token" "$out" "$err"; then
   exit 1
 fi
 grep -q 'mode 0600, not printed' "$err"
-echo "github-token: mode 0600, absent from stdout and stderr"
+echo "github-token present: mode 0600, absent from stdout and stderr"
+
+# Missing: deploy step succeeds, one warning, no token text, empty mount file.
+: >"$out"
+: >"$err"
+github_ready=9
+secrets=$missing/secrets
+mkdir -p "$secrets"
+run_install "$missing/does-not-exist" "$secrets" >"$out" 2>"$err"
+[ "${github_ready:-0}" = 0 ]
+[ -f "$secrets/github-token" ]
+[ ! -s "$secrets/github-token" ]
+mode=$(stat -c '%a' "$secrets/github-token")
+[ "$mode" = 600 ]
+grep -q 'missing or empty' "$err"
+if grep -F "$token" "$out" "$err"; then
+  echo 'token appeared in the missing-file output' >&2
+  exit 1
+fi
+
+# The mounted config drops [github] and keeps [[lines]].
+sample=$tmp/sample.toml
+cat >"$sample" << 'TOML'
+server = "http://graft-server:7878"
+token_file = "/run/secrets/graft-mirror-token"
+
+[github]
+owner = "org"
+repo = "name"
+token_file = "/run/secrets/github-token"
+[[lines]]
+branch = "main"
+line = "main"
+TOML
+stripped=$(strip_github_table <"$sample")
+printf '%s\n' "$stripped" | grep -q '\[\[lines\]\]'
+if printf '%s\n' "$stripped" | grep -q '\[github\]'; then
+  echo 'strip left [github]' >&2
+  exit 1
+fi
+echo "github-token missing: warning logged, deploy step succeeded, [github] omitted"

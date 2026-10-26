@@ -5,9 +5,11 @@
 #
 #   1. Bootstrap secrets under /etc/graft, if missing: the server signing key,
 #      and (after the server is up) the mirror's service token. Both are
-#      github-token (HOMELAB_VOGT_GITHUB_TOKEN) is fetched at deploy time.
 #      written by a throwaway root container from the pinned image, mode 0600,
-#      owned by uid 10001. Neither is ever printed.
+#      owned by uid 10001. Neither is ever printed. github-token is copied
+#      from /etc/graft/github-token when that file was placed on the VM. A
+#      missing or empty source is a warning; the deploy continues and the
+#      mirrors start without [github].
 #   2. Pull the pinned image and pre-flight: check deploy/server.toml and
 #      every deploy/mirror*.toml with that image's own binaries. A config the image
 #      can't parse stops the deploy here, with the running stack untouched
@@ -32,6 +34,8 @@
 # Non-secret host settings (GRAFT_BIND_IP, ports) may go in
 # /etc/graft/deploy.env. Environment overrides:
 #   GRAFT_SECRETS_DIR       secrets directory (default /etc/graft)
+#   GRAFT_MIRROR_CONFIG_DIR directory of the mirror configs compose mounts
+#                           (set by this script; default is deploy/)
 #   GRAFT_REMINT=1          mint a new mirror token even if the current one is fresh
 #   GRAFT_TOKEN_RENEW_DAYS  re-mint a token older than this (default 20; TTL is 30)
 #   GRAFT_REFS_WAIT         seconds each followed repo waits for its first ref
@@ -141,17 +145,65 @@ store_secret() {
 command -v curl >/dev/null || die "curl is required"
 
 # GitHub credential for every mirror's [github] token_file (WI-2487).
-# Fetched at deploy time into the secrets directory, mode 0600. The value
-# goes stdin-to-file and is never printed or placed in argv or compose env.
-fetch_github_token() {
-  local wrapper=${GRAFT_SECRET_CMD:-secret}
-  command -v "$wrapper" >/dev/null || die "github token: $wrapper is required to read HOMELAB_VOGT_GITHUB_TOKEN"
-  "$wrapper" get HOMELAB_VOGT_GITHUB_TOKEN     --project 76b1ebe1-3656-4cef-952c-30d5d489c6e7 --env prod     | store_secret github-token
-  log "wrote github-token ($(as_root "wc -c < /s/github-token") bytes, mode 0600, not printed)"
+# Placed once on the VM at /etc/graft/github-token, outside this deploy.
+# Copied into the secrets directory, mode 0600. The value is never printed
+# or placed in argv or compose env. A missing or empty source does not fail
+# the deploy: the mount points at an empty file and the mounted configs omit
+# [github], so graft-mirror starts. pr-batch then fails with
+# "pr-batch opens PRs: configure [github]" until the file is placed.
+install_github_token() {
+  local src=${1:-/etc/graft/github-token} staged
+  github_ready=0
+  if [ ! -s "$src" ]; then
+    log "warning: $src is missing or empty; mirrors will start without [github] and pr-batch cannot open pull requests until that file is placed"
+    as_root "set -e; : > /s/github-token; chmod 0600 /s/github-token; chown 10001:10001 /s/github-token 2>/dev/null || true"
+    return 0
+  fi
+  # Stage first. The source may be the secrets file this is about to replace,
+  # and the token must not be printed or placed in argv.
+  staged=$(mktemp)
+  cp -- "$src" "$staged"
+  if [ ! -s "$staged" ]; then
+    rm -f "$staged"
+    log "warning: $src is missing or empty; mirrors will start without [github] and pr-batch cannot open pull requests until that file is placed"
+    as_root "set -e; : > /s/github-token; chmod 0600 /s/github-token; chown 10001:10001 /s/github-token 2>/dev/null || true"
+    return 0
+  fi
+  store_secret github-token <"$staged"
+  rm -f "$staged"
+  github_ready=1
+  log "copied github-token ($(as_root "wc -c < /s/github-token") bytes, mode 0600, not printed)"
 }
 
-log "github token: fetching HOMELAB_VOGT_GITHUB_TOKEN into $secrets/github-token"
-fetch_github_token
+# Drop a trailing [github] table. [[lines]] stays.
+strip_github_table() {
+  awk '
+    /^\[github\]/ { skip=1; next }
+    /^\[/ { skip=0 }
+    !skip { print }
+  '
+}
+
+# Configs compose mounts. With a token they are the checkout copies. Without
+# one they omit [github]. GRAFT_MIRROR_CONFIG_DIR points compose at them.
+prepare_mounted_configs() {
+  local cfg dir
+  dir=$(mktemp -d "$secrets/mirror-configs.XXXXXX")
+  for cfg in "${mirror_configs[@]}"; do
+    if [ "$github_ready" = 1 ]; then
+      cp -- "$here/$cfg" "$dir/$cfg"
+    else
+      strip_github_table < "$here/$cfg" > "$dir/$cfg"
+    fi
+    chmod 0644 "$dir/$cfg"
+  done
+  # mktemp is 0700; compose (and the pre-flight user) must be able to read it.
+  chmod 0755 "$dir"
+  export GRAFT_MIRROR_CONFIG_DIR=$dir
+}
+
+install_github_token /etc/graft/github-token
+prepare_mounted_configs
 
 log "pulling $GRAFT_IMAGE"
 # The attester (profile `attester`) is built here, not pulled.
@@ -180,9 +232,9 @@ check_server_config() {
 # then reads the token file. With no token mounted, reaching that read means
 # the config passed.
 check_mirror_config() {
-  local cfg=$1 out rc=0
+  local cfg=$1 out rc=0 dir=${GRAFT_MIRROR_CONFIG_DIR:-$here}
   out=$(timeout 60 docker run --rm --network none --user 10001:10001 \
-    --entrypoint graft-mirror -v "$here/$cfg:/c/mirror.toml:ro" \
+    --entrypoint graft-mirror -v "$dir/$cfg:/c/mirror.toml:ro" \
     "$GRAFT_IMAGE" follow --config /c/mirror.toml 2>&1) || rc=$?
   if ! printf '%s' "$out" | grep -q 'reading the token file'; then
     printf '%s\n' "$out" | tail -n 5 >&2

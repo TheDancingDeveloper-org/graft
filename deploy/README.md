@@ -125,17 +125,26 @@ A private upstream (one anonymous `git ls-remote` cannot read) gets a
 `http.extraHeader`. The token is not written into the config, printed, or
 placed in argv. An empty token file fails the mirror. Every mirror, public and private,
 also uses that file as its `[github] token_file` so `pr-batch` can push
-`graft/batch-*` and open a pull request. `up.sh` fetches
-`HOMELAB_VOGT_GITHUB_TOKEN` (Infisical project apps, env prod) at deploy time
-and writes it to `/etc/graft/github-token`, mode 0600, owned by uid 10001.
-The value is never printed, placed in argv, or set as a compose environment
-value. Place the host file before onboarding a private repository if you
-deploy without `up.sh`; otherwise `up.sh` writes it. Generated mirror configs
-are mode 0644 so that user can read them.
+`graft/batch-*` and open a pull request. The graft-dev runner does not talk
+to Infisical. Someone with access places the token once on the VM, outside
+the deploy (the value is never put on argv):
+
+```sh
+secret get HOMELAB_VOGT_GITHUB_TOKEN --project apps | install -m 0600 /dev/stdin /etc/graft/github-token
+```
+
+`up.sh` copies that file into the secrets directory, mode 0600, owned by uid
+10001. If it is missing or empty, the deploy still succeeds: it logs one
+warning, leaves the mount pointing at an empty file, and starts the mirrors
+without `[github]`. `pr-batch` then fails with `pr-batch opens PRs: configure
+[github]` until the file is placed. The value is never printed or set as a
+compose environment value. Place the host file before onboarding a private
+repository if you deploy without `up.sh`. Generated mirror configs are mode
+0644 so that user can read them.
 
 ### Open a batch pull request
 
-From the graft-dev VM, after the line has lands to export:
+From the graft-dev VM, after the line has landed changes to export:
 
 ```sh
 docker exec graft-dev-mirror-<svc> graft-mirror pr-batch <line> --base <branch> --config /etc/graft/deploy/mirror.toml

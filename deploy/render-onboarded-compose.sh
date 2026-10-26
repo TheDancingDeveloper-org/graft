@@ -69,7 +69,7 @@ ${command_yaml}
     ports:
       - "\${GRAFT_BIND_IP:-127.0.0.1}:\${GRAFT_MIRROR_${env_name}_METRICS_PORT:-$port}:9465"
     volumes:
-      - ./$config:/etc/graft/deploy/mirror.toml:ro
+      - \${GRAFT_MIRROR_CONFIG_DIR:-.}/$config:/etc/graft/deploy/mirror.toml:ro
       - type: bind
         source: \${GRAFT_SECRETS_DIR:-/etc/graft}/$token
         target: /run/secrets/graft-mirror-token
