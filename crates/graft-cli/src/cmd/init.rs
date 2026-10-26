@@ -63,10 +63,17 @@ pub(crate) fn run(g: &Global, args: &InitArgs) -> Result<(), Failure> {
             repo: name.clone(),
             workspace: None,
         };
+        // `LocalRepo::create` already made `.graft/repo`. WorkingCopy::init
+        // refuses a dest whose `.graft` exists, so stage the copy beside it
+        // and move the repository directory in afterwards.
+        let stage = dir.with_file_name(format!(
+            ".{}.graft-init",
+            dir.file_name().and_then(|n| n.to_str()).unwrap_or("repo")
+        ));
         let (mut wc, _) = workcopy::clone(
             &api,
             &cx,
-            &dir,
+            &stage,
             config,
             DEFAULT_LINE,
             None,
@@ -76,6 +83,17 @@ pub(crate) fn run(g: &Global, args: &InitArgs) -> Result<(), Failure> {
         .await?;
         let server = format!("local:{}", repo_dir.display());
         wc.set_server(Some(server))?;
+        std::fs::rename(
+            stage.join(".graft").join("config"),
+            dir.join(".graft").join("config"),
+        )?;
+        for name in ["state", "index", "sparse", ".gitignore"] {
+            let from = stage.join(".graft").join(name);
+            if from.exists() {
+                std::fs::rename(&from, dir.join(".graft").join(name))?;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&stage);
 
         if g.json {
             return print_json(&json!({

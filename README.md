@@ -56,8 +56,9 @@ the same release.
 ## Quick start: local
 
 > Local mode is in. `graft init` creates a repository the CLI opens
-> in-process: no server, no daemon, no token. The commands below are the
-> ones that mode accepts.
+> in-process: no server, no daemon, no token. A second working copy is
+> `graft clone` of the first (or of `.graft/repo`). Import and export use
+> `--server local:<repo-dir>`.
 
 ```sh
 graft init demo && cd demo
@@ -101,8 +102,9 @@ The agent loop is clone, edit, commit, sync, land. A conflict comes back in
 the files (exit 3), not as a pull request. The short guide, including the
 exit codes and what never to do, is [docs/agents.md](docs/agents.md).
 
-MCP is `graft mcp` on stdio today. The HTTP `/mcp` endpoint and the tool
-list are in [docs/agents.md](docs/agents.md) (checkout-less agents).
+MCP is `graft mcp` on stdio. Inside a working copy it needs no flags
+(`claude mcp add graft -- graft mcp`). Codex and Cursor snippets, the tool
+list, and the server `/mcp` form are in [docs/agents.md](docs/agents.md).
 
 ## Migrating from git
 

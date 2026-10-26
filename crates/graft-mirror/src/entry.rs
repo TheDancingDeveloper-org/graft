@@ -179,8 +179,9 @@ async fn cmd_import(args: &[String]) -> Result<(), CmdError> {
     }
     let git_dir = git_dir.ok_or_else(|| CmdError::Usage("import needs <git-dir>".into()))?;
     let repo = repo.ok_or_else(|| CmdError::Usage("import needs --repo".into()))?;
-    let server = server
-        .ok_or_else(|| CmdError::Usage("no server: pass --server or GRAFT_ENDPOINT".into()))?;
+    let server = server.ok_or_else(|| {
+        CmdError::Usage("no server: pass --server, GRAFT_ENDPOINT, or local:<repo>".into())
+    })?;
     let db = db.unwrap_or_else(|| git_dir.join("graft-mirror.sqlite"));
 
     let mut config = ImportConfig::new(&git_dir, &repo);
@@ -190,7 +191,7 @@ async fn cmd_import(args: &[String]) -> Result<(), CmdError> {
     config.tags = tags;
     config.allow_lossy = parse_shas(&lossy)?;
 
-    let api = Server::connect(&server, token(token_file.as_deref())?).await?;
+    let api = Server::open(&server, token(token_file.as_deref())?).await?;
     let map = MirrorDb::open(&db).map_err(MirrorError::from)?;
     let out = import_repo(&api, &mirror_cx(&repo), &map, &config).await?;
     let r = &out.report;
@@ -434,9 +435,10 @@ async fn cmd_export_to(args: &[String]) -> Result<(), CmdError> {
     let db = db.ok_or_else(|| {
         CmdError::Usage("export --to needs --db (the mirror DB keeps the exact commits)".into())
     })?;
-    let server = server
-        .ok_or_else(|| CmdError::Usage("no server: pass --server or GRAFT_ENDPOINT".into()))?;
-    let api = Server::connect(&server, token(token_file.as_deref())?).await?;
+    let server = server.ok_or_else(|| {
+        CmdError::Usage("no server: pass --server, GRAFT_ENDPOINT, or local:<repo>".into())
+    })?;
+    let api = Server::open(&server, token(token_file.as_deref())?).await?;
     let db = MirrorDb::open(&db).map_err(MirrorError::from)?;
     let report = export_all(&api, &mirror_cx(&repo), &db, &repo, &dest).await?;
     println!(

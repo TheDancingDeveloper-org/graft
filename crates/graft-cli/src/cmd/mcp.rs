@@ -3,9 +3,9 @@
 //!
 //! Standard output is the MCP channel, so anything for people goes to
 //! standard error. The endpoint and token come from the same places as every
-//! command (`--endpoint`, `GRAFT_ENDPOINT`, the node socket, the working
-//! copy's server; `--token-file` or `GRAFT_TOKEN`), and the token is never
-//! printed.
+//! command (`--server`, `--endpoint`, `GRAFT_ENDPOINT`, the node socket, the
+//! working copy's server; `--token-file` or `GRAFT_TOKEN`), and the token is
+//! never printed. `--print-config` writes a registration snippet and exits.
 //!
 //! Started inside a working copy it also serves the working-copy tools:
 //! `graft_status`, `graft_commit` with `from_working_copy`, and
@@ -20,7 +20,7 @@ use graft_client::workcopy::{
     CommitLimits, CommitOptions, DEFAULT_CACHE_BYTES, LandOptions, LandOutcome, WorkingCopy,
 };
 use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat};
-use graft_client::{Error as ClientError, Remote};
+use graft_client::{Backend, Error as ClientError, LocalRepo};
 use graft_mcp::{
     McpServer, WorkingCopyCommit, WorkingCopyError, WorkingCopyFuture, WorkingCopyLand,
     WorkingCopySync, WorkingCopyTools, WorkingCopyUpstream,
@@ -31,9 +31,11 @@ use graft_proto::{ApiError, CallContext};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::cli::Global;
+use crate::cli::{Global, McpArgs, McpClient};
 use crate::cmd::status::{change_json, upstream_json};
-use crate::conn::{call_context, resolve_settings, runtime, working_copy};
+use crate::conn::{
+    call_context, connect as connect_session, resolve_settings, runtime, working_copy,
+};
 use crate::error::Failure;
 use crate::identity;
 use crate::render;
@@ -41,19 +43,37 @@ use crate::render;
 /// Paths listed in a status or commit result before it says `truncated`.
 const PATHS_MAX: usize = 500;
 
-/// Runs the MCP server over stdio until the client closes it.
-pub(crate) fn run(g: &Global) -> Result<(), Failure> {
+/// Runs the MCP server over stdio until the client closes it, or prints a
+/// registration snippet when `--print-config` is set.
+pub(crate) fn run(g: &Global, args: &McpArgs) -> Result<(), Failure> {
+    if let Some(client) = args.print_config {
+        print_config(client)?;
+        return Ok(());
+    }
     let wc = working_copy()?;
     runtime()?.block_on(async {
-        let remote = Arc::new(connect(g, wc.as_ref()).await?);
-        let principal = call_context().principal;
-        let mut server = McpServer::new(Arc::clone(&remote), principal)
-            .with_endpoint(remote.endpoint().to_string());
+        let (backend, local) = connect(g, wc.as_ref()).await?;
+        let remote = Arc::new(backend);
+        let principal = match local.as_ref() {
+            Some(_) => {
+                LocalRepo::context(
+                    wc.as_ref().map(|w| w.config().repo.as_str()).unwrap_or(""),
+                    "mcp",
+                )
+                .principal
+            }
+            None => call_context().principal,
+        };
+        let mut server = McpServer::new(Arc::clone(&remote), principal);
+        if let Some(endpoint) = remote.endpoint() {
+            server = server.with_endpoint(endpoint.to_string());
+        }
         if let Some(wc) = wc {
             server = server.with_working_copy(Arc::new(Served {
                 repo: wc.config().repo.clone(),
                 wc: Mutex::new(wc),
                 remote,
+                _local: local,
             }));
         }
         server.serve_stdio().await?;
@@ -61,16 +81,78 @@ pub(crate) fn run(g: &Global) -> Result<(), Failure> {
     })
 }
 
+/// Prints the registration snippet for `client`. Inside a working copy the
+/// snippet is flagless. Outside one it passes `-C` and this directory, which
+/// `graft -C` has already entered. The snippet never contains a token.
+fn print_config(client: McpClient) -> Result<(), Failure> {
+    let inside = crate::conn::working_copy_info()?.is_some();
+    let dir = std::env::current_dir().map_err(|e| {
+        Failure::new(
+            crate::Exit::Failure,
+            "mcp",
+            format!("cannot read the current directory: {}", e.kind()),
+        )
+    })?;
+    let text = registration_snippet(client, if inside { None } else { Some(dir.as_path()) });
+    print!("{text}");
+    Ok(())
+}
+
+/// The snippet a client stores. `cwd` is set only outside a working copy, so
+/// the client starts graft there with `-C`.
+fn registration_snippet(client: McpClient, cwd: Option<&std::path::Path>) -> String {
+    let dir = cwd.map(|path| path.display().to_string());
+    match client {
+        McpClient::Claude => match &dir {
+            Some(dir) => format!("claude mcp add graft -- graft -C {dir} mcp\n"),
+            None => "claude mcp add graft -- graft mcp\n".to_owned(),
+        },
+        McpClient::Codex => {
+            let mut out = String::from("[mcp_servers.graft]\ncommand = \"graft\"\n");
+            match &dir {
+                Some(dir) => {
+                    out.push_str(&format!(
+                        "args = [\"-C\", \"{dir}\", \"mcp\"]\ncwd = \"{dir}\"\n"
+                    ));
+                }
+                None => out.push_str("args = [\"mcp\"]\n"),
+            }
+            out
+        }
+        McpClient::Cursor => {
+            let args = match &dir {
+                Some(dir) => format!("[\"-C\", \"{dir}\", \"mcp\"]"),
+                None => "[\"mcp\"]".to_owned(),
+            };
+            format!(
+                "{{\n  \"mcpServers\": {{\n    \"graft\": {{\n      \"command\": \"graft\",\n      \"args\": {args}\n    }}\n  }}\n}}\n"
+            )
+        }
+    }
+}
+
 /// Connects to the endpoint the other commands would use. Unlike them it
 /// needs no repository: every tool names its own.
-async fn connect(g: &Global, wc: Option<&WorkingCopy>) -> Result<Remote, Failure> {
-    let user = crate::config::load()?;
-    let settings = resolve_settings(g, wc, &user)?;
-    let remote = Remote::connect(settings.endpoint).await?;
-    Ok(match settings.token {
-        Some(token) => remote.with_token(token),
-        None => remote,
-    })
+async fn connect(
+    g: &Global,
+    wc: Option<&WorkingCopy>,
+) -> Result<(Backend, Option<std::sync::Arc<LocalRepo>>), Failure> {
+    match wc {
+        Some(wc) => {
+            let session = connect_session(g, Some(wc)).await?;
+            Ok((session.remote, session._local))
+        }
+        None => {
+            let user = crate::config::load()?;
+            let settings = resolve_settings(g, None::<&WorkingCopy>, &user)?;
+            let remote = graft_client::Remote::connect(settings.endpoint).await?;
+            let remote = match settings.token {
+                Some(token) => remote.with_token(token),
+                None => remote,
+            };
+            Ok((Backend::remote(remote), None))
+        }
+    }
 }
 
 /// The working copy `graft mcp` started in, served to the MCP tools. One
@@ -78,7 +160,8 @@ async fn connect(g: &Global, wc: Option<&WorkingCopy>) -> Result<Remote, Failure
 struct Served {
     repo: String,
     wc: Mutex<WorkingCopy>,
-    remote: Arc<Remote>,
+    remote: Arc<Backend>,
+    _local: Option<Arc<LocalRepo>>,
 }
 
 impl Served {
@@ -419,6 +502,28 @@ fn queued_land(line: String, url: String, recovered: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_snippets_carry_no_token() {
+        for client in [McpClient::Claude, McpClient::Codex, McpClient::Cursor] {
+            let inside = registration_snippet(client, None);
+            let outside = registration_snippet(client, Some(std::path::Path::new("/work/app")));
+            for snippet in [&inside, &outside] {
+                let lower = snippet.to_ascii_lowercase();
+                assert!(!lower.contains("token"));
+                assert!(!lower.contains("bearer"));
+                assert!(!lower.contains("secret"));
+                assert!(snippet.contains("mcp"));
+            }
+            assert!(outside.contains("-C"));
+            assert!(outside.contains("/work/app"));
+            assert!(!inside.contains("-C"));
+        }
+        assert_eq!(
+            registration_snippet(McpClient::Claude, None),
+            "claude mcp add graft -- graft mcp\n"
+        );
+    }
 
     #[test]
     fn queued_land_output_is_public_facing() {

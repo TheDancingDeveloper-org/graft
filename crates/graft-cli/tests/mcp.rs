@@ -473,8 +473,51 @@ fn named_server_config_connects_mcp_without_overrides() {
     let mut mcp = Mcp::start(&app, &[], &[("GRAFT_CONFIG", &config_path_text)]);
     let log = mcp.ok("graft_log", json!({"repo": REPO, "from": "main"}));
     assert!(!log.to_string().contains(token));
+    let status = mcp.ok("graft_status", json!({"repo": REPO}));
+    assert_eq!(status["repo"], REPO, "{status}");
+    assert!(
+        status["workspace"].is_string() || status["workspace"].is_null(),
+        "{status}"
+    );
+    assert!(!status.to_string().contains(token), "{status}");
     let stderr = mcp.finish();
     assert!(!stderr.contains(token), "{stderr}");
+}
+
+#[test]
+fn print_config_snapshots_never_include_a_token() {
+    let home = scratch();
+    let app = home.path().join("app");
+    std::fs::create_dir_all(app.join(".graft")).unwrap();
+    std::fs::write(app.join(".graft/config"), "repo = demo\nserver = dev\n").unwrap();
+    std::fs::write(
+        app.join(".graft/state"),
+        "line = main\nbase = c0000000000000000000000000000000000000000000000000000000000000000\nlsn = 0\n",
+    )
+    .unwrap();
+    for client in ["claude", "codex", "cursor"] {
+        let inside = graft(&app)
+            .args(["mcp", "--print-config", client])
+            .assert()
+            .success();
+        let inside_text = String::from_utf8(inside.get_output().stdout.clone()).unwrap();
+        assert!(
+            !inside_text.to_ascii_lowercase().contains("token"),
+            "{inside_text}"
+        );
+        assert!(!inside_text.contains("-C"), "{inside_text}");
+        insta::assert_snapshot!(format!("print_config_{client}_inside"), inside_text);
+
+        let out = graft(home.path())
+            .args(["mcp", "--print-config", client])
+            .assert()
+            .success();
+        let mut text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        assert!(!text.to_ascii_lowercase().contains("token"), "{text}");
+        assert!(text.contains("-C"), "{text}");
+        text = text.replace(&home.path().display().to_string(), "/work");
+        insta::assert_snapshot!(format!("print_config_{client}_outside"), text);
+    }
 }
 
 #[test]

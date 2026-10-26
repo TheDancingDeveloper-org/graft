@@ -2,14 +2,15 @@
 //! and fetches only the slice's objects (`docs/design.md` §9).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use graft_client::fetch::FetchOptions;
-use graft_client::workcopy::{self, WcConfig, WcInfo};
-use graft_client::{RepoUrl, Sparse};
+use graft_client::workcopy::{self, WcConfig, WcInfo, WorkingCopy};
+use graft_client::{Backend, LocalRepo, RepoUrl, Sparse};
 use serde_json::json;
 
 use crate::cli::{CloneArgs, Global};
-use crate::conn::{call_context, connect, repo_path, runtime};
+use crate::conn::{Conn, call_context, connect, local_repo_path, repo_path, runtime};
 use crate::error::Failure;
 use crate::render::{print_json, short};
 
@@ -30,7 +31,7 @@ fn clone_target(repo: &str) -> Result<CloneTarget, Failure> {
         })
     } else if repo.contains("://") {
         Err(Failure::usage(
-            "expected a repository name, graft://host[:port]/repo, or grafts://host[:port]/repo",
+            "expected a repository name, a local path, graft://host[:port]/repo, or grafts://host[:port]/repo",
         ))
     } else {
         Ok(CloneTarget {
@@ -48,6 +49,48 @@ fn default_dir(repo: &str) -> PathBuf {
         .map_or_else(|| PathBuf::from("graft-clone"), PathBuf::from)
 }
 
+fn absolute(path: &Path) -> Result<PathBuf, Failure> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+/// A local repository directory, or a working copy whose server is `local:`.
+fn local_source(path: &str) -> Result<Option<(PathBuf, String)>, Failure> {
+    let candidate = Path::new(path);
+    if !candidate.exists() {
+        return Ok(None);
+    }
+    let abs = absolute(candidate)?;
+    if abs.join("meta.sqlite").is_file() && abs.join("objects").is_dir() {
+        let name = abs
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("repo")
+            .to_owned();
+        return Ok(Some((abs, name)));
+    }
+    match WorkingCopy::open_info(&abs) {
+        Ok(info) => {
+            let Some(server) = info.server() else {
+                return Err(Failure::usage(
+                    "that working copy has no local: server; clone it by repository name",
+                ));
+            };
+            let Some(repo_dir) = local_repo_path(server) else {
+                return Err(Failure::usage(
+                    "that working copy is not local; clone it by repository name from its server",
+                ));
+            };
+            Ok(Some((PathBuf::from(repo_dir), info.config().repo.clone())))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// Clones the repository into a new working copy.
 pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
     if args.root_files && args.paths.is_empty() {
@@ -63,6 +106,15 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
     } else {
         Sparse::new(paths, args.root_files)
     };
+
+    if let Some((repo_dir, repo)) = local_source(&args.repo)? {
+        if args.line_explicit && args.line.contains("://") {
+            return Err(Failure::usage("a local clone does not take a graft URL"));
+        }
+        let dest = args.dir.clone().unwrap_or_else(|| default_dir(&repo));
+        return clone_local(g, args, dest, sparse, repo_dir, repo);
+    }
+
     let target = clone_target(&args.repo)?;
     if let Some(from_url) = &target.line
         && args.line_explicit
@@ -97,61 +149,96 @@ pub(crate) fn run(g: &Global, args: &CloneArgs) -> Result<(), Failure> {
         .unwrap_or_else(|| default_dir(&target.repo));
 
     runtime()?.block_on(async {
-        let cx = call_context();
         let conn = connect(&g, None::<&WcInfo>).await?;
-        let at = match &args.at {
-            Some(rev) => Some(conn.resolve(&cx, rev).await?),
-            None => None,
-        };
-        let config = WcConfig {
-            endpoint: conn
-                .server
-                .is_none()
-                .then(|| conn.remote.endpoint().map(ToString::to_string))
-                .flatten(),
-            repo: conn.repo.clone(),
-            workspace: None,
-        };
-        let (mut wc, stats) = workcopy::clone(
-            &conn.remote,
-            &cx,
-            &dest,
-            config,
-            &line,
-            at,
-            sparse,
-            &FetchOptions::default(),
-        )
-        .await?;
-        wc.set_server(conn.server.clone())?;
-        let base = wc.state().base;
-        let files = wc.index().entries.len();
-        if g.json {
-            return print_json(&json!({
-                "repo": conn.repo,
-                "endpoint": conn.remote.endpoint().map(ToString::to_string),
-                "line": line,
-                "base": base.to_string(),
-                "dir": dest.display().to_string(),
-                "files": files,
-                "fetch": {
-                    "trees": stats.trees,
-                    "blobs": stats.blobs,
-                    "bytes": stats.bytes,
-                    "requests": stats.requests,
-                    "cached": stats.cached,
-                },
-            }));
-        }
-        outln!(
-            "cloned {} {} at {} into {} ({files} files)",
-            conn.repo,
-            line,
-            short(base),
-            dest.display()
-        );
-        Ok(())
+        finish_clone(&g, &line, dest, sparse, conn, args.at.as_deref()).await
     })
+}
+
+fn clone_local(
+    g: &Global,
+    args: &CloneArgs,
+    dest: PathBuf,
+    sparse: Sparse,
+    repo_dir: PathBuf,
+    repo: String,
+) -> Result<(), Failure> {
+    let line = args.line.clone();
+    let at = args.at.clone();
+    runtime()?.block_on(async move {
+        let local = Arc::new(LocalRepo::open(&repo_dir)?);
+        let conn = Conn {
+            remote: Backend::local(local.engine_handle(), repo.clone()),
+            repo,
+            server: Some(format!("local:{}", repo_dir.display())),
+            line: line.clone(),
+            known: Vec::new(),
+            _local: Some(local),
+        };
+        finish_clone(g, &line, dest, sparse, conn, at.as_deref()).await
+    })
+}
+
+async fn finish_clone(
+    g: &Global,
+    line: &str,
+    dest: PathBuf,
+    sparse: Sparse,
+    conn: Conn,
+    at: Option<&str>,
+) -> Result<(), Failure> {
+    let cx = call_context();
+    let at = match at {
+        Some(rev) => Some(conn.resolve(&cx, rev).await?),
+        None => None,
+    };
+    let config = WcConfig {
+        endpoint: conn
+            .server
+            .is_none()
+            .then(|| conn.remote.endpoint().map(ToString::to_string))
+            .flatten(),
+        repo: conn.repo.clone(),
+        workspace: None,
+    };
+    let (mut wc, stats) = workcopy::clone(
+        &conn.remote,
+        &cx,
+        &dest,
+        config,
+        line,
+        at,
+        sparse,
+        &FetchOptions::default(),
+    )
+    .await?;
+    wc.set_server(conn.server.clone())?;
+    let base = wc.state().base;
+    let files = wc.index().entries.len();
+    if g.json {
+        return print_json(&json!({
+            "repo": conn.repo,
+            "endpoint": conn.remote.endpoint().map(ToString::to_string),
+            "line": line,
+            "base": base.to_string(),
+            "dir": dest.display().to_string(),
+            "files": files,
+            "fetch": {
+                "trees": stats.trees,
+                "blobs": stats.blobs,
+                "bytes": stats.bytes,
+                "requests": stats.requests,
+                "cached": stats.cached,
+            },
+        }));
+    }
+    outln!(
+        "cloned {} {} at {} into {} ({files} files)",
+        conn.repo,
+        line,
+        short(base),
+        dest.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]

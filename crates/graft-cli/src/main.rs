@@ -169,7 +169,7 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         Command::Ci(args) => cmd::ci::run(g, args),
         Command::Api(args) => api::run(g, args),
         Command::Version => cmd::version::run(g),
-        Command::Mcp => cmd::mcp::run(g),
+        Command::Mcp(args) => cmd::mcp::run(g, args),
         Command::Lsp { args } => match cmd::lsp::run(args) {
             Exit::Ok => Ok(()),
             code => Err(Failure::silent(code)),

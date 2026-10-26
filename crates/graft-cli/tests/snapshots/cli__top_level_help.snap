@@ -1,5 +1,6 @@
 ---
 source: crates/graft-cli/tests/cli.rs
+assertion_line: 153
 expression: text(out.get_output())
 ---
 The graft command-line client.
@@ -40,6 +41,7 @@ Options:
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
       --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
 

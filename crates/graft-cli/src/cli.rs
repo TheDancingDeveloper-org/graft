@@ -41,6 +41,9 @@ pub(crate) struct Global {
     /// File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument.
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) token_file: Option<PathBuf>,
+    /// Named server in the user config. Its endpoint and token file are used; the token is never an argument.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub(crate) server: Option<String>,
     /// Run as if started in this directory, like `git -C`
     #[arg(short = 'C', long = "directory", global = true, value_name = "DIR")]
     pub(crate) directory: Option<PathBuf>,
@@ -121,8 +124,9 @@ pub(crate) enum Command {
     /// tools: graft_status, graft_commit with from_working_copy, and
     /// graft_land and graft_sync that move the working copy. Standard output
     /// is the MCP channel; messages go to standard error. The token comes
-    /// only from --token-file or GRAFT_TOKEN.
-    Mcp,
+    /// from the working copy's named server, `--server`, `--token-file`, or
+    /// `GRAFT_TOKEN`, and is never printed.
+    Mcp(McpArgs),
     /// Run the LSP server over stdio
     Lsp {
         /// Arguments passed to the LSP server
@@ -141,6 +145,24 @@ pub(crate) enum Command {
     /// Commands designed but not built yet
     #[command(external_subcommand)]
     Planned(Vec<String>),
+}
+
+/// Which MCP client a registration snippet is for.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub(crate) enum McpClient {
+    /// `claude mcp add`
+    Claude,
+    /// A Codex `config.toml` block
+    Codex,
+    /// A Cursor `.cursor/mcp.json` block
+    Cursor,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct McpArgs {
+    /// Print the registration snippet for this client and exit. Never prints a token.
+    #[arg(long, value_enum, value_name = "CLIENT")]
+    pub(crate) print_config: Option<McpClient>,
 }
 
 #[derive(Debug, Args)]

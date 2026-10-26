@@ -1,0 +1,6 @@
+---
+source: crates/graft-cli/tests/mcp.rs
+assertion_line: 519
+expression: text
+---
+claude mcp add graft -- graft -C /work mcp
