@@ -24,6 +24,7 @@ use graft_model::{
     ApplyOptions, Change, Changeset, ChangesetId, CheckOptions, EntryKind, Metadata, ObjectId,
     ObjectKind, Rule, Tree, TreeId, Violation, apply_changes_with,
 };
+use graft_proto::attribution;
 use graft_proto::types::{CreateChangeset, Created, DraftState, ImportChangesets};
 use graft_proto::{ApiError, CallContext, Frame, PrincipalKind};
 use graft_store::{
@@ -1115,23 +1116,38 @@ fn put_blobs(changes: &[Change]) -> Vec<ObjectId> {
         .collect()
 }
 
-/// A caller whose token names a Vogt session or work item can't attribute a
-/// changeset to a different one: `vogt.session` and `vogt.work_item`, when
-/// set, must match the token, so `pr-batch` trailers (D26) can be trusted. Services (the node daemon, the mirror) act for
-/// others and are trusted.
+/// A caller whose token names a session or work item can't attribute a
+/// changeset to a different one. Either name — `agent.session` /
+/// `agent.work_item`, or the legacy aliases — must match the token when it
+/// is set, so export trailers can be trusted. The new name is preferred by
+/// [`graft_proto::attribution::get`]; a legacy value that disagrees is still
+/// refused, even when the new name matches. Services (the node daemon, the
+/// mirror) act for others and are trusted.
 fn check_identity(cx: &CallContext, metadata: &Metadata) -> Result<(), ApiError> {
     let p = &cx.principal;
     if p.kind == PrincipalKind::Service {
         return Ok(());
     }
     for (key, held, rule) in [
-        ("vogt.session", &p.session, "session-metadata"),
-        ("vogt.work_item", &p.work_item, "work-item-metadata"),
+        (attribution::Key::Session, &p.session, "session-metadata"),
+        (
+            attribution::Key::WorkItem,
+            &p.work_item,
+            "work-item-metadata",
+        ),
     ] {
-        if let (Some(held), Some(given)) = (held, metadata.get(key))
-            && given != held
-        {
-            return Err(errors::invalid(None, rule));
+        if let Some(held) = held {
+            if attribution::get(metadata, key).is_some_and(|given| given != held) {
+                return Err(errors::invalid(None, rule));
+            }
+            // The new name wins for readers, but a stored legacy value that
+            // names someone else is still a lie.
+            if metadata
+                .get(key.legacy())
+                .is_some_and(|given| given != held)
+            {
+                return Err(errors::invalid(None, rule));
+            }
         }
     }
     Ok(())
