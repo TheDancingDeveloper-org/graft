@@ -53,16 +53,34 @@ jobs:
           # shellcheck disable=SC2016
           expr_open='${'"{"
           while IFS=: read -r file number line; do
-            case "$line" in
-              *self-hosted*|*"[graft-dev]"*) ;;
-              *)
-                echo "::error file=$file,line=$number::job does not name a self-hosted runner"
-                bad=1
-                ;;
-            esac
-            case "$line" in
+            # The whole runs-on value: key and any trailing comment stripped,
+            # surrounding whitespace trimmed.
+            value=${line#*runs-on:}
+            value=${value%%#*}
+            value=$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+            case "$value" in
               *"$expr_open"*)
                 echo "::error file=$file,line=$number::dynamic runner selection is not allowed"
+                bad=1
+                continue
+                ;;
+            esac
+            case "$value" in
+              # Self-hosted lists. The graft-dev runner is self-hosted but
+              # registered with --no-default-labels, so its only label is
+              # graft-dev.
+              "[self-hosted]"|"[self-hosted,"*"]"|"[graft-dev]") ;;
+              # Operator decision 2026-10-26: release builds in release.yml
+              # only use these hosted labels, matched exactly. Required PR
+              # checks in ci.yml stay self-hosted.
+              ubuntu-24.04|ubuntu-24.04-arm|macos-14|"[ubuntu-24.04]"|"[ubuntu-24.04-arm]"|"[macos-14]")
+                if [ "$file" != .github/workflows/release.yml ]; then
+                  echo "::error file=$file,line=$number::hosted runners are allowed only in release.yml"
+                  bad=1
+                fi
+                ;;
+              *)
+                echo "::error file=$file,line=$number::job does not name an allowed runner"
                 bad=1
                 ;;
             esac
@@ -107,7 +125,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -122,18 +140,17 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight]
-    runs-on: [self-hosted, docker]
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cross
       - name: Build static archive
-        run: scripts/release/build-archive.sh x86_64-unknown-linux-musl cross
+        run: scripts/release/build-archive.sh x86_64-unknown-linux-musl cargo
       - name: Verify checksum
         run: sha256sum -c graft-x86_64-unknown-linux-musl.tar.gz.sha256
       - uses: actions/upload-artifact@v4
@@ -149,18 +166,17 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight]
-    runs-on: [self-hosted, docker]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cross
       - name: Build static archive
-        run: scripts/release/build-archive.sh aarch64-unknown-linux-musl cross
+        run: scripts/release/build-archive.sh aarch64-unknown-linux-musl cargo
       - name: Verify checksum
         run: sha256sum -c graft-aarch64-unknown-linux-musl.tar.gz.sha256
       - uses: actions/upload-artifact@v4
@@ -176,7 +192,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight]
-    runs-on: [self-hosted, macos]
+    runs-on: macos-14
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -200,7 +216,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight, binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-aarch64]
-    runs-on: [self-hosted, docker]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -245,7 +261,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     needs: [release-preflight, binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-aarch64, image]
-    runs-on: [self-hosted]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write

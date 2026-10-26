@@ -1,0 +1,1 @@
+Release builds run on GitHub-hosted runners: `ubuntu-24.04` for x86_64 musl, image, preflight and assembly; `ubuntu-24.04-arm` for aarch64 musl; `macos-14` for aarch64 Darwin. The runner-policy check allowlists those exact labels for `release.yml` only. Required checks stay self-hosted.
