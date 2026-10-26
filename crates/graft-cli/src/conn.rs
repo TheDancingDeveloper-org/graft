@@ -299,28 +299,13 @@ fn resolve_settings_from_sources(
         ));
     }
     let named_endpoint = named.map(|server| Endpoint::parse(&server.endpoint));
-    let endpoint = endpoint_override
-        .clone()
-        .or_else(|| {
-            wc.and_then(|(_, server)| server)
-                .and(named_endpoint.clone())
-        })
-        .or_else(|| {
-            let socket = Path::new(NODE_SOCKET);
-            socket.exists().then(|| Endpoint::NodeSocket(socket.to_owned()))
-        })
-        .or(legacy_endpoint)
-        .or(named_endpoint.clone())
-        .ok_or_else(|| {
-            Failure::usage(
-                "no endpoint: pass --endpoint, set GRAFT_ENDPOINT, run `graft login`, or use a configured working copy",
-            )
-        })?;
-    let server = named_endpoint
-        .as_ref()
-        .filter(|named_endpoint| **named_endpoint == endpoint)
-        .and(selected_server)
-        .map(str::to_owned);
+    let (endpoint, server) = resolve_connection_from_sources(
+        wc,
+        selected_server,
+        named_endpoint.as_ref(),
+        legacy_endpoint,
+        endpoint_override,
+    )?;
     let token = match token_override {
         Some(token) => Some(token),
         None => server
@@ -334,6 +319,37 @@ fn resolve_settings_from_sources(
         endpoint,
         token,
     })
+}
+
+pub(crate) fn resolve_connection_from_sources(
+    wc: Option<(&WcConfig, Option<&str>)>,
+    selected_server: Option<&str>,
+    named_endpoint: Option<&Endpoint>,
+    legacy_endpoint: Option<Endpoint>,
+    endpoint_override: Option<Endpoint>,
+) -> Result<(Endpoint, Option<String>), Failure> {
+    let endpoint = endpoint_override
+        .clone()
+        .or_else(|| {
+            wc.and_then(|(_, server)| server)
+                .and(named_endpoint.cloned())
+        })
+        .or_else(|| {
+            let socket = Path::new(NODE_SOCKET);
+            socket.exists().then(|| Endpoint::NodeSocket(socket.to_owned()))
+        })
+        .or(legacy_endpoint)
+        .or(named_endpoint.cloned())
+        .ok_or_else(|| {
+            Failure::usage(
+                "no endpoint: pass --endpoint, set GRAFT_ENDPOINT, run `graft login`, or use a configured working copy",
+            )
+        })?;
+    let server = named_endpoint
+        .filter(|named_endpoint| **named_endpoint == endpoint)
+        .and(selected_server)
+        .map(str::to_owned);
+    Ok((endpoint, server))
 }
 
 /// The bearer token from `--token-file`, else `GRAFT_TOKEN`. Surrounding

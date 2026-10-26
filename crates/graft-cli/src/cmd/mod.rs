@@ -10,6 +10,7 @@ pub(crate) mod commit;
 pub(crate) mod completions;
 pub(crate) mod config;
 pub(crate) mod diff;
+pub(crate) mod doctor;
 pub(crate) mod init;
 pub(crate) mod land;
 pub(crate) mod line;

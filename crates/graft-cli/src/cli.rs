@@ -62,6 +62,8 @@ pub(crate) enum Command {
     Logout(LogoutArgs),
     /// Inspect user configuration
     Config(ConfigArgs),
+    /// Check config, server, endpoint, protocol and token
+    Doctor,
     /// Create a local repository and working copy
     Init(InitArgs),
     /// Open a workspace and lay out a sparse working copy

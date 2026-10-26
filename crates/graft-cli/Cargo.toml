@@ -21,6 +21,7 @@ base64.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 clap_mangen.workspace = true
+graft-auth.workspace = true
 graft-client.workspace = true
 graft-mirror = { path = "../graft-mirror" }
 graft-node = { path = "../graft-node" }

@@ -45,6 +45,14 @@ fn completions_cover_public_commands_and_options() {
                 "{shell} completion exposed hidden command {hidden}"
             );
         }
+        if shell == "bash" {
+            for hidden in HIDDEN_COMMANDS {
+                assert!(
+                    !script.split_whitespace().any(|word| word == *hidden),
+                    "bash completion exposed hidden command {hidden}"
+                );
+            }
+        }
         assert_no_internal_references(&["completions", shell], &script);
     }
 }
