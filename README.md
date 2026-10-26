@@ -24,9 +24,9 @@ from this repository:
 cargo install --git https://github.com/TheDancingDeveloper-org/graft graft-cli
 ```
 
-That installs the `graft` binary (clone, commit, sync, land, login, MCP).
-`graft-server`, `graft-node` and `graft-mirror` are separate workspace
-binaries; build them from a checkout with `cargo build -p graft-cli`.
+That installs the `graft` binary. `graft serve`, `graft node` and
+`graft mirror` are subcommands of that binary (the server, the host cache,
+and git import and export).
 
 Release binaries and the container image are produced by the release
 workflow when a `v*` tag is pushed. They are not published yet. The
@@ -62,7 +62,8 @@ graft land                       # moves the line by compare-and-swap
 
 From the second copy, edit a different region of `file.txt`, commit and
 land. Line merge (merge3) keeps both edits. A second land of an overlapping
-edit exits 3 with conflict markers in the file.
+edit exits 3, lists the paths and writes nothing. `graft land --sync` (or
+`graft sync`) moves to the tip and writes the conflict markers into the file.
 
 ## Quick start: server
 
@@ -109,18 +110,14 @@ form are in [docs/agents.md](docs/agents.md).
 
 ## Migrating from git
 
-Git stays in the mirror. Nothing else in graft speaks git.
-
 | Step | Command | What it does |
 | --- | --- | --- |
-| Import | `graft-mirror import` | Lossless import of a git repository, including raw tag objects |
-| Follow | `graft-mirror follow` | Keep a git remote and graft in step |
-| Batch export | `graft-mirror pr-batch` | Deliver lands to GitHub as one pull request, one commit per land |
-| Full export | `graft-mirror export` | Write the history back out to git. This is the exit path |
+| Import | `graft mirror import` | Lossless import of a git repository, including raw tag objects |
+| Follow | `graft mirror follow` | Keep a git remote and graft in step |
+| Batch export | `graft mirror pr-batch` | Deliver lands to GitHub as one pull request, one commit per land |
+| Full export | `graft mirror export` | Write the history back out to git. This is the exit path |
 
-Those commands are the `graft-mirror` binary. `graft mirror` runs
-the same binary when experimental commands are enabled. Build it with
-`cargo build -p graft-mirror`.
+Git import and export stay behind `graft mirror`. Nothing else in graft speaks git.
 
 ## How it compares
 
