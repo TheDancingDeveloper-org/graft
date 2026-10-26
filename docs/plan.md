@@ -4,21 +4,23 @@
   What is delivered is in [status.md](status.md).
 - **Design:** [design.md](design.md) · **Decisions:** [decisions.md](decisions.md)
 
-## Phases (D22)
+## Phases
 
-The build waves below (G1 to G3) were planned as a read pilot, then writes
-through GitHub, then native landing. Almost all of them are built: every item
-from G1.1 to G3.11 is merged on `main`, except G3.10 (not planned), G1.17
-(superseded by the graft-dev VM) and G1.18 (dropped by D20). The product
-phases are now set by D22:
+The product roadmap is [roadmap.md](roadmap.md) (operator, 2026-10-26,
+[D35](decisions.md#d35-the-roadmap-of-record-and-the-phase-2-trigger)).
+It supersedes the phase table that used to live here. In short:
 
-| Phase | Ships | State |
+| Release | Ships | State |
 | --- | --- | --- |
-| 1 | **A git alternative.** Correct storage and history; fast sparse clone and sync; workspaces; server-side rebase, line merge (D16) and lock-free CAS land; conflicts handed back to the client; CLI, MCP and LSP; git import and export; line merge between lines with merge points (D29), pick and tags; GitHub delivery as one batch PR per batch (D21) with one commit per land (D26), rebase-merged by `land-pr` (D28); a client-side pre-land conflict check (D27). Lines default to `direct`; no build, test or CI runs in the land path | Built and in use (trial WI-2270). Backlog nearly done; what remains is below |
-| 2 | **CI checks.** `attested` and `queued` policies, the attester, the CI token exchange, post-land runners, auto-revert | Code exists (G3.1, G3.8, the trial attester), switched off. Not extended until the operator starts phase 2. Phase 2 starts with the graft-primary authority switch; D25's post-land checks on the batch line (design §8.7) are its design |
-| (3) | Folded into phases 1 and 2: native landing ships in phase 1 on `direct` lines; its policy gate and CI attestations are phase 2 | — |
-| 4 | **Breadth:** per-line combiner, prefetch, symbol index, a second repository, the export drill (auto-revert moves to phase 2) | Outline, WI-2214 (p4) |
-| 5 | **Later:** regional tier, virtual checkouts, chunked blobs, code search, publish decision | — |
+| v0.1 | **A git alternative with low friction.** Storage and history; sparse clone; workspaces and stacks; server-side rebase, line merge (D16) and lock-free land; conflicts in the files; the pre-land check (D27); lines, merge points (D29), pick, tags; CLI, MCP, LSP; git import, follow and export; batch PRs with one commit per land (D26, D28, D30); local repositories (D32); one binary; `serve --dev`; `login`; releases. Lines are `direct`; nothing runs in the land path (D22, D31) | Shipped 2026-10-26 (v0.1.0); polish continues as v0.1.x |
+| v0.2 | **Verification without gates.** Attestation kinds `check`, `review`, `approval`; post-land checks with bisect and auto-revert on candidate lines (D25, §8.7); the review queue as a query; the CI token exchange; journal webhooks | Not started. Starts with the decision to switch a named repository to graft-primary (D35) |
+| v0.3 | **Gates as policy.** `require` rules per line, path and change size; who may attest; parked lands (D36); proposals as a query; a read-only web UI in the server (D38); break glass | Not started |
+| v0.4 | **First authority switch.** One repository graft-primary; GitHub becomes an export mirror; external PRs imported as drafts; no pull requests for that repository | Not started |
+| v0.5+ | **Breadth.** Combiner, path read restrictions, a replica store, a regional tier, symbol index, virtual checkouts, chunked blobs | Outline (WI-2214) |
+
+The build waves below (G1 to G3) were the original plan and are kept as
+history. Everything from G1.1 to G3.11 is on `main` except G3.10 (not
+planned) and G1.17 and G1.18 (superseded or dropped).
 
 Not planned (D21, D22): cutting rustTorrent `main` over to graft-primary
 (G3.10), and the per-land PR bridge (G2.6; its code was removed in
