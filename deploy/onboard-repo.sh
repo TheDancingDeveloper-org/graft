@@ -216,7 +216,7 @@ trap cleanup EXIT
 attempts=${GRAFT_LINE_ATTEMPTS:-60}
 attempt=1
 while :; do
-if ! docker run --rm --user 0:0 --network graft-dev \
+if docker run --rm --user 0:0 --network graft-dev \
     --entrypoint sh -v "$work:/w" "${GRAFT_IMAGE:?deploy/image.env did not set GRAFT_IMAGE}" -c '
       set -eu
       repo=$1; base=$2; line=$3
