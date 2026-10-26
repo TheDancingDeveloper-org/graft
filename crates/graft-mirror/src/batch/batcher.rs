@@ -34,6 +34,9 @@ use super::types::{
 /// An open batch's detail when the line has nothing past its tip.
 const NOTHING_NEW: &str = "waiting for review; no new lands to append";
 
+/// How many taken batch numbers a new batch skips before it gives up.
+const MAX_TAKEN_PROBES: u64 = 32;
+
 /// Batches one integration line into squashed GitHub PRs.
 pub struct Batcher<'a, A, F> {
     api: &'a A,
@@ -991,7 +994,7 @@ where
             }
         }
 
-        let number = self.db.next_batch_number()?;
+        let number = self.free_number().await?;
         let created_ms = (self.clock)();
         let branch = format!("{BRANCH_PREFIX}{number}");
         let line = clean_text(&self.config.line, FIELD_CHARS, false);
@@ -1595,11 +1598,58 @@ where
         Ok(())
     }
 
-    /// Opens the PR, or adopts the one already on the branch. Never merges
-    /// or queues it.
+    /// The next batch number whose branch graft is free to use: past the
+    /// database's last batch, and past any `graft/batch-<n>` that already
+    /// has a branch or a PR on GitHub (a reset database, trial leftovers).
+    /// Such a branch or PR is never reused or adopted (WI-2585).
+    async fn free_number(&mut self) -> Result<u64, MirrorError> {
+        let first = self.db.next_batch_number()?;
+        for number in first..first + MAX_TAKEN_PROBES {
+            let branch = format!("{BRANCH_PREFIX}{number}");
+            let there = self.mirror.ls_remote(&[branch.as_str()]).await?;
+            if there.iter().any(|(_, sha)| sha.is_some()) {
+                tracing::warn!(branch = %branch, "mirror batch: branch exists; skipping its number");
+                continue;
+            }
+            if let Some(pull) = self.forge.find_pull(&branch).await? {
+                tracing::warn!(
+                    branch = %branch, pr = pull.number,
+                    "mirror batch: branch has a PR graft did not open; skipping its number"
+                );
+                continue;
+            }
+            return Ok(number);
+        }
+        Err(config_err(format!(
+            "batch numbers {first} to {} all have a branch or PR on GitHub; \
+             remove stale {BRANCH_PREFIX}* branches or PRs",
+            first + MAX_TAKEN_PROBES - 1
+        )))
+    }
+
+    /// Opens the PR, or adopts the one this batch opened before a crash: open,
+    /// and at the batch's own head. Any other PR on the branch (merged,
+    /// closed, or at other commits) was not opened by this batch; it is never
+    /// adopted, and the batch is rejected so its lands stay pending.
     async fn open(&mut self, rec: &mut BatchRecord) -> Result<(), MirrorError> {
         let pull = match self.forge.find_pull(&rec.branch).await? {
-            Some(pull) => pull,
+            Some(pull) if pull.open && !pull.merged && pull.head_sha == rec.squash_sha.to_hex() => {
+                pull
+            }
+            // This includes the batch's own PR when a run crashed after
+            // create_pull and the PR was merged or closed before the retry:
+            // the batch is rejected and its lands are batched again. If that
+            // PR was merged, the next batch repeats changes main already has
+            // and the operator closes it; lands are never silently lost.
+            Some(pull) => {
+                return self.reject(
+                    rec,
+                    format!(
+                        "branch {} already has PR #{} that this batch did not open; not adopted",
+                        rec.branch, pull.number
+                    ),
+                );
+            }
             None => {
                 let new = crate::github::NewPull {
                     title: rec.title.clone(),
