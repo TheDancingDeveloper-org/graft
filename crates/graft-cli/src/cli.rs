@@ -3,7 +3,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, Args, Parser, Subcommand};
 
 /// The default line when no working copy or `--at` names a snapshot.
 pub(crate) const DEFAULT_LINE: &str = "main";
@@ -227,6 +228,16 @@ pub(crate) enum ConfigCommand {
     Show,
 }
 
+/// Whether `clone --line` was written on the command line. Clap's
+/// `ValueSource` covers `--line b` and `--line=b`; a default value does not
+/// count.
+pub(crate) fn clone_line_from_command_line(matches: &ArgMatches) -> bool {
+    matches
+        .subcommand_matches("clone")
+        .and_then(|clone| clone.value_source("line"))
+        == Some(ValueSource::CommandLine)
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct CloneArgs {
     /// Repository to clone
@@ -236,8 +247,9 @@ pub(crate) struct CloneArgs {
     /// Line whose tip to clone, unless `--at` is given
     #[arg(long, default_value = DEFAULT_LINE)]
     pub(crate) line: String,
-    /// True when `--line` was passed. The default does not count, so a URL
-    /// `?line=` is not reported as a conflict with the implicit `main`.
+    /// True when `--line` was passed, in either `--line b` or `--line=b`
+    /// form. The default does not count, so a URL `?line=` is not reported
+    /// as a conflict with the implicit `main`.
     #[arg(skip)]
     pub(crate) line_explicit: bool,
     /// Snapshot to clone: a changeset id or a ref name

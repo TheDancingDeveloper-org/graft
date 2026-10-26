@@ -17,7 +17,7 @@ mod render;
 
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 
 use cli::{Cli, Command};
 use error::Failure;
@@ -51,7 +51,11 @@ fn main() -> ExitCode {
     if let Some(code) = legacy_role_entry(&args) {
         return code;
     }
-    let cli = match Cli::try_parse() {
+    let matches = match Cli::command().try_get_matches() {
+        Ok(matches) => matches,
+        Err(e) => return parse_failure(e),
+    };
+    let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(e) => return parse_failure(e),
     };
@@ -62,8 +66,7 @@ fn main() -> ExitCode {
     if let Some(code) = role_entry(&cli.command) {
         return code;
     }
-    let mut cli = cli;
-    mark_explicit_line(&mut cli);
+    mark_explicit_line(&mut cli, &matches);
     let result = dispatch(&cli);
     let code = match result {
         Ok(()) => Exit::Ok,
@@ -126,10 +129,10 @@ fn enter_directory(g: &cli::Global) -> Result<(), Failure> {
 
 /// Records that `--line` was written on the command line. Clap's default
 /// is the same string, so the clone conflict check cannot see the difference
-/// from the parsed value alone.
-fn mark_explicit_line(cli: &mut Cli) {
+/// from the parsed value alone. `ValueSource` sees `--line b` and `--line=b`.
+fn mark_explicit_line(cli: &mut Cli, matches: &clap::ArgMatches) {
     if let Command::Clone(args) = &mut cli.command
-        && std::env::args_os().any(|arg| arg == "--line")
+        && cli::clone_line_from_command_line(matches)
     {
         args.line_explicit = true;
     }
