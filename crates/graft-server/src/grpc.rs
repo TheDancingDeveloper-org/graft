@@ -204,6 +204,11 @@ impl Services {
             .send_compressed(gz)
             .max_decoding_message_size(CI_MESSAGE)
             .max_encoding_message_size(CONTROL_MESSAGE);
+        let review = pb::review_service_server::ReviewServiceServer::new(self.clone())
+            .accept_compressed(gz)
+            .send_compressed(gz)
+            .max_decoding_message_size(CONTROL_MESSAGE)
+            .max_encoding_message_size(CONTROL_MESSAGE);
         let mirror = pb::mirror_service_server::MirrorServiceServer::new(self)
             .accept_compressed(gz)
             .send_compressed(gz)
@@ -214,6 +219,7 @@ impl Services {
             .add_service(workspaces)
             .add_service(admin)
             .add_service(ci)
+            .add_service(review)
             .add_service(mirror)
     }
 
@@ -1350,6 +1356,64 @@ impl pb::mirror_service_server::MirrorService for Services {
             .map_err(Status::from)?;
         tracing::info!(op = OP, count, "recorded exported commits");
         Ok(Response::new(pb::Empty {}))
+    }
+}
+
+#[tonic::async_trait]
+impl pb::review_service_server::ReviewService for Services {
+    async fn get_attestations(
+        &self,
+        request: Request<pb::GetAttestationsRequest>,
+    ) -> Result<Response<pb::AttestationPage>, Status> {
+        let cx = self.cx(&request, "GetAttestations")?;
+        let req: GetAttestations = wire(request.into_inner())?;
+        let repo = req.repo.clone();
+        let page = self
+            .app
+            .call(
+                "GetAttestations",
+                &repo,
+                cx,
+                false,
+                move |e, cx| async move { e.get_attestations(&cx, req).await },
+            )
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(page.into()))
+    }
+
+    async fn get_land_checks(
+        &self,
+        request: Request<pb::GetLandChecksRequest>,
+    ) -> Result<Response<pb::LandCheckPage>, Status> {
+        let cx = self.cx(&request, "GetLandChecks")?;
+        let req: GetLandChecks = wire(request.into_inner())?;
+        let repo = req.repo.clone();
+        let page = self
+            .app
+            .call("GetLandChecks", &repo, cx, false, move |e, cx| async move {
+                e.get_land_checks(&cx, req).await
+            })
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(page.into()))
+    }
+
+    async fn review_queue(
+        &self,
+        request: Request<pb::ReviewQueueRequest>,
+    ) -> Result<Response<pb::ReviewQueuePage>, Status> {
+        let cx = self.cx(&request, "ReviewQueue")?;
+        let req: ReviewQueue = wire(request.into_inner())?;
+        let repo = req.repo.clone();
+        let page = self
+            .app
+            .call("ReviewQueue", &repo, cx, false, move |e, cx| async move {
+                e.review_queue(&cx, req).await
+            })
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(page.into()))
     }
 }
 

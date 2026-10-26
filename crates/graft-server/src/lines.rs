@@ -19,6 +19,7 @@ use graft_engine::policy::{
 };
 use graft_model::RepoPath;
 use serde::Deserialize;
+use serde::de::{self, Deserializer, MapAccess};
 
 /// The land policy a line gates with.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -78,21 +79,152 @@ pub(crate) struct PostLandSpec {
 }
 
 /// One `[[lines]]` entry, or the `[default_line]` table (which has no name).
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// `checks` is either the land-policy array (`["ci/fmt", ...]`) or the
+/// tracking string `"post-land"`. Those are different fields on the engine
+/// (`LandPolicy` versus [`LineChecks`]), so this type deserializes the key
+/// itself. An absent `checks` key is the policy default (no checks) and
+/// [`LineChecks::Off`].
+#[derive(Clone, Debug, Default)]
 pub(crate) struct LineSpec {
     pub(crate) name: Option<String>,
-    #[serde(default)]
     pub(crate) policy: PolicySpec,
-    #[serde(default)]
+    /// Land-policy check names when `checks` is an array.
     pub(crate) checks: Vec<String>,
-    #[serde(default)]
+    /// Non-gating tracking when `checks = "post-land"`.
+    pub(crate) tracking: Option<TrackingMode>,
+    /// Check names a post-land landing must pass.
+    pub(crate) required: Vec<String>,
+    /// Failures of one post-land check tolerated before it is `bad`.
+    /// Absent means 0. Ignored unless tracking is post-land.
+    pub(crate) retries: u32,
     pub(crate) attest_merged: bool,
-    #[serde(default)]
     pub(crate) authority: AuthoritySpec,
-    #[serde(default)]
     pub(crate) path_rules: Vec<PathRuleSpec>,
     pub(crate) post_land: Option<PostLandSpec>,
+}
+
+/// `checks = "post-land"`: non-gating land-check tracking (D25).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrackingMode {
+    /// Each landing gets a `pending` land-checks row.
+    PostLand,
+}
+
+impl<'de> Deserialize<'de> for LineSpec {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> de::Visitor<'de> for Visit {
+            type Value = LineSpec;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a line table")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<LineSpec, A::Error> {
+                let mut spec = LineSpec::default();
+                let mut seen = std::collections::HashSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(de::Error::custom(format!("duplicate field `{key}`")));
+                    }
+                    match key.as_str() {
+                        "name" => spec.name = Some(map.next_value()?),
+                        "policy" => spec.policy = map.next_value()?,
+                        "checks" => {
+                            let parsed: ChecksField = map.next_value()?;
+                            spec.checks = parsed.policy;
+                            spec.tracking = parsed.tracking;
+                        }
+                        "required" => spec.required = map.next_value()?,
+                        "retries" => spec.retries = map.next_value()?,
+                        "attest_merged" => spec.attest_merged = map.next_value()?,
+                        "authority" => spec.authority = map.next_value()?,
+                        "path_rules" => spec.path_rules = map.next_value()?,
+                        "post_land" => spec.post_land = Some(map.next_value()?),
+                        other => {
+                            return Err(de::Error::unknown_field(
+                                other,
+                                &[
+                                    "name",
+                                    "policy",
+                                    "checks",
+                                    "required",
+                                    "retries",
+                                    "attest_merged",
+                                    "authority",
+                                    "path_rules",
+                                    "post_land",
+                                ],
+                            ));
+                        }
+                    }
+                }
+                Ok(spec)
+            }
+        }
+        deserializer.deserialize_struct(
+            "LineSpec",
+            &[
+                "name",
+                "policy",
+                "checks",
+                "required",
+                "retries",
+                "attest_merged",
+                "authority",
+                "path_rules",
+                "post_land",
+            ],
+            Visit,
+        )
+    }
+}
+
+/// `checks` is either the historical policy array or the tracking string.
+struct ChecksField {
+    policy: Vec<String>,
+    tracking: Option<TrackingMode>,
+}
+
+impl<'de> Deserialize<'de> for ChecksField {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> de::Visitor<'de> for Visit {
+            type Value = ChecksField;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list of check names or the string \"post-land\"")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "post-land" => Ok(ChecksField {
+                        policy: Vec::new(),
+                        tracking: Some(TrackingMode::PostLand),
+                    }),
+                    other => Err(E::custom(format!(
+                        "unknown checks value {other:?}; expected \"post-land\" or a list"
+                    ))),
+                }
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut names = Vec::new();
+                while let Some(name) = seq.next_element::<String>()? {
+                    names.push(name);
+                }
+                Ok(ChecksField {
+                    policy: names,
+                    tracking: None,
+                })
+            }
+        }
+        deserializer.deserialize_any(Visit)
+    }
 }
 
 fn check_names(what: &str, checks: &[String]) -> Result<(), String> {
@@ -124,6 +256,23 @@ impl LineSpec {
             (None, false) => "default_line".to_owned(),
         };
         check_names(&what, &self.checks)?;
+        check_names(&format!("{what}: required"), &self.required)?;
+        match self.tracking {
+            Some(TrackingMode::PostLand) => {
+                if self.required.is_empty() {
+                    return Err(format!(
+                        "{what}: checks = \"post-land\" needs a non-empty required list"
+                    ));
+                }
+            }
+            None => {
+                if !self.required.is_empty() || self.retries != 0 {
+                    return Err(format!(
+                        "{what}: required and retries need checks = \"post-land\""
+                    ));
+                }
+            }
+        }
         match self.policy {
             PolicySpec::Direct => {
                 if !self.checks.is_empty() {
@@ -201,7 +350,13 @@ impl LineSpec {
                 checks: p.checks.clone(),
                 auto_revert: p.auto_revert,
             }),
-            checks: LineChecks::Off,
+            checks: match self.tracking {
+                None => LineChecks::Off,
+                Some(TrackingMode::PostLand) => LineChecks::PostLand {
+                    required: self.required.clone(),
+                    retries: self.retries,
+                },
+            },
         }
     }
 }
