@@ -1636,6 +1636,11 @@ where
             Some(pull) if pull.open && !pull.merged && pull.head_sha == rec.squash_sha.to_hex() => {
                 pull
             }
+            // This includes the batch's own PR when a run crashed after
+            // create_pull and the PR was merged or closed before the retry:
+            // the batch is rejected and its lands are batched again. If that
+            // PR was merged, the next batch repeats changes main already has
+            // and the operator closes it; lands are never silently lost.
             Some(pull) => {
                 return self.reject(
                     rec,

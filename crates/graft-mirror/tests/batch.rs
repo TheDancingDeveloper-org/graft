@@ -47,6 +47,9 @@ struct FakeGitHub {
     merging: Mutex<Vec<u64>>,
     /// A branch update made immediately after the next PR read.
     race_push: Mutex<Option<(usize, String, String)>>,
+    /// `(branch, skip)`: after `skip` PR lookups for `branch` answer as
+    /// usual, a merged PR graft did not open appears on it.
+    foreign_pr: Mutex<Option<(String, usize)>>,
 }
 
 impl FakeGitHub {
@@ -58,6 +61,7 @@ impl FakeGitHub {
             comments: Mutex::new(Vec::new()),
             merging: Mutex::new(Vec::new()),
             race_push: Mutex::new(None),
+            foreign_pr: Mutex::new(None),
         }
     }
 
@@ -187,7 +191,30 @@ impl FakeGitHub {
 
 impl Forge for FakeGitHub {
     async fn find_pull(&self, branch: &str) -> Result<Option<Pull>, ForgeError> {
-        let prs = self.prs.lock().unwrap();
+        let mut prs = self.prs.lock().unwrap();
+        let mut foreign = self.foreign_pr.lock().unwrap();
+        if let Some((b, skip)) = foreign.as_mut()
+            && b == branch
+        {
+            if *skip == 0 {
+                let main = support::branch(&self.upstream, "main").unwrap();
+                let number = prs.len() as u64 + 1;
+                prs.push(FakePr {
+                    number,
+                    new: NewPull {
+                        title: "someone else's PR".to_owned(),
+                        body: String::new(),
+                        head: branch.to_owned(),
+                        base: "main".to_owned(),
+                    },
+                    open: false,
+                    merged: Some(main),
+                });
+                *foreign = None;
+            } else {
+                *skip -= 1;
+            }
+        }
         Ok(prs
             .iter()
             .find(|p| p.new.head == branch)
@@ -2147,4 +2174,41 @@ async fn leftover_batch_branches_and_prs_are_skipped_for_a_fresh_number() {
         stray
     );
     assert_eq!(support::branch(&w.upstream, "main").unwrap(), main);
+}
+
+/// WI-2585: a PR graft did not open that appears on the batch branch after
+/// the number was chosen and the branch pushed is not adopted. The batch is
+/// rejected unmerged, and the next run carries its lands in a fresh PR.
+#[tokio::test]
+async fn a_foreign_pr_on_the_pushed_branch_is_rejected_not_adopted() {
+    let w = World::new().await;
+    w.start().await;
+    let main = support::branch(&w.upstream, "main").unwrap();
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    // The number check reads graft/batch-1 once; the PR appears for open().
+    *w.github.foreign_pr.lock().unwrap() = Some(("graft/batch-1".to_owned(), 1));
+
+    let run = w.batcher().run().await.unwrap();
+    let rec = opened(run.outcome);
+    assert_eq!(rec.number, 1);
+    assert_eq!(rec.state, BatchState::Rejected);
+    assert!(rec.detail.contains("did not open"), "{}", rec.detail);
+    assert!(rec.merged.is_none() && rec.merge_sha.is_none());
+    assert_eq!(rec.pr_number, None, "the foreign PR is not recorded");
+    assert_eq!(w.github.prs().len(), 1, "no PR was opened over it");
+    assert_eq!(support::branch(&w.upstream, "main").unwrap(), main);
+
+    // The lands are still pending: the next run puts them in a new PR on a
+    // free number, past the taken branch.
+    let rec = opened(w.batcher().run().await.unwrap().outcome);
+    assert_eq!(rec.state, BatchState::Open, "{}", rec.detail);
+    assert_eq!((rec.number, rec.lands), (2, 1));
+    let prs = w.github.prs();
+    let pr = prs
+        .iter()
+        .find(|p| Some(p.number) == rec.pr_number)
+        .unwrap();
+    assert!(pr.open && pr.merged.is_none());
+    assert_eq!(pr.new.head, "graft/batch-2");
+    assert!(pr.new.body.contains(&a.to_string()[..13]));
 }

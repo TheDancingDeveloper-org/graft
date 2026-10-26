@@ -51,6 +51,33 @@ record held:
    ```
    Stop if batch 2 is not `merged` with `pr_number` 143, or if a batch newer
    than 2 exists: the state has moved on and this procedure no longer fits.
+
+   **STOP check: no sync ran after the bad settle.** A `pr-batch` run after
+   the settle syncs the line by diffing from batch 2's tip. That sync
+   snapshot leaves out the two lands' content, so a DB-only reset would then
+   give a PR that lists 2 lands but carries none of their files. Both checks
+   must pass:
+
+   a. `synced` is unchanged: `hex(synced)` from `batch_lines` equals
+      `hex(base)` of batch 2. (Batch 2 was cut on the line's newest sync. A
+      later sync replaces `synced` with the newer base tip.)
+   b. No sync changeset sits after batch 2 on the line. From a graft client
+      pointed at graft-dev, repo `graft`, list the line's first-parent history
+      down to batch 2's tip:
+      ```sh
+      graft log --at backlog-1 --limit 50 --json
+      ```
+      Look at every entry above batch 2's tip (its id is `hex(tip)` from
+      step 3, lower case). None may have a subject starting
+      `graft: sync line backlog-1 onto`. If the tip is not in the first 50,
+      page on with `--cursor` from the output until it is.
+
+   **If either check fails, do not run step 4.** Restart the mirror
+   (`docker start graft-dev-mirror-graft`), leave the DB as it is, and hand
+   the work item back to oversight. That state needs the line repaired in
+   graft first: the two lands re-applied onto the line, for example with
+   `graft pick`, so the next batch carries them as new lands. That is a
+   separate, operator-approved fix.
 4. Undo the settle, in one transaction:
    ```sql
    BEGIN;
@@ -81,9 +108,25 @@ record held:
    now has both a branch and PR #143, so it is skipped) with a **new** PR
    listing both lands (c5277958105f2 for WI-2548, and the WI-2542 land).
    PR #143 is not touched.
+
+   **Verify the content, not just the list.** Gather the files each land
+   changed (`graft show <land id>` for each of the two), then the new PR's
+   files (`gh pr diff <new PR> --name-only -R TheDancingDeveloper-org/graft`).
+   Every file of both lands must appear in the PR diff, with the lands'
+   changes. If a file is missing, the PR lists lands it does not deliver:
+   close it unmerged, mark its batch rejected the same way as step 4, and
+   hand back to oversight as in step 3.
 6. Optional tidy-up on GitHub: the branch `graft/batch-2` now holds the bad
    run's commits under the merged PR #143. Delete it once the new PR is open;
    nothing references it.
+
+## Crash window (known, safe)
+
+If `pr-batch` crashes after GitHub creates the batch's PR but before the DB
+records it, and that PR is merged or closed before the next run, the retry
+does not adopt it. The batch is rejected and its lands go in the next batch.
+If the PR had merged, close the follow-up PR, whose changes main already has.
+Lands are never marked delivered without a PR the batch opened.
 
 ## Other repos
 
