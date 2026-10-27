@@ -1,11 +1,12 @@
 //! PR bodies, commit messages and per-land commit objects (D26, D28).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use graft_git::GitSha;
 use graft_git::export::{Committer, commit_object};
 use graft_git::map::ImportedCommit;
 use graft_model::ChangesetId;
+use graft_proto::types::{LandCheck, LandCheckState};
 
 use crate::text::clean_text;
 
@@ -35,6 +36,8 @@ pub(crate) struct BatchHeader {
     pub(crate) uncut: Option<String>,
     /// The cut's land cap.
     pub(crate) max_lands: usize,
+    /// The cut is at the newest land with settled post-land checks.
+    pub(crate) checked: bool,
     /// Why the batch is one squashed commit instead of one per land.
     pub(crate) fallback: Option<String>,
     /// Lands added after the PR opened.
@@ -57,6 +60,69 @@ pub(crate) fn keep_with_reverts(lands: &[LandLine], max: usize) -> usize {
         };
         keep = lands.len() - i;
     }
+}
+
+/// How many of `lands` (newest first) a batch on a checked line takes,
+/// oldest first (design §8.7 step 6), given the lands' `GetLandChecks` rows
+/// by changeset. A cut is valid after a land when every land up to it is
+/// `good`, or is reverted by a land inside the cut, and no revert of a kept
+/// land is held. A revert without a row (a drop the mirror moved onto the
+/// line) counts as settled when what it reverts is kept. The keep is the
+/// largest valid cut within `max`, else the smallest valid one, so a land
+/// and its revert are never split. `0` when no cut is valid; then the land
+/// the walk stopped at is returned with it.
+pub(crate) fn settled_keep(
+    lands: &[LandLine],
+    rows: &HashMap<ChangesetId, LandCheck>,
+    max: usize,
+) -> (usize, Option<ChangesetId>) {
+    let ids: HashSet<ChangesetId> = lands.iter().map(|l| l.id).collect();
+    // Each kept-or-held land that a land in the batch reverts, and by whom.
+    let mut reverted_by: HashMap<ChangesetId, ChangesetId> = HashMap::new();
+    for l in lands {
+        if let Some(target) = l.reverts.filter(|t| ids.contains(t)) {
+            reverted_by.insert(target, l.id);
+        }
+    }
+    for row in rows.values() {
+        if let Some(revert) = row.revert.filter(|r| ids.contains(r)) {
+            reverted_by.entry(row.changeset).or_insert(revert);
+        }
+    }
+    let mut seen = HashSet::new();
+    // Kept lands whose revert has not been reached yet.
+    let mut open: HashSet<ChangesetId> = HashSet::new();
+    let mut cuts = Vec::new();
+    let mut stop = None;
+    for (i, l) in lands.iter().rev().enumerate() {
+        let settled = if reverted_by.contains_key(&l.id) {
+            open.insert(l.id);
+            true
+        } else {
+            match rows.get(&l.id).map(|r| r.state) {
+                Some(LandCheckState::Good) => true,
+                None => l.reverts.is_some_and(|t| seen.contains(&t)),
+                _ => false,
+            }
+        };
+        if !settled {
+            stop = Some(l.id);
+            break;
+        }
+        seen.insert(l.id);
+        open.retain(|t| reverted_by.get(t) != Some(&l.id));
+        if open.is_empty() {
+            cuts.push(i + 1);
+        }
+    }
+    let keep = cuts
+        .iter()
+        .rev()
+        .find(|k| **k <= max.max(1))
+        .or(cuts.first())
+        .copied()
+        .unwrap_or(0);
+    (keep, stop)
 }
 
 /// A land's latest check results, bounded: `none`, or `<check> passed`
@@ -224,7 +290,18 @@ pub(crate) fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
             "- Attestations: the journal read stopped at its cap; the list may be incomplete\n",
         );
     }
-    if h.held > 0 {
+    if h.held > 0 && h.checked {
+        head.push_str(&format!(
+            "- Cut at {} lands with settled post-land checks: {} newer {} for the next batch\n",
+            lands.len(),
+            h.held,
+            if h.held == 1 {
+                "land waits"
+            } else {
+                "lands wait"
+            }
+        ));
+    } else if h.held > 0 {
         head.push_str(&format!(
             "- Cut at {} lands: {} newer {} for the next batch\n",
             h.max_lands,

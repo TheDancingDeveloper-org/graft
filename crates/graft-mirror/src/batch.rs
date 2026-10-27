@@ -69,6 +69,17 @@
 //! start). [`BatchConfig::max_age_ms`] holds a batch back until its oldest
 //! land (by author time) is that old or it has `max_lands` lands.
 //!
+//! Checked lines (WI-2599, design §8.7 step 6, phase 2): with
+//! [`BatchConfig::checked`] (`--checks post-land`, for a line whose server
+//! config has `checks = "post-land"`), the cut is the newest land such that
+//! every land up to it is `good` in `GetLandChecks`, or is reverted by a land
+//! inside the cut. Pending lands and a bad land with no revert yet wait; a
+//! run with nothing settled is [`BatchOutcome::Unsettled`]. `max_lands`
+//! applies within the settled prefix, and an append to an open batch takes
+//! only settled lands. The rows are read from the batch start's position,
+//! found by one-row probes (O(log line length)), then once, paged, for at
+//! most the batch's lands.
+//!
 //! Costs follow the change: the sync reads one diff and one rebase; the land
 //! list is a first-parent `Log` from the tip back to the batch start, capped
 //! at [`MAX_LANDS`]; attestations come from a bounded read of the journal's

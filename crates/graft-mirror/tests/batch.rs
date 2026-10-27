@@ -7,7 +7,8 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use graft_engine::{Engine, EngineConfig};
+use graft_engine::policy::LineChecks;
+use graft_engine::{Engine, EngineConfig, LineConfig};
 use graft_mirror::batch::{BatchConfig, BatchOutcome, BatchRecord, BatchState, Batcher};
 use graft_mirror::credentials::SecretToken;
 use graft_mirror::follow::{FollowConfig, FollowLine, POLL_INTERVAL};
@@ -16,8 +17,8 @@ use graft_mirror::{Mirror, MirrorDb, MirrorError, current_ref};
 use graft_model::{
     Author, AuthorKind, Change, ChangesetId, EntryKind, Metadata, ObjectKind, RepoPath, Timestamp,
 };
-use graft_proto::api::{AdminApi, RepoApi};
-use graft_proto::types::{Attest, CreateChangeset, RefKind, UpdateRef};
+use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
+use graft_proto::types::*;
 use graft_proto::{CallContext, Frame};
 use graft_store::memory::MemoryStore;
 use graft_testkit::clock::FakeClock;
@@ -295,6 +296,25 @@ struct World {
 
 impl World {
     async fn new() -> World {
+        World::with_config(EngineConfig::default()).await
+    }
+
+    /// A world whose integration line has post-land checks on `ci/test`
+    /// with no retry (design §8.7), batched with `checked` set.
+    async fn checked() -> World {
+        let mut line = LineConfig::direct(LINE);
+        line.checks = LineChecks::PostLand {
+            required: vec!["ci/test".to_owned()],
+            retries: 0,
+        };
+        World::with_config(EngineConfig {
+            lines: vec![line],
+            ..EngineConfig::default()
+        })
+        .await
+    }
+
+    async fn with_config(config: EngineConfig) -> World {
         let tmp = tempfile::tempdir().unwrap();
         let upstream = tmp.path().join("github.git");
         let work = tmp.path().join("work");
@@ -310,7 +330,7 @@ impl World {
             store.clone(),
             store,
             Arc::new(FakeClock::at(1_000_000)),
-            EngineConfig::default(),
+            config,
         );
         api.create_repo(&cx(), REPO.to_owned()).await.unwrap();
         let db = MirrorDb::open(&tmp.path().join("mirror.sqlite")).unwrap();
@@ -351,6 +371,16 @@ impl World {
         db: &'w MirrorDb,
         edit: impl FnOnce(&mut BatchConfig),
     ) -> Batcher<'w, Api, FakeGitHub> {
+        self.batcher_over(&self.api, db, edit)
+    }
+
+    /// [`World::batcher_with`] reading graft through `api`.
+    fn batcher_over<'w, A: AdminApi + ObjectApi + RepoApi>(
+        &'w self,
+        api: &'w A,
+        db: &'w MirrorDb,
+        edit: impl FnOnce(&mut BatchConfig),
+    ) -> Batcher<'w, A, FakeGitHub> {
         let base = FollowLine {
             branch: "main".to_owned(),
             line: "main".to_owned(),
@@ -373,7 +403,7 @@ impl World {
         );
         edit(&mut config);
         Batcher::new(
-            &self.api,
+            api,
             cx(),
             db,
             Mirror::new(&self.mirror_dir, self.upstream.to_str().unwrap()),
@@ -2211,4 +2241,381 @@ async fn a_foreign_pr_on_the_pushed_branch_is_rejected_not_adopted() {
     assert!(pr.open && pr.merged.is_none());
     assert_eq!(pr.new.head, "graft/batch-2");
     assert!(pr.new.body.contains(&a.to_string()[..13]));
+}
+
+// ---- Post-land checked lines (design §8.7 step 6, WI-2599) ----
+
+/// A batcher for a checked line.
+fn checked(c: &mut BatchConfig) {
+    c.checked = true;
+}
+
+impl World {
+    /// Lands `head` on the integration line through `Land`, so a checked
+    /// line gives it a `pending` land-checks row.
+    async fn land_head(&self, head: ChangesetId) -> ChangesetId {
+        match self
+            .api
+            .land(
+                &cx(),
+                Land {
+                    repo: REPO.to_owned(),
+                    head,
+                    line: LINE.to_owned(),
+                    squash: false,
+                    merge: MergeMode::File,
+                    deadline_ms: None,
+                    merged_from: None,
+                },
+            )
+            .await
+            .unwrap()
+        {
+            Landed::Landed { landed, .. } => landed,
+            other => panic!("not landed: {other:?}"),
+        }
+    }
+
+    /// One changeset writing `file` on the line tip, landed through `Land`.
+    async fn land_checked(&self, file: &str, n: i64) -> ChangesetId {
+        let tip = self.tip(LINE).await;
+        let body = format!("{file} {n}\n");
+        let id = self
+            .api
+            .create_changeset(
+                &cx(),
+                CreateChangeset {
+                    repo: REPO.to_owned(),
+                    parents: tip.into_iter().collect(),
+                    changes: vec![Change::Put {
+                        path: RepoPath::new(file).unwrap(),
+                        kind: EntryKind::File,
+                        id: graft_model::ObjectId::hash(ObjectKind::Blob, body.as_bytes()),
+                    }],
+                    author: Author {
+                        name: "Tess".to_owned(),
+                        email: "tess@example.com".to_owned(),
+                        kind: AuthorKind::Agent,
+                    },
+                    authored_at: Timestamp {
+                        ms: 1_700_000_000_000 + n * 1000,
+                        offset_min: 0,
+                    },
+                    message: format!("add {file}"),
+                    metadata: Metadata::new(),
+                    inline_blobs: vec![Frame::encode(ObjectKind::Blob, body.as_bytes())],
+                    workspace: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        self.land_head(id).await
+    }
+
+    /// Lands graft's `Revert` of `land` (metadata `graft.reverts`).
+    async fn land_revert(&self, land: ChangesetId) -> ChangesetId {
+        let tip = self.tip(LINE).await.unwrap();
+        let revert = self
+            .api
+            .revert(
+                &cx(),
+                Revert {
+                    repo: REPO.to_owned(),
+                    changeset: land,
+                    onto: tip,
+                    workspace: None,
+                },
+            )
+            .await
+            .unwrap();
+        self.land_head(revert).await
+    }
+
+    /// The post-land checker reports `ci/test` on `land`.
+    async fn report(&self, land: ChangesetId, pass: bool) {
+        self.api
+            .attest_v2(
+                &attest_cx(),
+                AttestV2 {
+                    repo: REPO.to_owned(),
+                    changeset: land,
+                    kind: AttestKind::Check,
+                    check: "ci/test".to_owned(),
+                    status: if pass {
+                        AttestStatus::Pass
+                    } else {
+                        AttestStatus::Fail
+                    },
+                    by: Some("checker".to_owned()),
+                    url: "https://ci.example/run".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    /// The state of `land`'s row on the integration line.
+    async fn check_state(&self, land: ChangesetId) -> LandCheckState {
+        let rows = graft_client::land_checks(
+            &self.api,
+            &cx(),
+            GetLandChecks {
+                repo: REPO.to_owned(),
+                line: LINE.to_owned(),
+                from_pos: 0,
+                page: Page {
+                    limit: 0,
+                    token: None,
+                },
+            },
+            1000,
+        )
+        .await
+        .unwrap();
+        rows.iter().find(|r| r.changeset == land).unwrap().state
+    }
+
+    /// The files the batch branch changes on GitHub's `main`.
+    fn batch_files(&self, n: u64) -> Vec<String> {
+        let head = support::branch(&self.upstream, &format!("graft/batch-{n}")).unwrap();
+        let main = support::branch(&self.upstream, "main").unwrap();
+        self.changed(&main, &head)
+    }
+}
+
+// Accept 2: good, good, pending, good is cut after the second land, and
+// the rest waits until the pending land settles.
+#[tokio::test]
+async fn a_checked_line_cuts_before_a_pending_land() {
+    let w = World::checked().await;
+    w.start().await;
+    let a = w.land_checked("a.txt", 1).await;
+    let b = w.land_checked("b.txt", 2).await;
+    let c = w.land_checked("c.txt", 3).await;
+    let d = w.land_checked("d.txt", 4).await;
+    for land in [a, b, d] {
+        w.report(land, true).await;
+    }
+    let rec = opened(w.batcher_with(&w.db, checked).run().await.unwrap().outcome);
+    assert_eq!((rec.lands, rec.tip), (2, b));
+    assert_eq!(w.batch_files(1), ["a.txt", "b.txt"]);
+    assert!(
+        rec.body
+            .contains("Cut at 2 lands with settled post-land checks: 2 newer lands wait"),
+        "{}",
+        rec.body
+    );
+    assert!(!rec.body.contains(&short(c)) && !rec.body.contains(&short(d)));
+
+    // Still pending: nothing is appended to the open batch.
+    let run = w.batcher_with(&w.db, checked).run().await.unwrap();
+    let BatchOutcome::Waiting(open) = run.outcome else {
+        panic!("expected the open batch, got {:?}", run.outcome);
+    };
+    assert_eq!((open.lands, open.tip), (2, b));
+    assert!(open.detail.contains("not settled"), "{}", open.detail);
+
+    // Settled: the open batch takes c and d.
+    w.report(c, true).await;
+    let run = w.batcher_with(&w.db, checked).run().await.unwrap();
+    let BatchOutcome::Waiting(open) = run.outcome else {
+        panic!("expected the open batch, got {:?}", run.outcome);
+    };
+    assert_eq!((open.lands, open.tip), (4, d));
+    assert_eq!(w.batch_files(1), ["a.txt", "b.txt", "c.txt", "d.txt"]);
+}
+
+// Accept 3: good, bad, good revert of the bad land, good is one batch of
+// all four, the bad land with its revert.
+#[tokio::test]
+async fn a_checked_line_takes_a_bad_land_with_its_revert() {
+    let w = World::checked().await;
+    w.start().await;
+    let a = w.land_checked("a.txt", 1).await;
+    let b = w.land_checked("b.txt", 2).await;
+    w.report(a, true).await;
+    w.report(b, false).await;
+    let r = w.land_revert(b).await;
+    assert_eq!(w.check_state(b).await, LandCheckState::Reverted);
+    w.report(r, true).await;
+    let d = w.land_checked("d.txt", 4).await;
+    w.report(d, true).await;
+
+    let rec = opened(w.batcher_with(&w.db, checked).run().await.unwrap().outcome);
+    assert_eq!((rec.lands, rec.tip), (4, d));
+    assert_eq!(w.batch_files(1), ["a.txt", "d.txt"]);
+    for land in [a, b, r, d] {
+        assert!(rec.body.contains(&short(land)), "{}", rec.body);
+    }
+    // One commit per land, the bad land and its revert included.
+    let head = support::branch(&w.upstream, "graft/batch-1").unwrap();
+    let main = support::branch(&w.upstream, "main").unwrap();
+    assert_eq!(chain_of(&w, &main, &head).len(), 4);
+}
+
+// Accept 4: a bad land with no revert yet stops the cut before it; a line
+// whose oldest land is bad makes no batch.
+#[tokio::test]
+async fn a_checked_line_cuts_before_a_bad_land_with_no_revert() {
+    let w = World::checked().await;
+    w.start().await;
+    let a = w.land_checked("a.txt", 1).await;
+    let b = w.land_checked("b.txt", 2).await;
+    let c = w.land_checked("c.txt", 3).await;
+    w.report(a, true).await;
+    w.report(b, false).await;
+    w.report(c, true).await;
+    let rec = opened(w.batcher_with(&w.db, checked).run().await.unwrap().outcome);
+    assert_eq!((rec.lands, rec.tip), (1, a));
+    assert_eq!(w.batch_files(1), ["a.txt"]);
+    assert!(!rec.body.contains(&short(b)));
+
+    // After a merge the next batch starts at the bad land: no batch.
+    w.github.squash_merge(1);
+    let run = w.batcher_with(&w.db, checked).run().await.unwrap();
+    assert_eq!(run.settled.unwrap().state, BatchState::Merged);
+    match run.outcome {
+        BatchOutcome::Unsettled { lands, waiting } => assert_eq!((lands, waiting), (2, b)),
+        other => panic!("expected no batch, got {other:?}"),
+    }
+    assert_eq!(w.github.prs().len(), 1);
+}
+
+// Accept 1 (the checked path is off by default): the same lands, unchecked,
+// batch to the tip whatever their rows say.
+#[tokio::test]
+async fn an_unchecked_batcher_ignores_land_checks() {
+    let w = World::checked().await;
+    w.start().await;
+    let a = w.land_checked("a.txt", 1).await;
+    w.report(a, false).await;
+    let b = w.land_checked("b.txt", 2).await;
+    let rec = opened(w.batcher().run().await.unwrap().outcome);
+    assert_eq!((rec.lands, rec.tip), (2, b));
+    assert!(!rec.body.contains("post-land"));
+}
+
+/// `GetLandChecks` reads through the batcher: each call's page limit and
+/// the rows it returned.
+struct Counting<'a> {
+    api: &'a Api,
+    reads: Mutex<Vec<(u32, usize)>>,
+}
+
+macro_rules! forward {
+    ($($name:ident($req:ty) -> $out:ty;)*) => {
+        $(
+            async fn $name(&self, cx: &CallContext, req: $req) -> graft_proto::error::ApiResult<$out> {
+                self.api.$name(cx, req).await
+            }
+        )*
+    };
+}
+
+impl ObjectApi for Counting<'_> {
+    forward! {
+        get_objects(GetObjects) -> Objects;
+        has_objects(HasObjects) -> Vec<graft_model::ObjectId>;
+        put_objects(PutObjects) -> Vec<graft_model::ObjectId>;
+    }
+}
+
+impl AdminApi for Counting<'_> {
+    forward! {
+        import_changesets(ImportChangesets) -> Vec<Created>;
+        gc(Gc) -> GcReport;
+        mint_token(MintToken) -> String;
+    }
+    async fn create_repo(
+        &self,
+        cx: &CallContext,
+        name: String,
+    ) -> graft_proto::error::ApiResult<()> {
+        self.api.create_repo(cx, name).await
+    }
+}
+
+impl RepoApi for Counting<'_> {
+    forward! {
+        create_changeset(CreateChangeset) -> Created;
+        get_changesets(GetChangesets) -> Changesets;
+        resolve_ref(ResolveRef) -> RefView;
+        list_refs(ListRefs) -> Vec<RefView>;
+        update_ref(UpdateRef) -> RefView;
+        stat(PathAt) -> EntryView;
+        list_tree(ListTree) -> Entries;
+        read_file(PathAt) -> FileContent;
+        log(Log) -> History;
+        is_ancestor(Pair) -> bool;
+        merge_base(Pair) -> Option<ChangesetId>;
+        diff(Diff) -> DiffResult;
+        blame(Blame) -> BlameResult;
+        rebase(Rebase) -> ChangesetId;
+        revert(Revert) -> ChangesetId;
+        land(Land) -> Landed;
+        attest(Attest) -> ();
+        watch(Watch) -> JournalPage;
+    }
+    async fn get_land_checks(
+        &self,
+        cx: &CallContext,
+        req: GetLandChecks,
+    ) -> graft_proto::error::ApiResult<LandCheckPage> {
+        let limit = req.page.limit;
+        let page = self.api.get_land_checks(cx, req).await?;
+        self.reads.lock().unwrap().push((limit, page.rows.len()));
+        Ok(page)
+    }
+}
+
+// Accept 5: a batch after many checked lands reads its own lands' rows,
+// paged, plus O(log line length) one-row probes, never the line's rows.
+#[tokio::test]
+async fn a_checked_cut_reads_only_the_batch_rows() {
+    const EARLIER: i64 = 40;
+    let w = World::checked().await;
+    w.start().await;
+    for n in 0..EARLIER {
+        let land = w.land_checked(&format!("f{n}.txt"), n).await;
+        w.report(land, true).await;
+    }
+    let rec = opened(w.batcher_with(&w.db, checked).run().await.unwrap().outcome);
+    assert_eq!(rec.lands, EARLIER as u64);
+    w.github.squash_merge(1);
+    assert_eq!(
+        w.batcher_with(&w.db, checked)
+            .run()
+            .await
+            .unwrap()
+            .settled
+            .unwrap()
+            .state,
+        BatchState::Merged
+    );
+    let x = w.land_checked("x.txt", 100).await;
+    let y = w.land_checked("y.txt", 101).await;
+    w.report(x, true).await;
+    w.report(y, true).await;
+
+    let counting = Counting {
+        api: &w.api,
+        reads: Mutex::new(Vec::new()),
+    };
+    let run = w
+        .batcher_over(&counting, &w.db, checked)
+        .run()
+        .await
+        .unwrap();
+    let rec = opened(run.outcome);
+    assert_eq!((rec.lands, rec.tip), (2, y));
+    let reads = counting.reads.into_inner().unwrap();
+    let (probes, pages): (Vec<_>, Vec<_>) = reads.iter().partition(|(limit, _)| *limit == 1);
+    // The batch read asks for its two lands and gets exactly them.
+    assert_eq!(pages.iter().map(|(_, rows)| rows).sum::<usize>(), 2);
+    assert!(pages.iter().all(|(limit, _)| *limit <= 2), "{pages:?}");
+    // Probes: an exponential search and a bisection over ~40 positions.
+    assert!(probes.len() <= 16, "{} probes", probes.len());
+    let rows: usize = reads.iter().map(|(_, rows)| rows).sum();
+    assert!(rows < EARLIER as usize / 2, "{rows} rows read");
 }

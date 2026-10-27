@@ -288,6 +288,7 @@ impl RepoApi for Server {
         revert(Revert) -> ChangesetId;
         land(Land) -> Landed;
         attest(Attest) -> ();
+        get_land_checks(GetLandChecks) -> LandCheckPage;
         watch(Watch) -> JournalPage;
     }
 }
@@ -396,6 +397,7 @@ impl RepoApi for Api {
         revert(Revert) -> ChangesetId;
         land(Land) -> Landed;
         attest(Attest) -> ();
+        get_land_checks(GetLandChecks) -> LandCheckPage;
         watch(Watch) -> JournalPage;
     }
 }
