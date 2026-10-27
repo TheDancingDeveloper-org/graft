@@ -21,6 +21,17 @@ GIT_ENV = {
     "GIT_AUTHOR_EMAIL": "bench@graft.invalid",
     "GIT_COMMITTER_NAME": "graft-bench",
     "GIT_COMMITTER_EMAIL": "bench@graft.invalid",
+    # The receive-pack and upload-pack that a local push or fetch starts
+    # inherit these. No background gc may repack refs under a concurrent
+    # fetch, and a fetch may still ask for a tip that a racing push has
+    # just replaced ("upload-pack: not our ref" in the concurrent writers).
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "gc.auto",
+    "GIT_CONFIG_VALUE_0": "0",
+    "GIT_CONFIG_KEY_1": "receive.autogc",
+    "GIT_CONFIG_VALUE_1": "false",
+    "GIT_CONFIG_KEY_2": "uploadpack.allowAnySHA1InWant",
+    "GIT_CONFIG_VALUE_2": "true",
 }
 
 
