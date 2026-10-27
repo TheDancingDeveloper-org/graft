@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS check_refs (
     changeset BLOB NOT NULL,
     sha BLOB NOT NULL,
     pushed INTEGER NOT NULL,
+    pos INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (line, changeset)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pr_imports (
@@ -169,8 +170,8 @@ pub struct ExportState {
 pub struct CheckLine {
     /// The next journal LSN to read.
     pub lsn: u64,
-    /// The first `GetLandChecks` position that may still hold a live ref:
-    /// every row before it is settled and its ref deleted.
+    /// The first `GetLandChecks` position not yet read for new lands. Held
+    /// refs are read at their own positions, so this never waits on them.
     pub pos: u64,
     /// The line moved (or check refs just started it) and its rows have
     /// not been read since. Saved with the cursor, so a failed read is
@@ -187,6 +188,8 @@ pub struct CheckRef {
     pub sha: GitSha,
     /// Whether the push is known to have reached upstream.
     pub pushed: bool,
+    /// The land's `GetLandChecks` row position, read alone each poll.
+    pub pos: u64,
 }
 
 /// An authority switch in progress on one line (`docs/design.md` §11.3).
@@ -246,6 +249,7 @@ impl MirrorDb {
             .map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         add_column(&conn, "batch_lines", "start_base", "BLOB")?;
+        add_column(&conn, "check_refs", "pos", "INTEGER NOT NULL DEFAULT 0")?;
         add_column(&conn, "batch_lines", "sync_batch", "INTEGER")?;
         add_column(
             &conn,
@@ -533,7 +537,10 @@ impl MirrorDb {
     pub fn check_refs(&self, line: &str) -> Result<Vec<CheckRef>, GitError> {
         let conn = self.conn();
         let mut stmt = conn
-            .prepare("SELECT changeset, sha, pushed FROM check_refs WHERE line = ?1")
+            .prepare(
+                "SELECT changeset, sha, pushed, pos FROM check_refs WHERE line = ?1
+                 ORDER BY pos",
+            )
             .map_err(db_err)?;
         let rows = stmt
             .query_map(params![line], |r| {
@@ -541,17 +548,19 @@ impl MirrorDb {
                     r.get::<_, Vec<u8>>(0)?,
                     r.get::<_, Vec<u8>>(1)?,
                     r.get::<_, bool>(2)?,
+                    r.get::<_, i64>(3)?,
                 ))
             })
             .map_err(db_err)?;
         let mut out = Vec::new();
         for row in rows {
-            let (changeset, sha, pushed) = row.map_err(db_err)?;
+            let (changeset, sha, pushed, pos) = row.map_err(db_err)?;
             out.push(CheckRef {
                 changeset: ChangesetId(id_col(changeset)?),
                 sha: sha_col(Some(sha))?
                     .ok_or_else(|| GitError::Map("mirror db: malformed sha".to_owned()))?,
                 pushed,
+                pos: pos as u64,
             });
         }
         Ok(out)
@@ -561,9 +570,16 @@ impl MirrorDb {
     pub fn put_check_ref(&self, line: &str, r: &CheckRef) -> Result<(), GitError> {
         self.conn()
             .execute(
-                "INSERT INTO check_refs (line, changeset, sha, pushed) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (line, changeset) DO UPDATE SET sha = ?3, pushed = ?4",
-                params![line, r.changeset.0.0.to_vec(), r.sha.0.to_vec(), r.pushed],
+                "INSERT INTO check_refs (line, changeset, sha, pushed, pos)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (line, changeset) DO UPDATE SET sha = ?3, pushed = ?4, pos = ?5",
+                params![
+                    line,
+                    r.changeset.0.0.to_vec(),
+                    r.sha.0.to_vec(),
+                    r.pushed,
+                    r.pos as i64
+                ],
             )
             .map(drop)
             .map_err(db_err)

@@ -529,6 +529,7 @@ async fn a_rerun_after_a_crash_gives_the_same_shas() {
     let server = post_land(&w.api);
     let log = Records::new(&w.upstream);
     w.polled(&server, &log).await;
+    let start = w.db.check_line(LINE).unwrap().unwrap().pos;
     let lands = [w.land().await, w.land().await, w.land().await];
 
     // The second record fails: the first land is pushed, the rest not.
@@ -564,7 +565,7 @@ async fn a_rerun_after_a_crash_gives_the_same_shas() {
     // pushes). The clock has moved on, so a fresh export would date
     // differently; the mirror map keeps every sha the same.
     conn.execute("DELETE FROM check_refs", []).unwrap();
-    conn.execute("UPDATE check_lines SET dirty = 1", [])
+    conn.execute("UPDATE check_lines SET dirty = 1, pos = ?1", [start as i64])
         .unwrap();
     drop(conn);
     advance(3_600_000);
@@ -739,8 +740,81 @@ async fn cost_follows_the_change_and_the_cursor_is_durable() {
     assert!(server.rows.lock().unwrap().is_empty());
 }
 
-// Done when 5: the GitHub token goes with the check refs' pushes and
-// deletes in the environment only, never in argv.
+// Done when 4 (review blocker): a land stuck bad behind a growing tail of
+// settled lands costs one row a poll, however long the tail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stuck_land_costs_one_row_whatever_settles_behind_it() {
+    let w = World::new().await;
+    let server = post_land(&w.api);
+    let log = Records::new(&w.upstream);
+    w.polled(&server, &log).await;
+    let stuck = w.land().await;
+    w.report(stuck, false).await;
+    w.polled(&server, &log).await;
+    let mut steady = Vec::new();
+    for tail in [8, 64] {
+        for _ in 0..tail {
+            let land = w.land().await;
+            w.report(land, true).await;
+        }
+        // The new rows are read once: settled, so no ref.
+        let report = w.polled(&server, &log).await;
+        assert!(report.created.is_empty());
+        server.reset();
+        w.polled(&server, &log).await;
+        steady.push(server.rows.lock().unwrap().iter().sum::<usize>());
+        assert_eq!(
+            w.upstream_refs().into_keys().collect::<Vec<_>>(),
+            [stuck],
+            "only the stuck land holds a ref"
+        );
+    }
+    assert_eq!(
+        steady,
+        [1, 1],
+        "rows read per poll do not grow with the tail"
+    );
+}
+
+// Done when 4 (review blocker): a land more than MAX_ROWS rows behind a
+// stuck land still gets its ref; the new rows are read in capped steps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_land_past_the_row_cap_still_gets_its_ref() {
+    use graft_mirror::check_refs::MAX_ROWS;
+    let w = World::new().await;
+    let server = post_land(&w.api);
+    let log = Records::new(&w.upstream);
+    w.polled(&server, &log).await;
+    let stuck = w.land().await;
+    w.report(stuck, false).await;
+    for _ in 0..MAX_ROWS + 8 {
+        let land = w.land().await;
+        w.report(land, true).await;
+    }
+    let late = w.land().await;
+    let mut created = Vec::new();
+    for _ in 0..3 {
+        server.reset();
+        created.extend(w.polled(&server, &log).await.created);
+        let rows: usize = server.rows.lock().unwrap().iter().sum();
+        assert!(rows <= MAX_ROWS as usize + 2, "{rows} rows in one poll");
+    }
+    let created: Vec<ChangesetId> = created.into_iter().map(|(c, _)| c).collect();
+    assert_eq!(created, [stuck, late]);
+    let live: BTreeSet<_> = w.upstream_refs().into_keys().collect();
+    assert_eq!(live, BTreeSet::from([stuck, late]));
+    assert!(
+        !w.db.check_line(LINE).unwrap().unwrap().dirty,
+        "all rows read"
+    );
+}
+
+// Done when 5: through CheckRefs, the GitHub token goes with each check ref
+// push and delete in the environment only, never in argv. A fake `git` on
+// PATH logs the network commands (push, ls-remote) and passes every other
+// command to the real git. The test re-runs itself in a child process with
+// that PATH, since this crate forbids the `unsafe` that changing its own
+// environment needs.
 const CHILD: &str = "GRAFT_WI2624_CHILD";
 const TOKEN: &str = "ghs_wi2624_fake_token_value";
 const TEST: &str = "the_token_is_never_in_argv";
@@ -749,21 +823,12 @@ const TEST: &str = "the_token_is_never_in_argv";
 fn the_token_is_never_in_argv() {
     if let Ok(dir) = std::env::var(CHILD) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        return rt.block_on(async {
-            let dir = Path::new(&dir);
-            let mirror = Mirror::new(dir.join("m.git"), "https://github.com/o/r.git");
-            let sha = GitSha::from_hex(&"ab".repeat(20)).unwrap();
-            let branch = format!("{PREFIX}c{}", "0".repeat(64));
-            mirror
-                .push_lease(&branch, sha, None, Some(TOKEN))
-                .await
-                .unwrap();
-            mirror
-                .delete_lease(&branch, sha, Some(TOKEN))
-                .await
-                .unwrap();
-        });
+        return rt.block_on(child(Path::new(&dir)));
     }
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|d| d.join("git"))
+        .find(|p| p.is_file())
+        .expect("git on PATH");
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -772,13 +837,17 @@ fn the_token_is_never_in_argv() {
     std::fs::write(
         &git,
         format!(
-            "#!/bin/sh\nprintf 'call argv=%s header=%s\\n' \"$*\" \"${{GIT_CONFIG_VALUE_0:-none}}\" >>'{}'\n",
-            log.display()
+            "#!/bin/sh\ncase \" $* \" in *\" push \"*|*\" ls-remote \"*)\n  \
+             printf 'call argv=%s header=%s\\n' \"$*\" \"${{GIT_CONFIG_VALUE_0:-none}}\" >>'{}'\n  \
+             exit 0;;\nesac\nexec '{}' \"$@\"\n",
+            log.display(),
+            real.display()
         ),
     )
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(dir.path().join("token"), TOKEN).unwrap();
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", TEST, "--nocapture"])
@@ -793,7 +862,7 @@ fn the_token_is_never_in_argv() {
     );
     let calls = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<&str> = calls.lines().collect();
-    assert_eq!(lines.len(), 2, "{calls}");
+    assert_eq!(lines.len(), 2, "one push, one delete: {calls}");
     use base64::Engine as _;
     let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{TOKEN}"));
     for line in &lines {
@@ -801,9 +870,44 @@ fn the_token_is_never_in_argv() {
         assert!(!argv.contains(TOKEN) && !argv.contains(&basic), "{line}");
         assert_eq!(header, format!("Authorization: Basic {basic}"));
     }
+    assert!(lines[0].contains(&format!(":refs/heads/{PREFIX}")) && lines[0].contains(" push "));
     assert!(
-        lines[1].contains(&format!(":refs/heads/{PREFIX}")),
+        lines[1].contains(&format!(" :refs/heads/{PREFIX}")),
         "a delete"
     );
     assert!(lines[1].contains("--force-with-lease="), "on a lease");
+}
+
+/// The child: CheckRefs over an HTTPS upstream with a token file, through
+/// one land's ref push and, once it settles, its delete.
+async fn child(dir: &Path) {
+    let w = World::new().await;
+    let server = post_land(&w.api);
+    let log = Records::new(&w.upstream);
+    let token = graft_mirror::credentials::StaticToken::load(&dir.join("token")).unwrap();
+    let checks = || {
+        CheckRefs::new(
+            &server,
+            cx(),
+            &w.db,
+            Mirror::new(&w.mirror_dir, "https://github.com/o/r.git"),
+            &token,
+            &log,
+            CheckRefsConfig::new(REPO, vec![CheckRefLine::new(LINE)]),
+        )
+        .with_clock(clock)
+    };
+    checks().poll_once().await.unwrap();
+    let land = w.land().await;
+    let out = checks().poll_once().await.unwrap();
+    assert!(
+        matches!(&out[0].1, CheckRefsOutcome::Polled(r) if r.created.len() == 1),
+        "{out:?}"
+    );
+    w.report(land, true).await;
+    let out = checks().poll_once().await.unwrap();
+    assert!(
+        matches!(&out[0].1, CheckRefsOutcome::Polled(r) if r.deleted == [land]),
+        "{out:?}"
+    );
 }

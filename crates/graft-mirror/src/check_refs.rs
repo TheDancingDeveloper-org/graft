@@ -15,21 +15,21 @@
 //! 1. Read the journal from the line's durable cursor, `RefMoved` entries
 //!    only, a bounded page at a time. A move of the line marks it dirty, in
 //!    the same statement that saves the cursor.
-//! 2. When it is dirty, or refs are held, read the line's `GetLandChecks` rows
-//!    from the settled position (every row before it is settled and its ref
-//!    deleted). The rows, not the journal, say which moves are lands: a
-//!    land gets a row in its own transaction, and a move that is not a land
-//!    (pr-batch's sync merge, an admin move) gets none, so it never gets a
-//!    ref that nothing would settle.
-//! 3. For each row still pending (or bad and not yet reverted) with no ref:
-//!    export the land with `graft-git`'s deterministic exporter, record
-//!    `(changeset, sha)` through `RecordExports`, record the ref in the
-//!    mirror DB, then push it with a lease that requires the branch not to
-//!    exist. Every land is exported, not only the newest: bisect needs the
-//!    interior lands' refs.
-//! 4. For each row settled (good, reverted, or bad with its revert landed)
-//!    whose ref is held: delete it upstream with a lease on its sha, then
-//!    forget it. The settled position moves past the settled prefix.
+//! 2. Read each held ref's `GetLandChecks` row alone, at the position
+//!    recorded with the ref. A settled land (good, reverted, or bad with its
+//!    revert landed) has its ref deleted upstream with a lease on its sha,
+//!    then forgotten. A ref not yet known pushed is pushed again.
+//! 3. When the line is dirty, read the rows not yet read, from the line's
+//!    durable new-row position. The rows, not the journal, say which moves
+//!    are lands: a land gets a row in its own transaction, and a move that
+//!    is not a land (pr-batch's sync merge, an admin move) gets none, so it
+//!    never gets a ref that nothing would settle. Each unsettled land gets
+//!    its ref: export it with `graft-git`'s deterministic exporter, record
+//!    `(changeset, sha)` through `RecordExports`, record the ref (with its
+//!    row position) in the mirror DB, then push it with a lease that
+//!    requires the branch not to exist. Every land is exported, not only
+//!    the newest: bisect needs the interior lands' refs. The new-row
+//!    position moves past every row read, settled or not.
 //!
 //! Live refs are therefore at most the unsettled lands, which the
 //! checker's window bounds. A crash anywhere re-runs idempotently: the
@@ -38,9 +38,17 @@
 //! sha is this mirror's own earlier push.
 //!
 //! Costs follow the change: the journal read is O(entries since the
-//! cursor); the rows read is O(rows from the oldest unsettled land), capped
-//! at [`MAX_ROWS`]; the first poll of a line finds the journal's end and
-//! the rows' end with O(log n) one-entry reads, never a scan.
+//! cursor), the held refs cost one one-row read each, O(unsettled lands),
+//! and new rows are read once each, at most [`MAX_ROWS`] a poll (the rest
+//! next poll). A land stuck bad behind many settled lands costs one row a
+//! poll, not the rows behind it. The first poll of a line finds the
+//! journal's end and the rows' end with O(log n) one-entry reads, never a
+//! scan.
+//!
+//! Lands already landed when a line's check refs first start (before the
+//! rows' end found then) never get a ref, even if they are still pending:
+//! enable check refs on a line before its first checked land, or have the
+//! checker settle those lands another way.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -336,9 +344,10 @@ where
             .map(|r| (r.changeset, r))
             .collect();
         let mut report = CheckRefsReport::default();
-        if state.dirty || !held.is_empty() {
+        self.poll_held(l, &mut held, &mut report).await?;
+        if state.dirty {
             // A capped read leaves the line dirty: the rest is read next poll.
-            let capped = self.settle(l, &mut state, &mut held, &mut report).await?;
+            let capped = self.read_new(l, &mut state, &mut held, &mut report).await?;
             state.dirty = capped;
             self.db.set_check_line(&l.line, &state)?;
         }
@@ -404,11 +413,43 @@ where
         Ok(())
     }
 
-    /// Reads the rows from the settled position: gives each unsettled land
-    /// its ref, deletes the refs of settled lands, and moves the settled
-    /// position past the settled prefix. Whether the read stopped at
-    /// [`MAX_ROWS`].
-    async fn settle(
+    /// Reads each held ref's row alone, at its own position: deletes the
+    /// refs of settled lands and pushes any not yet known pushed. One
+    /// one-row read per held ref, whatever lies between them.
+    async fn poll_held(
+        &mut self,
+        l: &CheckRefLine,
+        held: &mut HashMap<ChangesetId, CheckRef>,
+        report: &mut CheckRefsReport,
+    ) -> Result<(), MirrorError> {
+        let mut refs: Vec<CheckRef> = held.values().copied().collect();
+        refs.sort_by_key(|r| r.pos);
+        for r in refs {
+            let row = self.row_at_or_after(&l.line, r.pos).await?;
+            match row {
+                Some(row) if row.pos == r.pos && row.changeset == r.changeset => {
+                    if settled(&row) {
+                        self.delete(l, &r).await?;
+                        held.remove(&r.changeset);
+                        report.deleted.push(r.changeset);
+                    } else if !r.pushed {
+                        let r = self.push(l, r).await?;
+                        held.insert(r.changeset, r);
+                    }
+                }
+                _ => tracing::warn!(
+                    repo = %self.config.repo, line = %l.line, changeset = %r.changeset,
+                    pos = r.pos, "check ref's land row is not at its recorded position; kept"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads the rows from `state.pos` (the first not yet read), at most
+    /// [`MAX_ROWS`]: gives each unsettled land without a ref its ref, and
+    /// moves `state.pos` past every row read. Whether the read was capped.
+    async fn read_new(
         &mut self,
         l: &CheckRefLine,
         state: &mut CheckLine,
@@ -431,43 +472,30 @@ where
             MAX_ROWS,
         )
         .await?;
-        let mut prefix = true;
         for row in &rows {
-            if settled(row) {
-                if let Some(r) = held.remove(&row.changeset) {
-                    self.delete(l, &r).await?;
-                    report.deleted.push(r.changeset);
-                }
-                if prefix {
-                    state.pos = row.pos + 1;
-                    self.db.set_check_line(&l.line, state)?;
-                }
-                continue;
+            // A ref recorded before a crash moved `pos` is already held.
+            if !settled(row) && !held.contains_key(&row.changeset) {
+                let r = self.create(l, row).await?;
+                report.created.push((r.changeset, r.sha));
+                held.insert(r.changeset, r);
             }
-            prefix = false;
-            match held.get(&row.changeset).copied() {
-                Some(r) if r.pushed => {}
-                Some(r) => {
-                    let r = self.push(l, r).await?;
-                    held.insert(r.changeset, r);
-                }
-                None => {
-                    let r = self.create(l, row.changeset).await?;
-                    report.created.push((r.changeset, r.sha));
-                    held.insert(r.changeset, r);
-                }
-            }
+            state.pos = row.pos + 1;
+            self.db.set_check_line(&l.line, state)?;
         }
-        Ok(rows.len() >= MAX_ROWS as usize)
+        let capped = rows.len() >= MAX_ROWS as usize;
+        if capped {
+            tracing::info!(
+                repo = %self.config.repo, line = %l.line, pos = state.pos,
+                "check refs read {MAX_ROWS} new rows; the rest are read next poll"
+            );
+        }
+        Ok(capped)
     }
 
     /// Exports `land`, records the export with the server and in the
     /// mirror DB, then pushes its ref.
-    async fn create(
-        &mut self,
-        l: &CheckRefLine,
-        land: ChangesetId,
-    ) -> Result<CheckRef, MirrorError> {
+    async fn create(&mut self, l: &CheckRefLine, row: &LandCheck) -> Result<CheckRef, MirrorError> {
+        let land = row.changeset;
         let sha = self.export(land).await?;
         let cx = self.call("record-export");
         self.exports
@@ -477,6 +505,7 @@ where
             changeset: land,
             sha,
             pushed: false,
+            pos: row.pos,
         };
         self.db.put_check_ref(&l.line, &r)?;
         self.push(l, r).await
@@ -579,7 +608,7 @@ where
     /// The position after the line's last `GetLandChecks` row, by doubling
     /// then bisecting on one-row reads: O(log n) calls, never a scan.
     async fn rows_end(&mut self, line: &str) -> Result<u64, MirrorError> {
-        let Some(mut lo) = self.row_at_or_after(line, 0).await? else {
+        let Some(mut lo) = self.row_at_or_after(line, 0).await?.map(|r| r.pos) else {
             return Ok(0);
         };
         // A row is at `lo`; none is at or after `hi`.
@@ -587,7 +616,7 @@ where
         let mut step = 1u64;
         for _ in 0..MAX_PROBES {
             let p = lo.saturating_add(step);
-            match self.row_at_or_after(line, p).await? {
+            match self.row_at_or_after(line, p).await?.map(|r| r.pos) {
                 Some(pos) => lo = pos,
                 None => {
                     hi = Some(p);
@@ -602,7 +631,7 @@ where
                 break;
             }
             let mid = lo + (hi - lo) / 2;
-            match self.row_at_or_after(line, mid).await? {
+            match self.row_at_or_after(line, mid).await?.map(|r| r.pos) {
                 Some(pos) => lo = pos,
                 None => hi = mid,
             }
@@ -610,8 +639,12 @@ where
         Ok(lo + 1)
     }
 
-    /// The position of the first row at or after `pos`, if any.
-    async fn row_at_or_after(&mut self, line: &str, pos: u64) -> Result<Option<u64>, MirrorError> {
+    /// The first row at or after `pos`, if any.
+    async fn row_at_or_after(
+        &mut self,
+        line: &str,
+        pos: u64,
+    ) -> Result<Option<LandCheck>, MirrorError> {
         let cx = self.call("land-checks");
         let page = self
             .api
@@ -628,6 +661,6 @@ where
                 },
             )
             .await?;
-        Ok(page.rows.first().map(|r| r.pos))
+        Ok(page.rows.into_iter().next())
     }
 }
