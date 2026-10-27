@@ -258,7 +258,15 @@ fn run_dev_server(args: &cli::ServeArgs) -> Result<(), Failure> {
 
 fn dispatch(cli: &Cli) -> Result<(), Failure> {
     let g = &cli.global;
-    if matches!(cli.command, Command::Attest(_) | Command::Ci(_)) && !experimental_enabled(g) {
+    if matches!(
+        cli.command,
+        Command::Attest(_)
+            | Command::Attestations(_)
+            | Command::Checks(_)
+            | Command::ReviewQueue(_)
+            | Command::Ci(_)
+    ) && !experimental_enabled(g)
+    {
         return Err(Failure::usage(
             "experimental; enable with GRAFT_EXPERIMENTAL=1".to_owned(),
         ));
@@ -289,6 +297,9 @@ fn dispatch(cli: &Cli) -> Result<(), Failure> {
         Command::Revert(args) => cmd::revert::run(g, args),
         Command::Pick(args) => cmd::pick::run(g, args),
         Command::Attest(args) => cmd::attest::run(g, args),
+        Command::Attestations(args) => cmd::attest::list(g, args),
+        Command::Checks(args) => cmd::checks::run(g, args),
+        Command::ReviewQueue(args) => cmd::review_queue::run(g, args),
         Command::Ci(args) => cmd::ci::run(g, args),
         Command::Api(args) => api::run(g, args),
         Command::Version => cmd::version::run(g),

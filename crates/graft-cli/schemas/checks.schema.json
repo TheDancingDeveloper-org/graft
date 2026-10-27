@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft checks --json",
+  "type": "object",
+  "required": ["line", "checks", "next"],
+  "additionalProperties": false,
+  "properties": {
+    "line": {"type": "string"},
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["pos", "changeset", "state", "revert"],
+        "additionalProperties": false,
+        "properties": {
+          "pos": {"type": "integer", "minimum": 0},
+          "changeset": {"type": "string", "pattern": "^[a-z][0-9a-f]{64}$"},
+          "state": {"enum": ["pending", "good", "bad", "reverted", "unknown"]},
+          "revert": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "next": {"type": ["string", "null"]}
+  }
+}

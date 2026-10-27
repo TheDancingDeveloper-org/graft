@@ -111,6 +111,9 @@ fn help_is_public_facing_for_every_command() {
         &["revert"],
         &["pick"],
         &["attest"],
+        &["attestations"],
+        &["checks"],
+        &["review-queue"],
         &["ci"],
         &["ci", "exchange"],
         &["api"],
@@ -171,6 +174,8 @@ fn experimental_commands_are_hidden_and_gated() {
     let help = graft(dir.path()).arg("--help").assert().success();
     let help = text(help.get_output());
     assert!(!help.contains("attest"));
+    assert!(!help.contains("attestations"));
+    assert!(!help.contains("review-queue"));
     assert!(!help.contains("ci "));
 
     graft(dir.path())
@@ -178,6 +183,13 @@ fn experimental_commands_are_hidden_and_gated() {
         .assert()
         .code(2)
         .stderr(contains("experimental; enable with GRAFT_EXPERIMENTAL=1"));
+    for command in ["attestations", "checks", "review-queue"] {
+        graft(dir.path())
+            .args([command, "main"])
+            .assert()
+            .code(2)
+            .stderr(contains("experimental; enable with GRAFT_EXPERIMENTAL=1"));
+    }
     graft(dir.path())
         .args(["ci", "exchange", "--provider", "github", "--out", "token"])
         .assert()
@@ -689,7 +701,7 @@ fn every_schema_file_compiles() {
         count += 1;
     }
     assert_eq!(
-        count, 29,
+        count, 32,
         "one schema per command, plus error, api-list, line-list, line-merge, line-merges, tag-list and workspace-list"
     );
 }

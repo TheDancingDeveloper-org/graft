@@ -32,6 +32,7 @@ use graft_proto::error::ApiResult;
 use graft_proto::pb;
 use graft_proto::pb::object_service_server::{ObjectService, ObjectServiceServer};
 use graft_proto::pb::repo_service_server::{RepoService, RepoServiceServer};
+use graft_proto::pb::review_service_server::{ReviewService, ReviewServiceServer};
 use graft_proto::pb::workspace_service_server::WorkspaceServiceServer;
 use graft_proto::types::*;
 use graft_proto::{
@@ -226,7 +227,12 @@ where
         .send_compressed(CompressionEncoding::Gzip)
         .max_decoding_message_size(MAX_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_MESSAGE_BYTES);
-    services(svc).add_service(workspaces)
+    let review = ReviewServiceServer::from_arc(svc.clone())
+        .accept_compressed(CompressionEncoding::Gzip)
+        .send_compressed(CompressionEncoding::Gzip)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES);
+    services(svc).add_service(workspaces).add_service(review)
 }
 
 fn router<A: ObjectApi + RepoApi + 'static>(api: Arc<A>, shared: Arc<Shared>) -> Router {
@@ -687,7 +693,9 @@ impl<A: ObjectApi + RepoApi + 'static> RepoService for Svc<A> {
     }
 
     async fn attest(&self, req: Request<pb::AttestRequest>) -> Result<Response<pb::Empty>, Status> {
-        unary!(self, req, "Attest", Attest, attest, |_r| pb::Empty {})
+        // v0.2 clients send kind and status on this same RPC. The old
+        // `Attest` type drops them, so decode `AttestV2`.
+        unary!(self, req, "Attest", AttestV2, attest_v2, |_r| pb::Empty {})
     }
 
     async fn watch(
@@ -697,6 +705,46 @@ impl<A: ObjectApi + RepoApi + 'static> RepoService for Svc<A> {
         unary!(self, req, "Watch", Watch, watch, |r| {
             let page: Result<pb::JournalPage, Status> = Ok(pb::JournalPage::from(r));
             Box::pin(futures_util::stream::iter([page])) as JournalPages
+        })
+    }
+}
+
+#[tonic::async_trait]
+impl<A: ObjectApi + RepoApi + 'static> ReviewService for Svc<A> {
+    async fn get_attestations(
+        &self,
+        req: Request<pb::GetAttestationsRequest>,
+    ) -> Result<Response<pb::AttestationPage>, Status> {
+        unary!(
+            self,
+            req,
+            "GetAttestations",
+            GetAttestations,
+            get_attestations,
+            |r| pb::AttestationPage::from(r)
+        )
+    }
+
+    async fn get_land_checks(
+        &self,
+        req: Request<pb::GetLandChecksRequest>,
+    ) -> Result<Response<pb::LandCheckPage>, Status> {
+        unary!(
+            self,
+            req,
+            "GetLandChecks",
+            GetLandChecks,
+            get_land_checks,
+            |r| pb::LandCheckPage::from(r)
+        )
+    }
+
+    async fn review_queue(
+        &self,
+        req: Request<pb::ReviewQueueRequest>,
+    ) -> Result<Response<pb::ReviewQueuePage>, Status> {
+        unary!(self, req, "ReviewQueue", ReviewQueue, review_queue, |r| {
+            pb::ReviewQueuePage::from(r)
         })
     }
 }

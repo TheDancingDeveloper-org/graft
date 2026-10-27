@@ -122,6 +122,15 @@ pub(crate) enum Command {
     /// Record a check result for a changeset (for CI)
     #[command(hide = true)]
     Attest(AttestArgs),
+    /// List attestations for a changeset or line range
+    #[command(hide = true)]
+    Attestations(AttestationsArgs),
+    /// Show check state for landings on a line
+    #[command(hide = true)]
+    Checks(ChecksArgs),
+    /// List landings waiting for review
+    #[command(hide = true)]
+    ReviewQueue(ReviewQueueArgs),
     /// CI helpers: exchange the job's identity token for a graft token
     #[command(hide = true)]
     Ci(CiArgs),
@@ -716,23 +725,88 @@ pub(crate) struct PickArgs {
     pub(crate) merge: LandMerge,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum AttestKindArg {
+    Check,
+    Review,
+    Approval,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum AttestStatusArg {
+    Pass,
+    Fail,
+    Pending,
+    Error,
+}
+
 #[derive(Debug, Args)]
-#[command(group(clap::ArgGroup::new("result").required(true).args(["pass", "fail"])))]
 pub(crate) struct AttestArgs {
-    /// The changeset checked: an id or a ref
+    /// The changeset attested: an id or a ref
     pub(crate) rev: String,
-    /// The check's name, for example `ci/test`
+    /// What the attestation records
+    #[arg(long, value_enum, requires = "status", requires = "name")]
+    pub(crate) kind: Option<AttestKindArg>,
+    /// The attestation outcome
+    #[arg(long, value_enum, requires = "kind", requires = "name")]
+    pub(crate) status: Option<AttestStatusArg>,
+    /// The check or review name
+    #[arg(long, value_name = "NAME", requires = "kind", requires = "status")]
+    pub(crate) name: Option<String>,
+    /// Legacy check name
     #[arg(long, value_name = "NAME")]
-    pub(crate) check: String,
-    /// The check passed
-    #[arg(long)]
+    pub(crate) check: Option<String>,
+    /// The legacy check passed
+    #[arg(long, conflicts_with = "fail")]
     pub(crate) pass: bool,
-    /// The check failed
-    #[arg(long)]
+    /// The legacy check failed
+    #[arg(long, conflicts_with = "pass")]
     pub(crate) fail: bool,
-    /// A link to the run
+    /// A link to the run or review
     #[arg(long, value_name = "URL", default_value = "")]
     pub(crate) url: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AttestationsArgs {
+    /// One changeset: an id or a ref
+    pub(crate) rev: Option<String>,
+    /// Read attestations for positions on this line
+    #[arg(long, value_name = "LINE")]
+    pub(crate) line: Option<String>,
+    /// First line position
+    #[arg(long, value_name = "POS", requires = "line")]
+    pub(crate) from: Option<u64>,
+    /// Last line position
+    #[arg(long, value_name = "POS", requires = "line")]
+    pub(crate) to: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ChecksArgs {
+    /// The line whose landings to inspect
+    pub(crate) line: String,
+    /// First line position
+    #[arg(long, value_name = "POS", default_value_t = 0)]
+    pub(crate) from: u64,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ReviewQueueArgs {
+    /// The line whose landings need review
+    pub(crate) line: String,
+    /// Only landings after this journal position
+    #[arg(long, value_name = "LSN", default_value_t = 0)]
+    pub(crate) since: u64,
+    /// Only landings touching this path or directory
+    #[arg(long, value_name = "PATH")]
+    pub(crate) path: Option<String>,
+    /// Only landings changing at most this many lines
+    #[arg(long, value_name = "N")]
+    pub(crate) max_lines: Option<u32>,
+    /// Maximum landings to return
+    #[arg(long, value_name = "N", default_value_t = PAGE_DEFAULT)]
+    pub(crate) limit: u32,
 }
 
 #[derive(Debug, Args)]
