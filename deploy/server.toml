@@ -35,7 +35,13 @@ ci_repo = "TheDancingDeveloper-org/graft"
 repo_id = "1429435571"
 graft_repo = "graft"
 refs = ["refs/heads/main", "refs/heads/graft/"]
-workflows = ["TheDancingDeveloper-org/graft/.github/workflows/graft-ci-attest.yml@refs/heads/main"]
+# graft-post-land-check.yml is the main-pinned reusable workflow that
+# graft-post-land.yml calls on a land's check ref (refs/heads/graft/check/...);
+# its attest job posts the passed post-land checks (docs/runbooks/v02-exit.md).
+workflows = [
+  "TheDancingDeveloper-org/graft/.github/workflows/graft-ci-attest.yml@refs/heads/main",
+  "TheDancingDeveloper-org/graft/.github/workflows/graft-post-land-check.yml@refs/heads/main",
+]
 scopes = ["repo:graft:attest"]
 
 # Per-line land policy (WI-2288, WI-2298). Decision D22: phase 1 is a git
@@ -74,3 +80,19 @@ authority = "git-primary"
 name = "trial-1"
 policy = "direct"
 authority = "graft-primary"
+
+# The v0.2 exit rehearsal line of the repository `graft` (docs/runbooks/v02-exit.md).
+# Lines are global to the server, but only `graft` has one by this name.
+# Landing stays direct: nothing runs in the land path. `checks = "post-land"`
+# only tracks each land as pending until the post-land checker (compose
+# profile `post-land`) settles it good, or bad and reverted. `required` are
+# the names the attest job of graft-post-land-check.yml posts. Create the
+# line with trial/create-trial-line.sh (GRAFT_TRIAL_REPO=graft,
+# GRAFT_TRIAL_LINE=exit-rehearsal). backlog-1 is switched in a later PR.
+[[lines]]
+name = "exit-rehearsal"
+policy = "direct"
+authority = "graft-primary"
+checks = "post-land"
+required = ["ci/fmt", "ci/clippy", "ci/test"]
+retries = 1

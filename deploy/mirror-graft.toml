@@ -21,3 +21,11 @@ default_author = "thedancingdeveloper <306930456+thedancingdeveloper@users.norep
 [[lines]]
 branch = "main"
 line = "main"
+
+# Per-land check refs for the post-land line `exit-rehearsal`: every land is
+# exported, recorded and pushed as refs/heads/graft/check/exit-rehearsal/<changeset>
+# for the post-land checker to dispatch on (docs/runbooks/v02-exit.md).
+# The line's server config must be checks = "post-land".
+[[check_refs]]
+line = "exit-rehearsal"
+prefix = "graft/check/exit-rehearsal/"

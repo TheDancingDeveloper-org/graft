@@ -9,6 +9,9 @@
 #            web UI, clang/lld and OpenSSL headers, plus the attester
 #            binary. The attester runs as root with only CHOWN, SETUID,
 #            SETGID and KILL, and runs every check as uid 10001.
+#   checker  the post-land checker (`--runner github`): the binary on
+#            debian-slim, no toolchain (target `checker`, profile
+#            `post-land`)
 
 ARG RUST_VERSION=1.90
 ARG RUNTIME_RUST_VERSION=1.95
@@ -26,6 +29,22 @@ RUN --mount=type=cache,id=graft-attester-registry,target=/usr/local/cargo/regist
     [ -n "${CARGO_BUILD_JOBS}" ] || unset CARGO_BUILD_JOBS; \
     cargo build --release --locked -p graft-attester; \
     install -D target/release/graft-attester /out/graft-attester
+
+# The post-land checker (compose profile `post-land`): the same binary with
+# `--runner github`, which runs no checks here, so no toolchain. Runs as uid
+# 10001, the owner of the graft and GitHub token files it reads.
+FROM debian:${DEBIAN_VERSION}-slim AS checker
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 10001 graft \
+ && useradd --system --uid 10001 --gid graft --no-create-home \
+      --home-dir /var/lib/graft-attester --shell /usr/sbin/nologin graft \
+ && mkdir -p /var/lib/graft-attester/state \
+ && chown -R graft:graft /var/lib/graft-attester
+COPY --from=builder /out/graft-attester /usr/local/bin/graft-attester
+USER graft:graft
+ENTRYPOINT ["graft-attester"]
 
 FROM rust:${RUNTIME_RUST_VERSION}-slim-${DEBIAN_VERSION} AS runtime
 RUN apt-get update \

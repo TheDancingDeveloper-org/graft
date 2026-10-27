@@ -556,21 +556,44 @@ post_land = { checks = ["ci/build", "ci/test"], auto_revert = true }
 
     #[test]
     fn the_deploy_config_parses_and_lands_directly() {
-        use graft_engine::policy::{Authority, LandPolicy};
-        // deploy/server.toml as the graft-dev VM runs it: direct (D22).
+        use graft_engine::policy::{Authority, LandPolicy, LineChecks};
+        // deploy/server.toml as the graft-dev VM runs it: every line lands
+        // direct (D22). The one exception is post-land tracking (D40) on
+        // graft's v0.2 exit lines, which is not in the land path; any other
+        // line with checks fails here.
+        const POST_LAND: [&str; 2] = ["exit-rehearsal", "backlog-1"];
         let c = ServerConfig::parse(include_str!("../../../deploy/server.toml"))
             .expect("deploy/server.toml parses");
         let e = c.engine_config();
         let names: Vec<_> = e.lines.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, ["main", "trial-1"]);
+        assert_eq!(names[..2], ["main", "trial-1"]);
         for line in &e.lines {
             assert_eq!(line.policy, LandPolicy::Direct, "{}", line.name);
             assert!(line.post_land.is_none(), "{}", line.name);
             assert!(line.path_rules.is_empty(), "{}", line.name);
+            if POST_LAND.contains(&line.name.as_str()) {
+                assert_eq!(
+                    line.checks,
+                    LineChecks::PostLand {
+                        required: vec!["ci/fmt".into(), "ci/clippy".into(), "ci/test".into()],
+                        retries: 1,
+                    },
+                    "{}",
+                    line.name
+                );
+                assert_eq!(line.authority, Authority::GraftPrimary, "{}", line.name);
+            } else {
+                assert_eq!(line.checks, LineChecks::Off, "{}", line.name);
+            }
         }
+        assert!(
+            names.contains(&"exit-rehearsal"),
+            "the rehearsal line is configured"
+        );
         assert_eq!(e.lines[0].authority, Authority::GitPrimary);
         assert_eq!(e.lines[1].authority, Authority::GraftPrimary);
         assert_eq!(e.default_line.policy, LandPolicy::Direct);
+        assert_eq!(e.default_line.checks, LineChecks::Off);
     }
 
     #[test]
