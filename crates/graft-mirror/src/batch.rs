@@ -39,7 +39,10 @@
 //!    byte from recorded fields (`graft_git::export::commit_object`),
 //!    stored in the local mirror and recorded (the chain in
 //!    `batch_commits`) before anything is pushed, so a retry pushes the
-//!    same shas.
+//!    same shas. With [`Batcher::with_export_log`], each commit is also
+//!    recorded with the server as its land's export (`RecordExports`, in
+//!    chunks within the server's cap) before the push, so a CI run on a
+//!    batch commit can exchange its token for that land (D40).
 //! 5. **Push** branch `graft/batch-<n>` with a lease that requires the
 //!    branch not to exist, and **open a PR** into the base (adopting one
 //!    already on the branch). The PR body lists the lands (changeset,

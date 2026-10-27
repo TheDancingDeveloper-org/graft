@@ -20,7 +20,7 @@ use crate::follow::{Follower, LineOutcome};
 use crate::git::{Mirror, PushOutcome};
 use crate::github::{Forge, Pull};
 use crate::text::{clean_message, clean_text};
-use crate::{MirrorError, current_ref, move_ref};
+use crate::{ExportLog, MAX_RECORD_EXPORTS, MirrorError, current_ref, move_ref};
 
 use super::render::{
     BatchHeader, keep_with_reverts, land_commit, parse_commit, render, settled_keep,
@@ -49,6 +49,7 @@ pub struct Batcher<'a, A, F> {
     config: BatchConfig,
     clock: fn() -> i64,
     calls: u64,
+    exports: Option<&'a dyn ExportLog>,
 }
 
 impl<'a, A, F> Batcher<'a, A, F>
@@ -89,12 +90,21 @@ where
             config,
             clock: system_ms,
             calls: 0,
+            exports: None,
         })
     }
 
     /// Reads time from `clock` (milliseconds since the epoch).
     pub fn with_clock(mut self, clock: fn() -> i64) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Records each batch commit as the export of its land's changeset in
+    /// `log` before the branch is pushed, so a CI run on a batch commit can
+    /// exchange its token for that land (D40).
+    pub fn with_export_log(mut self, log: &'a dyn ExportLog) -> Self {
+        self.exports = Some(log);
         self
     }
 
@@ -1473,15 +1483,18 @@ where
             return self.skip(rec, "not appended: the batch has no per-land commits");
         }
         if remote != rec.squash_sha {
-            if !recorded.iter().any(|commit| commit.sha == remote) {
+            let Some(at) = recorded.iter().position(|commit| commit.sha == remote) else {
                 return Err(config_err(format!(
                     "batch branch {} moved other than forward from its recorded commits",
                     rec.branch
                 )));
-            }
+            };
             // The database is ahead of GitHub: the push landed and the run
             // died before the body was written, or the push itself did not.
-            // Re-push the recorded head with a lease, then refresh the body.
+            // Record the commits past the remote head (the run may have died
+            // before recording them), re-push the recorded head with a
+            // lease, then refresh the body.
+            self.record_exports(&recorded[at + 1..]).await?;
             self.push_append(rec, remote).await?;
         }
         // GitHub's body can lag the database when a run dies after the
@@ -1610,6 +1623,7 @@ where
         rec.body = self.body_for(rec).await?;
         rec.detail = format!("recorded {} appended land(s)", appended.len());
         self.db.extend_batch(rec, &appended)?;
+        self.record_exports(&appended).await?;
         self.push_append(rec, old_head).await?;
         self.sync_body(rec, number, "").await?;
         rec.detail = format!(
@@ -1747,11 +1761,38 @@ where
         Ok(())
     }
 
+    /// Records each of `commits` as the export of its land, before the push
+    /// that publishes it.
+    async fn record_exports(&mut self, commits: &[BatchCommit]) -> Result<(), MirrorError> {
+        let pairs: Vec<(ChangesetId, GitSha)> = commits.iter().map(|c| (c.land, c.sha)).collect();
+        self.record(&pairs).await
+    }
+
+    /// Records `exports` with the export log, in chunks within the server's
+    /// `RecordExports` cap. Recording a pair again is a no-op on the server.
+    async fn record(&mut self, exports: &[(ChangesetId, GitSha)]) -> Result<(), MirrorError> {
+        let Some(log) = self.exports else {
+            return Ok(());
+        };
+        for chunk in exports.chunks(MAX_RECORD_EXPORTS) {
+            let cx = self.call("record-exports");
+            log.record_exports(&cx, &self.config.repo, chunk).await?;
+        }
+        Ok(())
+    }
+
     /// Pushes the batch's head commit to `graft/batch-<n>`, on a lease that
     /// requires the branch not to exist. The same commit already there is
     /// fine (a retry); other commits are not overwritten, and the batch is
     /// rejected.
     async fn push(&mut self, rec: &mut BatchRecord) -> Result<(), MirrorError> {
+        let commits = self.db.batch_commits(rec.number)?;
+        if commits.is_empty() {
+            // A squashed batch: its one commit holds the cut tip's tree.
+            self.record(&[(rec.tip, rec.squash_sha)]).await?;
+        } else {
+            self.record_exports(&commits).await?;
+        }
         let token = if self.mirror.is_https() {
             Some(self.forge.token().await?)
         } else {

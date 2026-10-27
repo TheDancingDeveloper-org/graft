@@ -200,6 +200,10 @@ pub trait ExportLog: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), ApiError>> + Send + 's>>;
 }
 
+/// The most exports one `RecordExports` call carries (the server's cap).
+/// Callers record longer lists in chunks of this size.
+pub const MAX_RECORD_EXPORTS: usize = 256;
+
 /// The graft ref for a git tag (`refs/tags/<name>`).
 pub fn tag_ref(name: &str) -> String {
     format!("tags/{name}")

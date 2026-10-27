@@ -4,22 +4,24 @@
 
 mod support;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use graft_engine::policy::LineChecks;
 use graft_engine::{Engine, EngineConfig, LineConfig};
+use graft_git::GitSha;
 use graft_mirror::batch::{BatchConfig, BatchOutcome, BatchRecord, BatchState, Batcher};
 use graft_mirror::credentials::SecretToken;
 use graft_mirror::follow::{FollowConfig, FollowLine, POLL_INTERVAL};
 use graft_mirror::github::{CheckRun, Forge, ForgeError, NewPull, Pull};
-use graft_mirror::{Mirror, MirrorDb, MirrorError, current_ref};
+use graft_mirror::{ExportLog, MAX_RECORD_EXPORTS, Mirror, MirrorDb, MirrorError, current_ref};
 use graft_model::{
     Author, AuthorKind, Change, ChangesetId, EntryKind, Metadata, ObjectKind, RepoPath, Timestamp,
 };
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::types::*;
-use graft_proto::{CallContext, Frame};
+use graft_proto::{ApiError, CallContext, Frame};
 use graft_store::memory::MemoryStore;
 use graft_testkit::clock::FakeClock;
 use support::{REPO, clock, cx, git, move_line};
@@ -2620,4 +2622,204 @@ async fn a_checked_cut_reads_only_the_batch_rows() {
     assert!(probes.len() <= 16, "{} probes", probes.len());
     let rows: usize = reads.iter().map(|(_, rows)| rows).sum();
     assert!(rows < EARLIER as usize / 2, "{rows} rows read");
+}
+
+/// The server's export record, in memory: it refuses a `RecordExports` call
+/// over the server's cap, as the server does, and keeps each call's size.
+#[derive(Default)]
+struct Exports {
+    got: Mutex<HashSet<(ChangesetId, GitSha)>>,
+    calls: Mutex<Vec<usize>>,
+}
+
+impl Exports {
+    /// Whether `commit` is recorded as the export of `changeset`.
+    fn is_export_of(&self, changeset: ChangesetId, commit: GitSha) -> bool {
+        self.got.lock().unwrap().contains(&(changeset, commit))
+    }
+
+    fn calls(&self) -> Vec<usize> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl ExportLog for Exports {
+    fn record_exports<'s>(
+        &'s self,
+        _cx: &'s CallContext,
+        repo: &'s str,
+        exports: &'s [(ChangesetId, GitSha)],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send + 's>>
+    {
+        Box::pin(async move {
+            assert_eq!(repo, REPO);
+            if exports.len() > MAX_RECORD_EXPORTS {
+                return Err(ApiError::LimitExceeded {
+                    limit: "record_exports".to_owned(),
+                    max: MAX_RECORD_EXPORTS as u64,
+                });
+            }
+            self.calls.lock().unwrap().push(exports.len());
+            self.got.lock().unwrap().extend(exports.iter().copied());
+            Ok(())
+        })
+    }
+}
+
+/// Asserts each of batch `number`'s per-land commits is recorded as its
+/// land's export, and returns them.
+fn assert_recorded(w: &World, log: &Exports, number: u64) -> Vec<(ChangesetId, GitSha)> {
+    let commits: Vec<_> =
+        w.db.batch_commits(number)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.land, c.sha))
+            .collect();
+    assert!(!commits.is_empty());
+    for (land, sha) in &commits {
+        assert!(
+            log.is_export_of(*land, *sha),
+            "{land} -> {sha} not recorded"
+        );
+    }
+    commits
+}
+
+#[tokio::test]
+async fn each_batch_commit_is_recorded_as_its_lands_export() {
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let b = w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    let log = Exports::default();
+    let rec = opened(
+        w.batcher()
+            .with_export_log(&log)
+            .run()
+            .await
+            .unwrap()
+            .outcome,
+    );
+    let commits = assert_recorded(&w, &log, rec.number);
+    assert_eq!(
+        commits.iter().map(|(land, _)| *land).collect::<Vec<_>>(),
+        [a, b]
+    );
+    // One commit per land: a land's export is its own commit only.
+    assert!(!log.is_export_of(a, commits[1].1));
+    assert_eq!(commits[1].1, rec.squash_sha);
+
+    // An append to the open batch records the appended land's commit.
+    let c = w.land(&[("c.txt", "c1\n")], "review fix", 3).await;
+    let run = w.batcher().with_export_log(&log).run().await.unwrap();
+    let BatchOutcome::Waiting(rec) = run.outcome else {
+        panic!("expected the open batch to wait")
+    };
+    let commits = assert_recorded(&w, &log, rec.number);
+    assert_eq!(commits.len(), 3);
+    assert_eq!(commits[2], (c, rec.squash_sha));
+    assert_eq!(
+        support::branch(&w.upstream, &rec.branch).unwrap(),
+        rec.squash_sha.to_hex()
+    );
+
+    // A re-run with nothing new records nothing new and changes no commit.
+    let before = log.got.lock().unwrap().len();
+    let run = w.batcher().with_export_log(&log).run().await.unwrap();
+    assert!(matches!(run.outcome, BatchOutcome::Waiting(_)));
+    assert_eq!(log.got.lock().unwrap().len(), before);
+    assert_eq!(assert_recorded(&w, &log, rec.number), commits);
+}
+
+#[tokio::test]
+async fn batch_exports_are_recorded_before_the_push() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    // GitHub refuses every push to a batch branch.
+    let hook = w.upstream.join("hooks/pre-receive");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in refs/heads/graft/batch-*) exit 1;; esac\ndone\nexit 0\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&hook, perms).unwrap();
+
+    let log = Exports::default();
+    let _ = w.batcher().with_export_log(&log).run().await;
+    let rec = w.db.last_batch(LINE).unwrap().expect("the batch was cut");
+    assert_eq!(
+        support::branch(&w.upstream, &rec.branch),
+        None,
+        "the push failed"
+    );
+    assert_ne!(rec.state, BatchState::Open);
+    assert_eq!(assert_recorded(&w, &log, rec.number).len(), 2);
+
+    // A log that cannot record stops the push.
+    std::fs::remove_file(&hook).unwrap();
+    struct Refuse;
+    impl ExportLog for Refuse {
+        fn record_exports<'s>(
+            &'s self,
+            _cx: &'s CallContext,
+            _repo: &'s str,
+            _exports: &'s [(ChangesetId, GitSha)],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send + 's>>
+        {
+            Box::pin(async { Err(ApiError::Unavailable { retry_after_ms: 1 }) })
+        }
+    }
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    assert!(w.batcher().with_export_log(&Refuse).run().await.is_err());
+    let rec = w.db.last_batch(LINE).unwrap().expect("the batch was cut");
+    assert_eq!(rec.state, BatchState::Planned);
+    assert_eq!(support::branch(&w.upstream, &rec.branch), None);
+    // The next run records, then pushes the same commit.
+    let log = Exports::default();
+    let rec = match w
+        .batcher()
+        .with_export_log(&log)
+        .run()
+        .await
+        .unwrap()
+        .outcome
+    {
+        BatchOutcome::Waiting(rec) | BatchOutcome::Opened(rec) => rec,
+        other => panic!("expected the batch to open, got {other:?}"),
+    };
+    assert_recorded(&w, &log, rec.number);
+    assert_eq!(
+        support::branch(&w.upstream, &rec.branch).unwrap(),
+        rec.squash_sha.to_hex()
+    );
+}
+
+#[tokio::test]
+async fn a_batch_over_the_record_cap_is_recorded_in_chunks() {
+    let w = World::new().await;
+    w.start().await;
+    let lands = MAX_RECORD_EXPORTS + 3;
+    for n in 0..lands {
+        let path = format!("f{n}.txt");
+        w.land(&[(path.as_str(), "x\n")], &format!("add {n}"), n as i64)
+            .await;
+    }
+    let log = Exports::default();
+    let rec = opened(
+        w.batcher()
+            .with_export_log(&log)
+            .run()
+            .await
+            .unwrap()
+            .outcome,
+    );
+    assert_eq!(rec.lands as usize, lands);
+    assert_eq!(assert_recorded(&w, &log, rec.number).len(), lands);
+    assert_eq!(log.calls(), [MAX_RECORD_EXPORTS, 3]);
 }
