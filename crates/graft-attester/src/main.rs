@@ -3,19 +3,31 @@
 //! checks what landed on a checked line instead, and reverts the first bad
 //! land (WI-2598). See the library docs and `deploy/README.md`.
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use graft_attester::post_land::{DEFAULT_WINDOW, PostLand, ProcessRunner};
+use graft_attester::github_runner::{
+    DEFAULT_API, DEFAULT_WORKFLOW, GitHubConfig, GitHubRunner, GitHubToken, read_secret,
+};
+use graft_attester::post_land::{DEFAULT_WINDOW, PostLand, ProcessRunner, Runner};
 use graft_attester::{
     Attester, Check, Config, DEFAULT_CHECKS, DEFAULT_LINE, DEFAULT_REPO, Mode, RetriesSource,
     call_context, effective_retries, log,
 };
 use graft_client::{Endpoint, Remote};
+use graft_proto::api::RepoApi as _;
+use graft_proto::types::GetLineConfig;
+
+/// Where post-land checks run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum RunnerKind {
+    /// Here, each check as a process on a checkout of the landed snapshot.
+    Process,
+    /// As a GitHub Actions workflow dispatched on the mirror's per-land ref.
+    Github,
+}
 
 /// Builds and tests new drafts and posts `Attest` per check.
 #[derive(Debug, Parser)]
@@ -45,19 +57,54 @@ struct Args {
     /// Post-land: most lands held at once.
     #[arg(long, default_value_t = DEFAULT_WINDOW)]
     window: usize,
-    /// File holding the token (mode 0600 or stricter). It needs `read` and
-    /// `attest` on the repository.
+    /// File holding the graft token (mode 0600 or stricter). It needs
+    /// `read` and `attest` on the repository, and in post-land mode `land`
+    /// on the line too, because the checker lands the reverts.
     #[arg(long, default_value = "/run/secrets/graft-attester-token")]
     token_file: PathBuf,
+    /// Post-land: where the checks run. `github` dispatches `--workflow` on
+    /// `<ref-prefix><changeset>` and reads its jobs; the workflow attests
+    /// the passes itself.
+    #[arg(long, value_enum, default_value_t = RunnerKind::Process)]
+    runner: RunnerKind,
+    /// `--runner github`: the GitHub repository, `owner/name`.
+    #[arg(long)]
+    github_repo: Option<String>,
+    /// `--runner github`: file holding the GitHub token (mode 0600 or
+    /// stricter). It is opened read-only and never written, so graft-mirror
+    /// can share it. It needs `actions: write` on the repository.
+    #[arg(long, default_value = "/run/secrets/github-token")]
+    github_token_file: PathBuf,
+    /// `--runner github`: the GitHub API root.
+    #[arg(long, default_value = DEFAULT_API)]
+    github_api: String,
+    /// `--runner github`: the workflow dispatched for each snapshot and
+    /// attempt. Its `run-name` must carry the `request_id` input.
+    #[arg(long, default_value = DEFAULT_WORKFLOW)]
+    workflow: String,
+    /// `--runner github`: prefix of the ref the mirror pushes for each land;
+    /// the changeset id follows (default `graft/check/<line>/`).
+    #[arg(long)]
+    ref_prefix: Option<String>,
+    /// `--runner github`: seconds between polls of a run.
+    #[arg(long, default_value_t = 15)]
+    github_poll_s: u64,
+    /// `--runner github`: seconds a dispatched run may stay unfound or
+    /// queued; past it nothing is judged and it is tried again later.
+    #[arg(long, default_value_t = 1800)]
+    github_start_timeout_s: u64,
     /// A check, `name=program args...`, run in order (repeatable; default
-    /// rustTorrent's `ci/fmt`, `ci/clippy` and `ci/test`).
+    /// rustTorrent's `ci/fmt`, `ci/clippy` and `ci/test`). With `--runner
+    /// github` it is `name=job`, and the default is the line's `required`
+    /// checks, each read from the job named after its last `/` segment.
     #[arg(long = "check")]
     checks: Vec<String>,
     /// Run every check even after one fails (default: the rest are
     /// attested failed without running, as a CI job's later steps are).
     #[arg(long)]
     keep_going: bool,
-    /// Per-check time limit, in seconds.
+    /// Per-check time limit, in seconds (with `--runner github`, the
+    /// limit for the whole run once it started).
     #[arg(long, default_value_t = 2700)]
     timeout_s: u64,
     /// Root of the work, log and state directories.
@@ -104,19 +151,7 @@ fn parse_env(s: &str) -> Result<(String, String), String> {
 /// Reads the token, refusing a file others could read. The value is never
 /// printed, and errors name the path only.
 fn read_token(path: &Path) -> Result<String, String> {
-    let meta = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if meta.permissions().mode() & 0o077 != 0 {
-        return Err(format!(
-            "{}: readable by group or others; make it 0600",
-            path.display()
-        ));
-    }
-    let token = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let token = token.trim().to_owned();
-    if token.is_empty() {
-        return Err(format!("{}: empty", path.display()));
-    }
-    Ok(token)
+    read_secret(path)
 }
 
 fn config(args: &Args) -> Result<Config, String> {
@@ -125,13 +160,19 @@ fn config(args: &Args) -> Result<Config, String> {
         (Mode::Draft, None) => DEFAULT_LINE.to_owned(),
         (Mode::PostLand, None) => return Err("--mode post-land needs --line".to_owned()),
     };
+    if args.runner == RunnerKind::Github && args.mode != Mode::PostLand {
+        return Err("--runner github needs --mode post-land".to_owned());
+    }
     let mut cfg = Config::new(args.repo.clone(), line, &args.root);
     if args.mode == Mode::PostLand {
         // Its own position: the two modes read the journal apart.
         cfg.state_file = Some(args.root.join("state").join("post-land-lsn"));
     }
     cfg.stop_on_failure = !args.keep_going;
-    let specs: Vec<&str> = if args.checks.is_empty() {
+    let specs: Vec<&str> = if args.checks.is_empty() && args.runner == RunnerKind::Github {
+        // Filled in from the line's `required` once connected.
+        Vec::new()
+    } else if args.checks.is_empty() {
         DEFAULT_CHECKS.to_vec()
     } else {
         args.checks.iter().map(String::as_str).collect()
@@ -152,10 +193,64 @@ fn config(args: &Args) -> Result<Config, String> {
     Ok(cfg)
 }
 
+/// The GitHub runner's settings; `cfg.checks` are `name=job`.
+fn github_config(args: &Args, cfg: &Config) -> Result<GitHubConfig, String> {
+    let slug = args
+        .github_repo
+        .as_deref()
+        .ok_or("--runner github needs --github-repo owner/name")?;
+    let prefix = args
+        .ref_prefix
+        .clone()
+        .unwrap_or_else(|| format!("graft/check/{}/", cfg.line));
+    let mut gh = GitHubConfig::new(slug, prefix)?;
+    gh.api = args.github_api.clone();
+    gh.workflow = args.workflow.clone();
+    gh.poll = Duration::from_secs(args.github_poll_s);
+    gh.start_timeout = Duration::from_secs(args.github_start_timeout_s);
+    gh.run_timeout = cfg.timeout;
+    for check in &cfg.checks {
+        gh.jobs.insert(check.name.clone(), check.argv[0].clone());
+    }
+    Ok(gh)
+}
+
+/// Runs the post-land checker with `runner` until it stops.
+async fn check_lands<R: Runner<Remote>>(
+    remote: Remote,
+    runner: R,
+    cfg: Config,
+    retries: u32,
+    window: usize,
+) -> ExitCode {
+    let mut checker = match PostLand::new(remote, runner, cfg, retries) {
+        Ok(c) => c,
+        Err(e) => {
+            log(&format!("error: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    checker.set_window(window);
+    tokio::select! {
+        r = checker.run(None) => match r {
+            // Reported by the run; the operator decides.
+            Ok(_) => ExitCode::from(3),
+            Err(e) => {
+                log(&format!("error: {e}"));
+                ExitCode::FAILURE
+            }
+        },
+        _ = shutdown() => {
+            log("stopping");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let args = Args::parse();
-    let cfg = match config(&args) {
+    let mut cfg = match config(&args) {
         Ok(c) => c,
         Err(e) => {
             log(&format!("error: {e}"));
@@ -168,6 +263,16 @@ async fn main() -> ExitCode {
             log(&format!("error: token: {e}"));
             return ExitCode::from(2);
         }
+    };
+    let github_token = match args.runner {
+        RunnerKind::Process => None,
+        RunnerKind::Github => match GitHubToken::read(&args.github_token_file) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log(&format!("error: GitHub token: {e}"));
+                return ExitCode::from(2);
+            }
+        },
     };
 
     // The server may still be starting: retry the connection.
@@ -185,6 +290,41 @@ async fn main() -> ExitCode {
             }
         }
     };
+    if args.runner == RunnerKind::Github && cfg.checks.is_empty() {
+        let line = match remote
+            .get_line_config(
+                &call_context(),
+                GetLineConfig {
+                    repo: cfg.repo.clone(),
+                    line: cfg.line.clone(),
+                },
+            )
+            .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                log(&format!(
+                    "error: line config: {e}; give the checks with --check name=job"
+                ));
+                return ExitCode::FAILURE;
+            }
+        };
+        if line.required.is_empty() {
+            log(&format!(
+                "error: line {} requires no checks; give them with --check name=job",
+                cfg.line
+            ));
+            return ExitCode::from(2);
+        }
+        cfg.checks = line
+            .required
+            .iter()
+            .map(|name| Check {
+                name: name.clone(),
+                argv: vec![name.rsplit('/').next().unwrap_or(name).to_owned()],
+            })
+            .collect();
+    }
     let checks: Vec<&str> = cfg.checks.iter().map(|c| c.name.as_str()).collect();
     if args.mode == Mode::PostLand {
         let chosen =
@@ -211,29 +351,33 @@ async fn main() -> ExitCode {
             checks.join(", "),
             chosen.retries
         ));
-        let runner = ProcessRunner::new(cfg.clone());
-        let mut checker = match PostLand::new(remote, runner, cfg, chosen.retries) {
-            Ok(c) => c,
+        let retries = chosen.retries;
+        if args.runner == RunnerKind::Process {
+            let runner = ProcessRunner::new(cfg.clone());
+            return check_lands(remote, runner, cfg, retries, args.window).await;
+        }
+        let gh = match github_config(&args, &cfg) {
+            Ok(g) => g,
+            Err(e) => {
+                log(&format!("error: {e}"));
+                return ExitCode::from(2);
+            }
+        };
+        let Some(token) = github_token else {
+            unreachable!("read for --runner github");
+        };
+        log(&format!(
+            "checks run as {} on {}/{}, refs {}<changeset>",
+            gh.workflow, gh.owner, gh.repo, gh.ref_prefix
+        ));
+        let runner = match GitHubRunner::new(gh, token) {
+            Ok(r) => r,
             Err(e) => {
                 log(&format!("error: {e}"));
                 return ExitCode::FAILURE;
             }
         };
-        checker.set_window(args.window);
-        return tokio::select! {
-            r = checker.run(None) => match r {
-                // Reported by the run; the operator decides.
-                Ok(_) => ExitCode::from(3),
-                Err(e) => {
-                    log(&format!("error: {e}"));
-                    ExitCode::FAILURE
-                }
-            },
-            _ = shutdown() => {
-                log("stopping");
-                ExitCode::SUCCESS
-            }
-        };
+        return check_lands(remote, runner, cfg, retries, args.window).await;
     }
     log(&format!(
         "watching {} line {} on {} for drafts; checks {}",
@@ -307,5 +451,66 @@ mod tests {
                 .ends_with("state/post-land-lsn")
         );
         assert!(Args::try_parse_from(["graft-attester", "--mode", "revert"]).is_err());
+    }
+
+    /// WI-2625 Done 5: the graft token's help names every scope the
+    /// post-land checker uses, `land` for its reverts included.
+    #[test]
+    fn the_token_file_help_names_read_attest_and_land() {
+        use clap::CommandFactory as _;
+        let help = Args::command().render_long_help().to_string();
+        let start = help.find("--token-file").expect("--token-file in the help");
+        let text: String = help[start..]
+            .split("--runner")
+            .next()
+            .expect("text")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for scope in ["`read`", "`attest`", "`land`", "reverts"] {
+            assert!(text.contains(scope), "{scope} missing from: {text}");
+        }
+    }
+
+    #[test]
+    fn the_github_runner_reads_jobs_and_defaults_its_ref_prefix() {
+        let args = Args::parse_from([
+            "graft-attester",
+            "--mode",
+            "post-land",
+            "--line",
+            "backlog-1",
+            "--runner",
+            "github",
+            "--github-repo",
+            "owner/graft",
+            "--check",
+            "ci/fmt=fmt",
+            "--check",
+            "ci/test=unit-tests",
+        ]);
+        let cfg = config(&args).expect("config");
+        let gh = github_config(&args, &cfg).expect("github config");
+        assert_eq!(gh.ref_prefix, "graft/check/backlog-1/");
+        assert_eq!(gh.workflow, DEFAULT_WORKFLOW);
+        assert_eq!((gh.owner.as_str(), gh.repo.as_str()), ("owner", "graft"));
+        assert_eq!(gh.job_of("ci/fmt"), "fmt");
+        assert_eq!(gh.job_of("ci/test"), "unit-tests");
+        // The checks default to the line's `required`, read once connected.
+        let args = Args::parse_from([
+            "graft-attester",
+            "--mode",
+            "post-land",
+            "--line",
+            "backlog-1",
+            "--runner",
+            "github",
+        ]);
+        let cfg = config(&args).expect("config");
+        assert!(cfg.checks.is_empty());
+        assert!(github_config(&args, &cfg).is_err(), "needs --github-repo");
+        // Only post-land mode runs on GitHub.
+        let args = Args::parse_from(["graft-attester", "--runner", "github"]);
+        assert!(config(&args).is_err());
     }
 }
