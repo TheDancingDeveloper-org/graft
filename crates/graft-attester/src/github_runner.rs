@@ -29,8 +29,8 @@
 //! - **A failed run**, and only these: the check's job concluded `failure`
 //!   or `timed_out`; the check's job ran past the run timeout (the runner
 //!   cancels the run, and the timeout is the verdict, not the
-//!   cancellation); and a 422 on dispatch other than `No ref found` (the
-//!   workflow is not on that ref, or has no `workflow_dispatch`).
+//!   cancellation); and a 422 saying the workflow is not on that ref or
+//!   has no `workflow_dispatch` trigger.
 //! - **No verdict** ([`Error::Forge`], tried again later): everything
 //!   else. GitHub unreachable, a 5xx, a rate limit or a refused credential;
 //!   the changeset's ref not pushed yet (422 `No ref found`); a run not
@@ -597,7 +597,7 @@ impl GitHubRunner {
             422 if self.message(&answer.body).starts_with("No ref found") => {
                 Err(self.forge_error("dispatching", &answer))
             }
-            422 => Ok(Some(format!(
+            422 if permanent_dispatch_refusal(&self.message(&answer.body)) => Ok(Some(format!(
                 "GitHub refused the dispatch on {ref_name}: {}",
                 self.message(&answer.body)
             ))),
@@ -724,6 +724,18 @@ impl GitHubRunner {
             };
         }
     }
+}
+
+fn permanent_dispatch_refusal(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    let missing_workflow = message.contains("workflow")
+        && (message.contains("not found") || message.contains("does not exist"))
+        && (message.contains("ref") || message.contains("workflow file"));
+    let missing_trigger = message.contains("workflow_dispatch")
+        && (message.contains("does not have")
+            || message.contains("missing")
+            || message.contains("not configured"));
+    missing_workflow || missing_trigger
 }
 
 /// Now, in seconds since the epoch.

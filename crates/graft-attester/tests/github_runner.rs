@@ -942,6 +942,54 @@ async fn an_outage_or_a_run_that_never_starts_is_an_error() {
     gh.assert_token_only_in_header();
 }
 
+/// WI-2631: a 422 caused by the workflow input contract is retryable and
+/// therefore cannot mark a bad land or revert it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unexpected_inputs_are_an_error_and_never_revert() {
+    let rig = Rig::new(0).await;
+    let landed = lands(&rig.engine, 2, 1).await;
+    rig.gh.set_mode(Mode::Refuse(
+        "Unexpected inputs provided: [request_id]".to_owned(),
+    ));
+    let mut c = rig.checker(rig.gh.config()).await;
+
+    let step = c.step(0).await;
+    assert!(matches!(step, Err(Error::Forge(_))), "{step:?}");
+    assert!(entries(&rig.engine, "LandReverted").await.is_empty());
+    assert!(
+        attested(&rig.engine)
+            .await
+            .values()
+            .flatten()
+            .all(|passed| *passed),
+        "an input error attested a failure"
+    );
+    let states = land_states(&rig.engine).await;
+    assert!(
+        landed
+            .iter()
+            .all(|id| states.get(id) != Some(&LandCheckState::Bad)),
+        "{states:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_contract_422s_are_retryable() {
+    let gh = FakeGitHub::start(None).await;
+    for (i, message) in [
+        "Unexpected inputs provided: [request_id]",
+        "Required input 'changeset' not provided",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        gh.set_mode(Mode::Refuse(message.to_owned()));
+        let mut runner = gh.runner();
+        let got = run_one(&mut runner, cs(25 + i as u8), FMT, 1).await;
+        assert!(matches!(got, Err(Error::Forge(_))), "{message}: {got:?}");
+    }
+}
+
 /// Done 2: a red job, a run past its timeout (cancelled), and a 422 for a
 /// workflow that is not on the ref are failed runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -973,6 +1021,16 @@ async fn a_red_job_a_timeout_and_a_workflow_not_on_the_ref_fail() {
         refused
             .url
             .ends_with("/actions/workflows/graft-post-land.yml")
+    );
+
+    gh.set_mode(Mode::Refuse(
+        "Workflow file graft-post-land.yml not found on ref graft/check/integration/x".to_owned(),
+    ));
+    let mut runner = gh.runner();
+    let missing = run_one(&mut runner, cs(33), FMT, 1).await.expect("run");
+    assert!(
+        matches!(&missing.outcome, Outcome::NotStarted(why) if why.contains("not found on ref")),
+        "{missing:?}"
     );
 }
 
