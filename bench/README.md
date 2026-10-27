@@ -330,19 +330,35 @@ runs against a fixture in tests and against graft-dev in the trial.
 
 | script | what it does |
 | --- | --- |
-| `postland/record.py` | follows one line from a stored LSN through `graft api watch` and `get_land_checks`, appends JSONL stamped with the observer's clock, resumes without duplicating a row, and flags entries that arrive late after a recorder gap |
+| `postland/record.py` | follows one line from a stored LSN through `graft api watch` (repo is a flag, never a request field) and `GET /v1/repos/{repo}/land-checks` with the token in a header, re-reads every still-pending land each poll, resumes without duplicating a row |
 | `postland/plant.py` | `--variant fmt` or `--variant test` lands a bad change and one good follower as `GRAFT_SESSION_ID=postland-plant`, then prints both changeset ids |
-| `postland/report.py` | writes the M1, M2, M3 and D31 tables from that JSONL and the stated Prometheus samples |
+| `postland/report.py` | writes the M1, M2, M3 and D31 tables from that JSONL and one Prometheus HTTP query |
 
-The M1 bound is p95 ≤ 30 min and max ≤ 4 h. Seconds a landing spends
-`blocked` are summed on their own row and subtracted from land-to-settled, so
-operator-held time is visible and not counted against the bound. `late` rows
-are excluded from the percentiles and counted for coverage. Every figure in
-the report is recomputed from the JSONL and from the query named in the D31
-section, `histogram_quantile(0.95, rate(graft_rpc_duration_seconds_bucket{op="Land"}[1d]))`.
+The M1 bound is p95 ≤ 30 min and max ≤ 4 h. Land time is the journal entry's
+`at` when the body has one, otherwise the first observation. Settle time is
+the first poll that reads the landing as `good`, `bad` or `reverted`.
+`--interval` (default 60s) is the largest gap a poll can hide, so it bounds
+the precision of every sample.
+
+`late` means the entry was first observed more than `--late-after` seconds
+(default 120) after the time it was journaled (`at` on the body). A body
+with no journal time is not late, including the first entry seen after a
+restart. Late rows are excluded from the percentiles and counted for coverage.
+
+The server's check states are `pending`, `good`, `bad` and `reverted` only.
+Blocked time is derived from a journaled attester report (`AttesterBlocked`).
+When none is journaled the M1 cell reads `n/a (not observable)` and is never
+reported as 0.
+
+The D31 figure is the result of running
+`histogram_quantile(0.95, rate(graft_rpc_duration_seconds_bucket{op="Land"}[1d]))`
+through the Prometheus HTTP API (`--prometheus`), not a file of pre-extracted
+samples.
 
 ```sh
 python3 -I -m pytest -q bench/tests
 python3 -I bench/postland/record.py --repo graft --line backlog-1 \
+    --endpoint http://graft-dev:17888 --token-file "$TOKEN_FILE" \
+    --interval 60 --late-after 120 \
     --state /var/lib/postland/state.json --out /var/lib/postland/log.jsonl
 ```
