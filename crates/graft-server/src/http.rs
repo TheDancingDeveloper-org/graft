@@ -770,11 +770,13 @@ async fn attestations(
             _ => return Err(bad("kind", "expected check, review or approval")),
         });
     }
+    let mut page = q.page()?;
+    page.limit = crate::clamp_review_page(Some(page.limit));
     let req = GetAttestations {
         repo: repo.clone(),
         selector,
         kinds,
-        page: q.page()?,
+        page,
     };
     let page = app
         .call(
@@ -826,11 +828,13 @@ async fn land_checks(
         .ok_or_else(|| bad("line", "required"))?
         .to_owned();
     let from_pos = q.num("from_pos")?.unwrap_or(0);
+    let mut page = q.page()?;
+    page.limit = crate::clamp_review_page(Some(page.limit));
     let req = GetLandChecks {
         repo: repo.clone(),
         line,
         from_pos,
-        page: q.page()?,
+        page,
     };
     let page = app
         .call("GetLandChecks", &repo, cx, false, move |e, cx| async move {
@@ -873,13 +877,15 @@ async fn review_queue(
     let since_lsn = q.num("since_lsn")?.unwrap_or(0);
     let path_prefix = q.path()?;
     let max_lines = q.num("max_lines")?;
+    let mut page = q.page()?;
+    page.limit = crate::clamp_review_page(Some(page.limit));
     let req = ReviewQueue {
         repo: repo.clone(),
         line,
         since_lsn,
         path_prefix,
         max_lines,
-        page: q.page()?,
+        page,
     };
     let page = app
         .call("ReviewQueue", &repo, cx, false, move |e, cx| async move {
@@ -1076,7 +1082,8 @@ pub(crate) mod tests {
             assert_eq!(body["error"]["kind"], kind, "{path}: {body}");
         }
         // Two rows per route. limit=1 must return one row and a resume
-        // token; an over-cap limit must not grow the page or invent a next.
+        // token. The over-cap request is clamped before the engine; the
+        // clamp itself is `clamp_review_page`.
         let harness = seeded_review_harness().await;
         let over = MAX_REVIEW_PAGE + 1;
         let routes = [
@@ -1122,10 +1129,6 @@ pub(crate) mod tests {
                 .as_array()
                 .unwrap_or_else(|| panic!("{name}: {body}"));
             assert_eq!(list.len(), 2, "{name} over-cap page: {body}");
-            assert!(
-                list.len() <= usize::try_from(MAX_REVIEW_PAGE).unwrap(),
-                "{name} exceeded the review page"
-            );
             assert!(
                 body[next_key].is_null(),
                 "{name} over-cap invented a next: {body}"
