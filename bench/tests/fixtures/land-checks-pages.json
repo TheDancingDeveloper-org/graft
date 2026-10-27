@@ -1,0 +1,127 @@
+{
+  "_source": "Row shape of GET /v1/repos/{repo}/land-checks (crates/graft-server/src/http.rs land_checks): {pos, changeset, state, revert}, with next set only when a page is full (crates/graft-engine/src/attest.rs do_get_land_checks). graft-dev has no post-land line yet, so the only real capture is land-checks-empty.json; these pages put the real backlog-1 changesets of watch-1280.json into that shape. Keys are from_pos, then /page_token.",
+  "poll1": {
+    "84": {
+      "rows": [
+        {
+          "pos": 84,
+          "changeset": "cda2b50efec7d12bc89f990cc98562a4c44bce2d80c3594b5a33835d2563e7122",
+          "state": "good",
+          "revert": null
+        },
+        {
+          "pos": 85,
+          "changeset": "c697026aa21db3908d406629f07592edab08b559b1b44a66cd31d4314e3142291",
+          "state": "pending",
+          "revert": null
+        }
+      ],
+      "next": "86"
+    },
+    "84/86": {
+      "rows": [
+        {
+          "pos": 86,
+          "changeset": "cc5921bbbe7e738fb0d54cf02ea34b6ebe3ae65b5f9453dae72bfd3800175a1cd",
+          "state": "bad",
+          "revert": null
+        },
+        {
+          "pos": 87,
+          "changeset": "cfb6ff9da71fdf5925d821357768292a8ee6265db0e9ec0cad7d7e9e1a93ad91f",
+          "state": "pending",
+          "revert": null
+        }
+      ],
+      "next": "88"
+    },
+    "84/88": {
+      "rows": [
+        {
+          "pos": 88,
+          "changeset": "c40208d1dacdfcb31e8bc1f7db54f2936bb1a12b754614a79d632b4bb8d4f6c46",
+          "state": "pending",
+          "revert": null
+        }
+      ],
+      "next": null
+    }
+  },
+  "poll2": {
+    "85": {
+      "rows": [
+        {
+          "pos": 85,
+          "changeset": "c697026aa21db3908d406629f07592edab08b559b1b44a66cd31d4314e3142291",
+          "state": "good",
+          "revert": null
+        },
+        {
+          "pos": 86,
+          "changeset": "cc5921bbbe7e738fb0d54cf02ea34b6ebe3ae65b5f9453dae72bfd3800175a1cd",
+          "state": "reverted",
+          "revert": "c13ebd5854498b57c7e5857544a73765ba21a3b0e60b675ff8b18820c69d364b8"
+        }
+      ],
+      "next": "87"
+    },
+    "85/87": {
+      "rows": [
+        {
+          "pos": 87,
+          "changeset": "cfb6ff9da71fdf5925d821357768292a8ee6265db0e9ec0cad7d7e9e1a93ad91f",
+          "state": "pending",
+          "revert": null
+        },
+        {
+          "pos": 88,
+          "changeset": "c40208d1dacdfcb31e8bc1f7db54f2936bb1a12b754614a79d632b4bb8d4f6c46",
+          "state": "good",
+          "revert": null
+        }
+      ],
+      "next": "89"
+    },
+    "85/89": {
+      "rows": [
+        {
+          "pos": 89,
+          "changeset": "c13ebd5854498b57c7e5857544a73765ba21a3b0e60b675ff8b18820c69d364b8",
+          "state": "good",
+          "revert": null
+        }
+      ],
+      "next": null
+    }
+  },
+  "poll3": {
+    "87": {
+      "rows": [
+        {
+          "pos": 87,
+          "changeset": "cfb6ff9da71fdf5925d821357768292a8ee6265db0e9ec0cad7d7e9e1a93ad91f",
+          "state": "good",
+          "revert": null
+        },
+        {
+          "pos": 88,
+          "changeset": "c40208d1dacdfcb31e8bc1f7db54f2936bb1a12b754614a79d632b4bb8d4f6c46",
+          "state": "good",
+          "revert": null
+        }
+      ],
+      "next": "89"
+    },
+    "87/89": {
+      "rows": [
+        {
+          "pos": 89,
+          "changeset": "c13ebd5854498b57c7e5857544a73765ba21a3b0e60b675ff8b18820c69d364b8",
+          "state": "good",
+          "revert": null
+        }
+      ],
+      "next": null
+    }
+  }
+}
