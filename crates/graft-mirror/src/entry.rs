@@ -516,7 +516,13 @@ impl AsyncCredentialFn<()> for RunFollowChecked<'_> {
             self.api,
             config,
         );
-        checks.verify().await?;
+        // A line that is not post-land stops follow; a transient failure
+        // (the server unreachable) is retried by each poll until verified.
+        match checks.verify().await {
+            Ok(()) => {}
+            Err(e @ MirrorError::Config(_)) => return Err(e.into()),
+            Err(e) => tracing::warn!(error = %e, "check refs not verified yet; retried each poll"),
+        }
         let mut tick = tokio::time::interval(checks.interval());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut stop = std::pin::pin!(shutdown());

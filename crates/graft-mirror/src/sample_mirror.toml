@@ -35,7 +35,9 @@ line = "main"
 # Per-land check refs (`follow`): one branch per unsettled land of a line whose
 # server config has checks = "post-land", at its export; deleted once it
 # settles. A line that is not post-land stops follow. Prefix default
-# graft/check/<line>/; it must start with graft/ and end in /.
+# graft/check/<line>/; it must start with graft/ and end in /. Lands already on
+# the line when check refs first start get no ref: enable this before the
+# line's first checked land.
 # [[check_refs]]
 # line = "backlog-1"
 # prefix = "graft/check/backlog-1/"

@@ -293,7 +293,7 @@ impl FileConfig {
         if config.export.as_ref().is_some_and(|e| e.import_pulls) && config.github.is_none() {
             return Err(bad("[export] import_pulls needs a [github] section"));
         }
-        let mut checked = Vec::new();
+        let mut checked: Vec<CheckRefLine> = Vec::new();
         for c in config.check_refs() {
             check_branch(&c.line)?;
             if !c.prefix.starts_with(REQUIRED_PREFIX) || !c.prefix.ends_with('/') {
@@ -303,13 +303,30 @@ impl FileConfig {
                 )));
             }
             check_branch(&c.prefix[..c.prefix.len() - 1])?;
-            if checked.contains(&c.line) {
+            if seen.contains(&c.line.as_str()) {
+                return Err(bad(format!(
+                    "[[check_refs]] line {:?} is also a followed [[lines]] line; \
+                     check refs are for an integration line",
+                    c.line
+                )));
+            }
+            if let Some(o) = checked
+                .iter()
+                .find(|o| o.prefix.starts_with(&c.prefix) || c.prefix.starts_with(&o.prefix))
+            {
+                return Err(bad(format!(
+                    "[[check_refs]] lines {:?} and {:?} share a line or overlapping prefixes \
+                     ({:?}, {:?})",
+                    o.line, c.line, o.prefix, c.prefix
+                )));
+            }
+            if checked.iter().any(|o| o.line == c.line) {
                 return Err(bad(format!(
                     "[[check_refs]] line {:?} is listed twice",
                     c.line
                 )));
             }
-            checked.push(c.line);
+            checked.push(c);
         }
         Ok(config)
     }
@@ -560,6 +577,10 @@ db = "/var/lib/m.sqlite"
         }
         let twice = format!("{}[[check_refs]]\nline = \"l\"\n", one(""));
         assert!(FileConfig::parse(&twice).is_err(), "a line listed twice");
+        let followed = format!("{lines}[[check_refs]]\nline = \"main\"\n");
+        assert!(FileConfig::parse(&followed).is_err(), "a followed line");
+        let nested = one("prefix = \"graft/check/\"\n[[check_refs]]\nline = \"m\"\n");
+        assert!(FileConfig::parse(&nested).is_err(), "overlapping prefixes");
     }
 
     #[test]
