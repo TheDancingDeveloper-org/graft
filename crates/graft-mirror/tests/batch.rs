@@ -2618,8 +2618,9 @@ async fn a_checked_cut_reads_only_the_batch_rows() {
     // The batch read asks for its two lands and gets exactly them.
     assert_eq!(pages.iter().map(|(_, rows)| rows).sum::<usize>(), 2);
     assert!(pages.iter().all(|(limit, _)| *limit <= 2), "{pages:?}");
-    // Probes: an exponential search and a bisection over ~40 positions.
-    assert!(probes.len() <= 16, "{} probes", probes.len());
+    // Probes: an exponential search and a bisection over 40 positions is
+    // at most ceil(log2 40) + a short bisection, not a scan of the line.
+    assert!(probes.len() <= 12, "{} probes", probes.len());
     let rows: usize = reads.iter().map(|(_, rows)| rows).sum();
     assert!(rows < EARLIER as usize / 2, "{rows} rows read");
 }
