@@ -1,0 +1,166 @@
+# Post-land checks and their attestation. Reusable, called only from
+# graft-post-land.yml pinned at @main. The server binding pins this file at
+# refs/heads/main, so the token-holding attest job always comes from main.
+#
+# The check jobs run the landed commit's code on the org self-hosted pool
+# with read-only contents, no secrets and no id-token. The attest job runs
+# on the attestation runner, checks out nothing, and posts a pass for each
+# check job that succeeded. A failed, skipped or cancelled check posts
+# nothing; the checker reads its absence.
+name: graft post-land checks
+
+on:
+  workflow_call:
+    inputs:
+      changeset:
+        description: Landed graft changeset ID exported at this commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # fmt, clippy and test mirror ci.yml's required checks, without the
+  # docs-only shortcut: a landed changeset is checked in full.
+  fmt:
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: [self-hosted]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Restore what main saved; never write the cache back from here.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    runs-on: [self-hosted]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      # Restore what main saved; never write the cache back from here.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      # Pinned cargo-nextest, as in ci.yml.
+      - run: |
+          curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/cargo-nextest" nextest --version
+      # The same OOM-flake quarantine as ci.yml (WI-2314): retry once only
+      # when the log matches the known signature.
+      - name: nextest
+        shell: bash
+        run: |
+          set +e
+          nextest() {
+            "$RUNNER_TEMP/cargo-nextest" nextest run --workspace --all-features --no-tests=pass 2>&1 \
+              | tee "$RUNNER_TEMP/nextest.log"
+            return "${PIPESTATUS[0]}"
+          }
+          nextest; status=$?
+          if [ "$status" -ne 0 ] && .github/scripts/oom-flake-signature.sh "$RUNNER_TEMP/nextest.log"; then
+            echo "::warning::known OOM flake (WI-2314): rustc killed with no diagnostic; retrying once"
+            nextest; status=$?
+          fi
+          exit "$status"
+      - run: cargo test --workspace --all-features --doc
+
+  attest:
+    name: Attest passed checks
+    needs: [fmt, clippy, test]
+    if: always()
+    runs-on: [graft-dev]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # The server address the runner can reach; set the repository
+      # variable GRAFT_ENDPOINT when the server is not on loopback.
+      GRAFT_ENDPOINT: ${{ vars.GRAFT_ENDPOINT || 'http://127.0.0.1:17888' }}
+      GRAFT_REPO: graft
+      # attest and ci are experimental client commands in this release.
+      GRAFT_EXPERIMENTAL: "1"
+      OIDC_AUDIENCE: graft-dev
+      CHANGESET: ${{ inputs.changeset }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      FMT_RESULT: ${{ needs.fmt.result }}
+      CLIPPY_RESULT: ${{ needs.clippy.result }}
+      TEST_RESULT: ${{ needs.test.result }}
+    steps:
+      - name: Choose the checks to attest
+        id: passed
+        shell: bash
+        run: |
+          set -euo pipefail
+          checks=""
+          [ "$FMT_RESULT" = success ] && checks="$checks ci/fmt"
+          [ "$CLIPPY_RESULT" = success ] && checks="$checks ci/clippy"
+          [ "$TEST_RESULT" = success ] && checks="$checks ci/test"
+          echo "fmt=$FMT_RESULT clippy=$CLIPPY_RESULT test=$TEST_RESULT; attesting:${checks:- nothing}"
+          echo "checks=${checks# }" >> "$GITHUB_OUTPUT"
+      - name: Install the graft client from the deployed server image
+        if: steps.passed.outputs.checks != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          docker cp graft-dev-server:/usr/local/bin/graft "$RUNNER_TEMP/bin/graft"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Exchange identity and attest passes
+        if: steps.passed.outputs.checks != ''
+        shell: bash
+        env:
+          CHECKS: ${{ steps.passed.outputs.checks }}
+        run: |
+          set -euo pipefail
+
+          audience=$(jq -rn --arg value "$OIDC_AUDIENCE" '$value | @uri')
+          oidc_token=$(printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" | \
+            curl -fsS --max-time 30 -H @- \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}" | jq -er '.value')
+          echo "::add-mask::$oidc_token"
+
+          umask 077
+          token_file=$(mktemp "$RUNNER_TEMP/graft-token.XXXXXX")
+          trap 'rm -f "$token_file"' EXIT
+          printf '%s' "$oidc_token" | graft --endpoint "$GRAFT_ENDPOINT" \
+            ci exchange --provider github --changeset "$CHANGESET" --out "$token_file"
+          unset oidc_token
+
+          for check in $CHECKS; do
+            graft --endpoint "$GRAFT_ENDPOINT" --repo "$GRAFT_REPO" \
+              --token-file "$token_file" attest "$CHANGESET" \
+              --check "$check" --pass --url "$RUN_URL"
+          done

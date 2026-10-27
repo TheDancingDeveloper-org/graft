@@ -1,0 +1,45 @@
+# Post-land checks for one landed changeset, dispatched by the post-land
+# checker on that land's check ref (refs/heads/graft/...). The called
+# workflow is pinned to main, so the OIDC job_workflow_ref is the protected
+# reusable workflow while ref and sha stay the dispatched ref's.
+# Not a required check.
+name: graft post-land
+
+# The checker finds its run by request_id in the run name.
+run-name: graft post-land ${{ inputs.changeset }} attempt ${{ inputs.attempt }} [${{ inputs.request_id }}]
+
+on:
+  workflow_dispatch:
+    inputs:
+      changeset:
+        description: Landed graft changeset ID exported at this commit
+        required: true
+        type: string
+      attempt:
+        description: Check attempt number for this changeset
+        required: true
+        type: string
+      request_id:
+        description: Opaque id the checker uses to find this run
+        required: true
+        type: string
+
+# One run per check ref. A queued run is never cancelled by a run on
+# another ref, so one land's checks cannot cancel another's.
+concurrency:
+  group: graft-post-land-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  post-land:
+    name: Post-land checks
+    if: startsWith(github.ref, 'refs/heads/graft/')
+    permissions:
+      contents: read
+      id-token: write
+    uses: TheDancingDeveloper-org/graft/.github/workflows/graft-post-land-check.yml@main
+    with:
+      changeset: ${{ inputs.changeset }}

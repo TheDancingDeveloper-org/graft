@@ -82,3 +82,32 @@ branch, run this dispatch workflow on `refs/heads/graft/batch-N` and pass the
 changeset that branch's commit exports. Allow that ref with a prefix rule such
 as `refs/heads/graft/` (a trailing `/` matches every ref under the prefix) and
 keep `refs/heads/main` in the same list. Leave the job off the required checks.
+
+## Post-land checks
+
+On a line whose checks run after the land, the checker dispatches
+[`.github/workflows/graft-post-land.yml`](../../.github/workflows/graft-post-land.yml)
+on the land's check ref (under `refs/heads/graft/`) with three inputs:
+`changeset`, `attempt` and `request_id`. The run name carries the
+`request_id`, so the checker can find its run. The workflow refuses refs
+outside `refs/heads/graft/`, and it runs one run per ref at a time; a queued
+run is never cancelled by a run on another ref.
+
+Its one job calls
+[`.github/workflows/graft-post-land-check.yml`](../../.github/workflows/graft-post-land-check.yml)
+pinned at `@main`, and only that call gets `id-token: write`. The called
+workflow has two kinds of job:
+
+- `fmt`, `clippy` and `test` run the same commands as the repository's
+  required checks, on the self-hosted pool. They check out the landed commit
+  with `contents: read`, no `id-token` and no secrets.
+- `attest` runs on the attestation runner after the checks, even when one
+  failed. It checks out no repository code. It exchanges its identity once
+  and posts a pass (`ci/fmt`, `ci/clippy`, `ci/test`) for each check job that
+  succeeded. A failed, skipped or cancelled check posts nothing; the checker
+  reads the missing pass as not passed.
+
+Add `graft-post-land-check.yml` at `refs/heads/main` to the binding's
+workflow list. GitHub dispatches only workflows that exist on the default
+branch, so both files must be on main before the first dispatch. Leave the
+workflow off the required checks.
