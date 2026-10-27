@@ -638,17 +638,34 @@ mod tests {
         let keep = harness._dir;
         let engine = &harness.engine;
         let id = repo(engine).await;
-        let first = journal(engine, id, "LandAttempt", r#"{"line":"main"}"#).await;
-        let second = journal(engine, id, "LandAttempt", r#"{"line":"main"}"#).await;
+        // Older journal the hook must not replay. The default start is the tip.
+        journal(engine, id, "LandAttempt", r#"{"line":"old"}"#).await;
         let inbox = Arc::new(Inbox::bind().await);
         inbox.set_status(500);
         let (tx, rx) = watch::channel(false);
         let serving = inbox.clone();
         let task = tokio::spawn(async move { serving.serve(rx).await });
         let client = reqwest::Client::new();
-        let spec = spec(&inbox.url());
+        let mut spec = spec(&inbox.url());
+        spec.start = "tip".into();
         let metric = counter();
         let secret = "super-secret-value";
+        // First look: nothing after the tip, so the starting cursor is saved.
+        assert!(
+            !deliver_repo(
+                engine.stores().0,
+                &client,
+                &spec,
+                0,
+                id,
+                secret,
+                &Some(metric.clone())
+            )
+            .await
+            .unwrap()
+        );
+        assert!(inbox.seen.lock().unwrap().is_empty());
+        let first = journal(engine, id, "LandAttempt", r#"{"line":"main"}"#).await;
         assert!(
             deliver_repo(
                 engine.stores().0,
@@ -669,6 +686,15 @@ mod tests {
                 .unwrap(),
             first
         );
+        let stored = engine
+            .stores()
+            .0
+            .derived(id, CURSOR_KIND, CURSOR_VERSION, &cursor_key(0))
+            .await
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some(first.to_string().as_bytes()));
+        // The tip moves while the failed entry is still owed.
+        let second = journal(engine, id, "LandAttempt", r#"{"line":"later"}"#).await;
         // The receiver answered 5xx and the process is gone. The cursor was
         // saved before that POST, so the reopened store still has the entry.
         let _ = engine;
