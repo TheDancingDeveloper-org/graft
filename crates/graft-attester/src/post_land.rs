@@ -18,13 +18,26 @@
 //!   first. If it passes, every unsettled land up to it is good.
 //! - **Bisect.** If it fails, the lands between the last good one and it
 //!   are halved until the first bad land is found: at most
-//!   `ceil(log2 n) + 1` runs of the failing check for `n` lands. The lands
-//!   before it are attested good; it is attested failed.
+//!   `ceil(log2 n) + 1` evaluations of the failing check for `n` lands.
+//!   That is also the bound on its runs only when `retries` is 0: each
+//!   evaluation that fails runs it `retries + 1` times. The lands before
+//!   it are attested good; it is attested failed.
 //! - **Retry.** A failed check is run again, up to `retries` more times.
 //!   One that then passes is a flake: the land is good, only the pass is
 //!   attested, and [`PostLand::flakes`] counts it. A check that keeps
 //!   failing is attested failed once per run, so the server's row reads
 //!   `bad`.
+//! - **A posted failure is final.** To the server a fail followed by a
+//!   pass within `retries` is a flake: `GetLandChecks` reads it `good`,
+//!   and `GetAttestations` lists both. So this checker never posts a
+//!   failure next to a pass: a flake posts only its pass, and a failure is
+//!   posted only as part of a bad verdict, after the land's other checks.
+//!   A crash can leave that verdict short (fewer than `retries + 1`
+//!   failures, read `pending`), and a check run again after the restart
+//!   may pass. The restart therefore runs nothing for such a land: it
+//!   posts the failures still missing, with the links already posted, and
+//!   the land is reverted as any bad land is. A failure of a configured
+//!   check posted by anyone else counts the same way.
 //! - **Revert.** The first bad land is reverted (each changeset of its
 //!   stack, newest first, with line merge) on the line's tip and landed
 //!   through the ordinary land path. The server stamps each revert
@@ -380,8 +393,11 @@ pub struct PostLand<A, R> {
 
 impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
     /// A checker of `cfg.line` with `cfg.checks`, retrying a failed check
-    /// `retries` times (the line's `retries` on the server), reading from
-    /// the saved position, if any.
+    /// `retries` times, reading from the saved position, if any. The
+    /// checker does not read the line's `retries` from the server
+    /// (`GetLineConfig`) yet, so the caller passes it and it must match the
+    /// line's setting: a mismatch makes this checker's verdict and the
+    /// server's land-checks row disagree.
     pub fn new(api: A, runner: R, cfg: Config, retries: u32) -> Result<Self, Error> {
         fs::create_dir_all(&cfg.work_dir)?;
         fs::create_dir_all(&cfg.log_dir)?;
@@ -674,6 +690,11 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
         {
             return self.revert(i).await;
         }
+        // A posted failure is final (module docs): finish its verdict, and
+        // run nothing whose pass would contradict it.
+        if let Some((i, check)) = self.interrupted() {
+            return self.finish_bad(i, check).await;
+        }
         let units = self.units();
         let Some(top) = units.last() else {
             return Ok(PostLandReport::Idle);
@@ -736,10 +757,50 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
             }));
         }
         self.attest_passes(first, &passed).await?;
+        self.attest_failures(first, &check, &urls).await?;
         let land = self.lands[first].landed;
-        // One failure per run, enough to read `bad`; those already posted
-        // (before a restart) count.
-        let posted = self.lands[first]
+        Ok(PostLandReport::Bad { land, check, good })
+    }
+
+    /// The first unsettled land with a failure of a configured check: a
+    /// bad verdict a crash interrupted, and the check that failed.
+    fn interrupted(&self) -> Option<(usize, String)> {
+        self.lands.iter().enumerate().find_map(|(i, rec)| {
+            if rec.reverted || self.state(rec) != State::Unsettled {
+                return None;
+            }
+            let failed = rec.reports.iter().find(|r| !r.passed)?;
+            Some((i, failed.check.clone()))
+        })
+    }
+
+    /// Finishes the bad verdict on land `i` that a crash interrupted, from
+    /// the links of the failures already posted, without running anything.
+    async fn finish_bad(&mut self, i: usize, check: String) -> Result<PostLandReport, Error> {
+        let urls: Vec<String> = self.lands[i]
+            .reports
+            .iter()
+            .filter(|r| r.check == check && !r.passed)
+            .map(|r| r.url.clone())
+            .collect();
+        self.attest_failures(i, &check, &urls).await?;
+        let land = self.lands[i].landed;
+        log(&format!(
+            "{land}: finishing the bad verdict of {check} a restart interrupted"
+        ));
+        Ok(PostLandReport::Bad {
+            land,
+            check,
+            good: Vec::new(),
+        })
+    }
+
+    /// Attests `check` failed on land `i` once per run, enough to read
+    /// `bad`; those already posted (before a restart) count. `urls` is not
+    /// empty.
+    async fn attest_failures(&self, i: usize, check: &str, urls: &[String]) -> Result<(), Error> {
+        let rec = &self.lands[i];
+        let posted = rec
             .reports
             .iter()
             .filter(|r| r.check == check && !r.passed)
@@ -747,9 +808,9 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
         let need = u64::from(self.retries) + 1;
         for n in posted..need {
             let url = &urls[(n as usize) % urls.len()];
-            self.attest(land, &check, false, url).await?;
+            self.attest(rec.landed, check, false, url).await?;
         }
-        Ok(PostLandReport::Bad { land, check, good })
+        Ok(())
     }
 
     /// Runs every check on `at`, each retried up to `retries` times.
