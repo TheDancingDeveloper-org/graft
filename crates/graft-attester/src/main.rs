@@ -59,8 +59,9 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_WINDOW)]
     window: usize,
     /// File holding the graft token (mode 0600 or stricter). It needs
-    /// `read` and `attest` on the repository, and in post-land mode `land`
-    /// on the line too, because the checker lands the reverts.
+    /// `read`, `attest`, and repo-wide `write` on the repository, and in
+    /// post-land mode `land` on the line too, because the checker lands
+    /// reverts that may restore any path touched by a bad land.
     #[arg(long, default_value = "/run/secrets/graft-attester-token")]
     token_file: PathBuf,
     /// Post-land: where the checks run. `github` dispatches `--workflow` on
@@ -462,10 +463,11 @@ mod tests {
         assert!(Args::try_parse_from(["graft-attester", "--mode", "revert"]).is_err());
     }
 
-    /// WI-2625 Done 5: the graft token's help names every scope the
-    /// post-land checker uses, `land` for its reverts included.
+    /// WI-2625 Done 5 and WI-2632: the graft token's help names every
+    /// scope the post-land checker uses, including repo-wide `write` for
+    /// the paths restored by its reverts.
     #[test]
-    fn the_token_file_help_names_read_attest_and_land() {
+    fn the_token_file_help_names_read_attest_write_and_land() {
         use clap::CommandFactory as _;
         let help = Args::command().render_long_help().to_string();
         let start = help.find("--token-file").expect("--token-file in the help");
@@ -476,7 +478,14 @@ mod tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        for scope in ["`read`", "`attest`", "`land`", "reverts"] {
+        for scope in [
+            "`read`",
+            "`attest`",
+            "`write`",
+            "repo-wide",
+            "`land`",
+            "reverts",
+        ] {
             assert!(text.contains(scope), "{scope} missing from: {text}");
         }
     }
