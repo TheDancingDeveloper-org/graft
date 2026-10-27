@@ -1,9 +1,10 @@
 //! `graft diff`: two changesets (server-side, with patches), or the working
-//! copy against its base (paths and statuses, no patch text).
+//! copy against its base (unified patches, capped).
 //!
-//! `--stat` prints per-file added and removed line counts, counted from the
-//! patch the command already asks for (or, for the working copy, a local
-//! patch of the same shape), capped the same way the patch is.
+//! `--name-only` prints the changed paths without patches. `--stat` prints
+//! per-file added and removed line counts, counted from the patch the command
+//! already asks for (or, for the working copy, a local patch of the same
+//! shape), capped the same way the patch is.
 
 use std::fs::{self, File};
 use std::io::Read;
@@ -13,7 +14,9 @@ use graft_client::workcopy::{FileStatus, WorkingCopy};
 use graft_model::{Change, EntryKind};
 use graft_proto::api::RepoApi;
 use graft_proto::types::{Diff, Page, PatchOptions};
-use imara_diff::{Algorithm, Diff as LineDiff, InternedInput};
+use imara_diff::{
+    Algorithm, BasicLineDiffPrinter, Diff as LineDiff, InternedInput, UnifiedDiffConfig,
+};
 use serde_json::json;
 
 use crate::cli::{DiffArgs, Global};
@@ -28,13 +31,27 @@ use crate::render::{diff, kind_name, print_json, short};
 const PATCH_CONTEXT: u32 = 3;
 const PATCH_MAX_BYTES: u64 = 64 * 1024;
 
+/// Total unified-patch bytes printed for one working-copy diff.
+const WORKING_COPY_PATCH_CAP: usize = 256 * 1024;
+
+fn working_copy_patch_cap() -> usize {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("GRAFT_DIFF_PATCH_CAP")
+        && let Ok(n) = value.parse::<usize>()
+        && n > 0
+    {
+        return n;
+    }
+    WORKING_COPY_PATCH_CAP
+}
+
 /// How many files `--stat` counts before reporting that more were omitted.
 const STAT_FILES: usize = 100;
 
 /// Diffs two changesets, or the working copy.
 pub(crate) fn run(g: &Global, args: &DiffArgs) -> Result<(), Failure> {
     match (&args.from, &args.to) {
-        (None, None) => working_copy_diff(g, args.stat),
+        (None, None) => working_copy_diff(g, args),
         (Some(from), Some(to)) => changeset_diff(g, args, from, to),
         _ => Err(Failure::usage(
             "give two changesets (FROM TO), or none to diff the working copy",
@@ -42,8 +59,8 @@ pub(crate) fn run(g: &Global, args: &DiffArgs) -> Result<(), Failure> {
     }
 }
 
-/// The working copy against its base: the changed paths and how each changed.
-fn working_copy_diff(g: &Global, stat: bool) -> Result<(), Failure> {
+/// The working copy against its base: unified patches, or paths only.
+fn working_copy_diff(g: &Global, args: &DiffArgs) -> Result<(), Failure> {
     let wc = require_working_copy()?;
     let changes = wc.status()?;
     if g.json {
@@ -52,28 +69,177 @@ fn working_copy_diff(g: &Global, stat: bool) -> Result<(), Failure> {
             "to": null,
             "files": changes.iter().map(change_json).collect::<Vec<_>>(),
         });
-        if stat {
+        if args.stat {
             let rows = working_copy_stat(&wc, &changes)?;
             value["stat"] = json!(rows);
             value["stat_omitted"] = json!(changes.len().saturating_sub(rows.len()));
         }
         return print_json(&value);
     }
-    if stat {
+    if args.stat {
         let rows = working_copy_stat(&wc, &changes)?;
         print_stat(&rows)?;
         print_omitted(changes.len(), rows.len())?;
         return Ok(());
     }
-    for change in &changes {
-        outln!("{:<9} {}", word(change), change.path());
+    if args.name_only {
+        for change in &changes {
+            outln!("{:<9} {}", word(change), change.path());
+        }
+        if changes.is_empty() {
+            outln!("no changes against {}", short(wc.state().base));
+        }
+        return Ok(());
     }
+    print_working_copy_patches(&wc, &changes)
+}
+
+/// Unified patches of the working copy, stopped once the total exceeds the cap.
+fn print_working_copy_patches(wc: &WorkingCopy, changes: &[FileStatus]) -> Result<(), Failure> {
     if changes.is_empty() {
         outln!("no changes against {}", short(wc.state().base));
-    } else {
-        outln!("(paths only; diff two changesets for patches)");
+        return Ok(());
     }
+    let cache = wc.open_cache(64 * 1024 * 1024)?;
+    let rt = tokio::runtime::Builder::new_current_thread().build()?;
+    let mut used = 0usize;
+    let mut truncated = false;
+    for (index, change) in changes.iter().enumerate() {
+        if used >= working_copy_patch_cap() {
+            truncated = true;
+            let left = changes.len() - index;
+            outln!(
+                "(truncated: patch cap reached, {left} file{} omitted)",
+                plural(left as u32)
+            );
+            break;
+        }
+        let patch = rt.block_on(working_copy_patch(wc, &cache, change))?;
+        let room = working_copy_patch_cap() - used;
+        let (shown, cut) = take_patch(&patch, room);
+        used = used.saturating_add(shown.len());
+        out!("{shown}");
+        if cut {
+            truncated = true;
+            let left = changes.len() - index - 1;
+            if left > 0 {
+                outln!(
+                    "(truncated: patch cap reached, {left} file{} omitted)",
+                    plural(left as u32)
+                );
+            } else {
+                outln!("(truncated: patch cap reached)");
+            }
+            break;
+        }
+    }
+    let _ = truncated;
     Ok(())
+}
+
+/// One file's unified patch, or a short note when it is binary or too large.
+async fn working_copy_patch(
+    wc: &WorkingCopy,
+    cache: &graft_store_fs::FsObjectStore,
+    change: &FileStatus,
+) -> Result<String, Failure> {
+    let path = change.path();
+    let header = format!("{:<9} {path}\n", word(change));
+    if matches!(change, FileStatus::Added(_) | FileStatus::Modified(_)) {
+        let metadata = fs::metadata(wc.root().join(path.as_str()))?;
+        if metadata.len() > PATCH_MAX_BYTES {
+            return Ok(format!("{header}(truncated: file exceeds the patch cap)\n"));
+        }
+    }
+    let old = match change {
+        FileStatus::Added(_) => None,
+        FileStatus::Modified(_) | FileStatus::Deleted(_) => {
+            let Some(entry) = wc.index().entries.get(path) else {
+                return Err(Failure::new(
+                    crate::Exit::Failure,
+                    "state",
+                    "working-copy index entry is missing",
+                ));
+            };
+            if !matches!(entry.kind, EntryKind::File | EntryKind::Exec) {
+                return Ok(format!("{header}Binary file {path}\n"));
+            }
+            if entry.stat.size > PATCH_MAX_BYTES {
+                return Ok(format!("{header}(truncated: file exceeds the patch cap)\n"));
+            }
+            match load_blob(cache, entry.id.0).await {
+                Ok(Some(bytes)) => Some(bytes),
+                Ok(None) => {
+                    return Err(Failure::new(
+                        crate::Exit::Failure,
+                        "store",
+                        "base blob is missing from cache",
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    };
+    let new = match change {
+        FileStatus::Deleted(_) => None,
+        FileStatus::Added(_) | FileStatus::Modified(_) => {
+            Some(read_capped(&wc.root().join(path.as_str()))?)
+        }
+    };
+    if new
+        .as_ref()
+        .is_some_and(|bytes| bytes.len() > PATCH_MAX_BYTES as usize)
+    {
+        return Ok(format!("{header}(truncated: file exceeds the patch cap)\n"));
+    }
+    let old_text = match as_text(old.as_deref()) {
+        Ok(v) => v,
+        Err(()) => return Ok(format!("{header}Binary file {path}\n")),
+    };
+    let new_text = match as_text(new.as_deref()) {
+        Ok(v) => v,
+        Err(()) => return Ok(format!("{header}Binary file {path}\n")),
+    };
+    Ok(format!(
+        "{header}{}",
+        unified_patch(path.as_str(), old_text, new_text, PATCH_CONTEXT)
+    ))
+}
+
+/// A unified diff of one file, with `---`/`+++` headers, matching server patches.
+fn unified_patch(path: &str, old: Option<&str>, new: Option<&str>, context: u32) -> String {
+    let mut out = String::new();
+    out.push_str(&match old {
+        Some(_) => format!("--- a/{path}\n"),
+        None => "--- /dev/null\n".to_owned(),
+    });
+    out.push_str(&match new {
+        Some(_) => format!("+++ b/{path}\n"),
+        None => "+++ /dev/null\n".to_owned(),
+    });
+    let input = InternedInput::new(old.unwrap_or(""), new.unwrap_or(""));
+    let mut diff = LineDiff::compute(Algorithm::Histogram, &input);
+    diff.postprocess_lines(&input);
+    let mut config = UnifiedDiffConfig::default();
+    config.context_len(context);
+    let printer = BasicLineDiffPrinter(&input.interner);
+    out.push_str(&diff.unified_diff(&printer, config, &input).to_string());
+    out
+}
+
+/// The prefix of `patch` that fits in `room` bytes, cut at a line end.
+fn take_patch(patch: &str, room: usize) -> (String, bool) {
+    if patch.len() <= room {
+        return (patch.to_owned(), false);
+    }
+    let mut end = room;
+    while !patch.is_char_boundary(end) {
+        end -= 1;
+    }
+    if let Some(nl) = patch[..end].rfind('\n') {
+        end = nl + 1;
+    }
+    (patch[..end].to_owned(), true)
 }
 
 /// Added and removed lines against the base blob in the local cache.
@@ -388,7 +554,7 @@ mod tests {
     use graft_model::{Change, EntryKind, ObjectId, RepoPath};
     use graft_proto::types::FileDiff;
 
-    use super::{diff_lines, patch_lines, stat_of};
+    use super::{diff_lines, patch_lines, stat_of, take_patch, unified_patch};
 
     #[test]
     fn line_diff_counts_a_move() {
@@ -404,6 +570,26 @@ mod tests {
     fn patch_lines_counts_removed_content_that_starts_with_header_marker() {
         let patch = "--- a/frontmatter.md\n+++ b/frontmatter.md\n@@ -1 +0,0 @@\n----\n";
         assert_eq!(patch_lines(patch), (0, 1));
+    }
+
+    #[test]
+    fn take_patch_cuts_at_a_line_and_marks_truncation() {
+        let patch = "modified  a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let (shown, cut) = take_patch(patch, 24);
+        assert!(cut);
+        assert!(shown.ends_with('\n'));
+        assert!(shown.len() <= 24);
+        let (whole, cut) = take_patch(patch, patch.len());
+        assert!(!cut);
+        assert_eq!(whole, patch);
+    }
+
+    #[test]
+    fn unified_patch_has_a_hunk_for_an_edit() {
+        let patch = unified_patch("README.md", Some("hello\n"), Some("edited\n"), 3);
+        assert!(patch.contains("@@"));
+        assert!(patch.contains("-hello"));
+        assert!(patch.contains("+edited"));
     }
 
     #[test]

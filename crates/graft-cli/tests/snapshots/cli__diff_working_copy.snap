@@ -1,6 +1,11 @@
 ---
 source: crates/graft-cli/tests/cli.rs
-expression: text(out.get_output())
+assertion_line: 420
+expression: shown
 ---
 modified  README.md
-(paths only; diff two changesets for patches)
+--- a/README.md
++++ b/README.md
+@@ -1,1 +1,1 @@
+-hello
++edited
