@@ -35,8 +35,10 @@ struct Args {
     /// (required there).
     #[arg(long)]
     line: Option<String>,
-    /// Post-land: times a failed check is run again before the land is bad
-    /// (the line's `retries` on the server).
+    /// Post-land: times a failed check is run again before the land is bad.
+    /// The checker does not read the line's `retries` from the server yet,
+    /// so set this to the line's `retries` setting; a different value makes
+    /// the checker's verdicts and the server's land-checks rows disagree.
     #[arg(long, default_value_t = 1)]
     retries: u32,
     /// Post-land: most lands held at once.

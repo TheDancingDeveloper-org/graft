@@ -709,6 +709,81 @@ async fn a_check_failing_every_retry_is_bad() {
     assert_eq!(entries(&rig.engine, "LandReverted").await.len(), 1);
 }
 
+/// WI-2611: the checker finds a land bad (a flaky check failed every
+/// retry) and dies after posting only one of its failures. Restarted, the
+/// check would pass, but the posted failure is final: the restart posts the
+/// missing failure without running the check, and the land is reverted
+/// once. No land gets both a pass and a fail of one check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_finishes_a_bad_verdict_instead_of_passing_a_flaky_check() {
+    let rig = Rig::new(1).await;
+    let landed = lands(&rig.engine, 1, 0).await;
+    let land = landed[0];
+
+    // `ci/test` fails both runs; the pass of `ci/build` and one failure
+    // post, the second failure does not.
+    *rig.faults.attest_after.lock().expect("faults") = Some(2);
+    let mut fake = Fake::default();
+    fake.flaky.insert(TEST.to_owned(), 2);
+    let mut c = rig.checker(fake).await;
+    assert!(c.step(0).await.is_err(), "attest failed");
+    assert_eq!(*rig.faults.attest_fired.lock().expect("faults"), 1);
+    drop(c);
+    let got = attested(&rig.engine).await;
+    let posted: Vec<(&str, bool)> = got[&land.to_string()]
+        .iter()
+        .map(|(_, c, p)| (c.as_str(), *p))
+        .collect();
+    assert_eq!(posted, [(BUILD, true), (TEST, false)]);
+    assert_eq!(
+        land_states(&rig.engine).await.get(&land),
+        Some(&LandCheckState::Pending),
+        "one failure is within retries"
+    );
+
+    // Restarted with the check no longer failing.
+    let mut c = rig.checker(Fake::default()).await;
+    let reports = drain(&mut c).await;
+    assert!(
+        matches!(&reports[0], PostLandReport::Bad { land: l, check, .. } if *l == land && check == TEST),
+        "{reports:?}"
+    );
+    assert!(
+        matches!(&reports[1], PostLandReport::Reverted { land: l, .. } if *l == land),
+        "{reports:?}"
+    );
+    assert!(
+        !c.runner().runs.iter().any(|(at, _, _)| *at == land),
+        "the land's checks were not run again: {:?}",
+        c.runner().runs
+    );
+
+    // No land attested both ways for one check.
+    for (id, reports) in attested(&rig.engine).await {
+        for check in [BUILD, TEST] {
+            let verdicts: Vec<bool> = reports
+                .iter()
+                .filter(|(_, c, _)| c == check)
+                .map(|(_, _, p)| *p)
+                .collect();
+            assert!(
+                verdicts.iter().all(|p| *p) || verdicts.iter().all(|p| !*p),
+                "{id} {check}: {verdicts:?}"
+            );
+        }
+    }
+    let fails = attested(&rig.engine).await[&land.to_string()]
+        .iter()
+        .filter(|(_, c, p)| c == TEST && !p)
+        .count();
+    assert_eq!(fails, 2, "retries + 1 failures");
+    assert_eq!(entries(&rig.engine, "LandReverted").await.len(), 1);
+    assert_eq!(
+        land_states(&rig.engine).await.get(&land),
+        Some(&LandCheckState::Reverted)
+    );
+}
+
 /// Accept 4: a revert that conflicts with a later land lands nothing,
 /// leaves a typed report, and the line is not modified.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
