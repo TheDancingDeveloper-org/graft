@@ -204,7 +204,9 @@ where
                     };
                     let server = if post { "post-land" } else { "off" };
                     return Err(MirrorError::Config(format!(
-                        "line {} checks are {server}; {flag} does not match.                          A checked line batched without --checks post-land ships                          lands whose checks have not run",
+                        "line {} checks are {server}; {flag} does not match. \
+                         A checked line batched without --checks post-land ships \
+                         lands whose checks have not run",
                         self.config.line
                     )));
                 }
@@ -212,7 +214,8 @@ where
             }
             Err(e) if is_unimplemented(&e) => {
                 eprintln!(
-                    "warning: the server does not implement GetLineConfig;                      --checks was not verified against line {}",
+                    "warning: the server does not implement GetLineConfig; \
+                     --checks was not verified against line {}",
                     self.config.line
                 );
                 Ok(())

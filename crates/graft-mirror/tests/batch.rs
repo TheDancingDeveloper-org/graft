@@ -2754,6 +2754,164 @@ async fn an_unimplemented_line_config_still_batches() {
     assert_eq!((rec.lands, rec.tip), (1, a));
 }
 
+/// A served line whose `GetLineConfig` answers `checks`, as graft-server
+/// does: the in-process engine leaves the RPC to the server crate.
+struct ServedLine {
+    api: Arc<Api>,
+    checks: LineChecksMode,
+}
+impl ObjectApi for ServedLine {
+    forward! {
+        get_objects(GetObjects) -> Objects;
+        has_objects(HasObjects) -> Vec<graft_model::ObjectId>;
+        put_objects(PutObjects) -> Vec<graft_model::ObjectId>;
+    }
+}
+impl RepoApi for ServedLine {
+    forward! {
+        create_changeset(CreateChangeset) -> Created;
+        get_changesets(GetChangesets) -> Changesets;
+        resolve_ref(ResolveRef) -> RefView;
+        list_refs(ListRefs) -> Vec<RefView>;
+        update_ref(UpdateRef) -> RefView;
+        stat(PathAt) -> EntryView;
+        list_tree(ListTree) -> Entries;
+        read_file(PathAt) -> FileContent;
+        log(Log) -> History;
+        is_ancestor(Pair) -> bool;
+        merge_base(Pair) -> Option<ChangesetId>;
+        diff(Diff) -> DiffResult;
+        blame(Blame) -> BlameResult;
+        rebase(Rebase) -> ChangesetId;
+        revert(Revert) -> ChangesetId;
+        land(Land) -> Landed;
+        attest(Attest) -> ();
+        watch(Watch) -> JournalPage;
+    }
+    async fn get_line_config(
+        &self,
+        _cx: &CallContext,
+        req: GetLineConfig,
+    ) -> graft_proto::error::ApiResult<graft_proto::types::LineConfig> {
+        Ok(graft_proto::types::LineConfig {
+            line: req.line,
+            checks: self.checks,
+            required: Vec::new(),
+            retries: 0,
+        })
+    }
+}
+
+// Served only so the test server also serves the review service, which
+// carries `GetLineConfig`.
+impl graft_proto::api::WorkspaceApi for ServedLine {
+    forward! {
+        open_workspace(OpenWorkspace) -> WorkspaceView;
+        get_workspace(WorkspaceRef) -> WorkspaceView;
+        set_head(SetHead) -> WorkspaceView;
+        get_conflicts(GetConflicts) -> Conflicts;
+        resolve(Resolve) -> Resolved;
+    }
+    async fn list_workspaces(
+        &self,
+        cx: &CallContext,
+        repo: String,
+        page: Page,
+    ) -> graft_proto::error::ApiResult<Vec<WorkspaceView>> {
+        self.api.list_workspaces(cx, repo, page).await
+    }
+    async fn renew_lease(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        lease_ms: u64,
+    ) -> graft_proto::error::ApiResult<WorkspaceView> {
+        self.api.renew_lease(cx, req, lease_ms).await
+    }
+    async fn sync(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        onto: Option<ChangesetId>,
+    ) -> graft_proto::error::ApiResult<Synced> {
+        self.api.sync(cx, req, onto).await
+    }
+    async fn stack(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        op: StackOp,
+    ) -> graft_proto::error::ApiResult<WorkspaceView> {
+        self.api.stack(cx, req, op).await
+    }
+    async fn close_workspace(
+        &self,
+        cx: &CallContext,
+        req: WorkspaceRef,
+        keep_drafts: bool,
+    ) -> graft_proto::error::ApiResult<()> {
+        self.api.close_workspace(cx, req, keep_drafts).await
+    }
+}
+
+/// pr-batch reads the line config through the mirror's own wrappers over
+/// gRPC (WI-2630): a post-land line batched without `--checks` is refused,
+/// not waved through with "the server does not implement GetLineConfig".
+#[tokio::test]
+async fn the_mirror_wrappers_forward_get_line_config() {
+    let w = World::new().await;
+    let store = Arc::new(MemoryStore::new());
+    let engine = Engine::new(
+        store.clone(),
+        store,
+        Arc::new(FakeClock::at(1_000_000)),
+        EngineConfig::default(),
+    );
+    let served = graft_testkit::server::TestServer::tcp_workspaces(Arc::new(ServedLine {
+        api: Arc::new(engine),
+        checks: LineChecksMode::PostLand,
+    }))
+    .await;
+    let connect = || graft_mirror::server::Server::connect(served.url(), None);
+
+    let server = connect().await.unwrap();
+    let cfg = server
+        .get_line_config(
+            &cx(),
+            GetLineConfig {
+                repo: REPO.to_owned(),
+                line: LINE.to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(cfg.checks, LineChecksMode::PostLand);
+
+    let refused = |err: MirrorError| {
+        let MirrorError::Config(msg) = err else {
+            panic!("expected Config, got {err}");
+        };
+        assert!(msg.contains("checks are post-land"), "{msg}");
+        assert!(msg.contains("does not match"), "{msg}");
+        assert!(!msg.contains("   "), "{msg}");
+    };
+    refused(
+        w.batcher_over(&server, &w.db, |_| {})
+            .run()
+            .await
+            .unwrap_err(),
+    );
+    let api = graft_mirror::server::Api::Remote(connect().await.unwrap());
+    refused(w.batcher_over(&api, &w.db, |_| {}).run().await.unwrap_err());
+    let line_configs = served
+        .calls()
+        .into_iter()
+        .filter(|c| *c == graft_testkit::server::Rpc::Repo("GetLineConfig"))
+        .count();
+    assert_eq!(line_configs, 3);
+    assert!(w.github.prs().is_empty());
+}
+
 // Accept 5: a batch after many checked lands reads its own lands' rows,
 // paged, plus O(log line length) one-row probes, never the line's rows.
 #[tokio::test]

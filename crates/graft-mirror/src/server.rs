@@ -273,19 +273,27 @@ impl RepoApi for Server {
         resolve_ref(ResolveRef) -> RefView;
         list_refs(ListRefs) -> Vec<RefView>;
         update_ref(UpdateRef) -> RefView;
+        create_line(CreateLine) -> RefView;
         stat(PathAt) -> EntryView;
         list_tree(ListTree) -> Entries;
         read_file(PathAt) -> FileContent;
         log(Log) -> History;
         is_ancestor(Pair) -> bool;
         merge_base(Pair) -> Option<ChangesetId>;
+        merge_base_via(Pair) -> MergeBaseResult;
         diff(Diff) -> DiffResult;
         blame(Blame) -> BlameResult;
         rebase(Rebase) -> ChangesetId;
         revert(Revert) -> ChangesetId;
         land(Land) -> Landed;
+        line_merge(LineMerge) -> LineMergeOutcome;
+        line_merges(LineMerges) -> LineMergePage;
         attest(Attest) -> ();
+        attest_v2(AttestV2) -> ();
+        get_attestations(GetAttestations) -> AttestationPage;
         get_land_checks(GetLandChecks) -> LandCheckPage;
+        review_queue(ReviewQueue) -> ReviewQueuePage;
+        get_line_config(GetLineConfig) -> LineConfig;
         watch(Watch) -> JournalPage;
     }
 }
@@ -295,6 +303,9 @@ impl WorkspaceApi for Server {
         open_workspace(OpenWorkspace) -> WorkspaceView;
         get_workspace(WorkspaceRef) -> WorkspaceView;
         set_head(SetHead) -> WorkspaceView;
+        get_conflicts(GetConflicts) -> Conflicts;
+        resolve(Resolve) -> Resolved;
+        overlapping_drafts(OverlappingDrafts) -> DraftOverlap;
     }
     async fn list_workspaces(
         &self,
@@ -336,22 +347,6 @@ impl WorkspaceApi for Server {
     ) -> ApiResult<()> {
         self.remote.close_workspace(cx, req, keep_drafts).await
     }
-
-    async fn get_conflicts(
-        &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::GetConflicts,
-    ) -> graft_proto::error::ApiResult<graft_proto::types::Conflicts> {
-        Err(graft_proto::ApiError::unimplemented("GetConflicts"))
-    }
-
-    async fn resolve(
-        &self,
-        _cx: &graft_proto::CallContext,
-        _req: graft_proto::types::Resolve,
-    ) -> graft_proto::error::ApiResult<graft_proto::types::Resolved> {
-        Err(graft_proto::ApiError::unimplemented("Resolve"))
-    }
 }
 
 macro_rules! api_delegate {
@@ -382,19 +377,27 @@ impl RepoApi for Api {
         resolve_ref(ResolveRef) -> RefView;
         list_refs(ListRefs) -> Vec<RefView>;
         update_ref(UpdateRef) -> RefView;
+        create_line(CreateLine) -> RefView;
         stat(PathAt) -> EntryView;
         list_tree(ListTree) -> Entries;
         read_file(PathAt) -> FileContent;
         log(Log) -> History;
         is_ancestor(Pair) -> bool;
         merge_base(Pair) -> Option<ChangesetId>;
+        merge_base_via(Pair) -> MergeBaseResult;
         diff(Diff) -> DiffResult;
         blame(Blame) -> BlameResult;
         rebase(Rebase) -> ChangesetId;
         revert(Revert) -> ChangesetId;
         land(Land) -> Landed;
+        line_merge(LineMerge) -> LineMergeOutcome;
+        line_merges(LineMerges) -> LineMergePage;
         attest(Attest) -> ();
+        attest_v2(AttestV2) -> ();
+        get_attestations(GetAttestations) -> AttestationPage;
         get_land_checks(GetLandChecks) -> LandCheckPage;
+        review_queue(ReviewQueue) -> ReviewQueuePage;
+        get_line_config(GetLineConfig) -> LineConfig;
         watch(Watch) -> JournalPage;
     }
 }
