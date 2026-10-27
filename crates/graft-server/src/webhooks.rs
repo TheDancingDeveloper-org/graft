@@ -236,24 +236,22 @@ async fn deliver_repo<M: MetaStore>(
 ) -> Result<bool, String> {
     let key = cursor_key(index);
     let cursor = read_cursor(meta, spec, repo, &key).await?;
+    // A new hook's cursor is only computed. Save it before the first POST so
+    // a 5xx plus a restart cannot recompute a later tip and skip the entry.
+    if meta
+        .derived(repo, CURSOR_KIND, CURSOR_VERSION, &key)
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .is_none()
+    {
+        advance(meta, repo, &key, cursor, cursor).await?;
+    }
     let rows = meta
         .journal(repo, cursor, 1)
         .await
         .map_err(|e| format!("{e:?}"))?;
     let Some((lsn, kind, body)) = rows.into_iter().next() else {
-        // Record a new tip cursor so a later entry is not hidden by a
-        // recomputed tip, and so a configured replay LSN is kept.
-        return match meta
-            .derived(repo, CURSOR_KIND, CURSOR_VERSION, &key)
-            .await
-            .map_err(|e| format!("{e:?}"))?
-        {
-            None => {
-                advance(meta, repo, &key, cursor, cursor).await?;
-                Ok(false)
-            }
-            Some(_) => Ok(false),
-        };
+        return Ok(false);
     };
     if lsn != cursor {
         return Err(format!("journal returned {lsn}, cursor is {cursor}"));
@@ -636,6 +634,8 @@ mod tests {
     #[tokio::test]
     async fn delivery_is_signed_and_a_failure_retries_the_same_entry() {
         let harness = engine();
+        let dir = harness._dir.path().to_path_buf();
+        let keep = harness._dir;
         let engine = &harness.engine;
         let id = repo(engine).await;
         let first = journal(engine, id, "LandAttempt", r#"{"line":"main"}"#).await;
@@ -669,10 +669,18 @@ mod tests {
                 .unwrap(),
             first
         );
+        // The receiver answered 5xx and the process is gone. The cursor was
+        // saved before that POST, so the reopened store still has the entry.
+        let _ = engine;
+        drop(harness.engine);
+        drop(harness.meta);
+        let _keep = keep;
+        let reopened =
+            Arc::new(SqliteMetaStore::open(SqliteConfig::new(dir.join("meta.db"))).unwrap());
         inbox.set_status(200);
         assert!(
             deliver_repo(
-                engine.stores().0,
+                &reopened,
                 &client,
                 &spec,
                 0,
@@ -685,7 +693,7 @@ mod tests {
         );
         assert!(
             deliver_repo(
-                engine.stores().0,
+                &reopened,
                 &client,
                 &spec,
                 0,
@@ -696,32 +704,26 @@ mod tests {
             .await
             .unwrap()
         );
-        assert_eq!(value(&metric, "delivered"), 2);
         let seen = inbox.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 3);
-        assert_eq!(seen[0].1, seen[1].1, "the failed entry is retried");
-        assert!(
-            seen[1]
-                .1
-                .windows(first.to_string().len())
-                .any(|w| w == first.to_string().as_bytes())
-        );
-        assert!(
-            seen[2]
-                .1
-                .windows(second.to_string().len())
-                .any(|w| w == second.to_string().as_bytes())
-        );
-        assert_eq!(seen[1].2, sign(secret, &seen[1].1));
-        assert_ne!(seen[1].2, sign("other", &seen[1].1));
+        assert_eq!(seen[0].0, 500);
+        assert_eq!(seen[1].0, 200);
+        assert_eq!(seen[2].0, 200);
+        let body = String::from_utf8(seen[1].1.clone()).unwrap();
+        assert_eq!(body.lines().nth(1).unwrap(), first.to_string());
+        let signed = sign(secret, &seen[1].1);
+        assert_eq!(seen[1].2, signed);
         assert_eq!(
-            read_cursor(engine.stores().0, &spec, id, &cursor_key(0))
-                .await
+            String::from_utf8(seen[2].1.clone())
+                .unwrap()
+                .lines()
+                .nth(1)
                 .unwrap(),
-            second + 1
+            second.to_string()
         );
+        assert_eq!(value(&metric, "delivered"), 2);
         let _ = tx.send(true);
-        task.abort();
+        let _ = task.await;
     }
 
     #[tokio::test]
@@ -993,6 +995,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_new_hook_on_a_long_memory_journal_reads_the_tip_once() {
+        use graft_store::memory::MemoryStore;
+        let meta = Arc::new(MemoryStore::new());
+        let id = meta.create_repo("graft").await.unwrap();
+        let batch = MetaTxn {
+            preconditions: vec![],
+            writes: (0..10_000)
+                .map(|n| Write::Journal {
+                    kind: "LandAttempt".into(),
+                    body: format!(r#"{{"line":"main","n":{n}}}"#).into_bytes(),
+                })
+                .collect(),
+        };
+        meta.commit(id, batch).await.unwrap();
+        let counted = CountedMem {
+            inner: meta,
+            journal: Arc::new(AtomicU64::new(0)),
+            journal_tip: Arc::new(AtomicU64::new(0)),
+        };
+        let mut spec = spec("http://127.0.0.1/hook");
+        spec.start = "tip".into();
+        let client = reqwest::Client::new();
+        assert!(
+            !deliver_repo(&counted, &client, &spec, 0, id, "k", &None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(counted.journal_tip.load(Ordering::Relaxed), 1);
+        assert!(
+            counted.journal.load(Ordering::Relaxed) <= 1,
+            "journal reads {}",
+            counted.journal.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            read_cursor(&counted, &spec, id, &cursor_key(0))
+                .await
+                .unwrap(),
+            10_001
+        );
+    }
+
+    struct CountedMem {
+        inner: Arc<graft_store::memory::MemoryStore>,
+        journal: Arc<AtomicU64>,
+        journal_tip: Arc<AtomicU64>,
+    }
+
     struct Counted {
         inner: Arc<SqliteMetaStore>,
         journal: Arc<AtomicU64>,
@@ -1000,6 +1050,143 @@ mod tests {
     }
 
     impl MetaStore for Counted {
+        fn create_repo(&self, name: &str) -> impl Future<Output = StoreResult<RepoId>> + Send {
+            self.inner.create_repo(name)
+        }
+        fn repo(&self, name: &str) -> impl Future<Output = StoreResult<Option<RepoId>>> + Send {
+            self.inner.repo(name)
+        }
+        fn commit(
+            &self,
+            repo: RepoId,
+            txn: MetaTxn,
+        ) -> impl Future<Output = StoreResult<TxnOutcome>> + Send {
+            self.inner.commit(repo, txn)
+        }
+        fn changeset(
+            &self,
+            repo: RepoId,
+            id: graft_model::ChangesetId,
+        ) -> impl Future<Output = StoreResult<Option<(Vec<u8>, graft_store::ChangesetRecord)>>> + Send
+        {
+            self.inner.changeset(repo, id)
+        }
+        fn get_ref(
+            &self,
+            repo: RepoId,
+            name: &str,
+        ) -> impl Future<Output = StoreResult<Option<graft_store::RefRecord>>> + Send {
+            self.inner.get_ref(repo, name)
+        }
+        fn list_refs(
+            &self,
+            repo: RepoId,
+            prefix: &str,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<graft_store::RefRecord>>> + Send {
+            self.inner.list_refs(repo, prefix, limit)
+        }
+        fn workspace(
+            &self,
+            repo: RepoId,
+            name: &str,
+        ) -> impl Future<Output = StoreResult<Option<graft_store::WorkspaceRecord>>> + Send
+        {
+            self.inner.workspace(repo, name)
+        }
+        fn expired_workspaces(
+            &self,
+            repo: RepoId,
+            before_ms: i64,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<graft_store::WorkspaceRecord>>> + Send {
+            self.inner.expired_workspaces(repo, before_ms, limit)
+        }
+        fn list_workspaces(
+            &self,
+            repo: RepoId,
+            owner: &str,
+            after: &str,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<graft_store::WorkspaceRecord>>> + Send {
+            self.inner.list_workspaces(repo, owner, after, limit)
+        }
+        fn count_records(
+            &self,
+            repo: RepoId,
+            state: graft_store::RecordState,
+        ) -> impl Future<Output = StoreResult<u64>> + Send {
+            self.inner.count_records(repo, state)
+        }
+        fn count_workspaces(
+            &self,
+            repo: RepoId,
+            before_ms: Option<i64>,
+        ) -> impl Future<Output = StoreResult<u64>> + Send {
+            self.inner.count_workspaces(repo, before_ms)
+        }
+        fn derived(
+            &self,
+            repo: RepoId,
+            kind: &str,
+            version: u32,
+            key: &[u8],
+        ) -> impl Future<Output = StoreResult<Option<Vec<u8>>>> + Send {
+            self.inner.derived(repo, kind, version, key)
+        }
+        fn line_pos(
+            &self,
+            repo: RepoId,
+            line: &str,
+            id: graft_model::ChangesetId,
+        ) -> impl Future<Output = StoreResult<Option<u64>>> + Send {
+            self.inner.line_pos(repo, line, id)
+        }
+        fn scan_line_path(
+            &self,
+            repo: RepoId,
+            line: &str,
+            path: &graft_model::RepoPath,
+            before: u64,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<(u64, graft_model::ChangesetId)>>> + Send
+        {
+            self.inner.scan_line_path(repo, line, path, before, limit)
+        }
+        fn holders(
+            &self,
+            repo: RepoId,
+            object: graft_model::ObjectId,
+        ) -> impl Future<Output = StoreResult<u32>> + Send {
+            self.inner.holders(repo, object)
+        }
+        fn land(
+            &self,
+            repo: RepoId,
+            draft: graft_model::ChangesetId,
+            line: &str,
+        ) -> impl Future<Output = StoreResult<Option<graft_model::ChangesetId>>> + Send {
+            self.inner.land(repo, draft, line)
+        }
+        fn journal(
+            &self,
+            repo: RepoId,
+            from: Lsn,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<(Lsn, String, Vec<u8>)>>> + Send {
+            self.journal.fetch_add(1, Ordering::Relaxed);
+            self.inner.journal(repo, from, limit)
+        }
+        fn journal_tip(
+            &self,
+            repo: RepoId,
+        ) -> impl Future<Output = StoreResult<Option<Lsn>>> + Send {
+            self.journal_tip.fetch_add(1, Ordering::Relaxed);
+            self.inner.journal_tip(repo)
+        }
+    }
+
+    impl MetaStore for CountedMem {
         fn create_repo(&self, name: &str) -> impl Future<Output = StoreResult<RepoId>> + Send {
             self.inner.create_repo(name)
         }
