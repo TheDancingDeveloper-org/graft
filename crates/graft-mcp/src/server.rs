@@ -269,7 +269,8 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         let mut tool_router = Self::tool_router()
             + Self::write_tool_router()
             + Self::upstream_tool_router()
-            + Self::drafts_tool_router();
+            + Self::drafts_tool_router()
+            + Self::review_tool_router();
         // Tests only. The tool returns a payload larger than the cap and
         // does not bound itself, so only `call_tool` can refuse it.
         #[cfg(test)]

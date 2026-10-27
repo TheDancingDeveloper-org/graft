@@ -94,11 +94,14 @@ async fn the_service_serves_tools_over_loopback_http() {
     assert_eq!(
         names,
         [
+            "graft_attest",
             "graft_blame",
             "graft_commit",
             "graft_conflicts",
             "graft_diff",
             "graft_draft_overlap",
+            "graft_get_attestations",
+            "graft_get_land_checks",
             "graft_land",
             "graft_line_create",
             "graft_log",
@@ -108,6 +111,7 @@ async fn the_service_serves_tools_over_loopback_http() {
             "graft_read",
             "graft_resolve",
             "graft_revert",
+            "graft_review_queue",
             "graft_show",
             "graft_status",
             "graft_sync",
@@ -119,6 +123,7 @@ async fn the_service_serves_tools_over_loopback_http() {
     for tool in &tools {
         let name = tool["name"].as_str().unwrap();
         let writes = [
+            "graft_attest",
             "graft_commit",
             "graft_land",
             "graft_line_create",

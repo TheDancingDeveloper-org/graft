@@ -73,6 +73,63 @@ async fn land_defaults_to_a_line_merge_in_its_schema() {
 }
 
 #[tokio::test]
+async fn review_tool_schemas_are_listed_with_their_inputs() {
+    let client = connect(Fake::standard()).await;
+    let tools = client.list_all_tools().await.expect("tools/list");
+    let expected = [
+        ("graft_review_queue", &["repo", "line"] as &[_]),
+        ("graft_get_attestations", &["repo"] as &[_]),
+        ("graft_get_land_checks", &["repo", "line"] as &[_]),
+        (
+            "graft_attest",
+            &["repo", "changeset", "kind", "check", "status"] as &[_],
+        ),
+    ];
+    let snapshot = expected
+        .into_iter()
+        .map(|(name, required)| {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            let schema = serde_json::to_value(&*tool.input_schema).unwrap();
+            for field in required {
+                assert!(schema["properties"][field].is_object(), "{name}.{field}");
+                assert!(
+                    schema["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(field)),
+                    "{name} requires {field}"
+                );
+            }
+            json!({"name": name, "schema": schema})
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshot.len(), 4);
+    let attest_schema = &snapshot[3]["schema"];
+    assert_eq!(
+        serde_json::Value::Array(
+            attest_schema["$defs"]["AttestKindArg"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|variant| variant["const"].clone())
+                .collect()
+        ),
+        json!(["check", "review", "approval"])
+    );
+    assert_eq!(
+        serde_json::Value::Array(
+            attest_schema["$defs"]["AttestStatusArg"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|variant| variant["const"].clone())
+                .collect()
+        ),
+        json!(["pass", "fail", "pending", "error"])
+    );
+}
+
+#[tokio::test]
 async fn a_call_round_trips_over_the_framing() {
     let client = connect(Fake::standard()).await;
     let result = call(

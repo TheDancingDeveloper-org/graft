@@ -7,6 +7,7 @@
 mod drafts;
 pub mod preflight;
 mod render;
+mod review;
 mod server;
 mod upstream;
 mod workcopy;
@@ -14,6 +15,10 @@ mod write;
 
 pub use drafts::DraftOverlapArgs;
 pub use render::{MAX_RESULT_BYTES, PATCH_MAX_BYTES};
+pub use review::{
+    AttestArgs, AttestKindArg, AttestStatusArg, GetAttestationsArgs, GetLandChecksArgs,
+    ReviewQueueArgs,
+};
 pub use server::{
     Auth, BlameArgs, Caller, DiffArgs, LogArgs, LsArgs, MAX_REQUEST_BYTES, McpServer, ReadArgs,
     ShowArgs, StatusArgs, http_config, request_auth, streamable_http_service,
@@ -106,6 +111,30 @@ pub const TOOLS: &[ToolSpec] = &[
         name: "graft_draft_overlap",
         description: "Other live workspaces with open drafts on these paths (no contents). Needs repo:<r>:drafts.",
         read_only: true,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_review_queue",
+        description: "Landed changesets that still need review.",
+        read_only: true,
+        bound: ToolBound::Paginated,
+    },
+    ToolSpec {
+        name: "graft_get_attestations",
+        description: "Attestations for a changeset or line range.",
+        read_only: true,
+        bound: ToolBound::Paginated,
+    },
+    ToolSpec {
+        name: "graft_get_land_checks",
+        description: "Check state of landed changesets on a line.",
+        read_only: true,
+        bound: ToolBound::Paginated,
+    },
+    ToolSpec {
+        name: "graft_attest",
+        description: "Record a check, review, or approval outcome.",
+        read_only: false,
         bound: ToolBound::Capped,
     },
     ToolSpec {

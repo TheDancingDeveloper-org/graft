@@ -434,6 +434,19 @@ async fn every_registered_tool_result_fits_and_an_oversized_status_is_typed() {
             "graft_draft_overlap",
             json!({"repo": "r", "paths": ["src/lib.rs"]}),
         ),
+        ("graft_review_queue", json!({"repo": "r", "line": "main"})),
+        (
+            "graft_get_attestations",
+            json!({"repo": "r", "changeset": cid(1).to_string()}),
+        ),
+        (
+            "graft_get_land_checks",
+            json!({"repo": "r", "line": "main"}),
+        ),
+        (
+            "graft_attest",
+            json!({"repo": "r", "changeset": cid(1).to_string(), "kind": "check", "check": "ci/test", "status": "pass"}),
+        ),
         (
             "graft_commit",
             json!({"repo": "r", "workspace": "w", "message": "m", "files": []}),
@@ -486,4 +499,149 @@ async fn every_registered_tool_result_fits_and_an_oversized_status_is_typed() {
         let size = serde_json::to_vec(&result).unwrap().len();
         assert!(size <= MAX_RESULT_BYTES, "{tool} returned {size} bytes");
     }
+}
+
+#[tokio::test]
+async fn review_reads_round_trip_with_pagination_and_bounded_results() {
+    let client = connect(Fake::standard()).await;
+
+    let first = call(
+        &client,
+        "graft_review_queue",
+        json!({"repo": "r", "line": "main", "limit": 1}),
+    )
+    .await;
+    let first_body = structured(&first);
+    assert_eq!(first_body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first_body["items"][0]["changeset"], cid(1).to_string());
+    assert_eq!(first_body["next_lsn"], 1);
+
+    let second = call(
+        &client,
+        "graft_review_queue",
+        json!({"repo": "r", "line": "main", "since_lsn": 1, "limit": 1}),
+    )
+    .await;
+    assert_eq!(
+        structured(&second)["items"][0]["changeset"],
+        cid(2).to_string()
+    );
+
+    let checks = call(
+        &client,
+        "graft_get_land_checks",
+        json!({"repo": "r", "line": "main", "limit": 2}),
+    )
+    .await;
+    let checks_body = structured(&checks);
+    assert_eq!(checks_body["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(checks_body["next"], "2");
+    let checks_page_2 = call(
+        &client,
+        "graft_get_land_checks",
+        json!({"repo": "r", "line": "main", "limit": 2, "cursor": "2"}),
+    )
+    .await;
+    assert_eq!(
+        structured(&checks_page_2)["rows"][0]["changeset"],
+        cid(3).to_string()
+    );
+    assert!(structured(&checks_page_2)["next"].is_null());
+
+    for result in [&first, &second, &checks, &checks_page_2] {
+        assert!(serde_json::to_vec(result).unwrap().len() <= MAX_RESULT_BYTES);
+    }
+}
+
+#[tokio::test]
+async fn attest_round_trips_and_attestations_are_paginated() {
+    let client = connect(Fake::standard()).await;
+    for check in ["review/one", "review/two"] {
+        let posted = call(
+            &client,
+            "graft_attest",
+            json!({
+                "repo": "r",
+                "changeset": cid(2).to_string(),
+                "kind": "review",
+                "check": check,
+                "status": "fail",
+                "by": "model reviewer"
+            }),
+        )
+        .await;
+        assert_eq!(structured(&posted)["recorded"], true);
+    }
+
+    let first = call(
+        &client,
+        "graft_get_attestations",
+        json!({"repo": "r", "changeset": cid(2).to_string(), "kinds": ["review"], "limit": 1}),
+    )
+    .await;
+    let first_body = structured(&first);
+    assert_eq!(first_body["attestations"].as_array().unwrap().len(), 1);
+    assert_eq!(first_body["attestations"][0]["kind"], "review");
+    assert_eq!(first_body["next"], "1");
+
+    let second = call(
+        &client,
+        "graft_get_attestations",
+        json!({"repo": "r", "changeset": cid(2).to_string(), "limit": 1, "cursor": "1"}),
+    )
+    .await;
+    assert_eq!(
+        structured(&second)["attestations"][0]["check"],
+        "review/two"
+    );
+    assert!(structured(&second)["next"].is_null());
+    assert!(serde_json::to_vec(&first).unwrap().len() <= MAX_RESULT_BYTES);
+    assert!(serde_json::to_vec(&second).unwrap().len() <= MAX_RESULT_BYTES);
+}
+
+#[tokio::test]
+async fn model_review_pass_removes_the_land_from_the_queue() {
+    let client = connect(Fake::standard()).await;
+    let before = call(
+        &client,
+        "graft_review_queue",
+        json!({"repo": "r", "line": "main"}),
+    )
+    .await;
+    assert!(
+        structured(&before)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["changeset"] == cid(2).to_string())
+    );
+
+    let posted = call(
+        &client,
+        "graft_attest",
+        json!({
+            "repo": "r",
+            "changeset": cid(2).to_string(),
+            "kind": "review",
+            "check": "model-review",
+            "status": "pass",
+            "by": "model reviewer"
+        }),
+    )
+    .await;
+    assert_eq!(structured(&posted)["recorded"], true);
+
+    let after = call(
+        &client,
+        "graft_review_queue",
+        json!({"repo": "r", "line": "main"}),
+    )
+    .await;
+    assert!(
+        structured(&after)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["changeset"] != cid(2).to_string())
+    );
 }
