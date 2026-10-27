@@ -7,7 +7,9 @@ use graft_model::{Author, AuthorKind, ChangesetId, Timestamp};
 use crate::export::default_committer;
 use crate::text::clean_message;
 
-use super::render::{BatchHeader, land_commit, land_message, land_row, parse_commit, render};
+use super::render::{
+    BatchHeader, land_commit, land_message, land_row, parse_commit, render, settled_keep,
+};
 use super::types::{
     AuthorIdentity, BatchState, CHANGESET_TRAILER, LandLine, MAX_LANDS, MAX_PR_BODY, MESSAGE_CHARS,
     claimed_author_trailer, git_time, git_time_at, ident_part, land_ident, short,
@@ -45,6 +47,7 @@ fn header(capped: bool) -> BatchHeader {
         held: 0,
         uncut: None,
         max_lands: 0,
+        checked: false,
         fallback: Some("test".to_owned()),
         appended: std::collections::HashSet::new(),
     }
@@ -394,4 +397,125 @@ fn pr_body_says_session_and_work_item_not_the_tracker() {
     let text = String::from_utf8(raw).unwrap();
     assert!(text.contains("Graft-Session: ses_x\n"));
     assert!(!text.contains("Vogt-"));
+}
+
+// ---- The settled cut on a checked line (design §8.7 step 6) ----
+
+use std::collections::HashMap;
+
+use graft_proto::types::{LandCheck, LandCheckState};
+
+/// Lands 1..=n, returned newest first as the batcher holds them, with
+/// `reverts[i] = Some(j)` making land `i + 1` a revert of land `j`.
+fn line_of(reverts: &[Option<u32>]) -> Vec<LandLine> {
+    let mut lands: Vec<LandLine> = (1..=reverts.len() as u32)
+        .map(|n| {
+            let mut l = land(n, false);
+            l.reverts = reverts[n as usize - 1].map(|t| land(t, false).id);
+            l
+        })
+        .collect();
+    lands.reverse();
+    lands
+}
+
+/// Rows for lands 1..: `states[i]` for land `i + 1`, `None` for no row.
+fn rows_of(states: &[Option<LandCheckState>]) -> HashMap<ChangesetId, LandCheck> {
+    states
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let id = land(i as u32 + 1, false).id;
+            s.map(|state| {
+                (
+                    id,
+                    LandCheck {
+                        pos: i as u64 + 10,
+                        changeset: id,
+                        state,
+                        revert: None,
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+use LandCheckState::{Bad, Good, Pending, Reverted};
+
+#[test]
+fn the_cut_stops_before_a_pending_land() {
+    let lands = line_of(&[None; 4]);
+    let rows = rows_of(&[Some(Good), Some(Good), Some(Pending), Some(Good)]);
+    assert_eq!(
+        settled_keep(&lands, &rows, usize::MAX),
+        (2, Some(land(3, false).id))
+    );
+}
+
+#[test]
+fn a_bad_land_is_taken_with_its_revert() {
+    let lands = line_of(&[None, None, Some(2), None]);
+    let mut rows = rows_of(&[Some(Good), Some(Reverted), Some(Good), Some(Good)]);
+    rows.get_mut(&land(2, false).id).unwrap().revert = Some(land(3, false).id);
+    assert_eq!(settled_keep(&lands, &rows, usize::MAX), (4, None));
+    // `bad` with the revert named only by the revert's metadata.
+    let rows = rows_of(&[Some(Good), Some(Bad), Some(Good), Some(Good)]);
+    assert_eq!(settled_keep(&lands, &rows, usize::MAX), (4, None));
+}
+
+#[test]
+fn a_bad_land_with_no_revert_stops_the_cut() {
+    let lands = line_of(&[None; 3]);
+    let rows = rows_of(&[Some(Good), Some(Bad), Some(Good)]);
+    assert_eq!(
+        settled_keep(&lands, &rows, usize::MAX),
+        (1, Some(land(2, false).id))
+    );
+    let rows = rows_of(&[Some(Bad), Some(Good), Some(Good)]);
+    assert_eq!(
+        settled_keep(&lands, &rows, usize::MAX),
+        (0, Some(land(1, false).id))
+    );
+}
+
+#[test]
+fn a_pending_revert_holds_the_land_it_reverts() {
+    let lands = line_of(&[None, None, Some(2)]);
+    let rows = rows_of(&[Some(Good), Some(Bad), Some(Pending)]);
+    assert_eq!(
+        settled_keep(&lands, &rows, usize::MAX),
+        (1, Some(land(3, false).id))
+    );
+}
+
+#[test]
+fn a_land_without_a_row_waits_unless_it_reverts_a_kept_land() {
+    let lands = line_of(&[None, None]);
+    let rows = rows_of(&[Some(Good), None]);
+    assert_eq!(
+        settled_keep(&lands, &rows, usize::MAX),
+        (1, Some(land(2, false).id))
+    );
+    // An operator's drop: the revert moved onto the line has no row.
+    let lands = line_of(&[None, Some(1), None]);
+    let rows = rows_of(&[Some(Pending), None, Some(Good)]);
+    assert_eq!(settled_keep(&lands, &rows, usize::MAX), (3, None));
+}
+
+#[test]
+fn the_land_cap_applies_within_the_settled_prefix_and_never_splits_a_revert() {
+    let lands = line_of(&[None; 4]);
+    let rows = rows_of(&[Some(Good); 4]);
+    assert_eq!(settled_keep(&lands, &rows, 3).0, 3);
+    // Land 2 and its revert (land 3) stay together: a cap of 2 stops
+    // before the pair, a cap of 3 takes it.
+    let lands = line_of(&[None, None, Some(2), None]);
+    let rows = rows_of(&[Some(Good), Some(Bad), Some(Good), Some(Good)]);
+    assert_eq!(settled_keep(&lands, &rows, 2).0, 1);
+    assert_eq!(settled_keep(&lands, &rows, 3).0, 3);
+    // A cap below every valid cut takes the smallest: the pair whole.
+    let lands = line_of(&[None, Some(1), None]);
+    let rows = rows_of(&[Some(Bad), Some(Good), Some(Good)]);
+    assert_eq!(settled_keep(&lands, &rows, 1).0, 2);
 }

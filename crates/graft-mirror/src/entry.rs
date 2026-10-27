@@ -49,6 +49,7 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
   pr-batch <line> --base <branch> --config <file> [--track]
            [--exclude <changeset>]... [--reason <text>]
            [--max-lands <n>] [--max-age <seconds>]
+           [--checks post-land]
                                         sync an integration line onto the
                                         followed base, export its net change
                                         as one squashed PR; never merges
@@ -763,6 +764,7 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     let mut reason = None;
     let mut max_lands = None;
     let mut max_age_ms = None;
+    let mut checked = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = |flag: &str| {
@@ -799,6 +801,15 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
                     .ok_or_else(|| CmdError::Usage("--max-age needs seconds".into()))?;
                 max_age_ms = Some(secs.saturating_mul(1000));
             }
+            "--checks" => match value("--checks")?.as_str() {
+                "post-land" => checked = true,
+                "off" => checked = false,
+                v => {
+                    return Err(CmdError::Usage(format!(
+                        "--checks: expected post-land or off, got {v}"
+                    )));
+                }
+            },
             s if s.starts_with('-') => return Err(CmdError::Usage(format!("unknown flag {s}"))),
             s if line.is_none() => line = Some(s.to_owned()),
             s => return Err(CmdError::Usage(format!("unexpected argument {s}"))),
@@ -830,6 +841,7 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     batch.drop_reason = reason;
     batch.max_lands = max_lands;
     batch.max_age_ms = max_age_ms;
+    batch.checked = checked;
     with_credentials(
         file.github.as_ref(),
         RunBatch {
@@ -917,6 +929,12 @@ impl AsyncCredentialFn<()> for RunBatch<'_> {
                 println!(
                     "line {line}: {lands} land(s) waiting (oldest authored at {oldest_ms} ms); \
                      not due for a batch yet"
+                );
+            }
+            BatchOutcome::Unsettled { lands, waiting } => {
+                println!(
+                    "line {line}: {lands} land(s) waiting; post-land checks of {waiting} \
+                     are not settled, so no batch yet"
                 );
             }
         }

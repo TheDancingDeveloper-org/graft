@@ -9,8 +9,8 @@ use graft_git::map::{ImportedCommit, MirrorMap};
 use graft_model::{Author, AuthorKind, Change, ChangesetId, Metadata, Timestamp};
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::types::{
-    ChangesetView, CreateChangeset, Diff, GetChangesets, Log, MergeMode, Page, Pair, Rebase,
-    RefKind, Revert, Watch,
+    ChangesetView, CreateChangeset, Diff, GetChangesets, GetLandChecks, LandCheck, Log, MergeMode,
+    Page, Pair, Rebase, RefKind, Revert, Watch,
 };
 use graft_proto::{ApiError, CallContext};
 
@@ -22,13 +22,15 @@ use crate::github::{Forge, Pull};
 use crate::text::{clean_message, clean_text};
 use crate::{MirrorError, current_ref, move_ref};
 
-use super::render::{BatchHeader, keep_with_reverts, land_commit, parse_commit, render};
+use super::render::{
+    BatchHeader, keep_with_reverts, land_commit, parse_commit, render, settled_keep,
+};
 use super::types::{
     Attested, BATCH, BRANCH_PREFIX, BatchCommit, BatchConfig, BatchLine, BatchOutcome, BatchRecord,
     BatchRun, BatchState, DEFAULT_DROP_REASON, Dropped, FETCH, FIELD_CHARS, LandLine,
-    MAX_ATTEST_PAGES, MAX_COMMITS, MAX_LANDS, MESSAGE_CHARS, PAGE, REVERTS_KEY, SYNC_KEY, Stamp,
-    TITLE_CHARS, claimed_author_trailer, config_err, git_time, is_sync, land_ident, short,
-    sync_base, system_ms,
+    MAX_ATTEST_PAGES, MAX_CHECK_PROBES, MAX_COMMITS, MAX_LANDS, MESSAGE_CHARS, PAGE, REVERTS_KEY,
+    SYNC_KEY, Stamp, TITLE_CHARS, claimed_author_trailer, config_err, git_time, is_sync,
+    land_ident, short, sync_base, system_ms,
 };
 
 /// An open batch's detail when the line has nothing past its tip.
@@ -560,6 +562,136 @@ where
         Ok((ids, capped))
     }
 
+    /// The `GetLandChecks` rows of `lands` (the lands after `start`), by
+    /// changeset. One paged read of at most `lands.len()` rows from the
+    /// first position past `start`: the batch's lands are the line's
+    /// positions after it, and a sync changeset has no row.
+    async fn land_check_rows(
+        &mut self,
+        start: ChangesetId,
+        lands: &[LandLine],
+    ) -> Result<HashMap<ChangesetId, LandCheck>, MirrorError> {
+        let batch: HashSet<ChangesetId> = lands.iter().map(|l| l.id).collect();
+        let from_pos = self.first_check_pos(start, &batch).await?;
+        let cx = self.call("land-checks");
+        let rows = graft_client::land_checks(
+            self.api,
+            &cx,
+            GetLandChecks {
+                repo: self.config.repo.clone(),
+                line: self.config.line.clone(),
+                from_pos,
+                page: Page {
+                    limit: 0,
+                    token: None,
+                },
+            },
+            u32::try_from(lands.len()).unwrap_or(u32::MAX),
+        )
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| batch.contains(&r.changeset))
+            .map(|r| (r.changeset, r))
+            .collect())
+    }
+
+    /// The first line position whose next row is not older than the
+    /// batch: rows before it are `start` or its ancestors. An exponential
+    /// probe then a bisection, one row per read, so the cost is
+    /// O(log line length), never a walk of the line's rows.
+    async fn first_check_pos(
+        &mut self,
+        start: ChangesetId,
+        batch: &HashSet<ChangesetId>,
+    ) -> Result<u64, MirrorError> {
+        // Every position up to `lo` is followed by an older row.
+        let Some(mut lo) = self.older_row(0, start, batch).await? else {
+            return Ok(0);
+        };
+        let mut step = 1u64;
+        let mut hi = None;
+        for _ in 0..MAX_CHECK_PROBES {
+            let p = lo.saturating_add(step);
+            match self.older_row(p, start, batch).await? {
+                Some(pos) => lo = pos.max(p),
+                None => {
+                    hi = Some(p);
+                    break;
+                }
+            }
+            step = step.saturating_mul(2);
+        }
+        let mut hi = hi.ok_or_else(|| {
+            config_err(format!(
+                "line {}: the batch start's post-land check position was not found",
+                self.config.line
+            ))
+        })?;
+        // `lo` is followed by an older row; `hi` is not.
+        for _ in 0..MAX_CHECK_PROBES {
+            if hi - lo <= 1 {
+                return Ok(hi);
+            }
+            let mid = lo + (hi - lo) / 2;
+            match self.older_row(mid, start, batch).await? {
+                // The row is before `hi`, or `hi` would be followed by it.
+                Some(pos) => lo = pos.clamp(mid, hi - 1),
+                None => hi = mid,
+            }
+        }
+        Ok(hi)
+    }
+
+    /// The position of the first row at or after `pos`, when it is a land
+    /// older than the batch (`start` or an ancestor of it). `None` when
+    /// there is no row there, or it is a batch land or a newer one.
+    async fn older_row(
+        &mut self,
+        pos: u64,
+        start: ChangesetId,
+        batch: &HashSet<ChangesetId>,
+    ) -> Result<Option<u64>, MirrorError> {
+        let cx = self.call("land-checks");
+        let page = self
+            .api
+            .get_land_checks(
+                &cx,
+                GetLandChecks {
+                    repo: self.config.repo.clone(),
+                    line: self.config.line.clone(),
+                    from_pos: pos,
+                    page: Page {
+                        limit: 1,
+                        token: None,
+                    },
+                },
+            )
+            .await?;
+        let Some(row) = page.rows.first() else {
+            return Ok(None);
+        };
+        if batch.contains(&row.changeset) {
+            return Ok(None);
+        }
+        if row.changeset == start {
+            return Ok(Some(row.pos));
+        }
+        let cx = self.call("is-ancestor");
+        let older = self
+            .api
+            .is_ancestor(
+                &cx,
+                Pair {
+                    repo: self.config.repo.clone(),
+                    a: row.changeset,
+                    b: start,
+                },
+            )
+            .await?;
+        Ok(older.then_some(row.pos))
+    }
+
     /// Authenticated principals (`RefMoved.actor`) for lands in `wanted`,
     /// keyed by the landed changeset. Missing when the journal has no actor
     /// (a land recorded before the field, or a move this read did not see).
@@ -925,44 +1057,74 @@ where
                 }));
             }
         }
-        let mut uncut = None;
-        let (cut, base, held) = match Some(max_lands) {
-            Some(max) if lands.len() > max.max(1) && capped => {
-                uncut = Some(format!(
-                    "the line has more than {MAX_LANDS} lands to batch, so the oldest are \
-                     not read and the {max}-land cap is not applied: this batch takes them all"
-                ));
-                (tip, base_tip, 0)
+        // On a checked line the cut is the newest settled land (§8.7 step
+        // 6), within the land cap; `Some(keep)` holds the lands past it.
+        let settled = if self.config.checked {
+            if capped {
+                return Err(config_err(format!(
+                    "line {} has more than {MAX_LANDS} lands to batch, so its oldest lands' \
+                     post-land checks are not read and the batch cannot be cut",
+                    self.config.line
+                )));
             }
-            Some(max) if lands.len() > max.max(1) => {
-                let keep = keep_with_reverts(&lands, max.max(1));
+            let rows = self.land_check_rows(state.start, &lands).await?;
+            match settled_keep(&lands, &rows, max_lands) {
+                (0, waiting) => {
+                    return Ok(Err(BatchOutcome::Unsettled {
+                        lands: lands.len(),
+                        waiting: waiting.unwrap_or(lands[lands.len() - 1].id),
+                    }));
+                }
+                (keep, _) => Some(keep),
+            }
+        } else {
+            None
+        };
+        let mut uncut = None;
+        let (cut, base, held) = match settled {
+            Some(keep) if keep < lands.len() => {
                 let cut = lands[lands.len() - keep].id;
-                // The base the line held at the cut: the newest sync at or
-                // before it, else the base at the batch start.
-                let pos = ids.iter().position(|i| *i == cut).unwrap_or(0);
-                let held_base = ids[pos..]
-                    .iter()
-                    .filter_map(|i| views.get(i))
-                    .find_map(|v| sync_base(&v.changeset.metadata))
-                    .and_then(|b| ChangesetId::parse(b).ok())
-                    .or(state.start_base);
-                match held_base {
-                    Some(base) => {
-                        let held = lands.len() - keep;
-                        lands.drain(..held);
-                        (cut, base, held)
-                    }
-                    None => {
-                        uncut = Some(format!(
-                            "the line's record predates batch cuts, so the base at the cut \
+                let base = held_base(&ids, &views, cut, state).ok_or_else(|| {
+                    config_err(format!(
+                        "line {}'s record predates batch cuts, so the base at the settled \
+                         cut is unknown; merge or reject its open batch first",
+                        self.config.line
+                    ))
+                })?;
+                let held = lands.len() - keep;
+                lands.drain(..held);
+                (cut, base, held)
+            }
+            Some(_) => (tip, base_tip, 0),
+            None => match Some(max_lands) {
+                Some(max) if lands.len() > max.max(1) && capped => {
+                    uncut = Some(format!(
+                        "the line has more than {MAX_LANDS} lands to batch, so the oldest are \
+                     not read and the {max}-land cap is not applied: this batch takes them all"
+                    ));
+                    (tip, base_tip, 0)
+                }
+                Some(max) if lands.len() > max.max(1) => {
+                    let keep = keep_with_reverts(&lands, max.max(1));
+                    let cut = lands[lands.len() - keep].id;
+                    match held_base(&ids, &views, cut, state) {
+                        Some(base) => {
+                            let held = lands.len() - keep;
+                            lands.drain(..held);
+                            (cut, base, held)
+                        }
+                        None => {
+                            uncut = Some(format!(
+                                "the line's record predates batch cuts, so the base at the cut \
                              is unknown and the {max}-land cap is not applied: this batch \
                              takes them all"
-                        ));
-                        (tip, base_tip, 0)
+                            ));
+                            (tip, base_tip, 0)
+                        }
                     }
                 }
-            }
-            _ => (tip, base_tip, 0),
+                _ => (tip, base_tip, 0),
+            },
         };
         if let Some(why) = &uncut {
             tracing::warn!(
@@ -1053,6 +1215,7 @@ where
                 held,
                 uncut,
                 max_lands,
+                checked: self.config.checked,
                 fallback: fallback.clone(),
                 appended: HashSet::new(),
             },
@@ -1361,7 +1524,7 @@ where
                 rec.line, rec.number, rec.tip
             )));
         }
-        let (new_lands, _) = self.describe(&ids, &views).await?;
+        let (mut new_lands, _) = self.describe(&ids, &views).await?;
         let max_lands = self
             .config
             .max_lands
@@ -1369,6 +1532,22 @@ where
             .min(MAX_COMMITS);
         if new_lands.is_empty() {
             return self.skip(rec, NOTHING_NEW);
+        }
+        let mut tip = tip;
+        if self.config.checked {
+            // Only the settled lands are appended (§8.7 step 6); the cap is
+            // applied to them below.
+            let rows = self.land_check_rows(rec.tip, &new_lands).await?;
+            let (keep, _) = settled_keep(&new_lands, &rows, usize::MAX);
+            if keep == 0 {
+                return self.skip(
+                    rec,
+                    "not appended: the next land's post-land checks are not settled",
+                );
+            }
+            let held = new_lands.len() - keep;
+            tip = new_lands[held].id;
+            new_lands.drain(..held);
         }
         if rec.lands as usize + new_lands.len() > max_lands {
             rec.detail = format!(
@@ -1524,6 +1703,7 @@ where
                 held: 0,
                 uncut: None,
                 max_lands,
+                checked: self.config.checked,
                 fallback: None,
                 appended,
             },
@@ -1812,6 +1992,23 @@ where
 
 /// The recorded value of an attribution field: the new `agent.*` key, else
 /// the legacy name. The new key wins when both are set.
+/// The base the line held at `cut`: the newest sync at or before it in
+/// `ids` (newest first), else the base at the batch start.
+fn held_base(
+    ids: &[ChangesetId],
+    views: &HashMap<ChangesetId, ChangesetView>,
+    cut: ChangesetId,
+    state: &BatchLine,
+) -> Option<ChangesetId> {
+    let pos = ids.iter().position(|i| *i == cut).unwrap_or(0);
+    ids[pos..]
+        .iter()
+        .filter_map(|i| views.get(i))
+        .find_map(|v| sync_base(&v.changeset.metadata))
+        .and_then(|b| ChangesetId::parse(b).ok())
+        .or(state.start_base)
+}
+
 fn attribution_raw(metadata: &Metadata, key: graft_proto::attribution::Key) -> Option<&str> {
     graft_proto::attribution::get(metadata, key)
 }

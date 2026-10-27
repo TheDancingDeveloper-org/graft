@@ -66,6 +66,11 @@ pub const MAX_CHECKS: usize = 8;
 /// Journal pages read for attestations, at most.
 pub const MAX_ATTEST_PAGES: usize = 16;
 
+/// One-row `GetLandChecks` reads that find where a batch starts on a
+/// checked line, per search phase: the exponential probe and the bisection
+/// each take at most this many (O(log line length)).
+pub(crate) const MAX_CHECK_PROBES: u32 = 64;
+
 /// Entries per page (journal, log, diff).
 pub(crate) const PAGE: u32 = 256;
 
@@ -234,6 +239,10 @@ pub struct BatchConfig {
     /// Hold a batch until its oldest land is this old (ms, by author time),
     /// unless it already has `max_lands` lands.
     pub max_age_ms: Option<i64>,
+    /// The line has `checks = "post-land"` on the server (design §8.7,
+    /// phase 2): a batch is cut at the newest land whose prefix is settled
+    /// in `GetLandChecks`. `false` batches as phase 1 does.
+    pub checked: bool,
 }
 
 impl BatchConfig {
@@ -252,6 +261,7 @@ impl BatchConfig {
             drop_reason: None,
             max_lands: None,
             max_age_ms: None,
+            checked: false,
         }
     }
 }
@@ -283,6 +293,14 @@ pub enum BatchOutcome {
         lands: usize,
         /// The oldest one's author time (ms).
         oldest_ms: i64,
+    },
+    /// The line is checked and its oldest land's post-land checks are not
+    /// settled (pending, or bad with no revert yet); no batch yet.
+    Unsettled {
+        /// Lands waiting.
+        lands: usize,
+        /// The oldest land the cut stops at.
+        waiting: ChangesetId,
     },
 }
 
