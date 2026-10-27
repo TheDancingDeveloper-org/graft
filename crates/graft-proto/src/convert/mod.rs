@@ -1123,6 +1123,7 @@ impl From<Revert> for pb::RevertRequest {
             changeset: cb(r.changeset),
             onto: cb(r.onto),
             workspace: r.workspace,
+            check_url: r.check_url,
         }
     }
 }
@@ -1130,11 +1131,18 @@ impl From<Revert> for pb::RevertRequest {
 impl TryFrom<pb::RevertRequest> for Revert {
     type Error = WireError;
     fn try_from(r: pb::RevertRequest) -> R<Self> {
+        if r.check_url
+            .as_ref()
+            .is_some_and(|u| u.len() > MAX_ATTEST_URL)
+        {
+            return Err(bad("check_url", "over the url cap"));
+        }
         Ok(Revert {
             repo: r.repo,
             changeset: cid(r.changeset, "changeset")?,
             onto: cid(r.onto, "onto")?,
             workspace: r.workspace,
+            check_url: r.check_url,
         })
     }
 }

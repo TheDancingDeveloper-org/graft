@@ -449,7 +449,14 @@ pub struct Revert {
     pub onto: ChangesetId,
     /// Workspace to hold the result.
     pub workspace: Option<String>,
+    /// The failed check run that prompted the revert (design §8.7 step 5),
+    /// stamped on the inverse as `graft.revert-check`. At most
+    /// [`MAX_ATTEST_URL`] bytes.
+    pub check_url: Option<String>,
 }
+
+/// The longest attestation or revert-check URL, in bytes.
+pub const MAX_ATTEST_URL: usize = 2048;
 
 /// `Land` request.
 #[derive(Clone, Debug, PartialEq, Eq)]

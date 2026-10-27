@@ -347,6 +347,9 @@ message RevertRequest {
   bytes changeset = 2;
   bytes onto = 3;
   optional string workspace = 4;
+  // The failed check run that prompted the revert (design 8.7 step 5);
+  // stamped as `graft.revert-check`. At most MAX_ATTEST_URL bytes.
+  optional string check_url = 5;
 }
 
 message LandRequest {

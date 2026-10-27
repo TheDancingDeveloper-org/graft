@@ -28,9 +28,9 @@
 //! - **Revert.** The first bad land is reverted (each changeset of its
 //!   stack, newest first, with line merge) on the line's tip and landed
 //!   through the ordinary land path. The server stamps each revert
-//!   `graft.reverts` and journals `LandReverted` with the failed check.
-//!   (`graft.revert-check`, the failed run's link, needs `Revert` to carry
-//!   it: clients may not write `graft.*` metadata.) Lands after it stay on the line; they are
+//!   `graft.reverts`, and `graft.revert-check` with the link of the last
+//!   failed run read for the land, and journals `LandReverted` with the
+//!   failed check. Lands after it stay on the line; they are
 //!   checked again on top of the revert: the revert's land is the snapshot
 //!   that settles them. A revert that conflicts, or one that does not fix
 //!   the line, is never forced: nothing is landed, the line is reported
@@ -75,6 +75,9 @@ pub const LAND_REVERTED: &str = "LandReverted";
 
 /// Metadata naming the changeset a revert inverts.
 pub const REVERTS: &str = "graft.reverts";
+
+/// Metadata naming the failed check run a revert answers.
+pub const REVERT_CHECK: &str = "graft.revert-check";
 
 /// The display name attestations are posted under.
 pub const ATTESTER_NAME: &str = "graft-attester post-land";
@@ -318,6 +321,7 @@ struct Report {
     lsn: u64,
     check: String,
     passed: bool,
+    url: String,
 }
 
 /// One land of the line, as read.
@@ -584,6 +588,11 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
                         lsn: entry.lsn,
                         check: check.to_owned(),
                         passed,
+                        url: body
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_owned(),
                     });
                 }
             }
@@ -841,6 +850,13 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
     /// Lands the revert of bad land `i` on the line's tip.
     async fn revert(&mut self, i: usize) -> Result<PostLandReport, Error> {
         let (land, old) = (self.lands[i].landed, self.lands[i].old);
+        // The link of the last failed run, for `graft.revert-check`.
+        let check_url = self.lands[i]
+            .reports
+            .iter()
+            .rev()
+            .find(|r| !r.passed && !r.url.is_empty())
+            .map(|r| r.url.clone());
         // The land's stack, newest first.
         let mut chain = Vec::new();
         let mut c = land;
@@ -888,6 +904,7 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
                         changeset: c,
                         onto: head,
                         workspace: None,
+                        check_url: check_url.clone(),
                     },
                 )
                 .await

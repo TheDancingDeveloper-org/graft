@@ -551,12 +551,15 @@ fn land_types_round_trip() {
     );
     check::<Revert, pb::RevertRequest, _>(
         "Revert",
-        (text(), cid(), cid(), otext()).prop_map(|(repo, changeset, onto, workspace)| Revert {
-            repo,
-            changeset,
-            onto,
-            workspace,
-        }),
+        (text(), cid(), cid(), otext(), otext()).prop_map(
+            |(repo, changeset, onto, workspace, check_url)| Revert {
+                repo,
+                changeset,
+                onto,
+                workspace,
+                check_url,
+            },
+        ),
     );
     check::<Land, pb::LandRequest, _>(
         "Land",
@@ -1099,4 +1102,59 @@ fn graft_proto_merge_conflict(
 #[test]
 fn the_merge_conflict_variant_does_not_grow_api_error() {
     assert!(std::mem::size_of::<ApiError>() <= 64);
+}
+
+#[test]
+fn revert_check_url_is_additive_and_bounded() {
+    use prost::Message;
+    let id = ChangesetId(ObjectId([3; 32]));
+    let revert = Revert {
+        repo: "r".to_owned(),
+        changeset: id,
+        onto: id,
+        workspace: None,
+        check_url: Some("https://ci.example/run/7".to_owned()),
+    };
+    let bytes = pb::RevertRequest::from(revert.clone()).encode_to_vec();
+    let back = Revert::try_from(pb::RevertRequest::decode(bytes.as_slice()).unwrap()).unwrap();
+    assert_eq!(back, revert);
+
+    // An old client's request (fields 1-4 only) decodes with no check URL.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct OldRevertRequest {
+        #[prost(string, tag = "1")]
+        repo: String,
+        #[prost(bytes = "vec", tag = "2")]
+        changeset: Vec<u8>,
+        #[prost(bytes = "vec", tag = "3")]
+        onto: Vec<u8>,
+        #[prost(string, optional, tag = "4")]
+        workspace: Option<String>,
+    }
+    let old = OldRevertRequest {
+        repo: "r".to_owned(),
+        changeset: id.0.0.to_vec(),
+        onto: id.0.0.to_vec(),
+        workspace: None,
+    }
+    .encode_to_vec();
+    let back = Revert::try_from(pb::RevertRequest::decode(old.as_slice()).unwrap()).unwrap();
+    assert_eq!(back.check_url, None);
+
+    let at_cap = pb::RevertRequest {
+        check_url: Some("u".repeat(MAX_ATTEST_URL)),
+        ..pb::RevertRequest::from(revert.clone())
+    };
+    assert!(Revert::try_from(at_cap).is_ok());
+    let over = pb::RevertRequest {
+        check_url: Some("u".repeat(MAX_ATTEST_URL + 1)),
+        ..pb::RevertRequest::from(revert)
+    };
+    assert_eq!(
+        Revert::try_from(over).unwrap_err(),
+        WireError {
+            field: "check_url",
+            reason: "over the url cap",
+        }
+    );
 }

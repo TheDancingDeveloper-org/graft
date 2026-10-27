@@ -11,7 +11,8 @@
 //! The result is deterministic, so a retried revert returns the same id: its
 //! author is the caller, its time is `c`'s (no server time, design rule 5),
 //! its message names `c`, and its metadata is `graft.reverts = c`, plus
-//! `graft.merged-paths` when the rebase merged. With `workspace`, it goes on
+//! `graft.revert-check` when the caller names the failed check run that
+//! prompted it, and `graft.merged-paths` when the rebase merged. With `workspace`, it goes on
 //! top of that workspace's stack, which must sit at `onto`; without one it
 //! is stored abandoned, like a rebase's output, until a land or a workspace
 //! takes it.
@@ -24,12 +25,17 @@ use graft_proto::{ApiError, CallContext, PrincipalKind};
 use graft_store::{MetaStore, ObjectStore};
 
 use crate::access::{Need, require, require_changes};
+use crate::land::MAX_ATTEST_URL;
 use crate::rebase::{REBASED_FROM, key};
 use crate::source::Trees;
 use crate::{Engine, errors};
 
 /// The metadata key naming the changeset a revert inverts.
 pub const REVERTS: &str = "graft.reverts";
+
+/// The metadata key naming the failed check run a revert answers
+/// (design §8.7 step 5).
+pub const REVERT_CHECK: &str = "graft.revert-check";
 
 /// The author a revert records for its caller.
 pub(crate) fn caller(cx: &CallContext) -> Author {
@@ -58,6 +64,13 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         req: Revert,
     ) -> Result<ChangesetId, ApiError> {
         require(cx, &req.repo, Need::Read)?;
+        if req
+            .check_url
+            .as_ref()
+            .is_some_and(|u| u.len() > MAX_ATTEST_URL)
+        {
+            return Err(errors::limit("revert-check-url", MAX_ATTEST_URL as u64));
+        }
         if req.workspace.is_some() {
             require(cx, &req.repo, Need::Workspace)?;
         }
@@ -93,6 +106,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
         let mut metadata = graft_model::Metadata::new();
         metadata.insert(REVERTS.to_owned(), req.changeset.to_string());
+        if let Some(url) = &req.check_url {
+            metadata.insert(REVERT_CHECK.to_owned(), url.clone());
+        }
         let inverse = Changeset {
             parents: vec![req.changeset],
             root: parent_root,
