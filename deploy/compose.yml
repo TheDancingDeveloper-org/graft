@@ -41,8 +41,9 @@
 #                            attester reads it, never the checks it runs)
 #   /etc/graft/post-land-token  the post-land checker's token (0600, uid
 #                            10001; read, attest, write and land on `graft`)
-#   /etc/graft/github-token  the mirrors' GitHub token, also read by the
-#                            post-land checker (0600, uid 10001)
+#   /etc/graft/github-checker-token  the post-land checker's own GitHub
+#                            token (0600, uid 10001; Actions read/write on
+#                            graft only), from Infisical via up.sh
 name: graft-dev
 
 x-graft: &graft
@@ -277,9 +278,10 @@ services:
   # graft-post-land.yml on each land's check ref (pushed by
   # graft-mirror-graft's [[check_refs]]), reads the jobs, posts failures,
   # bisects and lands reverts. It runs no checks itself: the image is the
-  # attester binary with no toolchain. Both token files are opened read-only
-  # and never appear in argv: the mirror's github-token, shared (operator
-  # decision), and its own graft token.
+  # attester binary with no toolchain. Both token files are its own, opened
+  # read-only and never in argv: github-checker-token (a fine-grained token,
+  # graft repository only, Actions read/write; not the mirrors'
+  # github-token) and its graft token.
   graft-post-land:
     <<: *graft
     profiles: [post-land]
@@ -306,7 +308,7 @@ services:
       - --line=${GRAFT_POST_LAND_LINE:-exit-rehearsal}
       - --token-file=/run/secrets/graft-post-land-token
       - --github-repo=TheDancingDeveloper-org/graft
-      - --github-token-file=/run/secrets/github-token
+      - --github-token-file=/run/secrets/github-checker-token
       - --workflow=graft-post-land.yml
       - --ref-prefix=graft/check/${GRAFT_POST_LAND_LINE:-exit-rehearsal}/
       # Runs queued or in progress at once, across every ref: the checks use
@@ -324,8 +326,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
-        target: /run/secrets/github-token
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-checker-token
+        target: /run/secrets/github-checker-token
         read_only: true
         bind:
           create_host_path: false

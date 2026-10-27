@@ -26,7 +26,7 @@ and checks only track each land after it has landed.
 | `[[check_refs]]` | `deploy/mirror-graft.toml` | `graft-mirror-graft` exports every land on the line, records the export, and pushes `refs/heads/graft/check/exit-rehearsal/<changeset>` |
 | `graft-post-land` | `deploy/compose.yml`, profile `post-land` | the checker (`graft-attester --mode post-land --runner github`). It dispatches `graft-post-land.yml` on each check ref, reads the jobs, posts failures, bisects and lands reverts. |
 | `post-land-token` | `/etc/graft`, minted by `up.sh` | the checker's graft token: `read`, `attest`, `write` on `graft`, `land` on the line. 0600, uid 10001. |
-| `github-token` | `/etc/graft`, placed by hand | the mirrors' GitHub token, also read by the checker (operator decision: reuse it). 0600, uid 10001. |
+| `github-checker-token` | `/etc/graft`, placed by `up.sh` from Infisical | the checker's own GitHub token: fine-grained, graft repository only, Actions read/write and Metadata read. 0600, uid 10001. Only the checker mounts it. The mirrors keep their own `github-token`. |
 | `bench/postland/` | a host with the graft CLI and Python 3 | recorder, planter and report (see `bench/README.md`) |
 
 The GitHub checks run on the org self-hosted pool. The attest job runs on
@@ -43,20 +43,47 @@ progress at once, so it doesn't crowd out the merge queues.
 2. **The workflows.** `graft-post-land.yml` and `graft-post-land-check.yml`
    must be on `main`. GitHub only dispatches a workflow that is on the
    default branch.
-3. **The GitHub token's scope.** The checker sends
-   `/etc/graft/github-token` to GitHub as a header. The token needs
-   **Actions: read and write** on `TheDancingDeveloper-org/graft`, on top of
-   the contents access the mirror uses. If it lacks Actions access, every
-   dispatch gets a 403. The checker treats that as an outage: it posts no
-   verdict, and lands stay `pending`. So M1 fails, but nothing is wrongly
-   reverted. Check the token's permissions before the rehearsal.
-4. **Security.** Both token files are opened read-only. They never appear
-   in argv, the environment, logs or `Debug` output. The GitHub token is
-   shared by the mirror and the checker and has broader scope than
-   dispatch needs (operator decision, accepted). Any workflow on any branch
-   can target the `[graft-dev]` runner (an accepted risk on graft-dev, to be
-   revisited before any production use). **Every batch review must flag a
-   batch that touches `.github/workflows/`.**
+3. **The checker's GitHub token.** The operator mints a **fine-grained
+   token**: resource owner `TheDancingDeveloper-org`, repository access
+   **graft only**, with **Actions: read and write** and **Metadata: read**
+   and nothing else. Give it an expiry. Store it in Infisical, project
+   `apps` (where the other graft-dev secrets are), as
+   `GRAFT_DEV_CHECKER_GITHUB_TOKEN`, with the value on stdin:
+
+   ```sh
+   secret set GRAFT_DEV_CHECKER_GITHUB_TOKEN --project apps < token-file
+   ```
+
+   With `GRAFT_POST_LAND=1`, `up.sh` pipes it from Infisical into
+   `/etc/graft/github-checker-token` (stdin only, 0600, uid 10001) when the
+   host running it has the `secret` tool. The graft-dev runner does not talk
+   to Infisical, so for a deploy from the `deploy-dev` workflow, place the
+   file once on the VM in the same way as the mirrors' token:
+
+   ```sh
+   secret get GRAFT_DEV_CHECKER_GITHUB_TOKEN --project apps \
+     | tailscale ssh sprooty@graft-dev 'sudo install -m 0600 -o 10001 -g 10001 /dev/stdin /etc/graft/github-checker-token'
+   ```
+
+   If neither Infisical nor the host has the token, `up.sh` logs a warning,
+   leaves the checker off (and stops one left running), and the rest of the
+   deploy goes on. Do not use the mirrors' `github-token` for the checker:
+   it is a classic token with far broader scope. Without Actions access,
+   every dispatch gets a 403. The checker treats that as an outage: it
+   posts no verdict and lands stay `pending`. M1 fails, but nothing is
+   wrongly reverted.
+4. **Security.** Both of the checker's token files are its own, mounted
+   read-only. They never appear in argv, the environment, logs or `Debug`
+   output.
+5. **Accepted risk: workflow edits on `exit-rehearsal` lands.** Any
+   workflow on any branch can target the `[graft-dev]` runner, and that
+   includes the check refs pushed for lands on this line. A land that edits
+   `.github/workflows/` can therefore run its own job on that runner. The
+   checks themselves come from the main-pinned
+   `graft-post-land-check.yml`. The operator accepted this risk for the
+   rehearsal lands on graft-dev, which holds no production data. Revisit it
+   before any production use of the CI exchange. **Every batch review must
+   flag a batch that touches `.github/workflows/`.**
 
 ## 1. Create the line
 
@@ -82,7 +109,8 @@ sudo sh -c 'printf "GRAFT_POST_LAND=1\n" >> /etc/graft/deploy.env'
 Then deploy as usual: the `deploy-dev` workflow, or `deploy/up.sh` on the
 VM. With `GRAFT_POST_LAND=1`, `up.sh`:
 
-- refuses to continue if `/etc/graft/github-token` is missing or empty;
+- places the checker's GitHub token (see "Before you start", item 3), or
+  leaves the checker off with a warning if it is absent;
 - mints `/etc/graft/post-land-token` if it is absent or older than 20 days
   (subject `graft-post-land-graft`, TTL 30 days);
 - builds the checker image (target `checker` of `deploy/attester/Dockerfile`,
@@ -179,7 +207,7 @@ The token never goes on the command line or in the environment.
 
 ## 6. The reviewer day (M3)
 
-Once a week, oversight starts a model session (Opus, low effort) whose
+Once a week, the operator starts a model session (Opus, low effort) whose
 settings deny `gh`, the GitHub MCP servers, and web fetches to
 `github.com`. The session gets a graft token with `read` and `attest` only.
 Record the line's LSN at the start of the day. The reviewer loops
@@ -220,7 +248,18 @@ Graft tokens on graft-dev live 30 days at most.
 - **Recorder and planter:** re-mint them by hand, as in steps 3 and 5,
   before day 30. The recorder reads its token file on every poll, so it
   needs no restart.
-- **The GitHub token** is placed by hand and rotated with the mirrors'.
+- **The checker's GitHub token:** mint a new fine-grained token before
+  the old one expires and store it under the same Infisical name. Then
+  place it (`up.sh` from a host with `secret`, or the `install` pipe in
+  "Before you start") and **restart the checker**. The checker reads the
+  file only when it starts:
+
+  ```sh
+  docker compose --env-file deploy/image.env -f deploy/compose.yml \
+    --profile post-land restart graft-post-land
+  ```
+
+  Then revoke the old token on GitHub.
 
 ## 9. Switch to backlog-1
 

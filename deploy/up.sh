@@ -36,8 +36,11 @@
 # compose profile `post-land`: it mints the post-land checker's token into
 # post-land-token (`read`, `attest` and `write` on `graft`, and `land` on
 # the checked line; 0600, uid 10001), builds the checker image (target
-# `checker`) and starts it. The checker reads the mirrors' github-token,
-# so a missing one stops the deploy. docs/runbooks/v02-exit.md.
+# `checker`) and starts it. The checker has its own GitHub token,
+# github-checker-token (never the mirrors' github-token): placed from
+# Infisical when this host has the `secret` tool, else the copy already on
+# the host. With neither, the checker stays off and the deploy continues.
+# docs/runbooks/v02-exit.md.
 #
 # Needs: docker with compose v2, curl, and membership of the docker group.
 # Non-secret host settings (GRAFT_BIND_IP, ports) may go in
@@ -59,7 +62,10 @@
 #   GRAFT_POST_LAND=1       run the post-land checker (profile `post-land`)
 #   GRAFT_POST_LAND_LINE    the line of `graft` it checks (default
 #                           exit-rehearsal); its token's `land` scope names
-#                           it, so changing it needs GRAFT_REMINT=1
+#                           it, so changing it needs a new post-land-token
+#   GRAFT_CHECKER_GITHUB_SECRET  Infisical name of the checker's GitHub token
+#                           (default GRAFT_DEV_CHECKER_GITHUB_TOKEN)
+#   GRAFT_CHECKER_GITHUB_PROJECT its Infisical project (default apps)
 #   GRAFT_READY_WAIT        seconds to wait for /readyz after a swap (default 120)
 #
 # Exit status: 0 deployed; 1 failed. A failed pre-flight or a rollback says so
@@ -125,10 +131,15 @@ if [ "$post_land" = 1 ]; then
   [[ $post_land_line =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
     || { printf 'up.sh: error: bad GRAFT_POST_LAND_LINE\n' >&2; exit 1; }
 fi
-if [ "${#profiles[@]}" -gt 0 ]; then
-  COMPOSE_PROFILES=$(IFS=,; printf '%s' "${profiles[*]}")
-  export COMPOSE_PROFILES
-fi
+set_profiles() {
+  if [ "${#profiles[@]}" -gt 0 ]; then
+    COMPOSE_PROFILES=$(IFS=,; printf '%s' "${profiles[*]}")
+    export COMPOSE_PROFILES
+  else
+    unset COMPOSE_PROFILES
+  fi
+}
+set_profiles
 renew_days=${GRAFT_TOKEN_RENEW_DAYS:-20}
 refs_wait=${GRAFT_REFS_WAIT:-600}
 ready_wait=${GRAFT_READY_WAIT:-120}
@@ -224,6 +235,39 @@ install_github_token() {
   esac
 }
 
+# The post-land checker's own GitHub token (operator decision: not the
+# mirrors' github-token, which has far broader scope). A fine-grained token,
+# graft repository only, Actions read/write and Metadata read, kept in
+# Infisical as $GRAFT_CHECKER_GITHUB_SECRET. When this host has the `secret`
+# tool, the value is piped from it into $secrets/github-checker-token
+# through store_secret (stdin only, 0600, uid 10001); a failed or empty read
+# leaves any existing file alone. Otherwise the file placed on the host by
+# hand is used, set to 0600 and uid 10001 by the root helper. The runner
+# never reads it, and only the checker mounts it.
+checker_github_ready=0
+install_checker_github_token() {
+  local name=${GRAFT_CHECKER_GITHUB_SECRET:-GRAFT_DEV_CHECKER_GITHUB_TOKEN}
+  local project=${GRAFT_CHECKER_GITHUB_PROJECT:-apps}
+  checker_github_ready=0
+  if command -v secret >/dev/null 2>&1; then
+    if secret get "$name" --project "$project" 2>/dev/null \
+      | store_secret github-checker-token 2>/dev/null; then
+      checker_github_ready=1
+      log "github-checker-token placed from Infisical ($project/$name; mode 0600, uid 10001, not printed)"
+      return 0
+    fi
+    log "Infisical gave no value for $project/$name"
+  fi
+  if as_root "set -e
+    test -s /s/github-checker-token
+    test -n \"\$(tr -d ' \t\r\n' < /s/github-checker-token)\"
+    chown 10001:10001 /s/github-checker-token
+    chmod 0600 /s/github-checker-token" 2>/dev/null; then
+    checker_github_ready=1
+    log "github-checker-token: using the copy on this host (mode 0600, uid 10001, not printed)"
+  fi
+}
+
 # Drop a trailing [github] table. [[lines]] stays.
 strip_github_table() {
   awk '
@@ -266,8 +310,21 @@ install_mounted_configs() {
 }
 
 install_github_token /etc/graft/github-token
-if [ "$post_land" = 1 ] && [ "$github_ready" != 1 ]; then
-  die "GRAFT_POST_LAND=1 needs /etc/graft/github-token: the post-land checker dispatches GitHub runs with it"
+if [ "$post_land" = 1 ]; then
+  install_checker_github_token
+  if [ "$checker_github_ready" != 1 ]; then
+    log "warning: GRAFT_POST_LAND=1 but the checker's GitHub token is absent (Infisical ${GRAFT_CHECKER_GITHUB_PROJECT:-apps}/${GRAFT_CHECKER_GITHUB_SECRET:-GRAFT_DEV_CHECKER_GITHUB_TOKEN}, or $secrets/github-checker-token): the post-land checker stays disabled; see docs/runbooks/v02-exit.md"
+    post_land=0
+    keep=()
+    for p in "${profiles[@]}"; do [ "$p" = post-land ] || keep+=("$p"); done
+    profiles=("${keep[@]}")
+    set_profiles
+    # A checker left running from an earlier deploy has lost its credential.
+    if [ -n "$(docker ps -q --filter name=^graft-dev-post-land\$)" ]; then
+      log "stopping graft-dev-post-land"
+      docker rm -f graft-dev-post-land >/dev/null
+    fi
+  fi
 fi
 prepare_mounted_configs
 

@@ -60,6 +60,7 @@ by uid 10001, mounted read-only:
 | `/etc/graft/mirror-token` | `/run/secrets/graft-mirror-token` | `up.sh`, minted by the running server |
 | `/etc/graft/mirror-token-fluent2`, `/etc/graft/mirror-token-vogt` | `/run/secrets/graft-mirror-token` in their own mirror | `up.sh`, the same way, each scoped `repo:<its repo>:admin` |
 | `/etc/graft/attester-token` | `/run/secrets/graft-attester-token` | `up.sh` with `GRAFT_ATTESTER=1`; owned by root, not uid 10001 (see below) |
+| `/etc/graft/github-checker-token` | `/run/secrets/github-checker-token` in `graft-post-land` only | `up.sh` with `GRAFT_POST_LAND=1`, from Infisical, or placed by hand (see below) |
 | `/etc/graft/post-land-token` | `/run/secrets/graft-post-land-token` in `graft-post-land` | `up.sh` with `GRAFT_POST_LAND=1`; scopes `read`, `attest`, `write` on `graft` and `land` on the checked line (see below) |
 
 `up.sh` writes them from a throwaway root container of the pinned image, so
@@ -317,9 +318,13 @@ workflow watches `deploy/**`). Run `deploy/up.sh` or the workflow by hand.
 The compose profile `post-land` runs `graft-post-land`: `graft-attester
 --mode post-land --runner github` on the line `GRAFT_POST_LAND_LINE`
 (default `exit-rehearsal`) of `graft`. It is **off by default**; turn it on
-with `GRAFT_POST_LAND=1` in `/etc/graft/deploy.env`. It reads the mirrors'
-`github-token` (shared, read-only) and its own `post-land-token`; `up.sh`
-refuses to enable it without the first and mints the second. The token
+with `GRAFT_POST_LAND=1` in `/etc/graft/deploy.env`. It reads its own
+GitHub token, `github-checker-token` (fine-grained: graft only, Actions
+read/write, Metadata read; Infisical `apps/GRAFT_DEV_CHECKER_GITHUB_TOKEN`),
+never the mirrors' `github-token`, and its own `post-land-token`. `up.sh`
+places the first from Infisical when the host has the `secret` tool, or uses
+the copy placed on the host. Without it the checker stays off. `up.sh` mints
+the second. The token
 needs `write` on the repository as well as `land` on the line, because a
 revert requires write on every path the bad land touched. The procedure,
 the measurements, rotation and the switch to `backlog-1` are in
