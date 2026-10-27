@@ -79,6 +79,14 @@ struct FakeRun {
     jobs: BTreeMap<String, String>,
     /// The run ended `cancelled`.
     cancelled: bool,
+    /// The run completed without starting any job (`startup_failure`).
+    no_jobs: bool,
+    /// The workflow's `attest` job failed, so the run is red.
+    attest_fails: bool,
+    /// Seconds before the first `in_progress` read its jobs started.
+    started_ago: u64,
+    /// `started_at` of its jobs, set when first read in progress.
+    started_at: Option<u64>,
     attested: bool,
     /// Not dispatched by the runner under test (another checker's).
     foreign: bool,
@@ -106,6 +114,18 @@ struct GhState {
     /// Most runs queued or in progress at once, counted at each dispatch
     /// with the new run.
     peak_in_flight: usize,
+    /// Job conclusions that replace the computed ones in runs dispatched
+    /// from now on.
+    conclusion_of: BTreeMap<String, String>,
+    /// Runs dispatched from now on complete without any job.
+    no_jobs: bool,
+    /// Runs dispatched from now on have a failing `attest` job.
+    attest_fails: bool,
+    /// Runs dispatched from now on are cancelled while still queued.
+    cancel_queued: bool,
+    /// Jobs of runs dispatched from now on started this many seconds
+    /// before they are first seen running.
+    started_ago: u64,
 }
 
 impl GhState {
@@ -130,6 +150,10 @@ impl GhState {
             running: polls,
             jobs: BTreeMap::new(),
             cancelled: false,
+            no_jobs: false,
+            attest_fails: false,
+            started_ago: 0,
+            started_at: None,
             attested: false,
             foreign: true,
         });
@@ -235,6 +259,9 @@ fn query(uri: &Uri) -> BTreeMap<String, String> {
 
 /// A run's status, without advancing it.
 fn peek(run: &FakeRun, mode: &Mode) -> &'static str {
+    if run.cancelled {
+        return "completed";
+    }
     match mode {
         Mode::StaysQueued => "queued",
         Mode::RunsForever => "in_progress",
@@ -246,6 +273,9 @@ fn peek(run: &FakeRun, mode: &Mode) -> &'static str {
 
 /// Reads a run's status, advancing it one poll.
 fn advance(run: &mut FakeRun, mode: &Mode) -> &'static str {
+    if run.cancelled {
+        return "completed";
+    }
     match mode {
         Mode::StaysQueued => "queued",
         Mode::RunsForever => "in_progress",
@@ -270,7 +300,10 @@ fn run_json(run: &FakeRun, status: &str) -> Value {
         "status": status,
         "conclusion": match status {
             "completed" if run.cancelled => Value::from("cancelled"),
-            "completed" if run.jobs.values().any(|c| c != "success") => Value::from("failure"),
+            "completed" if run.no_jobs => Value::from("startup_failure"),
+            "completed" if run.attest_fails || run.jobs.values().any(|c| c != "success") => {
+                Value::from("failure")
+            }
             "completed" => Value::from("success"),
             _ => Value::Null,
         },
@@ -385,28 +418,48 @@ async fn handle(
         }
         ("GET", ["runs", id, "jobs"]) => {
             let id: u64 = id.parse().expect("id");
-            let st = gh.state.lock().expect("fake");
-            let Some(run) = st.runs.iter().find(|r| r.id == id) else {
+            let mut st = gh.state.lock().expect("fake");
+            let mode = st.mode.clone();
+            let Some(run) = st.runs.iter_mut().find(|r| r.id == id) else {
                 return reply(StatusCode::NOT_FOUND, json!({ "message": "Not Found" }));
             };
-            let mut jobs: Vec<Value> = run
-                .jobs
-                .iter()
-                .map(|(name, conclusion)| {
+            let status = peek(run, &mode);
+            if status == "queued" || run.no_jobs {
+                return reply(StatusCode::OK, json!({ "total_count": 0, "jobs": [] }));
+            }
+            let started = *run
+                .started_at
+                .get_or_insert_with(|| unix_now() - run.started_ago);
+            let job = |name: &str, conclusion: &str| {
+                if status == "completed" {
                     json!({
                         "name": format!("check / {name}"),
                         "status": "completed",
                         "conclusion": conclusion,
+                        "started_at": fmt_utc(started),
                         "html_url": job_url(id, name),
                     })
-                })
-                .collect();
-            jobs.push(json!({
-                "name": "check / attest",
-                "status": "completed",
-                "conclusion": "success",
-                "html_url": job_url(id, "attest"),
-            }));
+                } else {
+                    json!({
+                        "name": format!("check / {name}"),
+                        "status": "in_progress",
+                        "conclusion": null,
+                        "started_at": fmt_utc(started),
+                        "html_url": job_url(id, name),
+                    })
+                }
+            };
+            let mut jobs: Vec<Value> = run.jobs.iter().map(|(n, c)| job(n, c)).collect();
+            if status == "completed" {
+                let attest = if run.cancelled {
+                    "cancelled"
+                } else if run.attest_fails {
+                    "failure"
+                } else {
+                    "success"
+                };
+                jobs.push(job("attest", attest));
+            }
             reply(
                 StatusCode::OK,
                 json!({ "total_count": jobs.len(), "jobs": jobs }),
@@ -414,11 +467,48 @@ async fn handle(
         }
         ("POST", ["runs", id, "cancel"]) => {
             let id: u64 = id.parse().expect("id");
-            gh.state.lock().expect("fake").cancels.push(id);
+            let mut st = gh.state.lock().expect("fake");
+            st.cancels.push(id);
+            if let Some(run) = st.runs.iter_mut().find(|r| r.id == id) {
+                // Every job still running is cancelled with the run.
+                run.cancelled = true;
+                for c in run.jobs.values_mut() {
+                    *c = "cancelled".to_owned();
+                }
+            }
             reply(StatusCode::ACCEPTED, json!({}))
         }
         _ => reply(StatusCode::NOT_FOUND, json!({ "message": "Not Found" })),
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+}
+
+/// `secs` since the epoch as GitHub writes it, `YYYY-MM-DDTHH:MM:SSZ`.
+fn fmt_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // Civil date from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 fn job_url(run: u64, job: &str) -> String {
@@ -464,6 +554,9 @@ async fn dispatch(gh: &Gh, body: &str) -> (StatusCode, String) {
         .iter()
         .map(|job| {
             let red = st.red.contains(*job) || (*job == "test" && broken);
+            if let Some(c) = st.conclusion_of.get(*job) {
+                return ((*job).to_owned(), c.clone());
+            }
             let conclusion = if st.cancel_runs || st.cancel_jobs.contains(*job) {
                 "cancelled"
             } else if red {
@@ -475,7 +568,12 @@ async fn dispatch(gh: &Gh, body: &str) -> (StatusCode, String) {
         })
         .collect();
     let id = 1000 + st.runs.len() as u64;
-    let cancelled = st.cancel_runs;
+    let cancelled = st.cancel_runs || st.cancel_queued;
+    let (no_jobs, attest_fails, started_ago) = (
+        st.no_jobs || st.cancel_queued,
+        st.attest_fails,
+        st.started_ago,
+    );
     st.runs.push(FakeRun {
         id,
         branch,
@@ -485,9 +583,14 @@ async fn dispatch(gh: &Gh, body: &str) -> (StatusCode, String) {
             .expect("request_id")
             .to_owned(),
         queued: 1,
-        running: 1,
+        // The run is seen in progress, then its jobs are read still running.
+        running: 2,
         jobs,
         cancelled,
+        no_jobs,
+        attest_fails,
+        started_ago,
+        started_at: None,
         attested: false,
         foreign: false,
     });
@@ -500,7 +603,10 @@ async fn attest_job(gh: &Gh, completed: Vec<FakeRun>) {
     let Some(engine) = &gh.engine else {
         return;
     };
-    for run in completed.into_iter().filter(|r| !r.foreign) {
+    for run in completed
+        .into_iter()
+        .filter(|r| !r.foreign && !r.attest_fails && !r.no_jobs)
+    {
         let at = ChangesetId::parse(&run.changeset).expect("changeset id");
         for (job, conclusion) in &run.jobs {
             if conclusion != "success" {
@@ -612,9 +718,11 @@ async fn one_dispatch_per_snapshot_and_attempt_maps_jobs_to_checks() {
     gh.assert_token_only_in_header();
 }
 
-/// Done 1: a job with an explicit name, and one missing from the run.
+/// Done 1: a job with an explicit name is read. Review blocker 1: a job
+/// missing from a completed run is no verdict (`Err`), and so is a run
+/// that completed without any job (`startup_failure`, a billing limit).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_mapped_job_is_read_and_a_missing_job_fails() {
+async fn a_mapped_job_is_read_and_a_missing_job_is_no_verdict() {
     let gh = FakeGitHub::start(None).await;
     let mut cfg = gh.config();
     cfg.jobs.insert("ci/unit".to_owned(), "test".to_owned());
@@ -623,13 +731,191 @@ async fn a_mapped_job_is_read_and_a_missing_job_fails() {
     let unit = run_one(&mut runner, at, "ci/unit", 1).await.expect("run");
     assert_eq!(unit.outcome, Outcome::Passed);
     assert_eq!(unit.url, job_url(1000, "test"));
-    let missing = run_one(&mut runner, at, "ci/miri", 1).await.expect("run");
-    assert!(
-        matches!(missing.outcome, Outcome::NotStarted(_)),
-        "{missing:?}"
-    );
-    assert_eq!(missing.url, "https://github.example/runs/1000");
+    let missing = run_one(&mut runner, at, "ci/miri", 1).await;
+    assert!(matches!(missing, Err(Error::Forge(_))), "{missing:?}");
     assert_eq!(gh.state().dispatches.len(), 1);
+
+    gh.state().no_jobs = true;
+    let mut runner = gh.runner();
+    let got = run_one(&mut runner, cs(9), FMT, 1).await;
+    assert!(matches!(got, Err(Error::Forge(_))), "{got:?}");
+    // Set aside: once runs start jobs again, a fresh run gives the verdict.
+    gh.state().no_jobs = false;
+    let got = run_one(&mut runner, cs(9), FMT, 1).await.expect("run");
+    assert_eq!(got.outcome, Outcome::Passed);
+    assert_eq!(gh.state().dispatches.len(), 3);
+}
+
+/// Review blocker 1: only a job concluding `failure` or `timed_out` fails a
+/// check. Every other conclusion is no verdict, and the next call reads a
+/// fresh run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_failure_and_timed_out_jobs_fail_a_check() {
+    let gh = FakeGitHub::start(None).await;
+    let mut runner = gh.runner();
+    for (i, conclusion) in [
+        "skipped",
+        "neutral",
+        "stale",
+        "startup_failure",
+        "action_required",
+        "cancelled",
+        "",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = cs(70 + i as u8);
+        gh.state()
+            .conclusion_of
+            .insert("fmt".to_owned(), conclusion.to_owned());
+        let got = run_one(&mut runner, at, FMT, 1).await;
+        assert!(
+            matches!(got, Err(Error::Forge(_))),
+            "{conclusion:?} gave {got:?}"
+        );
+        gh.state().conclusion_of.clear();
+        let before = gh.state().dispatches.len();
+        let again = run_one(&mut runner, at, FMT, 1).await.expect("run");
+        assert_eq!(again.outcome, Outcome::Passed, "{conclusion:?}");
+        assert_eq!(gh.state().dispatches.len(), before + 1, "{conclusion:?}");
+    }
+    for (conclusion, outcome) in [
+        ("failure", Outcome::Failed(Some(1))),
+        ("timed_out", Outcome::TimedOut),
+    ] {
+        gh.state()
+            .conclusion_of
+            .insert("fmt".to_owned(), conclusion.to_owned());
+        let mut runner = gh.runner();
+        let got = run_one(&mut runner, cs(90), FMT, 1).await.expect("run");
+        assert_eq!(got.outcome, outcome, "{conclusion}");
+        // A failed run is a result: it is read again, not dispatched again.
+        let before = gh.state().dispatches.len();
+        let mut runner = gh.runner();
+        let again = run_one(&mut runner, cs(90), FMT, 1).await.expect("run");
+        assert_eq!(again.outcome, outcome, "{conclusion}");
+        assert_eq!(gh.state().dispatches.len(), before);
+        gh.state().runs.clear();
+    }
+}
+
+/// A run made red by its `attest` job, with every check job green, gives
+/// passes: the attest job is no check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_red_run_with_green_check_jobs_passes() {
+    let gh = FakeGitHub::start(None).await;
+    gh.state().attest_fails = true;
+    let mut runner = gh.runner();
+    for name in CHECKS {
+        let got = run_one(&mut runner, cs(95), name, 1).await.expect("run");
+        assert_eq!(got.outcome, Outcome::Passed, "{name}");
+    }
+    assert_eq!(gh.state().dispatches.len(), 1);
+}
+
+/// A run cancelled while still queued, with no jobs, is no verdict.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_cancelled_while_queued_is_an_error() {
+    let gh = FakeGitHub::start(None).await;
+    gh.state().cancel_queued = true;
+    let mut runner = gh.runner();
+    let got = run_one(&mut runner, cs(96), TEST, 1).await;
+    assert!(matches!(got, Err(Error::Forge(_))), "{got:?}");
+    gh.state().cancel_queued = false;
+    let got = run_one(&mut runner, cs(96), TEST, 1).await.expect("run");
+    assert_eq!(got.outcome, Outcome::Passed);
+    assert_eq!(gh.state().dispatches.len(), 2, "a fresh run");
+}
+
+/// Review blocker 2: the run timeout counts from the job's `started_at` on
+/// GitHub. A run queued past the timeout is no verdict and is waited on,
+/// not failed; once it starts it is judged on its own run time. A job that
+/// GitHub says started longer ago than the timeout is late even to a
+/// runner that never saw it start (a restart keeps the clock).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_run_timeout_counts_from_the_jobs_start_not_the_queue() {
+    let gh = FakeGitHub::start(None).await;
+    gh.set_mode(Mode::StaysQueued);
+    let mut cfg = gh.config();
+    cfg.run_timeout = Duration::ZERO;
+    cfg.start_timeout = Duration::ZERO;
+    let mut runner = gh.runner_with(cfg.clone());
+    for _ in 0..3 {
+        let got = run_one(&mut runner, cs(100), FMT, 1).await;
+        assert!(matches!(got, Err(Error::Forge(_))), "queued: {got:?}");
+    }
+    assert_eq!(gh.state().dispatches.len(), 1, "the same run is waited on");
+    assert!(
+        gh.state().cancels.is_empty(),
+        "a queued run is never cancelled"
+    );
+
+    // It starts at last, on a busy pool, and runs within the timeout.
+    gh.set_mode(Mode::Normal);
+    cfg.run_timeout = Duration::from_secs(3600);
+    cfg.start_timeout = Duration::from_secs(3600);
+    let mut runner = gh.runner_with(cfg.clone());
+    let got = run_one(&mut runner, cs(100), FMT, 1).await.expect("run");
+    assert_eq!(got.outcome, Outcome::Passed);
+    assert_eq!(gh.state().dispatches.len(), 1);
+
+    // Started two hours ago by GitHub's clock: late on first sight.
+    gh.state().started_ago = 7200;
+    let mut runner = gh.runner_with(cfg);
+    let got = run_one(&mut runner, cs(101), FMT, 1).await.expect("run");
+    assert_eq!(got.outcome, Outcome::TimedOut);
+    assert_eq!(gh.state().cancels, vec![1001]);
+}
+
+/// Review blocker 2 end to end: with no retries and a zero run timeout, a
+/// line whose runs stay queued gets no failure and no revert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_run_never_fails_a_land() {
+    let rig = Rig::new(0).await;
+    let landed = lands(&rig.engine, 2, 0).await;
+    rig.gh.set_mode(Mode::StaysQueued);
+    let mut cfg = rig.gh.config();
+    cfg.run_timeout = Duration::ZERO;
+    cfg.start_timeout = Duration::ZERO;
+    let mut c = rig.checker(cfg).await;
+    for _ in 0..3 {
+        let step = c.step(0).await;
+        assert!(matches!(step, Err(Error::Forge(_))), "{step:?}");
+    }
+    assert_eq!(rig.gh.state().dispatches.len(), 1, "one run, waited on");
+    assert!(attested(&rig.engine).await.is_empty(), "nothing attested");
+    assert!(entries(&rig.engine, "LandReverted").await.is_empty());
+    let states = land_states(&rig.engine).await;
+    assert!(
+        landed
+            .iter()
+            .all(|id| states.get(id) == Some(&LandCheckState::Pending)),
+        "{states:?}"
+    );
+}
+
+/// A red run with green check jobs, end to end: the attest job failed, so
+/// the workflow posted nothing, and the checker posts each pass once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_attest_job_leaves_the_passes_to_the_checker() {
+    let rig = Rig::new(0).await;
+    let landed = lands(&rig.engine, 2, 0).await;
+    rig.gh.state().attest_fails = true;
+    let mut c = rig.checker(rig.gh.config()).await;
+    drain(&mut c).await;
+    assert!(rig.gh.state().attested.is_empty());
+    let got = attested(&rig.engine).await;
+    for land in &landed {
+        for name in CHECKS {
+            assert_eq!(
+                got.get(&(land.to_string(), name.to_owned())),
+                Some(&vec![true]),
+                "{name} on {land}"
+            );
+        }
+    }
+    assert!(entries(&rig.engine, "LandReverted").await.is_empty());
 }
 
 /// Done 2: an outage, a dispatch that never starts, a run that stays

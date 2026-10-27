@@ -24,19 +24,28 @@
 //!
 //! What counts as a result, and what does not:
 //!
-//! - **No verdict** ([`Error::Forge`], tried again later): GitHub
-//!   unreachable, a 5xx, a rate limit or a refused credential, the
-//!   changeset's ref not pushed yet (422 `No ref found`), and a run that
-//!   is not found or still queued after the start timeout (or cannot be
-//!   dispatched under the in-flight cap by then). A run or job that ended
-//!   `cancelled`, whoever cancelled it, is no verdict either: that run is
-//!   set aside and the next call dispatches a fresh one. A GitHub outage
-//!   therefore never makes a land bad, and never reverts one.
-//! - **A failed run**: a completed job that did not succeed, a run past
-//!   the run timeout once it started (the runner cancels it, and the
-//!   timeout is the verdict, not the cancellation), a run that
-//!   completed without the job, and any other 422 on dispatch (the
+//! - **A pass**: the check's job concluded `success`, whatever the run's
+//!   own conclusion (a failed `attest` job makes the run red, not a check).
+//! - **A failed run**, and only these: the check's job concluded `failure`
+//!   or `timed_out`; the check's job ran past the run timeout (the runner
+//!   cancels the run, and the timeout is the verdict, not the
+//!   cancellation); and a 422 on dispatch other than `No ref found` (the
 //!   workflow is not on that ref, or has no `workflow_dispatch`).
+//! - **No verdict** ([`Error::Forge`], tried again later): everything
+//!   else. GitHub unreachable, a 5xx, a rate limit or a refused credential;
+//!   the changeset's ref not pushed yet (422 `No ref found`); a run not
+//!   found after dispatch, or held by the in-flight cap; a run still
+//!   queued, however long (waiting for a runner is normal on a
+//!   self-hosted pool, and the next call waits on the same run); and a
+//!   completed run without the check's job, or whose job concluded
+//!   anything else (`cancelled`, `skipped`, `neutral`, `stale`,
+//!   `startup_failure`, `action_required`, none). Such a completed run is
+//!   set aside, and the next call dispatches a fresh one. A GitHub outage
+//!   therefore never makes a land bad, and never reverts one.
+//!
+//! The run timeout is measured from the job's `started_at` as GitHub
+//! reports it, so time queued for a runner never counts, and a restart
+//! keeps the clock.
 //!
 //! The token comes from a file (mode 0600 or stricter) opened read-only:
 //! the file is graft-mirror's, shared, and never written. It travels only
@@ -49,7 +58,7 @@ use std::fs;
 use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use graft_model::ChangesetId;
 use serde_json::{Value, json};
@@ -151,11 +160,13 @@ pub struct GitHubConfig {
     pub ref_prefix: String,
     /// Pause between polls of a run.
     pub poll: Duration,
-    /// Longest a dispatched run may take to be found and to leave the
-    /// queue; past it the run is an error (no verdict), not a failure.
+    /// Longest one call waits for a dispatched run to be found, for room
+    /// under the in-flight cap, or for a queued run to start; past it the
+    /// call is an error (no verdict), never a failure, and the next call
+    /// waits on the same run.
     pub start_timeout: Duration,
-    /// Longest a started run may run; past it the run is cancelled and its
-    /// checks failed.
+    /// Longest a check's job may run, from its `started_at` on GitHub;
+    /// past it the run is cancelled and that check failed.
     pub run_timeout: Duration,
     /// Check name to job name, for checks whose job is not the last `/`
     /// segment of the name.
@@ -208,11 +219,14 @@ pub fn request_id(at: ChangesetId, attempt: u32) -> String {
     format!("{at}-{attempt}")
 }
 
-/// One job's result.
+/// One job as read.
 #[derive(Clone, Debug)]
 struct Job {
     name: String,
+    status: String,
     conclusion: String,
+    /// `started_at`, in seconds since the epoch.
+    started: Option<u64>,
     url: String,
 }
 
@@ -222,11 +236,10 @@ enum Finished {
     /// It completed with these jobs.
     Completed {
         id: u64,
-        url: String,
         jobs: Vec<Job>,
+        /// Jobs (GitHub names) the runner stopped past the run timeout.
+        timed_out: std::collections::BTreeSet<String>,
     },
-    /// It ran past the run timeout and was cancelled.
-    TimedOut { url: String },
     /// GitHub refused the dispatch for this ref (422).
     Refused { url: String, why: String },
 }
@@ -238,40 +251,43 @@ fn find_job<'a>(jobs: &'a [Job], job: &str) -> Option<&'a Job> {
 }
 
 impl Finished {
-    /// The run, when `job` ended `cancelled` in it.
-    fn cancelled(&self, job: &str) -> Option<u64> {
+    /// The run of `job`: a pass or a failure, or why it is no verdict
+    /// (with the run to set aside).
+    fn run_of(&self, job: &str) -> Result<Run, (Option<u64>, String)> {
         match self {
-            Finished::Completed { id, jobs, .. } => find_job(jobs, job)
-                .filter(|j| j.conclusion == "cancelled")
-                .map(|_| *id),
-            _ => None,
-        }
-    }
-
-    fn run_of(&self, job: &str) -> Run {
-        match self {
-            Finished::Completed { url, jobs, .. } => match find_job(jobs, job) {
-                Some(j) => Run {
-                    outcome: match j.conclusion.as_str() {
+            Finished::Completed {
+                id,
+                jobs,
+                timed_out,
+                ..
+            } => {
+                let Some(j) = find_job(jobs, job) else {
+                    return Err((Some(*id), format!("run {id} has no job {job}")));
+                };
+                let outcome = if timed_out.contains(&j.name) {
+                    Outcome::TimedOut
+                } else {
+                    match j.conclusion.as_str() {
                         "success" => Outcome::Passed,
+                        "failure" => Outcome::Failed(Some(1)),
                         "timed_out" => Outcome::TimedOut,
-                        _ => Outcome::Failed(Some(1)),
-                    },
+                        other => {
+                            return Err((
+                                Some(*id),
+                                format!("job {job} of run {id} ended {other:?}; it runs again"),
+                            ));
+                        }
+                    }
+                };
+                Ok(Run {
+                    outcome,
                     url: j.url.clone(),
-                },
-                None => Run {
-                    outcome: Outcome::NotStarted(format!("no job {job} in the run")),
-                    url: url.clone(),
-                },
-            },
-            Finished::TimedOut { url } => Run {
-                outcome: Outcome::TimedOut,
-                url: url.clone(),
-            },
-            Finished::Refused { url, why } => Run {
+                })
+            }
+            Finished::Refused { url, why } => Ok(Run {
                 outcome: Outcome::NotStarted(why.clone()),
                 url: url.clone(),
-            },
+            }),
         }
     }
 }
@@ -281,7 +297,6 @@ struct RunView {
     id: u64,
     status: String,
     conclusion: String,
-    url: String,
 }
 
 /// The runner over GitHub Actions.
@@ -419,8 +434,18 @@ impl GitHubRunner {
         Ok(Answer { status, body })
     }
 
-    /// The newest run of `ref_name` whose title carries `rid`.
-    async fn find(&self, ref_name: &str, rid: &str) -> Result<Option<RunView>, Error> {
+    /// The newest run of `ref_name` whose title carries `rid`, and the
+    /// highest id of any such run. Before a dispatch (`after` none) a run
+    /// that ended cancelled or was set aside is passed over: it is no
+    /// result, and a fresh run replaces it. After a dispatch only a run
+    /// newer than `after` counts, cancelled or not: it is the one just
+    /// dispatched, and its end is reported.
+    async fn find(
+        &self,
+        ref_name: &str,
+        rid: &str,
+        after: Option<u64>,
+    ) -> Result<(Option<RunView>, u64), Error> {
         let path = format!(
             "{}/actions/workflows/{}/runs",
             self.repo_path(),
@@ -441,7 +466,7 @@ impl GitHubRunner {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        Ok(runs
+        let mine: Vec<RunView> = runs
             .iter()
             .filter(|r| {
                 ["display_title", "name"].iter().any(|k| {
@@ -451,8 +476,17 @@ impl GitHubRunner {
                 })
             })
             .filter_map(run_view)
-            .filter(|r| r.conclusion != "cancelled" && !self.ignored.contains(&r.id))
-            .max_by_key(|r| r.id))
+            .collect();
+        let newest = mine.iter().map(|r| r.id).max().unwrap_or(0);
+        let run = mine
+            .into_iter()
+            .filter(|r| !self.ignored.contains(&r.id))
+            .filter(|r| match after {
+                None => r.conclusion != "cancelled",
+                Some(floor) => r.id > floor,
+            })
+            .max_by_key(|r| r.id);
+        Ok((run, newest))
     }
 
     /// Runs of the workflow queued or in progress now, on any ref.
@@ -519,7 +553,9 @@ impl GitHubRunner {
                 jobs.iter()
                     .map(|j| Job {
                         name: text(j, "name"),
+                        status: text(j, "status"),
                         conclusion: text(j, "conclusion"),
+                        started: parse_utc(&text(j, "started_at")),
                         url: text(j, "html_url"),
                     })
                     .collect()
@@ -582,7 +618,9 @@ impl GitHubRunner {
         let ref_name = format!("{}{at}", self.cfg.ref_prefix);
         let rid = request_id(at, attempt);
         let since = Instant::now();
-        let mut run = self.find(&ref_name, &rid).await?;
+        let (mut run, newest) = self.find(&ref_name, &rid, None).await?;
+        // Set once dispatched: only a newer run is the one dispatched.
+        let mut after = None;
         if run.is_none() {
             // Under the cap: wait for a run to finish before adding one.
             loop {
@@ -603,49 +641,121 @@ impl GitHubRunner {
                     why,
                 });
             }
-            run = self.find(&ref_name, &rid).await?;
+            after = Some(newest);
+            run = self.find(&ref_name, &rid, after).await?.0;
         }
-        let mut started: Option<Instant> = None;
+        // Jobs stopped past the run timeout, once the run is cancelled.
+        let mut timed_out = std::collections::BTreeSet::new();
+        let mut waiting = Instant::now();
         loop {
             match &run {
-                None => {}
-                Some(r) if r.status == "completed" && r.conclusion == "cancelled" => {
-                    let id = r.id;
-                    self.ignore(id);
-                    return Err(Error::Forge(format!(
-                        "run {rid} on {ref_name} was cancelled; it runs again"
-                    )));
-                }
-                Some(r) if r.status == "completed" => {
-                    let jobs = self.jobs(r.id).await?;
-                    return Ok(Finished::Completed {
-                        id: r.id,
-                        url: r.url.clone(),
-                        jobs,
-                    });
-                }
-                Some(r) if queued(&r.status) => {}
-                Some(r) => {
-                    let s = *started.get_or_insert_with(Instant::now);
-                    if s.elapsed() >= self.cfg.run_timeout {
-                        self.cancel(r.id).await;
-                        return Ok(Finished::TimedOut { url: r.url.clone() });
+                None => {
+                    if since.elapsed() >= self.cfg.start_timeout {
+                        return Err(Error::Forge(format!(
+                            "run {rid} on {ref_name} not found after dispatch"
+                        )));
                     }
                 }
-            }
-            if started.is_none() && since.elapsed() >= self.cfg.start_timeout {
-                return Err(Error::Forge(match &run {
-                    None => format!("run {rid} on {ref_name} not found after dispatch"),
-                    Some(_) => format!("run {rid} on {ref_name} still queued"),
-                }));
+                Some(r) if r.status == "completed" => {
+                    let id = r.id;
+                    if r.conclusion == "cancelled" && timed_out.is_empty() {
+                        self.ignore(id);
+                        return Err(Error::Forge(format!(
+                            "run {rid} on {ref_name} was cancelled; it runs again"
+                        )));
+                    }
+                    let jobs = self.jobs(id).await?;
+                    return Ok(Finished::Completed {
+                        id,
+                        jobs,
+                        timed_out,
+                    });
+                }
+                // Waiting for a runner is no verdict, however long: this
+                // call gives up, and the next one waits on the same run.
+                Some(r) if queued(&r.status) && timed_out.is_empty() => {
+                    if waiting.elapsed() >= self.cfg.start_timeout {
+                        return Err(Error::Forge(format!(
+                            "run {rid} on {ref_name} still queued"
+                        )));
+                    }
+                }
+                Some(r) if timed_out.is_empty() => {
+                    // Started: the clock is each job's `started_at`.
+                    let id = r.id;
+                    let now = unix_now();
+                    let late: std::collections::BTreeSet<String> = self
+                        .jobs(id)
+                        .await?
+                        .into_iter()
+                        .filter(|j| j.status == "in_progress")
+                        .filter(|j| {
+                            j.started.is_some_and(|t| {
+                                now.saturating_sub(t) >= self.cfg.run_timeout.as_secs()
+                            })
+                        })
+                        .map(|j| j.name)
+                        .collect();
+                    if !late.is_empty() {
+                        log(&format!(
+                            "run {id}: {} past the run timeout; cancelling",
+                            late.iter().cloned().collect::<Vec<_>>().join(", ")
+                        ));
+                        self.cancel(id).await;
+                        timed_out = late;
+                        // Bounded wait for the cancellation to complete.
+                        waiting = Instant::now();
+                    }
+                }
+                // Cancelled by us; waiting for it to complete.
+                Some(r) => {
+                    if waiting.elapsed() >= self.cfg.start_timeout {
+                        return Err(Error::Forge(format!(
+                            "run {} still running after it was cancelled",
+                            r.id
+                        )));
+                    }
+                }
             }
             tokio::time::sleep(self.cfg.poll).await;
             run = match &run {
                 Some(r) => Some(self.get_run(r.id).await?),
-                None => self.find(&ref_name, &rid).await?,
+                None => self.find(&ref_name, &rid, after).await?.0,
             };
         }
     }
+}
+
+/// Now, in seconds since the epoch.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Seconds since the epoch of a GitHub timestamp,
+/// `YYYY-MM-DDTHH:MM:SS[.fff]Z`.
+pub fn parse_utc(s: &str) -> Option<u64> {
+    let s = s.strip_suffix('Z')?;
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let time = time.split('.').next()?;
+    let mut t = time.splitn(3, ':').map(|p| p.parse::<i64>().ok());
+    let (hh, mm, ss) = (t.next()??, t.next()??, t.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()
 }
 
 /// Statuses of a run that has not started.
@@ -663,11 +773,6 @@ fn run_view(v: &Value) -> Option<RunView> {
             .to_owned(),
         conclusion: v
             .get("conclusion")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        url: v
-            .get("html_url")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
@@ -691,15 +796,17 @@ impl<A> Runner<A> for GitHubRunner {
             self.done.insert(attempt, finished);
         }
         let job = self.cfg.job_of(&check.name);
-        if let Some(id) = self.done[&attempt].cancelled(&job) {
-            // No verdict: the next call dispatches a fresh run.
-            self.done.remove(&attempt);
-            self.ignore(id);
-            return Err(Error::Forge(format!(
-                "job {job} of run {id} was cancelled; it runs again"
-            )));
+        match self.done[&attempt].run_of(&job) {
+            Ok(run) => Ok(run),
+            Err((id, why)) => {
+                // No verdict: the next call dispatches a fresh run.
+                self.done.remove(&attempt);
+                if let Some(id) = id {
+                    self.ignore(id);
+                }
+                Err(Error::Forge(why))
+            }
         }
-        Ok(self.done[&attempt].run_of(&job))
     }
 
     async fn release(&mut self) {

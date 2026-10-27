@@ -94,8 +94,10 @@ struct Args {
     /// `--runner github`: seconds between polls of a run.
     #[arg(long, default_value_t = 15)]
     github_poll_s: u64,
-    /// `--runner github`: seconds a dispatched run may stay unfound or
-    /// queued; past it nothing is judged and it is tried again later.
+    /// `--runner github`: seconds one try waits for a dispatched run to
+    /// appear, for room under `--max-in-flight`, or for a queued run to
+    /// start. Past it nothing is judged, and the next try waits on the
+    /// same run.
     #[arg(long, default_value_t = 1800)]
     github_start_timeout_s: u64,
     /// A check, `name=program args...`, run in order (repeatable; default
@@ -108,8 +110,9 @@ struct Args {
     /// attested failed without running, as a CI job's later steps are).
     #[arg(long)]
     keep_going: bool,
-    /// Per-check time limit, in seconds (with `--runner github`, the
-    /// limit for the whole run once it started).
+    /// Per-check time limit, in seconds. With `--runner github` it counts
+    /// from the check job's `started_at` on GitHub: time queued for a
+    /// runner never counts, and a restart keeps the clock.
     #[arg(long, default_value_t = 2700)]
     timeout_s: u64,
     /// Root of the work, log and state directories.
