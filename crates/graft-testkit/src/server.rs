@@ -693,9 +693,26 @@ impl<A: ObjectApi + RepoApi + 'static> RepoService for Svc<A> {
     }
 
     async fn attest(&self, req: Request<pb::AttestRequest>) -> Result<Response<pb::Empty>, Status> {
-        // v0.2 clients send kind and status on this same RPC. The old
-        // `Attest` type drops them, so decode `AttestV2`.
-        unary!(self, req, "Attest", AttestV2, attest_v2, |_r| pb::Empty {})
+        // Old clients leave kind and status unspecified; those still call
+        // `attest`. A set v0.2 field is the only reason to call `attest_v2`,
+        // because a backing API that never implemented it must keep working.
+        let inner = req.get_ref();
+        // A check whose status only restates `passed`, with no display
+        // name, is the v0.1 call. Review, approval, pending, error and a
+        // named by are v0.2.
+        let kind = inner.kind;
+        let status = inner.status;
+        let check_shape =
+            kind == pb::AttestKind::Unspecified as i32 || kind == pb::AttestKind::Check as i32;
+        let status_restates_passed = status == pb::AttestStatus::Unspecified as i32
+            || (inner.passed && status == pb::AttestStatus::Pass as i32)
+            || (!inner.passed && status == pb::AttestStatus::Fail as i32);
+        let v2 = !check_shape || !status_restates_passed || inner.by.is_some();
+        if v2 {
+            unary!(self, req, "Attest", AttestV2, attest_v2, |_r| pb::Empty {})
+        } else {
+            unary!(self, req, "Attest", Attest, attest, |_r| pb::Empty {})
+        }
     }
 
     async fn watch(
