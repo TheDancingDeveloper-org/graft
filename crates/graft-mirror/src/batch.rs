@@ -83,10 +83,13 @@
 //! found by one-row probes (O(log line length)), then once, paged, for at
 //! most the batch's lands.
 //!
-//! `--checks` is not read from the server. The flag must match the line's
-//! server `checks` setting: `post-land` only when the line is post-land, and
-//! omitted (or `off`) only when the line's checks are off. A checked line
-//! batched without the flag ships lands whose checks have not run.
+//! `--checks` is verified against the line: `pr-batch` reads `GetLineConfig`
+//! and refuses when the flag disagrees with the line's `checks` mode
+//! (`post-land` only on a post-land line, omitted or `off` only when checks
+//! are off). A checked line batched without the flag would ship lands whose
+//! checks have not run, so that mismatch is refused. An older server that
+//! answers `unimplemented` keeps today's behaviour and prints a one-line
+//! warning; it cannot be checked.
 //!
 //! Costs follow the change: the sync reads one diff and one rebase; the land
 //! list is a first-parent `Log` from the tip back to the batch start, capped

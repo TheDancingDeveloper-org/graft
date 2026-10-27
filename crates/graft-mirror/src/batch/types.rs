@@ -243,9 +243,10 @@ pub struct BatchConfig {
     /// phase 2): a batch is cut at the newest land whose prefix is settled
     /// in `GetLandChecks`. `false` batches as phase 1 does.
     ///
-    /// Not read from the server. It must match the line's `checks` setting:
-    /// `true` only for a post-land line. A checked line batched with this
-    /// `false` ships lands whose checks have not run.
+    /// Verified against the line: `Batcher::run` reads `GetLineConfig` and
+    /// refuses when this disagrees with the server's `checks` mode. A
+    /// checked line batched with this `false` would ship lands whose checks
+    /// have not run. An unimplemented RPC is a warning, not a refusal.
     pub checked: bool,
 }
 
