@@ -904,7 +904,7 @@ async fn review_queue(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -919,18 +919,19 @@ mod tests {
     }
 
     use graft_auth::{Claims, SigningKey};
+    use graft_engine::policy::{LineChecks, LineConfig};
     use graft_engine::{Engine, EngineConfig};
-    use graft_model::SystemClock;
+    use graft_model::{Author, AuthorKind, EntryKind, Metadata, ObjectKind, SystemClock};
     use graft_proto::types::MAX_REVIEW_PAGE;
-    use graft_proto::{Principal, PrincipalKind};
+    use graft_proto::{Frame, ObjectApi as _, Principal, PrincipalKind};
     use graft_store::MetaStore as _;
     use graft_store_fs::{FsMode, FsObjectStore};
     use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
     use std::sync::OnceLock;
 
-    struct Harness {
-        app: Arc<App>,
-        token: String,
+    pub(crate) struct Harness {
+        pub(crate) app: Arc<App>,
+        pub(crate) token: String,
         _dir: tempfile::TempDir,
     }
 
@@ -951,7 +952,23 @@ mod tests {
             .clone()
     }
 
+    fn checked_main() -> EngineConfig {
+        let mut line = LineConfig::direct("main");
+        line.checks = LineChecks::PostLand {
+            required: vec!["ci/test".into()],
+            retries: 0,
+        };
+        EngineConfig {
+            lines: vec![line],
+            ..EngineConfig::default()
+        }
+    }
+
     async fn app() -> Harness {
+        app_with(EngineConfig::default()).await
+    }
+
+    async fn app_with(config: EngineConfig) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let meta = std::sync::Arc::new(
             SqliteMetaStore::open(SqliteConfig::new(dir.path().join("meta.db"))).unwrap(),
@@ -963,7 +980,7 @@ mod tests {
             meta.clone(),
             objects,
             std::sync::Arc::new(SystemClock),
-            EngineConfig::default(),
+            config,
         ));
         meta.create_repo("graft").await.unwrap();
         let signing = SigningKey::generate().unwrap();
@@ -1058,21 +1075,181 @@ mod tests {
             assert_eq!(status, 400, "{path}: {body}");
             assert_eq!(body["error"]["kind"], kind, "{path}: {body}");
         }
+        // Two rows per route. limit=1 must return one row and a resume
+        // token; an over-cap limit must not grow the page or invent a next.
+        let harness = seeded_review_harness().await;
         let over = MAX_REVIEW_PAGE + 1;
-        let pages = [
-            format!("/v1/repos/graft/attestations?line=main&from_pos=0&to_pos=0&limit={over}"),
-            format!("/v1/repos/graft/land-checks?line=main&from_pos=0&limit={over}"),
-            format!("/v1/repos/graft/review-queue?line=main&since_lsn=0&limit={over}"),
+        let routes = [
+            (
+                "attestations",
+                "/v1/repos/graft/attestations?line=main&from_pos=0&to_pos=9&limit=",
+                "attestations",
+                "next",
+            ),
+            (
+                "rows",
+                "/v1/repos/graft/land-checks?line=main&from_pos=0&limit=",
+                "rows",
+                "next",
+            ),
+            (
+                "items",
+                "/v1/repos/graft/review-queue?line=main&since_lsn=0&limit=",
+                "items",
+                "next_lsn",
+            ),
         ];
-        for path in pages {
-            let (status, body) = hit(harness.app.clone(), &harness.token, &path).await;
-            assert_eq!(status, 200, "{path}: {body}");
-            let list = body["attestations"]
+        for (name, template, list_key, next_key) in routes {
+            let one = format!("{template}1");
+            let (status, body) = hit(harness.app.clone(), &harness.token, &one).await;
+            assert_eq!(status, 200, "{name}: {body}");
+            let list = body[list_key]
                 .as_array()
-                .or_else(|| body["rows"].as_array())
-                .or_else(|| body["items"].as_array())
-                .unwrap_or_else(|| panic!("page shape: {body}"));
-            assert!(list.len() <= usize::try_from(MAX_REVIEW_PAGE).unwrap());
+                .unwrap_or_else(|| panic!("{name}: {body}"));
+            assert_eq!(
+                list.len(),
+                1,
+                "{name} limit=1 returned the whole set: {body}"
+            );
+            assert!(
+                !body[next_key].is_null(),
+                "{name} limit=1 has no resume token: {body}"
+            );
+            let wide = format!("{template}{over}");
+            let (status, body) = hit(harness.app.clone(), &harness.token, &wide).await;
+            assert_eq!(status, 200, "{name}: {body}");
+            let list = body[list_key]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}: {body}"));
+            assert_eq!(list.len(), 2, "{name} over-cap page: {body}");
+            assert!(
+                list.len() <= usize::try_from(MAX_REVIEW_PAGE).unwrap(),
+                "{name} exceeded the review page"
+            );
+            assert!(
+                body[next_key].is_null(),
+                "{name} over-cap invented a next: {body}"
+            );
+        }
+    }
+
+    /// Two landed changesets on `main`, each with a check attestation.
+    /// A harness whose `main` line already has two review rows.
+    pub(crate) async fn seeded_review_harness() -> Harness {
+        let harness = app_with(checked_main()).await;
+        seed_review_rows(&harness).await;
+        harness
+    }
+
+    async fn seed_review_rows(harness: &Harness) {
+        let engine = &harness.app.engine;
+        let cx = graft_proto::CallContext {
+            principal: Principal {
+                subject: "writer".into(),
+                kind: PrincipalKind::Human,
+                session: None,
+                work_item: None,
+                scopes: vec!["repo:graft:admin".into(), "repo:graft:attest".into()],
+            },
+            request_id: "seed".into(),
+            deadline_ms: None,
+        };
+        let mut parent = None;
+        // Three commits: the line base, then two landings.
+        for (n, bytes) in [
+            (0u8, b"base".as_slice()),
+            (1, b"one".as_slice()),
+            (2, b"two".as_slice()),
+        ] {
+            let frame = Frame::encode(ObjectKind::Blob, bytes);
+            engine
+                .put_objects(
+                    &cx,
+                    PutObjects {
+                        repo: "graft".into(),
+                        blobs: vec![frame],
+                    },
+                )
+                .await
+                .unwrap();
+            let id = ObjectId::hash(ObjectKind::Blob, bytes);
+            let created = engine
+                .create_changeset(
+                    &cx,
+                    CreateChangeset {
+                        repo: "graft".into(),
+                        parents: parent.into_iter().collect(),
+                        changes: vec![Change::Put {
+                            path: RepoPath::new(&format!("f{n}")).unwrap(),
+                            kind: EntryKind::File,
+                            id,
+                        }],
+                        author: Author {
+                            name: "Tess".into(),
+                            email: "tess@example.com".into(),
+                            kind: AuthorKind::Human,
+                        },
+                        authored_at: Timestamp {
+                            ms: 1_700_000_000_000,
+                            offset_min: 0,
+                        },
+                        message: format!("change {n}"),
+                        metadata: Metadata::new(),
+                        inline_blobs: Vec::new(),
+                        workspace: None,
+                    },
+                )
+                .await
+                .unwrap();
+            if parent.is_none() {
+                // The line starts at this changeset. That move is not a
+                // landing, so it writes no review or land-check row.
+                engine
+                    .create_line(
+                        &cx,
+                        CreateLine {
+                            repo: "graft".into(),
+                            name: "main".into(),
+                            from: created.id,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                engine
+                    .land(
+                        &cx,
+                        Land {
+                            repo: "graft".into(),
+                            head: created.id,
+                            line: "main".into(),
+                            squash: false,
+                            merge: MergeMode::File,
+                            deadline_ms: None,
+                            merged_from: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            if parent.is_some() {
+                engine
+                    .attest_v2(
+                        &cx,
+                        AttestV2 {
+                            repo: "graft".into(),
+                            changeset: created.id,
+                            kind: AttestKind::Check,
+                            check: "ci/test".into(),
+                            status: AttestStatus::Pass,
+                            by: None,
+                            url: String::new(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            parent = Some(created.id);
         }
     }
 }

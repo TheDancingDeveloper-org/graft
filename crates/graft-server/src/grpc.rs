@@ -1421,6 +1421,111 @@ impl pb::review_service_server::ReviewService for Services {
 mod tests {
     use super::*;
     use graft_model::ObjectKind;
+    use graft_proto::types::MAX_REVIEW_PAGE;
+    use pb::review_service_client::ReviewServiceClient;
+    use tonic::metadata::MetadataValue;
+    use tonic::transport::Server;
+    use tonic::transport::server::TcpIncoming;
+
+    #[tokio::test]
+    async fn review_grpc_pages_one_row_and_clamps_the_limit() {
+        let harness = crate::http::tests::seeded_review_harness().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let routes = Services::new(harness.app).routes();
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_routes(routes)
+                .serve_with_incoming(TcpIncoming::from(listener))
+                .await
+                .unwrap();
+        });
+        let mut client = ReviewServiceClient::with_interceptor(
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .unwrap()
+                .connect()
+                .await
+                .unwrap(),
+            {
+                let token = harness.token.clone();
+                move |mut req: Request<()>| {
+                    let value = MetadataValue::try_from(format!("Bearer {token}")).unwrap();
+                    req.metadata_mut().insert("authorization", value);
+                    let version =
+                        MetadataValue::try_from(graft_proto::PROTOCOL_VERSION.to_string()).unwrap();
+                    req.metadata_mut()
+                        .insert(graft_proto::VERSION_HEADER, version);
+                    Ok(req)
+                }
+            },
+        );
+        let page = pb::Page {
+            limit: 1,
+            token: None,
+        };
+        let range = pb::AttestLineRange {
+            line: "main".into(),
+            from_pos: 0,
+            to_pos: 9,
+        };
+        let one = client
+            .get_attestations(pb::GetAttestationsRequest {
+                repo: "graft".into(),
+                selector: Some(pb::get_attestations_request::Selector::LineRange(
+                    range.clone(),
+                )),
+                kinds: Vec::new(),
+                page: Some(page.clone()),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(one.attestations.len(), 1, "{one:?}");
+        assert!(one.next.is_some(), "{one:?}");
+        let checks = client
+            .get_land_checks(pb::GetLandChecksRequest {
+                repo: "graft".into(),
+                line: "main".into(),
+                from_pos: 0,
+                page: Some(page.clone()),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(checks.rows.len(), 1, "{checks:?}");
+        assert!(checks.next.is_some(), "{checks:?}");
+        let queue = client
+            .review_queue(pb::ReviewQueueRequest {
+                repo: "graft".into(),
+                line: "main".into(),
+                since_lsn: 0,
+                path_prefix: None,
+                max_lines: None,
+                page: Some(page),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(queue.items.len(), 1, "{queue:?}");
+        assert!(queue.next_lsn.is_some(), "{queue:?}");
+        let wide = pb::Page {
+            limit: MAX_REVIEW_PAGE + 1,
+            token: None,
+        };
+        let all = client
+            .get_attestations(pb::GetAttestationsRequest {
+                repo: "graft".into(),
+                selector: Some(pb::get_attestations_request::Selector::LineRange(range)),
+                kinds: Vec::new(),
+                page: Some(wide),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(all.attestations.len(), 2, "{all:?}");
+        assert!(all.next.is_none(), "{all:?}");
+        server.abort();
+    }
 
     #[test]
     fn pages_split_by_bytes_and_the_last_carries_misses() {
