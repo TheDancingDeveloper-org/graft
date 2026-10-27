@@ -1,0 +1,1 @@
+- bench: the git baseline turns off background gc and accepts any want, so the concurrent-writers step no longer fails with "upload-pack: not our ref".
