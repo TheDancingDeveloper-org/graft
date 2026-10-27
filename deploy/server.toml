@@ -34,7 +34,7 @@ provider = "github"
 ci_repo = "TheDancingDeveloper-org/graft"
 repo_id = "1429435571"
 graft_repo = "graft"
-refs = ["refs/heads/main"]
+refs = ["refs/heads/main", "refs/heads/graft/"]
 workflows = ["TheDancingDeveloper-org/graft/.github/workflows/graft-ci-attest.yml@refs/heads/main"]
 scopes = ["repo:graft:attest"]
 

@@ -1,0 +1,26 @@
+# Dispatch the attestation rehearsal on any ref, including a batch branch.
+# The called workflow is pinned to main, so the OIDC job_workflow_ref is the
+# protected reusable workflow while ref and sha stay this branch's.
+# Not a required check.
+name: dispatch graft CI attestation rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      changeset:
+        description: Landed graft changeset ID exported at this commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    name: Attest landed changeset
+    permissions:
+      contents: read
+      id-token: write
+    uses: TheDancingDeveloper-org/graft/.github/workflows/graft-ci-attest.yml@main
+    with:
+      changeset: ${{ inputs.changeset }}
