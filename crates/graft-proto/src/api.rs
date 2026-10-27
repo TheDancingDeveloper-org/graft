@@ -225,6 +225,17 @@ pub trait RepoApi: Send + Sync {
         let _ = (cx, req);
         async { Err(crate::ApiError::unimplemented("ReviewQueue")) }
     }
+    /// A line's post-land check settings (v0.2). Needs read scope; an
+    /// unknown line is `NotFound`. The default answers
+    /// `ApiError::unimplemented`.
+    fn get_line_config(
+        &self,
+        cx: &CallContext,
+        req: GetLineConfig,
+    ) -> impl Future<Output = ApiResult<LineConfig>> + Send {
+        let _ = (cx, req);
+        async { Err(crate::ApiError::unimplemented("GetLineConfig")) }
+    }
     /// Read the journal (long-poll page).
     fn watch(
         &self,

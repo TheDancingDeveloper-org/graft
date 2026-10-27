@@ -764,6 +764,20 @@ impl<A: ObjectApi + RepoApi + 'static> ReviewService for Svc<A> {
             pb::ReviewQueuePage::from(r)
         })
     }
+
+    async fn get_line_config(
+        &self,
+        req: Request<pb::GetLineConfigRequest>,
+    ) -> Result<Response<pb::LineConfig>, Status> {
+        unary!(
+            self,
+            req,
+            "GetLineConfig",
+            GetLineConfig,
+            get_line_config,
+            |r| pb::LineConfig::from(r)
+        )
+    }
 }
 
 /// The workspace a wire request names, refused when absent.

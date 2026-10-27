@@ -669,4 +669,26 @@ required = []
         .expect_err("empty default required");
         assert!(err.to_string().contains("default_line"), "{err}");
     }
+
+    /// `GetLineConfig` answers are bounded, so the config refuses a
+    /// `required` list longer than the wire allows.
+    #[test]
+    fn post_land_required_is_capped() {
+        let names = |n: usize| {
+            (0..n)
+                .map(|i| format!("\"c{i}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let text = |n: usize| {
+            format!(
+                "[[lines]]\nname = \"integration\"\nchecks = \"post-land\"\nrequired = [{}]\n",
+                names(n)
+            )
+        };
+        let max = graft_proto::types::MAX_LINE_CHECKS;
+        ServerConfig::parse(&text(max)).expect("at the cap");
+        let err = ServerConfig::parse(&text(max + 1)).expect_err("over the cap");
+        assert!(err.to_string().contains("more than"), "{err}");
+    }
 }

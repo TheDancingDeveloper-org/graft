@@ -588,6 +588,17 @@ impl RepoApi for Remote {
         ReviewQueuePage::try_from(r).map_err(wire_error)
     }
 
+    async fn get_line_config(&self, cx: &CallContext, req: GetLineConfig) -> ApiResult<LineConfig> {
+        let r = unary!(
+            self,
+            cx,
+            review,
+            get_line_config,
+            pb::GetLineConfigRequest::from(req)
+        );
+        LineConfig::try_from(r).map_err(wire_error)
+    }
+
     /// Returns the first page of the journal stream.
     async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
         let from_lsn = req.from_lsn;

@@ -22,6 +22,7 @@
 //! | `GET /v1/repos/{repo}/attestations?changeset=` or `line=&from_pos=&to_pos=` `&kind=&limit=&page_token=` | `GetAttestations` |
 //! | `GET /v1/repos/{repo}/land-checks?line=&from_pos=&limit=&page_token=` | `GetLandChecks` |
 //! | `GET /v1/repos/{repo}/review-queue?line=&since_lsn=&path=&max_lines=&limit=` | `ReviewQueue` |
+//! | `GET /v1/repos/{repo}/line-config?line=` | `GetLineConfig` |
 //!
 //! `log` and `drafts/overlap` page by `page_token`: pass the previous answer's `next`.
 //! Review reads page the same way, except `review-queue`, which resumes with `next_lsn`
@@ -68,6 +69,7 @@ pub(crate) fn facade_router(app: Arc<App>) -> Router {
         .route("/v1/repos/{repo}/attestations", get(attestations))
         .route("/v1/repos/{repo}/land-checks", get(land_checks))
         .route("/v1/repos/{repo}/review-queue", get(review_queue))
+        .route("/v1/repos/{repo}/line-config", get(line_config))
         .with_state(app)
 }
 
@@ -909,6 +911,39 @@ async fn review_queue(
     }))
 }
 
+async fn line_config(
+    State(app): State<Arc<App>>,
+    Path(repo): Path<String>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+) -> Answer {
+    let cx = cx(&app, &headers, "GetLineConfig")?;
+    let q = Query::parse(raw)?;
+    let line = q
+        .get("line")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad("line", "required"))?
+        .to_owned();
+    let req = GetLineConfig {
+        repo: repo.clone(),
+        line,
+    };
+    let config = app
+        .call("GetLineConfig", &repo, cx, false, move |e, cx| async move {
+            crate::lines::get_line_config(&e, &cx, req).await
+        })
+        .await?;
+    ok(json!({
+        "line": config.line,
+        "checks": match config.checks {
+            LineChecksMode::PostLand => "post-land",
+            _ => "none",
+        },
+        "required": config.required,
+        "retries": config.retries,
+    }))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1134,6 +1169,135 @@ pub(crate) mod tests {
                 "{name} over-cap invented a next: {body}"
             );
         }
+    }
+
+    /// WI-2614 Accept 2: `line-config` answers the configured settings, the
+    /// default for a line no entry names, and `NotFound` for an unknown
+    /// line or a ref that is not a line. It needs read scope.
+    #[tokio::test]
+    async fn line_config_returns_the_configured_values() {
+        let mut config = checked_main();
+        config.lines[0].checks = LineChecks::PostLand {
+            required: vec!["ci/fmt".into(), "ci/test".into()],
+            retries: 2,
+        };
+        let harness = app_with(config).await;
+        seed_review_rows(&harness).await;
+        let engine = &harness.app.engine;
+        let admin = graft_proto::CallContext {
+            principal: Principal {
+                subject: "writer".into(),
+                kind: PrincipalKind::Human,
+                session: None,
+                work_item: None,
+                scopes: vec!["repo:graft:admin".into()],
+            },
+            request_id: "seed".into(),
+            deadline_ms: None,
+        };
+        let tip = engine
+            .resolve_ref(
+                &admin,
+                ResolveRef {
+                    repo: "graft".into(),
+                    name: "main".into(),
+                },
+            )
+            .await
+            .unwrap()
+            .target;
+        engine
+            .create_line(
+                &admin,
+                CreateLine {
+                    repo: "graft".into(),
+                    name: "side".into(),
+                    from: tip,
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .update_ref(
+                &admin,
+                UpdateRef {
+                    repo: "graft".into(),
+                    name: "tools/mark".into(),
+                    expected: None,
+                    new: tip,
+                    kind: RefKind::Tool,
+                },
+            )
+            .await
+            .unwrap();
+
+        let (status, body) = hit(
+            harness.app.clone(),
+            &harness.token,
+            "/v1/repos/graft/line-config?line=main",
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            json!({
+                "line": "main",
+                "checks": "post-land",
+                "required": ["ci/fmt", "ci/test"],
+                "retries": 2,
+            })
+        );
+
+        let (status, body) = hit(
+            harness.app.clone(),
+            &harness.token,
+            "/v1/repos/graft/line-config?line=side",
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            json!({"line": "side", "checks": "none", "required": [], "retries": 0})
+        );
+
+        for path in [
+            "/v1/repos/graft/line-config?line=nope",
+            "/v1/repos/graft/line-config?line=tools/mark",
+        ] {
+            let (status, body) = hit(harness.app.clone(), &harness.token, path).await;
+            assert_eq!(status, 404, "{path}: {body}");
+            assert_eq!(body["error"]["kind"], "not_found", "{path}: {body}");
+        }
+        let (status, body) = hit(
+            harness.app.clone(),
+            &harness.token,
+            "/v1/repos/graft/line-config",
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+
+        let elsewhere = graft_auth::mint(
+            &harness.app.signing,
+            &Claims {
+                principal: Principal {
+                    subject: "stranger".into(),
+                    kind: PrincipalKind::Human,
+                    session: None,
+                    work_item: None,
+                    scopes: vec!["repo:other:read".into()],
+                },
+                exp: i64::MAX / 2,
+                jti: graft_auth::new_jti().unwrap(),
+            },
+        )
+        .unwrap();
+        let (status, body) = hit(
+            harness.app.clone(),
+            elsewhere.expose(),
+            "/v1/repos/graft/line-config?line=main",
+        )
+        .await;
+        assert_eq!(status, 403, "{body}");
     }
 
     /// Two landed changesets on `main`, each with a check attestation.

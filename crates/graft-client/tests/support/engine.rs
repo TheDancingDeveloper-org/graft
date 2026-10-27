@@ -930,6 +930,48 @@ impl RepoApi for EngineRepo {
             .review_queue(&c, req)
             .await)
     }
+    /// As graft-server answers it: the line must exist, then the engine's
+    /// config for it.
+    async fn get_line_config(
+        &self,
+        cx: &CallContext,
+        req: GetLineConfig,
+    ) -> ApiResult<graft_proto::types::LineConfig> {
+        delegate!(self, "GetLineConfig", cx, |c| async {
+            let line = self
+                .engine
+                .resolve_ref(
+                    &c,
+                    ResolveRef {
+                        repo: req.repo,
+                        name: req.line.clone(),
+                    },
+                )
+                .await?;
+            if line.kind != RefKind::Line {
+                return Err(ApiError::NotFound {
+                    what: format!("line {}", req.line),
+                });
+            }
+            Ok(match self.engine.line_config(&req.line).checks {
+                graft_engine::policy::LineChecks::PostLand { required, retries } => {
+                    graft_proto::types::LineConfig {
+                        line: req.line,
+                        checks: LineChecksMode::PostLand,
+                        required,
+                        retries,
+                    }
+                }
+                _ => graft_proto::types::LineConfig {
+                    line: req.line,
+                    checks: LineChecksMode::None,
+                    required: Vec::new(),
+                    retries: 0,
+                },
+            })
+        }
+        .await)
+    }
     async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
         delegate!(self, "Watch", cx, |c| self.engine.watch(&c, req).await)
     }

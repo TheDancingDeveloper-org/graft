@@ -13,8 +13,8 @@ use graft_model::{
 use graft_proto::api::{ObjectApi, RepoApi};
 use graft_proto::types::{
     Attest, AttestKind, AttestStatus, AttestV2, AttestationSelector, CreateChangeset,
-    GetAttestations, GetLandChecks, Land, Landed, MergeMode, Page, PutObjects, ResolveRef,
-    ReviewQueue,
+    GetAttestations, GetLandChecks, GetLineConfig, Land, Landed, LineChecksMode, MergeMode, Page,
+    PutObjects, ResolveRef, ReviewQueue,
 };
 use graft_proto::{ApiError, CallContext, Frame};
 use graft_testkit::fake_api::admin_cx;
@@ -497,5 +497,54 @@ async fn unimplemented_server_is_a_typed_error() {
             Err(ApiError::Rejected { ref policy, .. }) if policy == "unimplemented"
         ),
         "default: {err:?}"
+    );
+}
+
+/// WI-2614: `Remote::get_line_config` round-trips the line's settings over
+/// gRPC, and an unknown line is `NotFound`.
+#[tokio::test]
+async fn line_config_round_trips_through_remote() {
+    let mut config = checked();
+    config.lines[0].checks = LineChecks::PostLand {
+        required: vec!["build".to_owned(), "test".to_owned()],
+        retries: 2,
+    };
+    let engine = support::EngineRepo::with_config("r", config, &[("README", b"hi\n")]).await;
+    let server = TestServer::tcp_workspaces(engine).await;
+    let remote = Remote::connect(Endpoint::parse(server.url()))
+        .await
+        .expect("connect");
+    let cx = admin_cx();
+    let got = remote
+        .get_line_config(
+            &cx,
+            GetLineConfig {
+                repo: "r".to_owned(),
+                line: "main".to_owned(),
+            },
+        )
+        .await
+        .expect("line config");
+    assert_eq!(
+        got,
+        graft_proto::types::LineConfig {
+            line: "main".to_owned(),
+            checks: LineChecksMode::PostLand,
+            required: vec!["build".to_owned(), "test".to_owned()],
+            retries: 2,
+        }
+    );
+    let missing = remote
+        .get_line_config(
+            &cx,
+            GetLineConfig {
+                repo: "r".to_owned(),
+                line: "nope".to_owned(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(missing, Err(ApiError::NotFound { .. })),
+        "{missing:?}"
     );
 }
