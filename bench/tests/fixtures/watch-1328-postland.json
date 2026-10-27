@@ -1,0 +1,21 @@
+{
+  "_source": "Built in the shapes of crates/graft-engine/src/journal.rs (ref_moved, land_reverted, attested extended body); the checker lands the revert of cc5921 and a reviewer attests c40208.",
+  "entries": [
+    {
+      "lsn": 1330,
+      "kind": "RefMoved",
+      "body": "{\"name\":\"backlog-1\",\"old\":\"c40208d1dacdfcb31e8bc1f7db54f2936bb1a12b754614a79d632b4bb8d4f6c46\",\"new\":\"c13ebd5854498b57c7e5857544a73765ba21a3b0e60b675ff8b18820c69d364b8\",\"version\":89,\"actor\":\"graft-checker\"}"
+    },
+    {
+      "lsn": 1331,
+      "kind": "LandReverted",
+      "body": "{\"line\":\"backlog-1\",\"land\":\"cc5921bbbe7e738fb0d54cf02ea34b6ebe3ae65b5f9453dae72bfd3800175a1cd\",\"revert\":\"c13ebd5854498b57c7e5857544a73765ba21a3b0e60b675ff8b18820c69d364b8\",\"check\":\"ci/test\"}"
+    },
+    {
+      "lsn": 1336,
+      "kind": "Attested",
+      "body": "{\"changeset\":\"c40208d1dacdfcb31e8bc1f7db54f2936bb1a12b754614a79d632b4bb8d4f6c46\",\"check\":\"review:opus\",\"url\":\"https://example.invalid/review\",\"actor\":\"reviewer\",\"kind\":\"review\",\"status\":\"pass\",\"by\":null}"
+    }
+  ],
+  "next_lsn": 1337
+}

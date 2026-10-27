@@ -324,41 +324,75 @@ land check (D22).
 
 ## Post-land measurement (WI-2627)
 
-`bench/postland/` records and reports the v0.2 exit measurements. It is
-Python only and talks to the server through `graft api`, so the same code
-runs against a fixture in tests and against graft-dev in the trial.
+`bench/postland/` records and reports the v0.2 exit measurements (M1, M2,
+M3 and D31). It is Python only.
 
 | script | what it does |
 | --- | --- |
-| `postland/record.py` | follows one line from a stored LSN through `graft api watch` (repo is a flag, never a request field) and `GET /v1/repos/{repo}/land-checks` with the token in a header, re-reads every still-pending land each poll, resumes without duplicating a row |
-| `postland/plant.py` | `--variant fmt` or `--variant test` lands a bad change and one good follower as `GRAFT_SESSION_ID=postland-plant`, then prints both changeset ids |
-| `postland/report.py` | writes the M1, M2, M3 and D31 tables from that JSONL and one Prometheus HTTP query |
+| `postland/record.py` | follows one post-land line: `graft api watch` from the stored LSN to the head, then `GET /v1/repos/{repo}/land-checks` from the oldest unsettled position, and appends JSONL |
+| `postland/plant.py` | `--variant fmt` or `--variant test` lands a bad change and one good follower as `GRAFT_SESSION_ID=postland-plant`, prints both changeset ids, and with `--record` appends them for the report |
+| `postland/report.py` | writes the M1, M2, M3 and D31 tables from that JSONL, the operator's input files and Prometheus instant queries |
 
-The M1 bound is p95 ≤ 30 min and max ≤ 4 h. Land time is the journal entry's
-`at` when the body has one, otherwise the first observation. Settle time is
-the first poll that reads the landing as `good`, `bad` or `reverted`.
-`--interval` (default 60s) is the largest gap a poll can hide, so it bounds
-the precision of every sample.
+**Times are the recorder's own.** The server's `RefMoved` body is
+`{name, old, new, version, actor}` and `LandReverted` is
+`{line, land, revert, check}`: neither carries a time or a position. So a
+land's time is the recorder's first observation of it (its `RefMoved`, or
+its first land-checks row), and its settle time is the first poll that
+reads it `good`, `bad` or `reverted`. Each is late by at most one
+`--interval` (default 60 s); that is the precision of every M1 sample.
 
-`late` means the entry was first observed more than `--late-after` seconds
-(default 120) after the time it was journaled (`at` on the body). A body
-with no journal time is not late, including the first entry seen after a
-restart. Late rows are excluded from the percentiles and counted for coverage.
+**Late** is about the observer. A poll that comes more than `--late-after`
+seconds (default two intervals) after the previous committed poll, or the
+first poll of all, marks its rows `late`: what they report may have happened
+at any time in the gap. Each gap is also logged as a `Gap` row. The report
+leaves late samples out of the percentiles and counts them.
 
-The server's check states are `pending`, `good`, `bad` and `reverted` only.
-Blocked time is derived from a journaled attester report (`AttesterBlocked`).
-When none is journaled the M1 cell reads `n/a (not observable)` and is never
-reported as 0.
+**Cost follows the change.** Land-checks are read from the oldest land
+still unsettled (`pending`, or `bad` and waiting for its revert), or from
+the frontier (one past the highest position read) when none is, and paged
+with `next` to the end. Both positions are kept in the state file. The first
+poll needs `--from-lsn` and `--from-pos` (`0` for a line just switched to
+post-land).
 
-The D31 figure is the result of running
-`histogram_quantile(0.95, rate(graft_rpc_duration_seconds_bucket{op="Land"}[1d]))`
-through the Prometheus HTTP API (`--prometheus`), not a file of pre-extracted
-samples.
+**Restarts** never duplicate a row: the state file holds the log's length
+after the last committed poll, and a restart cuts anything past it and
+redoes that poll.
+
+**The token** is read from `--token-file` each poll and sent only as the
+`Authorization` header of the land-checks request (`graft api` gets the
+file path). It is never an argument and never written anywhere.
+
+**Blocked** time is not recorded by the server (its check states are
+`pending`, `good`, `bad` and `reverted`). The operator passes the held
+windows to `report.py --blocked` as `[{"from": t, "to": t}]`, taken from the
+checker's `line ... blocked at land ...` log line and the unblock time. The
+overlap is subtracted from each sample and shown as `blocked_s`. Without the
+file the column reads `not recorded`.
+
+**D31** runs these as instant queries (`/api/v1/query?time=`) at the end of
+each of `--days` days before `--enabled-at` and each day after it, and
+holds when every after-p95 is at most the highest before-p95 plus 20%:
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(graft_rpc_duration_seconds_bucket{job="graft-dev",op="Land"}[1d])))
+histogram_quantile(0.5, sum by (le) (rate(graft_rpc_duration_seconds_bucket{job="graft-dev",op="Land"}[1d])))
+avg_over_time(up{job="graft-dev",service="graft-server"}[1d])
+```
 
 ```sh
 python3 -I -m pytest -q bench/tests
-python3 -I bench/postland/record.py --repo graft --line backlog-1 \
+python3 -I bench/postland/record.py --repo graft --line exit-rehearsal \
     --endpoint http://graft-dev:17888 --token-file "$TOKEN_FILE" \
-    --interval 60 --late-after 120 \
+    --from-lsn "$START_LSN" --from-pos 0 --interval 60 --loop \
     --state /var/lib/postland/state.json --out /var/lib/postland/log.jsonl
+python3 -I bench/postland/plant.py --variant fmt --record /var/lib/postland/plants.jsonl
+python3 -I bench/postland/report.py --jsonl /var/lib/postland/log.jsonl \
+    --plants /var/lib/postland/plants.jsonl --batches batches.json --blocked blocked.json \
+    --checker-actor "$CHECKER" --prometheus "$PROM" --enabled-at "$ENABLED_AT" --out report.md
 ```
+
+The test fixtures `watch-1100.json`, `watch-1280.json`, `watch-1328.json`
+and `land-checks-empty.json` are captured from graft-dev. graft-dev has no
+post-land line yet, so the land-checks pages with rows and the post-land
+watch page are built in the server's shapes; each says so in `_source`.
+

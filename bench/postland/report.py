@@ -1,32 +1,37 @@
 #!/usr/bin/env python3
-"""Render the v0.2 exit tables from the recorder JSONL.
+"""Render the v0.2 exit tables from the recorder JSONL and Prometheus.
 
-Every number comes from the JSONL plus one Prometheus query. Nothing is
-estimated.
+Every number is recomputable from the JSONL, the operator's input files and
+the PromQL printed in the report, evaluated at the instants it lists.
 
-M1 bound (operator decision 3, tightened): p95 <= 30 min and max <= 4 h.
-Land time is the journal entry's ``journaled_at`` when the body named one,
-otherwise the first observation. Settle time is the first poll that read
-the landing as ``good``, ``bad`` or ``reverted``. The recorder's
-``--interval`` is the largest gap that observation can hide, so it bounds
-the precision of every sample.
+M1 (operator decision 3): p95 <= 30 min and max <= 4 h per day, excluding
+time the line was held Blocked for the operator.
 
-Queries the tables cite:
+- Land time is the recorder's first observation of the land, by either
+  read (a ``RefMoved`` for the line, or its first ``LandCheck`` row). The
+  server journals no time, so there is nothing earlier to use.
+- Settle time is the first ``LandCheck`` row in state ``good``, ``bad`` or
+  ``reverted``. Both times are poll times, so each sample is exact to one
+  ``--interval``.
+- A sample whose land or settle observation is ``late`` (first poll after a
+  recorder gap) is left out of the percentiles and counted under ``late``.
+- ``pending`` counts lands of the day not settled by the end of that day
+  (for the whole window: not settled at all).
+- Blocked: the server records no blocked state, so the windows come from
+  ``--blocked`` (the operator's list, taken from the checker's ``line ...
+  blocked at land ...`` log line and the unblock time). Overlap with a
+  window is subtracted from a sample and reported in ``blocked_s``. With no
+  file the column reads ``not recorded``.
 
-- land-to-settled: seconds from land time to the earliest ``LandCheck`` of
-  state ``good`` or ``bad`` for the same changeset. Rows flagged ``late``
-  are excluded from the percentiles and counted under ``late``.
-- blocked: only when the journal carries an ``AttesterBlocked`` row. The
-  server's check states are ``pending``, ``good``, ``bad`` and ``reverted``,
-  so without that row the cell is ``n/a (not observable)``. It is never 0.
-- pending: a ``RefMoved`` with no settlement row.
-- over bound: samples whose land-to-settled exceeds 4 h, and whether p95
-  exceeds 30 min.
-- M2: each planted changeset, the ``LandReverted`` that names it, whether
-  that revert's actor is the checker, and batch entries that contain it.
-- M3: per day, lands (``RefMoved``) against ``review`` attestations.
-- D31: the stated PromQL, fetched through the Prometheus HTTP API. The
-  value is the query result, not a file of pre-extracted samples.
+M2: for each plant (``plant.py --record``), the ``LandReverted`` that names
+it, the actor of the ``RefMoved`` that landed the revert, the last check
+state of both, and the batch PRs (``--batches``) that contain it.
+
+M3: per day, the line's lands against the ``review`` attestations on them.
+
+D31: the PromQL below, run as instant queries (``/api/v1/query`` with
+``time=``) at the end of each of ``--days`` days before ``--enabled-at`` and
+each day after it. Instants after ``--now`` are left out.
 """
 
 from __future__ import annotations
@@ -34,232 +39,306 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import subprocess
 import sys
+import urllib.error
+import urllib.request
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
 P95_BOUND_S = 30 * 60
 MAX_BOUND_S = 4 * 3600
-BLOCKED_NA = "n/a (not observable)"
-D31_QUERY = 'histogram_quantile(0.95, rate(graft_rpc_duration_seconds_bucket{op="Land"}[1d]))'
+D31_TOLERANCE = 0.20
+NOT_RECORDED = "not recorded"
+LAND_QUANTILE = 'histogram_quantile({q}, sum by (le) (rate(graft_rpc_duration_seconds_bucket{{job="{job}",op="Land"}}[1d])))'
+SCRAPE_UP = 'avg_over_time(up{{job="{job}",service="graft-server"}}[1d])'
+FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def load_jsonl(path: Path) -> list[dict]:
-    rows = []
-    if not path.exists():
-        return rows
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
+def parse_time(text: str) -> datetime:
+    return datetime.strptime(text, FMT).replace(tzinfo=timezone.utc)
 
 
-def _parse(ts: str) -> datetime:
-    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+def load_jsonl(path: Path | None) -> list[dict]:
+    if path is None or not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def percentile(values: list[float], pct: float) -> float:
-    """Nearest-rank percentile. Reproducible; not an interpolation."""
+def percentile(values: list[float], pct: float) -> float | None:
+    """Nearest-rank percentile: always one of the samples."""
     if not values:
-        return 0.0
+        return None
     ordered = sorted(values)
-    rank = max(1, math.ceil(pct / 100 * len(ordered)))
-    return ordered[rank - 1]
+    return ordered[max(1, math.ceil(pct / 100 * len(ordered))) - 1]
 
 
-def land_time(land: dict) -> str:
-    """Journal time when the entry named one, otherwise first observation."""
-    return land.get("journaled_at") or land["observed_at"]
+def overlap_s(start: datetime, end: datetime, windows: list[tuple[datetime, datetime]]) -> float:
+    return sum(max(0.0, (min(end, b) - max(start, a)).total_seconds()) for a, b in windows)
 
 
-def land_samples(rows: list[dict]) -> dict:
-    """Latency samples and coverage counts from recorder rows."""
-    moved = [r for r in rows if r["kind"] == "RefMoved"]
-    checks: dict[str, list[dict]] = defaultdict(list)
-    for row in rows:
-        if row["kind"] == "LandCheck" and row.get("changeset"):
-            checks[row["changeset"]].append(row)
-    samples = []
-    late = 0
-    pending = 0
-    blocked_reports = [r for r in rows if r["kind"] == "AttesterBlocked"]
-    for land in moved:
-        if land.get("late"):
-            late += 1
+def lands(rows: list[dict]) -> dict[str, dict]:
+    """Per changeset: first observation and first settlement, with late flags."""
+    out: dict[str, dict] = {}
+    for row in sorted((r for r in rows if r["kind"] in ("RefMoved", "LandCheck")), key=lambda r: r["observed_at"]):
+        land = out.setdefault(row["changeset"], {"changeset": row["changeset"], "seen": row, "settled": None, "bad": None, "reverted": None, "checked": False})
+        if row["kind"] != "LandCheck":
             continue
-        followers = [c for c in checks.get(land.get("changeset"), []) if c["state"] in ("good", "bad")]
-        if not followers:
+        land["checked"] = True
+        state = row["state"]
+        if state in ("good", "bad", "reverted") and land["settled"] is None:
+            land["settled"] = row
+        if state in ("bad", "reverted") and land["bad"] is None:
+            land["bad"] = row
+        if state == "reverted" and land["reverted"] is None:
+            land["reverted"] = row
+    return out
+
+
+def m1_rows(rows: list[dict], blocked: list[tuple[datetime, datetime]] | None) -> list[dict]:
+    """One row per land day, then ``all``. Lands with no land-checks row are
+    ``unchecked`` (landed before the line was post-land) and not sampled."""
+    by_day: dict[str, list[dict]] = defaultdict(list)
+    unchecked: dict[str, int] = defaultdict(int)
+    for land in lands(rows).values():
+        day = land["seen"]["observed_at"][:10]
+        if land["checked"]:
+            by_day[day].append(land)
+        else:
+            unchecked[day] += 1
+    table = []
+    everything: list[dict] = []
+    for day in sorted(set(by_day) | set(unchecked)):
+        end = parse_time(day + "T00:00:00Z") + timedelta(days=1)
+        table.append(m1_summary(day, by_day[day], blocked, settle_by=end) | {"unchecked": unchecked[day]})
+        everything += by_day[day]
+    table.append(m1_summary("all", everything, blocked, settle_by=None) | {"unchecked": sum(unchecked.values())})
+    return table
+
+
+def m1_summary(label: str, group: list[dict], blocked: list[tuple[datetime, datetime]] | None, *, settle_by: datetime | None) -> dict:
+    values: list[float] = []
+    late = pending = 0
+    held = 0.0
+    for land in group:
+        settled = land["settled"]
+        if settled is None or (settle_by is not None and parse_time(settled["observed_at"]) >= settle_by):
             pending += 1
             continue
-        followers.sort(key=lambda c: c["observed_at"])
-        settled = followers[0]
-        delta = (_parse(settled["observed_at"]) - _parse(land_time(land))).total_seconds()
-        samples.append(
-            {
-                "changeset": land.get("changeset"),
-                "seconds": delta,
-                "landed_at": land_time(land),
-                "settled_at": settled["observed_at"],
-            }
-        )
-    blocked = BLOCKED_NA if not blocked_reports else float(len(blocked_reports))
-    return {"samples": samples, "late": late, "pending": pending, "blocked": blocked}
-
-
-def m1_table(rows: list[dict], *, interval_s: int | None = None) -> dict:
-    summary = land_samples(rows)
-    values = [s["seconds"] for s in summary["samples"]]
+        if land["seen"].get("late") or settled.get("late"):
+            late += 1
+            continue
+        start, end = parse_time(land["seen"]["observed_at"]), parse_time(settled["observed_at"])
+        cut = overlap_s(start, end, blocked) if blocked else 0.0
+        held += cut
+        values.append((end - start).total_seconds() - cut)
     p95 = percentile(values, 95)
-    maximum = max(values) if values else 0.0
+    maximum = max(values) if values else None
     return {
-        "count": len(values),
+        "day": label,
+        "lands": len(group),
+        "samples": len(values),
         "p50_s": percentile(values, 50),
         "p95_s": p95,
         "max_s": maximum,
-        "over_p95_bound": p95 > P95_BOUND_S,
-        "over_max_bound": sum(1 for v in values if v > MAX_BOUND_S),
-        "late": summary["late"],
-        "pending": summary["pending"],
-        "blocked": summary["blocked"],
-        "precision": f"bounded by poll interval {interval_s}s" if interval_s is not None else "bounded by --interval",
-        "p95_bound_s": P95_BOUND_S,
-        "max_bound_s": MAX_BOUND_S,
+        "over_30m": sum(1 for v in values if v > P95_BOUND_S),
+        "over_4h": sum(1 for v in values if v > MAX_BOUND_S),
+        "within_bound": None if not values else (p95 <= P95_BOUND_S and maximum <= MAX_BOUND_S),
+        "late": late,
+        "pending": pending,
+        "blocked_s": held if blocked is not None else NOT_RECORDED,
     }
 
 
-def m2_table(rows: list[dict], plants: list[dict], batches: list[dict]) -> list[dict]:
-    reverts = {}
-    for row in rows:
-        if row["kind"] == "LandReverted":
-            reverts[row.get("changeset")] = row
+def bad_to_reverted(rows: list[dict]) -> dict:
+    values = [
+        (parse_time(land["reverted"]["observed_at"]) - parse_time(land["bad"]["observed_at"])).total_seconds()
+        for land in lands(rows).values()
+        if land["bad"] is not None and land["reverted"] is not None and land["bad"]["state"] == "bad"
+    ]
+    return {"count": len(values), "p50_s": percentile(values, 50), "max_s": max(values) if values else None}
+
+
+def m2_rows(rows: list[dict], plants: list[dict], batches: list[dict], checker_actor: str | None) -> list[dict]:
+    reverts = {r["changeset"]: r for r in rows if r["kind"] == "LandReverted"}
+    landed_by = {r["changeset"]: r.get("actor") for r in rows if r["kind"] == "RefMoved"}
+    last_state: dict[str, str] = {}
+    for row in sorted((r for r in rows if r["kind"] == "LandCheck"), key=lambda r: r["observed_at"]):
+        last_state[row["changeset"]] = row["state"]
     table = []
     for plant in plants:
-        cs = plant["changeset"]
-        revert = reverts.get(cs)
-        containing = [b["pr"] for b in batches if cs in b.get("changesets", [])]
+        cs = plant["plant"]
+        revert = reverts.get(cs, {}).get("revert")
+        actor = landed_by.get(revert) if revert else None
+        containing = [b["pr"] for b in batches if cs in b["changesets"]]
         table.append(
             {
-                "changeset": cs,
+                "plant": cs,
                 "variant": plant.get("variant"),
-                "reverted_by": None if revert is None else revert.get("revert"),
-                "unattended": bool(revert) and revert.get("actor") == "checker",
+                "plant_state": last_state.get(cs),
+                "reverted_by": revert,
+                "revert_actor": actor,
+                "revert_state": last_state.get(revert) if revert else None,
+                "unattended": None if checker_actor is None or actor is None else actor == checker_actor,
                 "batches": containing,
-                "paired_with_revert": bool(revert) and any(revert.get("revert") in b.get("changesets", []) for b in batches),
+                "never_alone": all(revert in b["changesets"] for b in batches if cs in b["changesets"]) if revert else not containing,
             }
         )
     return table
 
 
-def m3_table(rows: list[dict]) -> list[dict]:
-    lands: dict[str, int] = defaultdict(int)
-    reviews: dict[str, int] = defaultdict(int)
-    for row in rows:
-        if row.get("late"):
-            continue
-        day = row["observed_at"][:10]
-        if row["kind"] == "RefMoved":
-            lands[day] += 1
-        elif row["kind"] == "Attested" and row.get("attest_kind") == "review":
-            reviews[day] += 1
-    days = sorted(set(lands) | set(reviews))
-    return [{"day": day, "lands": lands[day], "reviews": reviews[day], "gap": lands[day] - reviews[day]} for day in days]
+def m3_rows(rows: list[dict]) -> list[dict]:
+    reviewed = {r["changeset"] for r in rows if r["kind"] == "Attested" and r.get("attest_kind") == "review"}
+    by_day: dict[str, list[str]] = defaultdict(list)
+    for land in lands(rows).values():
+        by_day[land["seen"]["observed_at"][:10]].append(land["changeset"])
+    return [
+        {"day": day, "lands": len(css), "reviewed": sum(1 for cs in css if cs in reviewed), "unreviewed": sum(1 for cs in css if cs not in reviewed)}
+        for day, css in sorted(by_day.items())
+    ]
 
 
-def prometheus_query(http: str, base_url: str, query: str) -> dict:
-    """Run one instant query against the Prometheus HTTP API."""
-    url = base_url.rstrip("/") + "/api/v1/query?" + urlencode({"query": query})
-    proc = subprocess.run([http, "-sS", "-m", "30", url], text=True, capture_output=True, check=False)
-    if proc.returncode != 0:
-        raise RuntimeError(f"prometheus query exited {proc.returncode}: {proc.stderr.strip()}")
-    return json.loads(proc.stdout or "{}")
+def fetch_json(url: str) -> dict:
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as err:
+        raise RuntimeError(f"prometheus answered {err.code}") from None
 
 
-def quantile_value(payload: dict) -> float | None:
-    result = (payload.get("data") or {}).get("result") or []
+def instant(base_url: str, query: str, at: datetime) -> float | None:
+    """One instant query at ``at``. None when Prometheus has no value."""
+    url = base_url.rstrip("/") + "/api/v1/query?" + urlencode({"query": query, "time": at.strftime(FMT)})
+    result = (fetch_json(url).get("data") or {}).get("result") or []
     if not result:
         return None
-    value = result[0].get("value")
-    if not value or len(value) < 2 or value[1] in ("NaN", "nan", None):
-        return None
-    return float(value[1])
+    value = float(result[0]["value"][1])
+    return None if math.isnan(value) else value
 
 
-def d31_table(before: dict, after: dict) -> dict:
-    return {
-        "query": D31_QUERY,
-        "source": "prometheus http api",
-        "before": quantile_value(before),
-        "after": quantile_value(after),
-    }
+def d31_instants(enabled_at: datetime, days: int, now: datetime) -> list[tuple[str, datetime]]:
+    """End of each 1d window: ``days`` before enablement, then ``days`` after."""
+    before = [("before", enabled_at - timedelta(days=k)) for k in range(days - 1, -1, -1)]
+    after = [("after", enabled_at + timedelta(days=k)) for k in range(1, days + 1)]
+    return [(side, at) for side, at in before + after if at <= now]
+
+
+def d31_rows(base_url: str, job: str, enabled_at: datetime, days: int, now: datetime) -> list[dict]:
+    p50 = LAND_QUANTILE.format(q="0.5", job=job)
+    p95 = LAND_QUANTILE.format(q="0.95", job=job)
+    up = SCRAPE_UP.format(job=job)
+    return [
+        {"side": side, "at": at.strftime(FMT), "p50_s": instant(base_url, p50, at), "p95_s": instant(base_url, p95, at), "up": instant(base_url, up, at)}
+        for side, at in d31_instants(enabled_at, days, now)
+    ]
+
+
+def d31_verdict(table: list[dict]) -> dict:
+    before = [r["p95_s"] for r in table if r["side"] == "before" and r["p95_s"] is not None]
+    after = [r["p95_s"] for r in table if r["side"] == "after" and r["p95_s"] is not None]
+    ceiling = max(before) * (1 + D31_TOLERANCE) if before else None
+    holds = None if ceiling is None or not after else all(v <= ceiling for v in after)
+    return {"before_days": len(before), "after_days": len(after), "ceiling_s": ceiling, "holds": holds}
 
 
 def _cell(value: object) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.3f}".rstrip("0").rstrip(".")
     return str(value)
 
 
-def render(rows: list[dict], plants: list[dict], batches: list[dict], before: dict, after: dict, *, interval_s: int | None = None) -> str:
-    m1 = m1_table(rows, interval_s=interval_s)
-    lines = [
+def _table(rows: list[dict], keys: list[str]) -> list[str]:
+    lines = ["| " + " | ".join(keys) + " |", "|" + " --- |" * len(keys)]
+    lines += ["| " + " | ".join(_cell(row[k]) for k in keys) + " |" for row in rows]
+    return lines
+
+
+def render(rows: list[dict], *, interval_s: int, plants: list[dict], batches: list[dict], blocked: list[tuple[datetime, datetime]] | None, checker_actor: str | None, d31: list[dict] | None, job: str) -> str:
+    gaps = [r for r in rows if r["kind"] == "Gap"]
+    out = [
         "# v0.2 exit tables",
         "",
-        "M1 land time is the journal entry when it names one, otherwise the first observation. Settle time is the first observation of good, bad or reverted. " + m1["precision"] + ".",
+        "## M1 land-to-settled",
         "",
-        "| metric | value |",
-        "| --- | --- |",
-    ]
-    for key in ("count", "p50_s", "p95_s", "max_s", "over_p95_bound", "over_max_bound", "late", "pending", "blocked", "precision", "p95_bound_s", "max_bound_s"):
-        lines.append(f"| {key} | {_cell(m1[key])} |")
-    lines += ["", "## M2 plants", "", "| changeset | variant | reverted_by | unattended | batches | paired |", "| --- | --- | --- | --- | --- | --- |"]
-    for row in m2_table(rows, plants, batches):
-        lines.append(
-            f"| {row['changeset']} | {row['variant']} | {row['reverted_by']} | {row['unattended']} | {row['batches']} | {row['paired_with_revert']} |"
-        )
-    lines += ["", "## M3 reviews", "", "| day | lands | reviews | gap |", "| --- | --- | --- | --- |"]
-    for row in m3_table(rows):
-        lines.append(f"| {row['day']} | {row['lands']} | {row['reviews']} | {row['gap']} |")
-    d31 = d31_table(before, after)
-    lines += [
-        "",
-        "## D31",
-        "",
-        f"Query `{d31['query']}` through the Prometheus HTTP API.",
-        "",
-        "| side | p95_s |",
-        "| --- | --- |",
-        f"| before | {d31['before']} |",
-        f"| after | {d31['after']} |",
+        f"Bound: p95 <= {P95_BOUND_S}s and max <= {MAX_BOUND_S}s, Blocked time excluded. "
+        f"Times are recorder observations (the server journals none), so each sample is exact to one poll interval ({interval_s}s). "
+        "Land time is the first observation of the land; settle time is the first poll that read it good, bad or reverted.",
         "",
     ]
-    return "\n".join(lines)
+    out += _table(m1_rows(rows, blocked), ["day", "lands", "unchecked", "samples", "p50_s", "p95_s", "max_s", "over_30m", "over_4h", "within_bound", "late", "pending", "blocked_s"])
+    if blocked is None:
+        out += ["", "Blocked time: not recorded. The server keeps no blocked state; pass `--blocked` with the operator's windows."]
+    btr = bad_to_reverted(rows)
+    out += ["", f"bad-to-reverted: {btr['count']} lands, p50 {_cell(btr['p50_s'])}s, max {_cell(btr['max_s'])}s.", ""]
+    out += ["### Recorder gaps", ""]
+    out += _table(gaps, ["from", "to", "seconds"]) if gaps else ["None."]
+    out += ["", "## M2 plants", ""]
+    out += _table(m2_rows(rows, plants, batches, checker_actor), ["plant", "variant", "plant_state", "reverted_by", "revert_actor", "revert_state", "unattended", "batches", "never_alone"])
+    out += ["", "## M3 reviews", "", "The review-queue check and the session's tool log are read separately.", ""]
+    out += _table(m3_rows(rows), ["day", "lands", "reviewed", "unreviewed"])
+    out += ["", "## D31 Land latency", ""]
+    if d31 is None:
+        out += ["Not run: pass `--prometheus` and `--enabled-at`."]
+    else:
+        verdict = d31_verdict(d31)
+        out += [
+            "Instant queries (`/api/v1/query`, `time=` the row's `at`):",
+            "",
+            f"- p50: `{LAND_QUANTILE.format(q='0.5', job=job)}`",
+            f"- p95: `{LAND_QUANTILE.format(q='0.95', job=job)}`",
+            f"- up: `{SCRAPE_UP.format(job=job)}`",
+            "",
+        ]
+        out += _table(d31, ["side", "at", "p50_s", "p95_s", "up"])
+        out += [
+            "",
+            f"Holds when every after-p95 is at most the highest before-p95 plus {int(D31_TOLERANCE * 100)}% "
+            f"(ceiling {_cell(verdict['ceiling_s'])}s, {verdict['before_days']} before and {verdict['after_days']} after days): {_cell(verdict['holds'])}.",
+        ]
+    out.append("")
+    return "\n".join(out)
+
+
+def load_windows(path: Path | None) -> list[tuple[datetime, datetime]] | None:
+    if path is None:
+        return None
+    return [(parse_time(w["from"]), parse_time(w["to"])) for w in json.loads(path.read_text(encoding="utf-8"))]
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--jsonl", type=Path, required=True)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--jsonl", type=Path, required=True, help="The recorder's log.")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--plants", type=Path, default=None)
-    parser.add_argument("--batches", type=Path, default=None)
-    parser.add_argument("--interval", type=int, default=60)
-    parser.add_argument("--prometheus", default=None, help="Prometheus base URL. Required unless --prometheus-fixture is set.")
-    parser.add_argument("--prometheus-fixture", type=Path, default=None, help="Recorded HTTP response, used by tests.")
-    parser.add_argument("--http", default="curl")
+    parser.add_argument("--interval", type=int, default=60, help="The recorder's poll interval.")
+    parser.add_argument("--plants", type=Path, default=None, help="JSONL written by plant.py --record.")
+    parser.add_argument("--batches", type=Path, default=None, help='JSON list of {"pr": n, "changesets": [...]} from the mirror.')
+    parser.add_argument("--blocked", type=Path, default=None, help='JSON list of {"from": t, "to": t} operator-held windows.')
+    parser.add_argument("--checker-actor", default=None, help="The checker's principal; a revert landed by it is unattended.")
+    parser.add_argument("--prometheus", default=None, help="Prometheus base URL.")
+    parser.add_argument("--job", default="graft-dev")
+    parser.add_argument("--enabled-at", default=None, help="Enablement instant, YYYY-MM-DDTHH:MM:SSZ.")
+    parser.add_argument("--days", type=int, default=14)
+    parser.add_argument("--now", default=None)
     args = parser.parse_args(argv)
-    rows = load_jsonl(args.jsonl)
-    plants = json.loads(args.plants.read_text(encoding="utf-8")) if args.plants else []
-    batches = json.loads(args.batches.read_text(encoding="utf-8")) if args.batches else []
-    if args.prometheus_fixture:
-        payload = json.loads(args.prometheus_fixture.read_text(encoding="utf-8"))
-        before, after = payload["before"], payload["after"]
-    elif args.prometheus:
-        before = prometheus_query(args.http, args.prometheus, D31_QUERY)
-        after = before
-    else:
-        before, after = {"data": {"result": []}}, {"data": {"result": []}}
-    text = render(rows, plants, batches, before, after, interval_s=args.interval)
+    d31 = None
+    if args.prometheus:
+        if not args.enabled_at:
+            parser.error("--prometheus needs --enabled-at")
+        now = parse_time(args.now) if args.now else datetime.now(timezone.utc)
+        d31 = d31_rows(args.prometheus, args.job, parse_time(args.enabled_at), args.days, now)
+    text = render(
+        load_jsonl(args.jsonl),
+        interval_s=args.interval,
+        plants=load_jsonl(args.plants),
+        batches=json.loads(args.batches.read_text(encoding="utf-8")) if args.batches else [],
+        blocked=load_windows(args.blocked),
+        checker_actor=args.checker_actor,
+        d31=d31,
+        job=args.job,
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(text, encoding="utf-8")
     print(args.out)
