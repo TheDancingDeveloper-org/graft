@@ -9,8 +9,8 @@ use graft_git::map::{ImportedCommit, MirrorMap};
 use graft_model::{Author, AuthorKind, Change, ChangesetId, Metadata, Timestamp};
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::types::{
-    ChangesetView, CreateChangeset, Diff, GetChangesets, GetLandChecks, LandCheck, Log, MergeMode,
-    Page, Pair, Rebase, RefKind, Revert, Watch,
+    ChangesetView, CreateChangeset, Diff, GetChangesets, GetLandChecks, GetLineConfig, LandCheck,
+    LineChecksMode, Log, MergeMode, Page, Pair, Rebase, RefKind, Revert, Watch,
 };
 use graft_proto::{ApiError, CallContext};
 
@@ -111,6 +111,7 @@ where
     /// Follows the base, settles or advances the last batch, syncs the line
     /// and, when nothing is open, exports a new batch and opens its PR.
     pub async fn run(&mut self) -> Result<BatchRun, MirrorError> {
+        self.check_line_mode().await?;
         let mut run = BatchRun {
             settled: None,
             synced: None,
@@ -175,6 +176,49 @@ where
             Err(outcome) => run.outcome = outcome,
         }
         Ok(run)
+    }
+
+    /// Refuses when `--checks` disagrees with the line's server config.
+    /// An older server that does not implement `GetLineConfig` keeps today's
+    /// behaviour, with a one-line warning.
+    async fn check_line_mode(&mut self) -> Result<(), MirrorError> {
+        let cx = self.call("line-config");
+        match self
+            .api
+            .get_line_config(
+                &cx,
+                GetLineConfig {
+                    repo: self.config.repo.clone(),
+                    line: self.config.line.clone(),
+                },
+            )
+            .await
+        {
+            Ok(cfg) => {
+                let post = cfg.checks == LineChecksMode::PostLand;
+                if post != self.config.checked {
+                    let flag = if self.config.checked {
+                        "--checks post-land"
+                    } else {
+                        "--checks off (or omitted)"
+                    };
+                    let server = if post { "post-land" } else { "off" };
+                    return Err(MirrorError::Config(format!(
+                        "line {} checks are {server}; {flag} does not match.                          A checked line batched without --checks post-land ships                          lands whose checks have not run",
+                        self.config.line
+                    )));
+                }
+                Ok(())
+            }
+            Err(e) if is_unimplemented(&e) => {
+                eprintln!(
+                    "warning: the server does not implement GetLineConfig;                      --checks was not verified against line {}",
+                    self.config.line
+                );
+                Ok(())
+            }
+            Err(e) => Err(MirrorError::Api(e)),
+        }
     }
 
     /// Advances the line's last batch without making a new one: push and
@@ -2085,4 +2129,8 @@ pub(crate) fn coauthor_lines(metadata: &Metadata) -> Vec<String> {
         .map(|l| clean_message(l, FIELD_CHARS, false))
         .filter(|l| !l.is_empty())
         .collect()
+}
+
+fn is_unimplemented(err: &ApiError) -> bool {
+    matches!(err, ApiError::Rejected { policy, .. } if policy == "unimplemented")
 }

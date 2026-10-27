@@ -2517,6 +2517,10 @@ macro_rules! forward {
     };
 }
 
+/// The in-process engine's `RepoApi` still uses the trait default for
+/// `GetLineConfig` (unimplemented). This wrapper answers as the server does
+/// once the RPC is built: the line's configured checks, or unimplemented
+/// when [`LineConfigApi::old_server`] is set.
 impl ObjectApi for Counting<'_> {
     forward! {
         get_objects(GetObjects) -> Objects;
@@ -2560,6 +2564,7 @@ impl RepoApi for Counting<'_> {
         land(Land) -> Landed;
         attest(Attest) -> ();
         watch(Watch) -> JournalPage;
+        get_line_config(GetLineConfig) -> graft_proto::types::LineConfig;
     }
     async fn get_land_checks(
         &self,
@@ -2571,6 +2576,182 @@ impl RepoApi for Counting<'_> {
         self.reads.lock().unwrap().push((limit, page.rows.len()));
         Ok(page)
     }
+}
+
+/// Answers `GetLineConfig` the way the server does, from the world's line
+/// config. The in-process engine's trait impl still uses the unimplemented
+/// default, so a test that cares about the RPC wraps the engine.
+struct ConfiguredLine<'a> {
+    api: &'a Api,
+    checks: LineChecksMode,
+}
+
+impl ObjectApi for ConfiguredLine<'_> {
+    forward! {
+        get_objects(GetObjects) -> Objects;
+        has_objects(HasObjects) -> Vec<graft_model::ObjectId>;
+        put_objects(PutObjects) -> Vec<graft_model::ObjectId>;
+    }
+}
+impl AdminApi for ConfiguredLine<'_> {
+    forward! {
+        import_changesets(ImportChangesets) -> Vec<Created>;
+        gc(Gc) -> GcReport;
+        mint_token(MintToken) -> String;
+    }
+    async fn create_repo(
+        &self,
+        cx: &CallContext,
+        name: String,
+    ) -> graft_proto::error::ApiResult<()> {
+        self.api.create_repo(cx, name).await
+    }
+}
+impl RepoApi for ConfiguredLine<'_> {
+    forward! {
+        create_changeset(CreateChangeset) -> Created;
+        get_changesets(GetChangesets) -> Changesets;
+        resolve_ref(ResolveRef) -> RefView;
+        list_refs(ListRefs) -> Vec<RefView>;
+        update_ref(UpdateRef) -> RefView;
+        stat(PathAt) -> EntryView;
+        list_tree(ListTree) -> Entries;
+        read_file(PathAt) -> FileContent;
+        log(Log) -> History;
+        is_ancestor(Pair) -> bool;
+        merge_base(Pair) -> Option<ChangesetId>;
+        diff(Diff) -> DiffResult;
+        blame(Blame) -> BlameResult;
+        rebase(Rebase) -> ChangesetId;
+        revert(Revert) -> ChangesetId;
+        land(Land) -> Landed;
+        attest(Attest) -> ();
+        watch(Watch) -> JournalPage;
+        get_land_checks(GetLandChecks) -> LandCheckPage;
+    }
+    async fn get_line_config(
+        &self,
+        _cx: &CallContext,
+        req: GetLineConfig,
+    ) -> graft_proto::error::ApiResult<graft_proto::types::LineConfig> {
+        Ok(graft_proto::types::LineConfig {
+            line: req.line,
+            checks: self.checks,
+            required: Vec::new(),
+            retries: 0,
+        })
+    }
+}
+
+struct OldServer<'a> {
+    api: &'a Api,
+}
+impl ObjectApi for OldServer<'_> {
+    forward! {
+        get_objects(GetObjects) -> Objects;
+        has_objects(HasObjects) -> Vec<graft_model::ObjectId>;
+        put_objects(PutObjects) -> Vec<graft_model::ObjectId>;
+    }
+}
+impl AdminApi for OldServer<'_> {
+    forward! {
+        import_changesets(ImportChangesets) -> Vec<Created>;
+        gc(Gc) -> GcReport;
+        mint_token(MintToken) -> String;
+    }
+    async fn create_repo(
+        &self,
+        cx: &CallContext,
+        name: String,
+    ) -> graft_proto::error::ApiResult<()> {
+        self.api.create_repo(cx, name).await
+    }
+}
+impl RepoApi for OldServer<'_> {
+    forward! {
+        create_changeset(CreateChangeset) -> Created;
+        get_changesets(GetChangesets) -> Changesets;
+        resolve_ref(ResolveRef) -> RefView;
+        list_refs(ListRefs) -> Vec<RefView>;
+        update_ref(UpdateRef) -> RefView;
+        stat(PathAt) -> EntryView;
+        list_tree(ListTree) -> Entries;
+        read_file(PathAt) -> FileContent;
+        log(Log) -> History;
+        is_ancestor(Pair) -> bool;
+        merge_base(Pair) -> Option<ChangesetId>;
+        diff(Diff) -> DiffResult;
+        blame(Blame) -> BlameResult;
+        rebase(Rebase) -> ChangesetId;
+        revert(Revert) -> ChangesetId;
+        land(Land) -> Landed;
+        attest(Attest) -> ();
+        watch(Watch) -> JournalPage;
+        get_land_checks(GetLandChecks) -> LandCheckPage;
+    }
+    async fn get_line_config(
+        &self,
+        _cx: &CallContext,
+        _req: GetLineConfig,
+    ) -> graft_proto::error::ApiResult<graft_proto::types::LineConfig> {
+        Err(ApiError::unimplemented("GetLineConfig"))
+    }
+}
+
+/// `--checks` is refused when it disagrees with the line (WI-2614).
+#[tokio::test]
+async fn checks_flag_must_match_the_line() {
+    let checked_line = World::checked().await;
+    checked_line.start().await;
+    let server = ConfiguredLine {
+        api: &checked_line.api,
+        checks: LineChecksMode::PostLand,
+    };
+    let err = checked_line
+        .batcher_over(&server, &checked_line.db, |_| {})
+        .run()
+        .await
+        .unwrap_err();
+    let MirrorError::Config(msg) = err else {
+        panic!("expected Config, got {err}");
+    };
+    assert!(msg.contains("post-land"), "{msg}");
+    assert!(msg.contains("does not match"), "{msg}");
+    assert!(checked_line.github.prs().is_empty());
+
+    let plain = World::new().await;
+    plain.start().await;
+    let server = ConfiguredLine {
+        api: &plain.api,
+        checks: LineChecksMode::None,
+    };
+    let err = plain
+        .batcher_over(&server, &plain.db, |c| c.checked = true)
+        .run()
+        .await
+        .unwrap_err();
+    let MirrorError::Config(msg) = err else {
+        panic!("expected Config, got {err}");
+    };
+    assert!(msg.contains("off"), "{msg}");
+    assert!(plain.github.prs().is_empty());
+}
+
+/// An older server that does not implement GetLineConfig still batches.
+#[tokio::test]
+async fn an_unimplemented_line_config_still_batches() {
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a\n")], "add a", 1).await;
+    let old = OldServer { api: &w.api };
+    let rec = opened(
+        w.batcher_over(&old, &w.db, |_| {})
+            .run()
+            .await
+            .unwrap()
+            .outcome,
+    );
+    assert_eq!((rec.lands, rec.tip), (1, a));
 }
 
 // Accept 5: a batch after many checked lands reads its own lands' rows,

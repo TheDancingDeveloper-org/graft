@@ -53,11 +53,14 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
                                         sync an integration line onto the
                                         followed base, export its net change
                                         as one squashed PR; never merges.
-                                        --checks must match the line's server
-                                        checks setting. The server does not
-                                        expose it, so a checked line batched
-                                        without --checks post-land ships lands
-                                        whose checks have not run.
+                                        --checks is verified against the
+                                        line's server checks setting. A
+                                        mismatch is refused: a checked line
+                                        batched without --checks post-land
+                                        would ship lands whose checks have
+                                        not run. An older server that does
+                                        not implement GetLineConfig warns and
+                                        cannot be checked.
   authority <status|freeze|verify|flip|unfreeze> --config <file> --line <l>
          [--last N]                     switch a line's authority safely
 
