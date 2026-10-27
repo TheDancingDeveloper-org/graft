@@ -24,6 +24,8 @@ jobs:
     env:
       GRAFT_ENDPOINT: http://127.0.0.1:17888
       GRAFT_REPO: graft
+      # attest and ci are experimental client commands in this release.
+      GRAFT_EXPERIMENTAL: "1"
       OIDC_AUDIENCE: graft-dev
       CHANGESET: ${{ inputs.changeset }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
