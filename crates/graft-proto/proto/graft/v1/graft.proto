@@ -553,6 +553,27 @@ message ReviewQueuePage {
   optional uint64 next_lsn = 2;
 }
 
+// A line's post-land check settings (v0.2, WI-2614), from the server's
+// `[[lines]]` config. Read scope. An unknown line is NOT_FOUND.
+message GetLineConfigRequest {
+  string repo = 1;
+  string line = 2;
+}
+
+enum LineChecksMode {
+  LINE_CHECKS_MODE_UNSPECIFIED = 0;
+  LINE_CHECKS_MODE_NONE = 1;
+  LINE_CHECKS_MODE_POST_LAND = 2;
+}
+
+message LineConfig {
+  string line = 1;
+  LineChecksMode checks = 2;
+  // At most MAX_LINE_CHECKS names.
+  repeated string required = 3;
+  uint32 retries = 4;
+}
+
 message WatchRequest {
   string repo = 1;
   uint64 from_lsn = 2;
@@ -952,4 +973,5 @@ service ReviewService {
   rpc GetAttestations(GetAttestationsRequest) returns (AttestationPage);
   rpc GetLandChecks(GetLandChecksRequest) returns (LandCheckPage);
   rpc ReviewQueue(ReviewQueueRequest) returns (ReviewQueuePage);
+  rpc GetLineConfig(GetLineConfigRequest) returns (LineConfig);
 }

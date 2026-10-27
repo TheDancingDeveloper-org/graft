@@ -160,6 +160,9 @@ impl RepoApi for Backend {
     async fn review_queue(&self, cx: &CallContext, req: ReviewQueue) -> ApiResult<ReviewQueuePage> {
         forward!(self.review_queue(cx, req))
     }
+    async fn get_line_config(&self, cx: &CallContext, req: GetLineConfig) -> ApiResult<LineConfig> {
+        forward!(self.get_line_config(cx, req))
+    }
     async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
         forward!(self.watch(cx, req))
     }

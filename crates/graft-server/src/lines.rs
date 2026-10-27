@@ -257,6 +257,12 @@ impl LineSpec {
         };
         check_names(&what, &self.checks)?;
         check_names(&format!("{what}: required"), &self.required)?;
+        if self.required.len() > graft_proto::types::MAX_LINE_CHECKS {
+            return Err(format!(
+                "{what}: required lists more than {} checks",
+                graft_proto::types::MAX_LINE_CHECKS
+            ));
+        }
         match self.tracking {
             Some(TrackingMode::PostLand) => {
                 if self.required.is_empty() {
@@ -391,4 +397,40 @@ pub(crate) fn engine_config(lines: &[LineSpec], default_line: Option<&LineSpec>)
         config.default_line = spec.to_engine("");
     }
     config
+}
+
+/// `GetLineConfig`: line `req.line`'s check settings, as the engine applies
+/// them. The line must exist; resolving it checks read scope.
+pub(crate) async fn get_line_config(
+    engine: &crate::app::ServerEngine,
+    cx: &graft_proto::CallContext,
+    req: graft_proto::types::GetLineConfig,
+) -> Result<graft_proto::types::LineConfig, graft_proto::ApiError> {
+    use graft_proto::RepoApi as _;
+    use graft_proto::types::{LineChecksMode, RefKind, ResolveRef};
+    let line = engine
+        .resolve_ref(
+            cx,
+            ResolveRef {
+                repo: req.repo,
+                name: req.line.clone(),
+            },
+        )
+        .await?;
+    if line.kind != RefKind::Line {
+        return Err(graft_proto::ApiError::NotFound {
+            what: format!("line {}", req.line),
+        });
+    }
+    let config = engine.line_config(&req.line);
+    let (checks, required, retries) = match config.checks {
+        LineChecks::Off => (LineChecksMode::None, Vec::new(), 0),
+        LineChecks::PostLand { required, retries } => (LineChecksMode::PostLand, required, retries),
+    };
+    Ok(graft_proto::types::LineConfig {
+        line: req.line,
+        checks,
+        required,
+        retries,
+    })
 }

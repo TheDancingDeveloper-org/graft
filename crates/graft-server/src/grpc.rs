@@ -1418,6 +1418,23 @@ impl pb::review_service_server::ReviewService for Services {
             .map_err(Status::from)?;
         Ok(Response::new(page.into()))
     }
+
+    async fn get_line_config(
+        &self,
+        request: Request<pb::GetLineConfigRequest>,
+    ) -> Result<Response<pb::LineConfig>, Status> {
+        let cx = self.cx(&request, "GetLineConfig")?;
+        let req = GetLineConfig::from(request.into_inner());
+        let repo = req.repo.clone();
+        let config = self
+            .app
+            .call("GetLineConfig", &repo, cx, false, move |e, cx| async move {
+                crate::lines::get_line_config(&e, &cx, req).await
+            })
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(config.into()))
+    }
 }
 
 #[cfg(test)]
@@ -1527,6 +1544,66 @@ mod tests {
             .into_inner();
         assert_eq!(all.attestations.len(), 2, "{all:?}");
         assert!(all.next.is_none(), "{all:?}");
+        server.abort();
+    }
+
+    /// WI-2614 Accept 2 over gRPC: the configured values, and NOT_FOUND for
+    /// an unknown line.
+    #[tokio::test]
+    async fn get_line_config_grpc_answers_the_config_and_not_found() {
+        let harness = crate::http::tests::seeded_review_harness().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let routes = Services::new(harness.app).routes();
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_routes(routes)
+                .serve_with_incoming(TcpIncoming::from(listener))
+                .await
+                .unwrap();
+        });
+        let token = harness.token.clone();
+        let mut client = ReviewServiceClient::with_interceptor(
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .unwrap()
+                .connect()
+                .await
+                .unwrap(),
+            move |mut req: Request<()>| {
+                let value = MetadataValue::try_from(format!("Bearer {token}")).unwrap();
+                req.metadata_mut().insert("authorization", value);
+                let version =
+                    MetadataValue::try_from(graft_proto::PROTOCOL_VERSION.to_string()).unwrap();
+                req.metadata_mut()
+                    .insert(graft_proto::VERSION_HEADER, version);
+                Ok(req)
+            },
+        );
+        let got = client
+            .get_line_config(pb::GetLineConfigRequest {
+                repo: "graft".into(),
+                line: "main".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            LineConfig::try_from(got).unwrap(),
+            LineConfig {
+                line: "main".into(),
+                checks: LineChecksMode::PostLand,
+                required: vec!["ci/test".into()],
+                retries: 0,
+            }
+        );
+        let err = client
+            .get_line_config(pb::GetLineConfigRequest {
+                repo: "graft".into(),
+                line: "nope".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound, "{err:?}");
         server.abort();
     }
 

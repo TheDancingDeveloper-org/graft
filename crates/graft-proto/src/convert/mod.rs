@@ -2555,3 +2555,55 @@ impl TryFrom<pb::Resolved> for Resolved {
 
 #[cfg(test)]
 mod tests;
+
+impl From<GetLineConfig> for pb::GetLineConfigRequest {
+    fn from(r: GetLineConfig) -> Self {
+        pb::GetLineConfigRequest {
+            repo: r.repo,
+            line: r.line,
+        }
+    }
+}
+
+impl From<pb::GetLineConfigRequest> for GetLineConfig {
+    fn from(r: pb::GetLineConfigRequest) -> Self {
+        GetLineConfig {
+            repo: r.repo,
+            line: r.line,
+        }
+    }
+}
+
+impl From<LineConfig> for pb::LineConfig {
+    fn from(r: LineConfig) -> Self {
+        pb::LineConfig {
+            line: r.line,
+            checks: (match r.checks {
+                LineChecksMode::None => pb::LineChecksMode::None,
+                LineChecksMode::PostLand => pb::LineChecksMode::PostLand,
+            }) as i32,
+            required: r.required,
+            retries: r.retries,
+        }
+    }
+}
+
+impl TryFrom<pb::LineConfig> for LineConfig {
+    type Error = WireError;
+    fn try_from(r: pb::LineConfig) -> R<Self> {
+        let checks = match pb::LineChecksMode::try_from(r.checks) {
+            Ok(pb::LineChecksMode::None) => LineChecksMode::None,
+            Ok(pb::LineChecksMode::PostLand) => LineChecksMode::PostLand,
+            _ => return Err(bad("checks", "unknown line checks mode")),
+        };
+        if r.required.len() > MAX_LINE_CHECKS {
+            return Err(bad("required", "too many checks"));
+        }
+        Ok(LineConfig {
+            line: r.line,
+            checks,
+            required: r.required,
+            retries: r.retries,
+        })
+    }
+}

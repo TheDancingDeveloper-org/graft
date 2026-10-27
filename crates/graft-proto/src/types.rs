@@ -878,6 +878,43 @@ pub struct ReviewQueuePage {
     pub next_lsn: Option<u64>,
 }
 
+/// Most check names a [`LineConfig`] carries.
+pub const MAX_LINE_CHECKS: usize = 64;
+
+/// `GetLineConfig` request: a line's post-land check settings (v0.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GetLineConfig {
+    /// Repository.
+    pub repo: String,
+    /// The line.
+    pub line: String,
+}
+
+/// Whether a line tracks post-land checks.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LineChecksMode {
+    /// No land-check tracking.
+    #[default]
+    None,
+    /// Each landing waits on `required` after it lands; never gates a land.
+    PostLand,
+}
+
+/// `GetLineConfig` response.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineConfig {
+    /// The line.
+    pub line: String,
+    /// Its check tracking.
+    pub checks: LineChecksMode,
+    /// Checks a landing must pass, at most [`MAX_LINE_CHECKS`]; empty
+    /// unless `checks` is `PostLand`.
+    pub required: Vec<String>,
+    /// Failures of one check tolerated before the landing is bad.
+    pub retries: u32,
+}
+
 /// `Watch` request: read the journal from an LSN.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Watch {
