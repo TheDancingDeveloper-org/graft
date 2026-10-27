@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use graft_attester::github_runner::{
-    DEFAULT_API, DEFAULT_WORKFLOW, GitHubConfig, GitHubRunner, GitHubToken, read_secret,
+    DEFAULT_API, DEFAULT_MAX_IN_FLIGHT, DEFAULT_WORKFLOW, GitHubConfig, GitHubRunner, GitHubToken,
+    read_secret,
 };
 use graft_attester::post_land::{DEFAULT_WINDOW, PostLand, ProcessRunner, Runner};
 use graft_attester::{
@@ -86,6 +87,10 @@ struct Args {
     /// the changeset id follows (default `graft/check/<line>/`).
     #[arg(long)]
     ref_prefix: Option<String>,
+    /// `--runner github`: most workflow runs queued or in progress at once,
+    /// on any ref; a new snapshot waits for one to finish.
+    #[arg(long, default_value_t = DEFAULT_MAX_IN_FLIGHT, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    max_in_flight: usize,
     /// `--runner github`: seconds between polls of a run.
     #[arg(long, default_value_t = 15)]
     github_poll_s: u64,
@@ -209,6 +214,7 @@ fn github_config(args: &Args, cfg: &Config) -> Result<GitHubConfig, String> {
     gh.poll = Duration::from_secs(args.github_poll_s);
     gh.start_timeout = Duration::from_secs(args.github_start_timeout_s);
     gh.run_timeout = cfg.timeout;
+    gh.max_in_flight = args.max_in_flight;
     for check in &cfg.checks {
         gh.jobs.insert(check.name.clone(), check.argv[0].clone());
     }
@@ -496,6 +502,7 @@ mod tests {
         assert_eq!((gh.owner.as_str(), gh.repo.as_str()), ("owner", "graft"));
         assert_eq!(gh.job_of("ci/fmt"), "fmt");
         assert_eq!(gh.job_of("ci/test"), "unit-tests");
+        assert_eq!(gh.max_in_flight, 2, "two runs in flight by default");
         // The checks default to the line's `required`, read once connected.
         let args = Args::parse_from([
             "graft-attester",
@@ -509,6 +516,25 @@ mod tests {
         let cfg = config(&args).expect("config");
         assert!(cfg.checks.is_empty());
         assert!(github_config(&args, &cfg).is_err(), "needs --github-repo");
+        let args = Args::parse_from([
+            "graft-attester",
+            "--mode",
+            "post-land",
+            "--line",
+            "backlog-1",
+            "--runner",
+            "github",
+            "--github-repo",
+            "owner/graft",
+            "--max-in-flight",
+            "5",
+        ]);
+        let cfg = config(&args).expect("config");
+        assert_eq!(github_config(&args, &cfg).expect("gh").max_in_flight, 5);
+        assert!(
+            Args::try_parse_from(["graft-attester", "--max-in-flight", "0"]).is_err(),
+            "the cap is at least 1"
+        );
         // Only post-land mode runs on GitHub.
         let args = Args::parse_from(["graft-attester", "--runner", "github"]);
         assert!(config(&args).is_err());
