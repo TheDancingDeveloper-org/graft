@@ -238,227 +238,38 @@ where
     }
 }
 
+/// One `RepoApi` method of [`Waiting`]: the reads and the ref move the
+/// import retries go through [`Waiting::again`]; the rest pass straight
+/// through.
+macro_rules! waiting {
+    ($($name:ident($req:ty) -> $out:ty;)*) => {$(
+        async fn $name(&self, cx: &CallContext, req: $req) -> Result<$out, ApiError> {
+            waiting!(@call self, cx, req, $name)
+        }
+    )*};
+    (@call $self:ident, $cx:ident, $req:ident, get_changesets) => {
+        waiting!(@again $self, $cx, $req, get_changesets)
+    };
+    (@call $self:ident, $cx:ident, $req:ident, resolve_ref) => {
+        waiting!(@again $self, $cx, $req, resolve_ref)
+    };
+    (@call $self:ident, $cx:ident, $req:ident, update_ref) => {
+        waiting!(@again $self, $cx, $req, update_ref)
+    };
+    (@call $self:ident, $cx:ident, $req:ident, $name:ident) => {
+        $self.inner.$name($cx, $req).await
+    };
+    (@again $self:ident, $cx:ident, $req:ident, $name:ident) => {
+        $self.again(|| $self.inner.$name($cx, $req.clone())).await
+    };
+}
+
 impl<A, S> RepoApi for Waiting<'_, A, S>
 where
     A: AdminApi + ObjectApi + RepoApi,
     S: Sleeper,
 {
-    async fn create_changeset(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::CreateChangeset,
-    ) -> Result<graft_proto::types::Created, ApiError> {
-        self.inner.create_changeset(cx, req).await
-    }
-
-    async fn get_changesets(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::GetChangesets,
-    ) -> Result<graft_proto::types::Changesets, ApiError> {
-        self.again(|| self.inner.get_changesets(cx, req.clone()))
-            .await
-    }
-
-    async fn resolve_ref(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::ResolveRef,
-    ) -> Result<graft_proto::types::RefView, ApiError> {
-        self.again(|| self.inner.resolve_ref(cx, req.clone())).await
-    }
-
-    async fn list_refs(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::ListRefs,
-    ) -> Result<Vec<graft_proto::types::RefView>, ApiError> {
-        self.inner.list_refs(cx, req).await
-    }
-
-    async fn update_ref(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::UpdateRef,
-    ) -> Result<graft_proto::types::RefView, ApiError> {
-        self.again(|| self.inner.update_ref(cx, req.clone())).await
-    }
-
-    async fn create_line(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::CreateLine,
-    ) -> Result<graft_proto::types::RefView, ApiError> {
-        self.inner.create_line(cx, req).await
-    }
-
-    async fn stat(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::PathAt,
-    ) -> Result<graft_proto::types::EntryView, ApiError> {
-        self.inner.stat(cx, req).await
-    }
-
-    async fn list_tree(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::ListTree,
-    ) -> Result<graft_proto::types::Entries, ApiError> {
-        self.inner.list_tree(cx, req).await
-    }
-
-    async fn read_file(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::PathAt,
-    ) -> Result<graft_proto::types::FileContent, ApiError> {
-        self.inner.read_file(cx, req).await
-    }
-
-    async fn log(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Log,
-    ) -> Result<graft_proto::types::History, ApiError> {
-        self.inner.log(cx, req).await
-    }
-
-    async fn is_ancestor(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Pair,
-    ) -> Result<bool, ApiError> {
-        self.inner.is_ancestor(cx, req).await
-    }
-
-    async fn merge_base(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Pair,
-    ) -> Result<Option<ChangesetId>, ApiError> {
-        self.inner.merge_base(cx, req).await
-    }
-
-    async fn merge_base_via(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Pair,
-    ) -> Result<graft_proto::types::MergeBaseResult, ApiError> {
-        self.inner.merge_base_via(cx, req).await
-    }
-
-    async fn diff(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Diff,
-    ) -> Result<graft_proto::types::DiffResult, ApiError> {
-        self.inner.diff(cx, req).await
-    }
-
-    async fn blame(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Blame,
-    ) -> Result<graft_proto::types::BlameResult, ApiError> {
-        self.inner.blame(cx, req).await
-    }
-
-    async fn rebase(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Rebase,
-    ) -> Result<ChangesetId, ApiError> {
-        self.inner.rebase(cx, req).await
-    }
-
-    async fn revert(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Revert,
-    ) -> Result<ChangesetId, ApiError> {
-        self.inner.revert(cx, req).await
-    }
-
-    async fn land(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Land,
-    ) -> Result<graft_proto::types::Landed, ApiError> {
-        self.inner.land(cx, req).await
-    }
-
-    async fn line_merge(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::LineMerge,
-    ) -> Result<graft_proto::types::LineMergeOutcome, ApiError> {
-        self.inner.line_merge(cx, req).await
-    }
-
-    async fn line_merges(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::LineMerges,
-    ) -> Result<graft_proto::types::LineMergePage, ApiError> {
-        self.inner.line_merges(cx, req).await
-    }
-
-    async fn attest(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Attest,
-    ) -> Result<(), ApiError> {
-        self.inner.attest(cx, req).await
-    }
-
-    async fn attest_v2(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::AttestV2,
-    ) -> Result<(), ApiError> {
-        self.inner.attest_v2(cx, req).await
-    }
-
-    async fn get_attestations(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::GetAttestations,
-    ) -> Result<graft_proto::types::AttestationPage, ApiError> {
-        self.inner.get_attestations(cx, req).await
-    }
-
-    async fn get_land_checks(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::GetLandChecks,
-    ) -> Result<graft_proto::types::LandCheckPage, ApiError> {
-        self.inner.get_land_checks(cx, req).await
-    }
-
-    async fn review_queue(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::ReviewQueue,
-    ) -> Result<graft_proto::types::ReviewQueuePage, ApiError> {
-        self.inner.review_queue(cx, req).await
-    }
-
-    async fn get_line_config(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::GetLineConfig,
-    ) -> Result<graft_proto::types::LineConfig, ApiError> {
-        self.inner.get_line_config(cx, req).await
-    }
-
-    async fn watch(
-        &self,
-        cx: &CallContext,
-        req: graft_proto::types::Watch,
-    ) -> Result<graft_proto::types::JournalPage, ApiError> {
-        self.inner.watch(cx, req).await
-    }
+    graft_proto::forward_repo_api!(waiting);
 }
 
 #[cfg(test)]

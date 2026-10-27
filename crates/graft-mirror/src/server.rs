@@ -267,35 +267,7 @@ impl ObjectApi for Server {
 }
 
 impl RepoApi for Server {
-    delegate! {
-        create_changeset(CreateChangeset) -> Created;
-        get_changesets(GetChangesets) -> Changesets;
-        resolve_ref(ResolveRef) -> RefView;
-        list_refs(ListRefs) -> Vec<RefView>;
-        update_ref(UpdateRef) -> RefView;
-        create_line(CreateLine) -> RefView;
-        stat(PathAt) -> EntryView;
-        list_tree(ListTree) -> Entries;
-        read_file(PathAt) -> FileContent;
-        log(Log) -> History;
-        is_ancestor(Pair) -> bool;
-        merge_base(Pair) -> Option<ChangesetId>;
-        merge_base_via(Pair) -> MergeBaseResult;
-        diff(Diff) -> DiffResult;
-        blame(Blame) -> BlameResult;
-        rebase(Rebase) -> ChangesetId;
-        revert(Revert) -> ChangesetId;
-        land(Land) -> Landed;
-        line_merge(LineMerge) -> LineMergeOutcome;
-        line_merges(LineMerges) -> LineMergePage;
-        attest(Attest) -> ();
-        attest_v2(AttestV2) -> ();
-        get_attestations(GetAttestations) -> AttestationPage;
-        get_land_checks(GetLandChecks) -> LandCheckPage;
-        review_queue(ReviewQueue) -> ReviewQueuePage;
-        get_line_config(GetLineConfig) -> LineConfig;
-        watch(Watch) -> JournalPage;
-    }
+    graft_proto::forward_repo_api!(delegate);
 }
 
 impl WorkspaceApi for Server {
@@ -371,35 +343,7 @@ impl ObjectApi for Api {
 }
 
 impl RepoApi for Api {
-    api_delegate! {
-        create_changeset(CreateChangeset) -> Created;
-        get_changesets(GetChangesets) -> Changesets;
-        resolve_ref(ResolveRef) -> RefView;
-        list_refs(ListRefs) -> Vec<RefView>;
-        update_ref(UpdateRef) -> RefView;
-        create_line(CreateLine) -> RefView;
-        stat(PathAt) -> EntryView;
-        list_tree(ListTree) -> Entries;
-        read_file(PathAt) -> FileContent;
-        log(Log) -> History;
-        is_ancestor(Pair) -> bool;
-        merge_base(Pair) -> Option<ChangesetId>;
-        merge_base_via(Pair) -> MergeBaseResult;
-        diff(Diff) -> DiffResult;
-        blame(Blame) -> BlameResult;
-        rebase(Rebase) -> ChangesetId;
-        revert(Revert) -> ChangesetId;
-        land(Land) -> Landed;
-        line_merge(LineMerge) -> LineMergeOutcome;
-        line_merges(LineMerges) -> LineMergePage;
-        attest(Attest) -> ();
-        attest_v2(AttestV2) -> ();
-        get_attestations(GetAttestations) -> AttestationPage;
-        get_land_checks(GetLandChecks) -> LandCheckPage;
-        review_queue(ReviewQueue) -> ReviewQueuePage;
-        get_line_config(GetLineConfig) -> LineConfig;
-        watch(Watch) -> JournalPage;
-    }
+    graft_proto::forward_repo_api!(api_delegate);
 }
 
 impl AdminApi for Api {

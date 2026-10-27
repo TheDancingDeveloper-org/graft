@@ -244,6 +244,73 @@ pub trait RepoApi: Send + Sync {
     ) -> impl Future<Output = ApiResult<JournalPage>> + Send;
 }
 
+/// Hands every [`RepoApi`] method to a forwarding macro, so a wrapper that
+/// forwards the trait cannot skip one (WI-2630, WI-2638). Several methods
+/// have defaults, so a hand-written wrapper that leaves one out still
+/// compiles and answers the default even when the type behind it serves
+/// the RPC.
+///
+/// `forward_repo_api!(m)` expands to `m! { name(Req) -> Out; ... }` with
+/// one line per method, in trait order. `m` is the wrapper's own
+/// `macro_rules!` and writes each `async fn name(&self, cx: &CallContext,
+/// req: Req) -> ApiResult<Out>`. Use it inside `impl RepoApi for Wrapper`:
+///
+/// ```ignore
+/// macro_rules! delegate {
+///     ($($name:ident($req:ty) -> $out:ty;)*) => {$(
+///         async fn $name(&self, cx: &CallContext, req: $req) -> ApiResult<$out> {
+///             self.inner.$name(cx, req).await
+///         }
+///     )*};
+/// }
+/// impl RepoApi for Wrapper {
+///     graft_proto::forward_repo_api!(delegate);
+/// }
+/// ```
+///
+/// A method added to [`RepoApi`] must be added here too; graft-proto's
+/// `forward_repo_api` test fails until it is.
+#[macro_export]
+macro_rules! forward_repo_api {
+    ($m:ident) => {
+        $m! {
+            create_changeset($crate::types::CreateChangeset) -> $crate::types::Created;
+            get_changesets($crate::types::GetChangesets) -> $crate::types::Changesets;
+            resolve_ref($crate::types::ResolveRef) -> $crate::types::RefView;
+            list_refs($crate::types::ListRefs) -> ::std::vec::Vec<$crate::types::RefView>;
+            update_ref($crate::types::UpdateRef) -> $crate::types::RefView;
+            create_line($crate::types::CreateLine) -> $crate::types::RefView;
+            stat($crate::types::PathAt) -> $crate::types::EntryView;
+            list_tree($crate::types::ListTree) -> $crate::types::Entries;
+            read_file($crate::types::PathAt) -> $crate::types::FileContent;
+            log($crate::types::Log) -> $crate::types::History;
+            is_ancestor($crate::types::Pair) -> bool;
+            merge_base($crate::types::Pair) -> ::std::option::Option<$crate::api::__private::ChangesetId>;
+            merge_base_via($crate::types::Pair) -> $crate::types::MergeBaseResult;
+            diff($crate::types::Diff) -> $crate::types::DiffResult;
+            blame($crate::types::Blame) -> $crate::types::BlameResult;
+            rebase($crate::types::Rebase) -> $crate::api::__private::ChangesetId;
+            revert($crate::types::Revert) -> $crate::api::__private::ChangesetId;
+            land($crate::types::Land) -> $crate::types::Landed;
+            line_merge($crate::types::LineMerge) -> $crate::types::LineMergeOutcome;
+            line_merges($crate::types::LineMerges) -> $crate::types::LineMergePage;
+            attest($crate::types::Attest) -> ();
+            attest_v2($crate::types::AttestV2) -> ();
+            get_attestations($crate::types::GetAttestations) -> $crate::types::AttestationPage;
+            get_land_checks($crate::types::GetLandChecks) -> $crate::types::LandCheckPage;
+            review_queue($crate::types::ReviewQueue) -> $crate::types::ReviewQueuePage;
+            get_line_config($crate::types::GetLineConfig) -> $crate::types::LineConfig;
+            watch($crate::types::Watch) -> $crate::types::JournalPage;
+        }
+    };
+}
+
+/// Paths [`forward_repo_api!`] names, so callers need not depend on them.
+#[doc(hidden)]
+pub mod __private {
+    pub use graft_model::ChangesetId;
+}
+
 /// Workspace operations.
 pub trait WorkspaceApi: Send + Sync {
     /// Opens a workspace.
