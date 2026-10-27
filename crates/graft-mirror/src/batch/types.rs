@@ -242,6 +242,10 @@ pub struct BatchConfig {
     /// The line has `checks = "post-land"` on the server (design §8.7,
     /// phase 2): a batch is cut at the newest land whose prefix is settled
     /// in `GetLandChecks`. `false` batches as phase 1 does.
+    ///
+    /// Not read from the server. It must match the line's `checks` setting:
+    /// `true` only for a post-land line. A checked line batched with this
+    /// `false` ships lands whose checks have not run.
     pub checked: bool,
 }
 

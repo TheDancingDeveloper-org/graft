@@ -83,6 +83,11 @@
 //! found by one-row probes (O(log line length)), then once, paged, for at
 //! most the batch's lands.
 //!
+//! `--checks` is not read from the server. The flag must match the line's
+//! server `checks` setting: `post-land` only when the line is post-land, and
+//! omitted (or `off`) only when the line's checks are off. A checked line
+//! batched without the flag ships lands whose checks have not run.
+//!
 //! Costs follow the change: the sync reads one diff and one rebase; the land
 //! list is a first-parent `Log` from the tip back to the batch start, capped
 //! at [`MAX_LANDS`]; attestations come from a bounded read of the journal's

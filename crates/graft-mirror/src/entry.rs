@@ -49,10 +49,15 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
   pr-batch <line> --base <branch> --config <file> [--track]
            [--exclude <changeset>]... [--reason <text>]
            [--max-lands <n>] [--max-age <seconds>]
-           [--checks post-land]
+           [--checks post-land|off]
                                         sync an integration line onto the
                                         followed base, export its net change
-                                        as one squashed PR; never merges
+                                        as one squashed PR; never merges.
+                                        --checks must match the line's server
+                                        checks setting. The server does not
+                                        expose it, so a checked line batched
+                                        without --checks post-land ships lands
+                                        whose checks have not run.
   authority <status|freeze|verify|flip|unfreeze> --config <file> --line <l>
          [--last N]                     switch a line's authority safely
 

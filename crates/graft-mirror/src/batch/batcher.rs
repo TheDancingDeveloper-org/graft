@@ -2032,8 +2032,6 @@ where
     }
 }
 
-/// The recorded value of an attribution field: the new `agent.*` key, else
-/// the legacy name. The new key wins when both are set.
 /// The base the line held at `cut`: the newest sync at or before it in
 /// `ids` (newest first), else the base at the batch start.
 fn held_base(
@@ -2051,6 +2049,8 @@ fn held_base(
         .or(state.start_base)
 }
 
+/// The recorded value of an attribution field: the new `agent.*` key, else
+/// the legacy name. The new key wins when both are set.
 fn attribution_raw(metadata: &Metadata, key: graft_proto::attribution::Key) -> Option<&str> {
     graft_proto::attribution::get(metadata, key)
 }
