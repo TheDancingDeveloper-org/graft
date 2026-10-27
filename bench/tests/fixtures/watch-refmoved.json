@@ -1,0 +1,15 @@
+{
+  "entries": [
+    {
+      "body": "{\"name\":\"main\",\"old\":null,\"new\":\"c1744607291736fffb4258d566d4af062b7d8d869f8fafac434f9e32fdbcc4e2e\",\"version\":1,\"actor\":\"redacted\"}",
+      "kind": "RefMoved",
+      "lsn": 259
+    },
+    {
+      "body": "{\"name\":\"tags/v0.1.0\",\"old\":null,\"new\":\"cdaf45dfc5a2fb276a0b4a305fef19d2374313a3363839ae269d8856593bf89e3\",\"version\":1,\"actor\":\"redacted\"}",
+      "kind": "RefMoved",
+      "lsn": 260
+    }
+  ],
+  "next_lsn": 261
+}
