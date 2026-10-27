@@ -84,10 +84,7 @@ fn working_copy_diff(g: &Global, args: &DiffArgs) -> Result<(), Failure> {
     }
     if args.name_only {
         for change in &changes {
-            outln!("{:<9} {}", word(change), change.path());
-        }
-        if changes.is_empty() {
-            outln!("no changes against {}", short(wc.state().base));
+            outln!("{}", change.path());
         }
         return Ok(());
     }
@@ -103,10 +100,8 @@ fn print_working_copy_patches(wc: &WorkingCopy, changes: &[FileStatus]) -> Resul
     let cache = wc.open_cache(64 * 1024 * 1024)?;
     let rt = tokio::runtime::Builder::new_current_thread().build()?;
     let mut used = 0usize;
-    let mut truncated = false;
     for (index, change) in changes.iter().enumerate() {
         if used >= working_copy_patch_cap() {
-            truncated = true;
             let left = changes.len() - index;
             outln!(
                 "(truncated: patch cap reached, {left} file{} omitted)",
@@ -120,7 +115,6 @@ fn print_working_copy_patches(wc: &WorkingCopy, changes: &[FileStatus]) -> Resul
         used = used.saturating_add(shown.len());
         out!("{shown}");
         if cut {
-            truncated = true;
             let left = changes.len() - index - 1;
             if left > 0 {
                 outln!(
@@ -133,7 +127,6 @@ fn print_working_copy_patches(wc: &WorkingCopy, changes: &[FileStatus]) -> Resul
             break;
         }
     }
-    let _ = truncated;
     Ok(())
 }
 
@@ -410,6 +403,15 @@ fn changeset_diff(g: &Global, args: &DiffArgs, from: &str, to: &str) -> Result<(
             let rows = stat_of(&result.files);
             print_stat(&rows)?;
             print_omitted(result.files.len(), rows.len())?;
+            if let Some(next) = &result.next {
+                outln!("more: --cursor {next}");
+            }
+            return Ok(());
+        }
+        if args.name_only {
+            for f in &result.files {
+                outln!("{}", f.change.path());
+            }
             if let Some(next) = &result.next {
                 outln!("more: --cursor {next}");
             }

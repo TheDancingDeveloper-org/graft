@@ -329,6 +329,15 @@ fn diff_between_two_changesets_human_and_json() {
     insta::assert_json_snapshot!("diff_json", value);
     assert_eq!(value["from"], json!(from));
     assert_eq!(value["to"], json!(to));
+
+    let names = run_on(&s, &["diff", "--name-only", &from, &to]).success();
+    let names = text(names.get_output());
+    assert_eq!(
+        names.lines().collect::<Vec<_>>(),
+        ["docs/guide.md", "src/lib.rs"]
+    );
+    assert!(!names.contains("@@"), "{names}");
+    assert!(!names.contains("put "), "{names}");
 }
 
 #[test]
@@ -419,10 +428,7 @@ fn diff_of_the_working_copy_lists_its_changes() {
     assert!(shown.contains("+edited"), "{shown}");
     insta::assert_snapshot!("diff_working_copy", shown);
     let names = graft(&app).args(["diff", "--name-only"]).assert().success();
-    let names = text(names.get_output());
-    assert!(names.contains("README.md"), "{names}");
-    assert!(!names.contains("@@"), "{names}");
-    assert!(!names.contains("+edited"), "{names}");
+    assert_eq!(text(names.get_output()), "README.md\n");
 
     let out = graft(&app).args(["--json", "diff"]).assert().success();
     let value = json_out(out.get_output());
@@ -444,9 +450,29 @@ fn diff_of_the_working_copy_truncates_past_the_patch_cap() {
         .assert()
         .success();
     let shown = text(out.get_output());
-    assert!(shown.contains("(truncated: patch cap reached"), "{shown}");
-    assert!(shown.contains("@@") || shown.contains("one.txt"), "{shown}");
-    assert!(shown.len() < 400, "{shown}");
+    assert_eq!(
+        shown,
+        "added     one.txt\n--- /dev/null\n(truncated: patch cap reached, 1 file omitted)\n"
+    );
+    assert!(!shown.contains("two.txt"), "{shown}");
+}
+
+#[test]
+fn blame_human_and_json() {
+    let s = serve();
+    let out = run_on(&s, &["blame", "src/lib.rs"]).success();
+    insta::assert_snapshot!("blame_human", text(out.get_output()));
+
+    let out = run_on(&s, &["--json", "blame", "src/lib.rs", "--lines", "1:2"]).success();
+    let value = json_out(out.get_output());
+    assert_valid("blame", &value);
+    insta::assert_json_snapshot!("blame_json", value);
+    assert_eq!(value["ranges"][0]["start"], json!(1));
+    assert_eq!(value["ranges"][0]["end"], json!(2));
+    assert_eq!(
+        value["ranges"][0]["origin"]["id"],
+        json!(s.commits.second.to_string())
+    );
 }
 
 #[test]
