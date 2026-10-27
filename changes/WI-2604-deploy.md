@@ -1,0 +1,1 @@
+graft-dev: the line `exit-rehearsal` of `graft` tracks post-land checks (`ci/fmt`, `ci/clippy`, `ci/test`, one retry), graft-mirror-graft pushes its per-land check refs, and an opt-in `post-land` compose profile runs the GitHub-backed post-land checker; the image is repinned to main 2f6a05f. Runbook: docs/runbooks/v02-exit.md.

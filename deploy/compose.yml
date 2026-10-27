@@ -12,6 +12,11 @@
 #                 the trial line `trial-1` of `rusttorrent` and posts Attest
 #                 for ci/fmt, ci/clippy and ci/test (WI-2276, decision D21);
 #                 built from deploy/attester/Dockerfile
+#   graft-post-land  (profile `post-land`, off by default) the post-land
+#                 checker of graft's line exit-rehearsal: dispatches GitHub
+#                 runs per land, posts failures and lands reverts (v0.2
+#                 exit, docs/runbooks/v02-exit.md); target `checker` of
+#                 deploy/attester/Dockerfile
 #
 # Image: GRAFT_IMAGE from deploy/image.env, pinned by digest. Run compose with
 # `--env-file deploy/image.env` (up.sh does).
@@ -34,6 +39,10 @@
 #                            fluent2 and vogt mirrors
 #   /etc/graft/attester-token  graft-attester's token (0600, uid 0: only the
 #                            attester reads it, never the checks it runs)
+#   /etc/graft/post-land-token  the post-land checker's token (0600, uid
+#                            10001; read, attest, write and land on `graft`)
+#   /etc/graft/github-token  the mirrors' GitHub token, also read by the
+#                            post-land checker (0600, uid 10001)
 name: graft-dev
 
 x-graft: &graft
@@ -262,6 +271,67 @@ services:
       # cargo registry, target dir and HOME, shared by every draft's checks
       - graft-dev-attester-cache:/var/cache/graft-attester
 
+  # The post-land checker for the v0.2 exit (docs/runbooks/v02-exit.md). Off
+  # unless the `post-land` profile is on (GRAFT_POST_LAND=1 for up.sh). It
+  # follows the lands on GRAFT_POST_LAND_LINE of `graft`, dispatches
+  # graft-post-land.yml on each land's check ref (pushed by
+  # graft-mirror-graft's [[check_refs]]), reads the jobs, posts failures,
+  # bisects and lands reverts. It runs no checks itself: the image is the
+  # attester binary with no toolchain. Both token files are opened read-only
+  # and never appear in argv: the mirror's github-token, shared (operator
+  # decision), and its own graft token.
+  graft-post-land:
+    <<: *graft
+    profiles: [post-land]
+    build:
+      context: ..
+      dockerfile: deploy/attester/Dockerfile
+      target: checker
+      args:
+        CARGO_BUILD_JOBS: "${GRAFT_ATTESTER_JOBS:-2}"
+    image: graft-dev-post-land:local
+    pull_policy: build
+    container_name: graft-dev-post-land
+    hostname: graft-dev-post-land
+    cpus: 1
+    mem_limit: 512m
+    depends_on:
+      graft-server:
+        condition: service_healthy
+    command:
+      - --mode=post-land
+      - --runner=github
+      - --endpoint=http://graft-server:7878
+      - --repo=graft
+      - --line=${GRAFT_POST_LAND_LINE:-exit-rehearsal}
+      - --token-file=/run/secrets/graft-post-land-token
+      - --github-repo=TheDancingDeveloper-org/graft
+      - --github-token-file=/run/secrets/github-token
+      - --workflow=graft-post-land.yml
+      - --ref-prefix=graft/check/${GRAFT_POST_LAND_LINE:-exit-rehearsal}/
+      # Runs queued or in progress at once, across every ref: the checks use
+      # the org self-hosted pool, shared with the merge queues.
+      - --max-in-flight=${GRAFT_POST_LAND_MAX_IN_FLIGHT:-2}
+      # Per check job, from its started_at: above the workflow's own
+      # 45-minute job limit, so GitHub's timeout is the one that fires.
+      - --timeout-s=${GRAFT_POST_LAND_TIMEOUT_S:-3000}
+      - --root=/var/lib/graft-attester
+    volumes:
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/post-land-token
+        target: /run/secrets/graft-post-land-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
+        read_only: true
+        bind:
+          create_host_path: false
+      # state (journal position); work and logs stay empty with this runner
+      - graft-dev-post-land:/var/lib/graft-attester
+
 volumes:
   graft-dev-objects:
     name: graft-dev-objects
@@ -277,6 +347,8 @@ volumes:
     name: graft-dev-attester
   graft-dev-attester-cache:
     name: graft-dev-attester-cache
+  graft-dev-post-land:
+    name: graft-dev-post-land
 
 networks:
   graft-dev:

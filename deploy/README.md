@@ -17,7 +17,7 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 | `up.sh` | idempotent deploy: bootstrap secrets, pull, config pre-flight, `up -d --wait`, readiness gate with rollback, health check |
 | `backup/` | backup script, systemd timer, `install.sh`, `restore-rehearsal.sh` (WI-2307) |
 | `monitoring/` | Prometheus alert rules and scrape config for the ops repo (WI-2307) |
-| `attester/Dockerfile` | the trial attester's image (profile `attester`, off by default; see below) |
+| `attester/Dockerfile` | the trial attester's image (profile `attester`, off by default; see below), and target `checker`, the post-land checker's (profile `post-land`, off by default) |
 
 The workflow is `.github/workflows/deploy-dev.yml`: on a push to `main` that
 touches `deploy/**`, and on `workflow_dispatch`, it runs `deploy/up.sh` on the
@@ -60,6 +60,7 @@ by uid 10001, mounted read-only:
 | `/etc/graft/mirror-token` | `/run/secrets/graft-mirror-token` | `up.sh`, minted by the running server |
 | `/etc/graft/mirror-token-fluent2`, `/etc/graft/mirror-token-vogt` | `/run/secrets/graft-mirror-token` in their own mirror | `up.sh`, the same way, each scoped `repo:<its repo>:admin` |
 | `/etc/graft/attester-token` | `/run/secrets/graft-attester-token` | `up.sh` with `GRAFT_ATTESTER=1`; owned by root, not uid 10001 (see below) |
+| `/etc/graft/post-land-token` | `/run/secrets/graft-post-land-token` in `graft-post-land` | `up.sh` with `GRAFT_POST_LAND=1`; scopes `read`, `attest`, `write` on `graft` and `land` on the checked line (see below) |
 
 `up.sh` writes them from a throwaway root container of the pinned image, so
 the runner user needs only the docker group, not sudo. A missing file stops
@@ -310,6 +311,19 @@ Turning it off: remove `GRAFT_ATTESTER=1`, then
 `docker compose --env-file deploy/image.env -f deploy/compose.yml --profile attester rm -sf graft-attester`.
 A push that changes only `crates/graft-attester` does not redeploy (the
 workflow watches `deploy/**`). Run `deploy/up.sh` or the workflow by hand.
+
+## Post-land checker (v0.2 exit, WI-2604)
+
+The compose profile `post-land` runs `graft-post-land`: `graft-attester
+--mode post-land --runner github` on the line `GRAFT_POST_LAND_LINE`
+(default `exit-rehearsal`) of `graft`. It is **off by default**; turn it on
+with `GRAFT_POST_LAND=1` in `/etc/graft/deploy.env`. It reads the mirrors'
+`github-token` (shared, read-only) and its own `post-land-token`; `up.sh`
+refuses to enable it without the first and mints the second. The token
+needs `write` on the repository as well as `land` on the line, because a
+revert requires write on every path the bad land touched. The procedure,
+the measurements, rotation and the switch to `backlog-1` are in
+[docs/runbooks/v02-exit.md](../docs/runbooks/v02-exit.md).
 
 ## Deploy safety: pre-flight and rollback (WI-2291)
 

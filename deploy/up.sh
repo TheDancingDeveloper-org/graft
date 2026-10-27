@@ -32,6 +32,13 @@
 # by root so the checks the attester runs as uid 10001 can't read it), builds
 # the attester image from this checkout and starts it.
 #
+# With GRAFT_POST_LAND=1 (v0.2 exit; off by default) it also turns on the
+# compose profile `post-land`: it mints the post-land checker's token into
+# post-land-token (`read`, `attest` and `write` on `graft`, and `land` on
+# the checked line; 0600, uid 10001), builds the checker image (target
+# `checker`) and starts it. The checker reads the mirrors' github-token,
+# so a missing one stops the deploy. docs/runbooks/v02-exit.md.
+#
 # Needs: docker with compose v2, curl, and membership of the docker group.
 # Non-secret host settings (GRAFT_BIND_IP, ports) may go in
 # /etc/graft/deploy.env. Environment overrides:
@@ -49,6 +56,10 @@
 #   GRAFT_ATTESTER=1        run the trial attester (profile `attester`)
 #   GRAFT_ATTESTER_REPO     the repository it attests (default rusttorrent)
 #   GRAFT_ATTESTER_LINE     the line whose drafts it attests (default trial-1)
+#   GRAFT_POST_LAND=1       run the post-land checker (profile `post-land`)
+#   GRAFT_POST_LAND_LINE    the line of `graft` it checks (default
+#                           exit-rehearsal); its token's `land` scope names
+#                           it, so changing it needs GRAFT_REMINT=1
 #   GRAFT_READY_WAIT        seconds to wait for /readyz after a swap (default 120)
 #
 # Exit status: 0 deployed; 1 failed. A failed pre-flight or a rollback says so
@@ -97,13 +108,26 @@ ttl=2592000
 attester=${GRAFT_ATTESTER:-0}
 attester_repo=${GRAFT_ATTESTER_REPO:-rusttorrent}
 export GRAFT_ATTESTER_REPO=$attester_repo
+profiles=()
 if [ "$attester" = 1 ]; then
-  export COMPOSE_PROFILES=attester
+  profiles+=(attester)
   # Created if it is not one the stack already serves (the default is).
   case " ${repos[*]} " in
     *" $attester_repo "*) ;;
     *) repos+=("$attester_repo") ;;
   esac
+fi
+post_land=${GRAFT_POST_LAND:-0}
+post_land_line=${GRAFT_POST_LAND_LINE:-exit-rehearsal}
+export GRAFT_POST_LAND_LINE=$post_land_line
+if [ "$post_land" = 1 ]; then
+  profiles+=(post-land)
+  [[ $post_land_line =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+    || { printf 'up.sh: error: bad GRAFT_POST_LAND_LINE\n' >&2; exit 1; }
+fi
+if [ "${#profiles[@]}" -gt 0 ]; then
+  COMPOSE_PROFILES=$(IFS=,; printf '%s' "${profiles[*]}")
+  export COMPOSE_PROFILES
 fi
 renew_days=${GRAFT_TOKEN_RENEW_DAYS:-20}
 refs_wait=${GRAFT_REFS_WAIT:-600}
@@ -242,6 +266,9 @@ install_mounted_configs() {
 }
 
 install_github_token /etc/graft/github-token
+if [ "$post_land" = 1 ] && [ "$github_ready" != 1 ]; then
+  die "GRAFT_POST_LAND=1 needs /etc/graft/github-token: the post-land checker dispatches GitHub runs with it"
+fi
 prepare_mounted_configs
 
 log "pulling $GRAFT_IMAGE"
@@ -421,6 +448,29 @@ if [ "$attester" = 1 ]; then
   compose build graft-attester
 fi
 
+# The post-land checker's token. `land` on its line lands the reverts;
+# `write` on the whole repository is what a revert needs, since Revert
+# requires write on every path the bad land touched; `attest` posts the
+# failures and interior passes; `read` follows the journal. Owned by uid
+# 10001, the checker's user, which runs no checks. TTL 30 days, re-minted
+# after GRAFT_TOKEN_RENEW_DAYS (20) by the next deploy.
+post_land_mint=0
+post_land_was_up=
+if [ "$post_land" = 1 ]; then
+  due post-land-token "post-land checker token" && post_land_mint=1
+  post_land_was_up=$(compose ps -q graft-post-land)
+  if [ "$post_land_mint" = 1 ]; then
+    compose exec -T graft-server graft-server admin token mint \
+      --subject graft-post-land-graft --kind service \
+      --scope repo:graft:read --scope repo:graft:attest \
+      --scope repo:graft:write --scope "repo:graft:land:$post_land_line" \
+      --ttl "$ttl" \
+      | store_secret post-land-token
+  fi
+  log "building the post-land checker image from $here/.."
+  compose build graft-post-land
+fi
+
 log "starting the stack"
 compose up -d --wait --remove-orphans \
   || rollback "the stack did not become healthy on $GRAFT_IMAGE"
@@ -430,6 +480,9 @@ if [ "${#restart_mirrors[@]}" -gt 0 ]; then
 fi
 if [ "$attester_mint" = 1 ] && [ -n "$attester_was_up" ]; then
   compose up -d --wait --no-deps --force-recreate graft-attester
+fi
+if [ "$post_land_mint" = 1 ] && [ -n "$post_land_was_up" ]; then
+  compose up -d --wait --no-deps --force-recreate graft-post-land
 fi
 
 log "health: $base/healthz"
