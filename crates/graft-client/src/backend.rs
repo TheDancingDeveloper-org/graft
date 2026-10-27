@@ -76,96 +76,17 @@ impl ObjectApi for Backend {
     }
 }
 
+/// One `RepoApi` method of [`Backend`], through `forward!`.
+macro_rules! forward_repo {
+    ($($name:ident($req:ty) -> $out:ty;)*) => {$(
+        async fn $name(&self, cx: &CallContext, req: $req) -> ApiResult<$out> {
+            forward!(self.$name(cx, req))
+        }
+    )*};
+}
+
 impl RepoApi for Backend {
-    async fn create_changeset(&self, cx: &CallContext, req: CreateChangeset) -> ApiResult<Created> {
-        forward!(self.create_changeset(cx, req))
-    }
-    async fn get_changesets(&self, cx: &CallContext, req: GetChangesets) -> ApiResult<Changesets> {
-        forward!(self.get_changesets(cx, req))
-    }
-    async fn resolve_ref(&self, cx: &CallContext, req: ResolveRef) -> ApiResult<RefView> {
-        forward!(self.resolve_ref(cx, req))
-    }
-    async fn list_refs(&self, cx: &CallContext, req: ListRefs) -> ApiResult<Vec<RefView>> {
-        forward!(self.list_refs(cx, req))
-    }
-    async fn update_ref(&self, cx: &CallContext, req: UpdateRef) -> ApiResult<RefView> {
-        forward!(self.update_ref(cx, req))
-    }
-    async fn create_line(&self, cx: &CallContext, req: CreateLine) -> ApiResult<RefView> {
-        forward!(self.create_line(cx, req))
-    }
-    async fn stat(&self, cx: &CallContext, req: PathAt) -> ApiResult<EntryView> {
-        forward!(self.stat(cx, req))
-    }
-    async fn list_tree(&self, cx: &CallContext, req: ListTree) -> ApiResult<Entries> {
-        forward!(self.list_tree(cx, req))
-    }
-    async fn read_file(&self, cx: &CallContext, req: PathAt) -> ApiResult<FileContent> {
-        forward!(self.read_file(cx, req))
-    }
-    async fn log(&self, cx: &CallContext, req: Log) -> ApiResult<History> {
-        forward!(self.log(cx, req))
-    }
-    async fn is_ancestor(&self, cx: &CallContext, req: Pair) -> ApiResult<bool> {
-        forward!(self.is_ancestor(cx, req))
-    }
-    async fn merge_base(&self, cx: &CallContext, req: Pair) -> ApiResult<Option<ChangesetId>> {
-        forward!(self.merge_base(cx, req))
-    }
-    async fn merge_base_via(&self, cx: &CallContext, req: Pair) -> ApiResult<MergeBaseResult> {
-        forward!(self.merge_base_via(cx, req))
-    }
-    async fn diff(&self, cx: &CallContext, req: Diff) -> ApiResult<DiffResult> {
-        forward!(self.diff(cx, req))
-    }
-    async fn blame(&self, cx: &CallContext, req: Blame) -> ApiResult<BlameResult> {
-        forward!(self.blame(cx, req))
-    }
-    async fn rebase(&self, cx: &CallContext, req: Rebase) -> ApiResult<ChangesetId> {
-        forward!(self.rebase(cx, req))
-    }
-    async fn revert(&self, cx: &CallContext, req: Revert) -> ApiResult<ChangesetId> {
-        forward!(self.revert(cx, req))
-    }
-    async fn land(&self, cx: &CallContext, req: Land) -> ApiResult<Landed> {
-        forward!(self.land(cx, req))
-    }
-    async fn line_merge(&self, cx: &CallContext, req: LineMerge) -> ApiResult<LineMergeOutcome> {
-        forward!(self.line_merge(cx, req))
-    }
-    async fn line_merges(&self, cx: &CallContext, req: LineMerges) -> ApiResult<LineMergePage> {
-        forward!(self.line_merges(cx, req))
-    }
-    async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
-        forward!(self.attest(cx, req))
-    }
-    async fn attest_v2(&self, cx: &CallContext, req: AttestV2) -> ApiResult<()> {
-        forward!(self.attest_v2(cx, req))
-    }
-    async fn get_attestations(
-        &self,
-        cx: &CallContext,
-        req: GetAttestations,
-    ) -> ApiResult<AttestationPage> {
-        forward!(self.get_attestations(cx, req))
-    }
-    async fn get_land_checks(
-        &self,
-        cx: &CallContext,
-        req: GetLandChecks,
-    ) -> ApiResult<LandCheckPage> {
-        forward!(self.get_land_checks(cx, req))
-    }
-    async fn review_queue(&self, cx: &CallContext, req: ReviewQueue) -> ApiResult<ReviewQueuePage> {
-        forward!(self.review_queue(cx, req))
-    }
-    async fn get_line_config(&self, cx: &CallContext, req: GetLineConfig) -> ApiResult<LineConfig> {
-        forward!(self.get_line_config(cx, req))
-    }
-    async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
-        forward!(self.watch(cx, req))
-    }
+    graft_proto::forward_repo_api!(forward_repo);
 }
 
 impl WorkspaceApi for Backend {
