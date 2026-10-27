@@ -819,7 +819,10 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
             kind: AttestKind::Check,
             check: check.to_owned(),
             status: AttestStatus::from_passed(passed),
-            by: Some(ATTESTER_NAME.to_owned()),
+            // A check report is the v0.1 shape: kind CHECK and a pass or
+            // fail. Leaving `by` unset lets a server that only implements
+            // `attest` accept it. Review and approval set the name.
+            by: None,
             url: url.to_owned(),
         };
         let tries = self.cfg.attest_tries.max(1);
