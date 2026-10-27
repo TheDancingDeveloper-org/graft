@@ -28,6 +28,13 @@ jobs:
       CHANGESET: ${{ inputs.changeset }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      - name: Install the graft client from the deployed server image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          docker cp graft-dev-server:/usr/local/bin/graft "$RUNNER_TEMP/bin/graft"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Exchange identity and attest
         shell: bash
         run: |
