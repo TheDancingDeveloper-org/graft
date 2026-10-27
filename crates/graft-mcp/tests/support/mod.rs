@@ -14,7 +14,7 @@
 pub mod http;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use graft_model::{
     Author, AuthorKind, BlobId, Change, Changeset, ChangesetId, EntryKind, Metadata, ObjectId,
@@ -141,6 +141,8 @@ pub struct Fake {
     overlaps: Vec<(String, String, String)>,
     /// Whether `get_workspace` exposes a workspace at c1 on main.
     upstream_workspace: bool,
+    /// Attestations posted through the v0.2 API.
+    attestations: Mutex<Vec<Attestation>>,
 }
 
 impl Fake {
@@ -232,6 +234,7 @@ impl Fake {
             synced_paths: Vec::new(),
             overlaps: Vec::new(),
             upstream_workspace: false,
+            attestations: Mutex::new(Vec::new()),
         };
         for i in 1..=count {
             let id = cid(i);
@@ -600,6 +603,157 @@ impl RepoApi for Fake {
 
     async fn attest(&self, _: &CallContext, _: Attest) -> ApiResult<()> {
         Self::unavailable()
+    }
+
+    async fn attest_v2(&self, _: &CallContext, req: AttestV2) -> ApiResult<()> {
+        self.check_at(req.changeset)?;
+        self.attestations.lock().unwrap().push(Attestation {
+            changeset: req.changeset,
+            kind: req.kind,
+            check: req.check,
+            status: req.status,
+            by: req.by,
+            url: req.url,
+        });
+        Ok(())
+    }
+
+    async fn get_attestations(
+        &self,
+        _: &CallContext,
+        req: GetAttestations,
+    ) -> ApiResult<AttestationPage> {
+        let all = self.attestations.lock().unwrap();
+        let mut matching = all
+            .iter()
+            .filter(|item| match &req.selector {
+                AttestationSelector::ByChangeset(id) => item.changeset == *id,
+                AttestationSelector::ByLineRange {
+                    line,
+                    from_pos,
+                    to_pos,
+                } => {
+                    line == "main"
+                        && self
+                            .order
+                            .iter()
+                            .position(|id| *id == item.changeset)
+                            .is_some_and(|index| {
+                                let pos = index as u64 + 1;
+                                pos >= *from_pos && pos <= *to_pos
+                            })
+                }
+                _ => false,
+            })
+            .filter(|item| req.kinds.is_empty() || req.kinds.contains(&item.kind))
+            .cloned()
+            .collect::<Vec<_>>();
+        let start = req
+            .page
+            .token
+            .as_deref()
+            .unwrap_or("0")
+            .parse::<usize>()
+            .map_err(|_| ApiError::InvalidChange {
+                path: "cursor".into(),
+                rule: "bad page token".into(),
+            })?;
+        let end = (start + req.page.limit as usize).min(matching.len());
+        let next = (end < matching.len()).then(|| end.to_string());
+        matching = matching.get(start..end).unwrap_or_default().to_vec();
+        Ok(AttestationPage {
+            attestations: matching,
+            next,
+        })
+    }
+
+    async fn get_land_checks(
+        &self,
+        _: &CallContext,
+        req: GetLandChecks,
+    ) -> ApiResult<LandCheckPage> {
+        if req.line != "main" {
+            return Err(ApiError::NotFound {
+                what: format!("line {}", req.line),
+            });
+        }
+        let start = req
+            .page
+            .token
+            .as_deref()
+            .map(str::parse::<usize>)
+            .transpose()
+            .map_err(|_| ApiError::InvalidChange {
+                path: "cursor".into(),
+                rule: "bad page token".into(),
+            })?
+            .unwrap_or_else(|| req.from_pos.saturating_sub(1) as usize);
+        let end = (start + req.page.limit as usize).min(self.order.len());
+        let rows = self.order[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, id)| LandCheck {
+                pos: (start + offset + 1) as u64,
+                changeset: *id,
+                state: LandCheckState::Good,
+                revert: None,
+            })
+            .collect();
+        Ok(LandCheckPage {
+            rows,
+            next: (end < self.order.len()).then(|| end.to_string()),
+        })
+    }
+
+    async fn review_queue(&self, _: &CallContext, req: ReviewQueue) -> ApiResult<ReviewQueuePage> {
+        if req.line != "main" {
+            return Err(ApiError::NotFound {
+                what: format!("line {}", req.line),
+            });
+        }
+        let attestations = self.attestations.lock().unwrap();
+        let pending = self
+            .order
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| (*index as u64 + 1) > req.since_lsn)
+            .filter(|(_, id)| {
+                !attestations.iter().any(|item| {
+                    item.changeset == **id
+                        && item.kind == AttestKind::Review
+                        && item.status == AttestStatus::Pass
+                })
+            })
+            .filter(|(_, id)| {
+                req.path_prefix.as_ref().is_none_or(|prefix| {
+                    self.changesets[id]
+                        .changes
+                        .iter()
+                        .any(|change| change.path().starts_with(prefix))
+                })
+            })
+            .filter(|(_, id)| {
+                req.max_lines
+                    .is_none_or(|max| self.changesets[id].changes.len() <= max as usize)
+            })
+            .take(req.page.limit as usize + 1)
+            .map(|(index, id)| {
+                let changeset = &self.changesets[id];
+                ReviewItem {
+                    changeset: *id,
+                    pos: index as u64 + 1,
+                    lsn: index as u64 + 1,
+                    author: changeset.author.clone(),
+                    paths_touched: changeset.changes.len() as u32,
+                    lines_changed: changeset.changes.len() as u64,
+                }
+            })
+            .collect::<Vec<_>>();
+        let more = pending.len() > req.page.limit as usize;
+        let mut items = pending;
+        items.truncate(req.page.limit as usize);
+        let next_lsn = more.then(|| items.last().unwrap().lsn);
+        Ok(ReviewQueuePage { items, next_lsn })
     }
 
     async fn watch(&self, _: &CallContext, _: Watch) -> ApiResult<JournalPage> {
