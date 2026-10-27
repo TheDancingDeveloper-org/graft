@@ -1377,6 +1377,7 @@ async fn a_revert_left_by_an_interrupted_run_is_appended_to_the_open_batch() {
                 changeset: a,
                 onto: tip.unwrap(),
                 workspace: None,
+                check_url: None,
             },
         )
         .await
@@ -2325,6 +2326,7 @@ impl World {
                     changeset: land,
                     onto: tip,
                     workspace: None,
+                    check_url: None,
                 },
             )
             .await

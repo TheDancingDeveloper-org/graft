@@ -86,8 +86,9 @@ pub(crate) const KIND_VERSION: u32 = 1;
 /// The longest check name, in bytes.
 pub const MAX_CHECK_NAME: usize = 128;
 
-/// The longest attestation URL, in bytes.
-pub const MAX_ATTEST_URL: usize = 2048;
+/// The longest attestation URL, in bytes (also bounds a revert's
+/// `check_url`).
+pub const MAX_ATTEST_URL: usize = graft_proto::types::MAX_ATTEST_URL;
 
 /// How many `graft.rebased-from` links an attestation lookup follows.
 pub const REBASED_HOPS: usize = 16;

@@ -9,7 +9,9 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use graft_attester::post_land::{BlockReason, PostLand, PostLandReport, REVERTS, Run, Runner};
+use graft_attester::post_land::{
+    BlockReason, PostLand, PostLandReport, REVERT_CHECK, REVERTS, Run, Runner,
+};
 use graft_attester::{Attester, Check, Config, Error, Outcome, call_context};
 use graft_client::{Endpoint, Remote};
 use graft_engine::policy::LineChecks;
@@ -589,6 +591,16 @@ async fn bisection_finds_the_first_bad_land_and_one_revert_settles_the_rest() {
         reverted[0].1["check"], TEST,
         "the failed check is journalled"
     );
+    // WI-2608: the revert carries the link of the last failed run of k.
+    let failed_url = entries(&rig.engine, "Attested")
+        .await
+        .into_iter()
+        .rev()
+        .find(|(_, b)| b["changeset"] == bad.to_string() && b["passed"] == false)
+        .map(|(_, b)| b["url"].as_str().expect("url").to_owned())
+        .expect("a failed attestation of k");
+    assert!(failed_url.starts_with(&format!("https://ci.example/{bad}/{TEST}/")));
+    assert_eq!(revert_cs.metadata[REVERT_CHECK], failed_url);
 
     // Every land is attested: k failed, every other land (and the revert)
     // passed every check, and never both.

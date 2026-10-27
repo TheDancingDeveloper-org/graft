@@ -296,6 +296,7 @@ fn a_revert_marks_its_landing<M: MetaStore>(f: &Fixture<M>) {
             changeset: a,
             onto: a,
             workspace: None,
+            check_url: None,
         },
     ))
     .expect("revert");
@@ -318,6 +319,48 @@ fn a_revert_marks_its_landing<M: MetaStore>(f: &Fixture<M>) {
     t.check(a, "build", AttestStatus::Pass);
     t.check(a, "test", AttestStatus::Pass);
     assert_eq!(t.state("chk", a), LandCheckState::Reverted);
+}
+
+// WI-2608: a revert given the failed run's URL stamps it as
+// `graft.revert-check`, rebased or not; one without has none; an over-long
+// URL is refused.
+fn a_revert_carries_its_check_url<M: MetaStore>(f: &Fixture<M>) {
+    let t = T::new(f);
+    let a = t.land(t.commit(t.root, "b", b"b1"), "chk");
+    let tip = t.land(t.commit(a, "c", b"c1"), "chk");
+    let revert = |onto, check_url: Option<String>| {
+        block_on(t.r.e().revert(
+            &t.r.cx,
+            Revert {
+                repo: "r".to_owned(),
+                changeset: a,
+                onto,
+                workspace: None,
+                check_url,
+            },
+        ))
+    };
+    let url = "https://ci.example/runs/42";
+    for onto in [a, tip] {
+        let with = revert(onto, Some(url.to_owned())).expect("revert");
+        let meta = &t.r.changeset(with).changeset.metadata;
+        assert_eq!(
+            meta.get(graft_engine::REVERT_CHECK).map(String::as_str),
+            Some(url)
+        );
+        assert_eq!(
+            meta.get(graft_engine::REVERTS).map(String::as_str),
+            Some(a.to_string().as_str())
+        );
+        let without = revert(onto, None).expect("revert");
+        let meta = &t.r.changeset(without).changeset.metadata;
+        assert!(!meta.contains_key(graft_engine::REVERT_CHECK));
+    }
+    let long = "u".repeat(graft_engine::MAX_ATTEST_URL + 1);
+    assert!(matches!(
+        revert(a, Some(long)),
+        Err(ApiError::LimitExceeded { ref limit, .. }) if limit == "revert-check-url"
+    ));
 }
 
 // Paging through both reads.
@@ -433,6 +476,7 @@ on_both!(
     old_attest_journals_old_keys_and_kind,
     reviews_and_approvals_gate_nothing,
     a_revert_marks_its_landing,
+    a_revert_carries_its_check_url,
     reads_page,
     reads_need_read,
 );
