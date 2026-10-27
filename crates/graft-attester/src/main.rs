@@ -12,7 +12,8 @@ use std::time::Duration;
 use clap::Parser;
 use graft_attester::post_land::{DEFAULT_WINDOW, PostLand, ProcessRunner};
 use graft_attester::{
-    Attester, Check, Config, DEFAULT_CHECKS, DEFAULT_LINE, DEFAULT_REPO, Mode, log,
+    Attester, Check, Config, DEFAULT_CHECKS, DEFAULT_LINE, DEFAULT_REPO, Mode, RetriesSource,
+    call_context, effective_retries, log,
 };
 use graft_client::{Endpoint, Remote};
 
@@ -36,11 +37,11 @@ struct Args {
     #[arg(long)]
     line: Option<String>,
     /// Post-land: times a failed check is run again before the land is bad.
-    /// The checker does not read the line's `retries` from the server yet,
-    /// so set this to the line's `retries` setting; a different value makes
-    /// the checker's verdicts and the server's land-checks rows disagree.
-    #[arg(long, default_value_t = 1)]
-    retries: u32,
+    /// Overrides the line's `retries` from `GetLineConfig`. When omitted,
+    /// the line's value is used. An older server that does not implement
+    /// `GetLineConfig` falls back to this value, or to 0 when it is omitted.
+    #[arg(long)]
+    retries: Option<u32>,
     /// Post-land: most lands held at once.
     #[arg(long, default_value_t = DEFAULT_WINDOW)]
     window: usize,
@@ -186,16 +187,32 @@ async fn main() -> ExitCode {
     };
     let checks: Vec<&str> = cfg.checks.iter().map(|c| c.name.as_str()).collect();
     if args.mode == Mode::PostLand {
+        let chosen =
+            match effective_retries(&remote, &call_context(), &cfg.repo, &cfg.line, args.retries)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    log(&format!("error: line config: {e}"));
+                    return ExitCode::FAILURE;
+                }
+            };
+        if chosen.source == RetriesSource::Fallback {
+            log(&format!(
+                "warning: the server does not implement GetLineConfig; retries {} for line {}",
+                chosen.retries, cfg.line
+            ));
+        }
         log(&format!(
             "checking lands on {} line {} on {}; checks {}, retries {}",
             cfg.repo,
             cfg.line,
             args.endpoint,
             checks.join(", "),
-            args.retries
+            chosen.retries
         ));
         let runner = ProcessRunner::new(cfg.clone());
-        let mut checker = match PostLand::new(remote, runner, cfg, args.retries) {
+        let mut checker = match PostLand::new(remote, runner, cfg, chosen.retries) {
             Ok(c) => c,
             Err(e) => {
                 log(&format!("error: {e}"));

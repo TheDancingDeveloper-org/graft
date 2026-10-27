@@ -70,7 +70,9 @@ use graft_client::fetch::FetchOptions;
 use graft_client::workcopy::{self, WcConfig};
 use graft_model::ChangesetId;
 use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
-use graft_proto::types::{Attest, DraftState, GetChangesets, JournalEntry, Watch, WorkspaceRef};
+use graft_proto::types::{
+    Attest, DraftState, GetChangesets, GetLineConfig, JournalEntry, Watch, WorkspaceRef,
+};
 use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
@@ -512,6 +514,71 @@ impl From<ApiError> for Error {
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Error::Io(e)
+    }
+}
+
+/// The call context the attester calls with. The server derives the real
+/// principal from the token; this one names the caller in request ids.
+/// Where the post-land retry count came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetriesSource {
+    /// `GetLineConfig` answered.
+    Line,
+    /// `--retries` was set.
+    Flag,
+    /// The server does not implement `GetLineConfig`; the flag or 0.
+    Fallback,
+}
+
+/// The retry count the post-land checker will use, and where it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectiveRetries {
+    /// Failures of one check tolerated before a land is bad.
+    pub retries: u32,
+    /// Why this count was chosen.
+    pub source: RetriesSource,
+}
+
+fn line_config_unimplemented(err: &ApiError) -> bool {
+    matches!(err, ApiError::Rejected { policy, .. } if policy == "unimplemented")
+}
+
+/// Post-land retries for `line`.
+///
+/// Uses the line's `retries` from `GetLineConfig`. `flag` is `--retries`
+/// and wins when it was given. An older server that returns
+/// `Rejected{policy:"unimplemented"}` falls back to the flag, or `0` when
+/// it was not given.
+pub async fn effective_retries<A: RepoApi>(
+    api: &A,
+    cx: &CallContext,
+    repo: &str,
+    line: &str,
+    flag: Option<u32>,
+) -> Result<EffectiveRetries, ApiError> {
+    match api
+        .get_line_config(
+            cx,
+            GetLineConfig {
+                repo: repo.to_owned(),
+                line: line.to_owned(),
+            },
+        )
+        .await
+    {
+        Ok(cfg) => Ok(EffectiveRetries {
+            retries: flag.unwrap_or(cfg.retries),
+            source: if flag.is_some() {
+                RetriesSource::Flag
+            } else {
+                RetriesSource::Line
+            },
+        }),
+        Err(e) if line_config_unimplemented(&e) => Ok(EffectiveRetries {
+            retries: flag.unwrap_or(0),
+            source: RetriesSource::Fallback,
+        }),
+        Err(e) => Err(e),
     }
 }
 
