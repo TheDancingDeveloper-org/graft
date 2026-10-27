@@ -631,11 +631,185 @@ mod tests {
         assert!(check(&[empty]).is_err());
     }
 
+    /// `journal_tip` returns the current tip, then appends the owed entry
+    /// before `journal` runs. The first delivery already sees it at tip+1.
+    /// There is no earlier empty look.
+    struct TipThenEntry {
+        inner: Arc<SqliteMetaStore>,
+        pending: Mutex<Option<(&'static str, &'static str)>>,
+        planted: Arc<Mutex<Option<Lsn>>>,
+    }
+
+    impl MetaStore for TipThenEntry {
+        fn create_repo(&self, name: &str) -> impl Future<Output = StoreResult<RepoId>> + Send {
+            self.inner.create_repo(name)
+        }
+        fn repo(&self, name: &str) -> impl Future<Output = StoreResult<Option<RepoId>>> + Send {
+            self.inner.repo(name)
+        }
+        fn commit(
+            &self,
+            repo: RepoId,
+            txn: MetaTxn,
+        ) -> impl Future<Output = StoreResult<TxnOutcome>> + Send {
+            self.inner.commit(repo, txn)
+        }
+        fn changeset(
+            &self,
+            repo: RepoId,
+            id: graft_model::ChangesetId,
+        ) -> impl Future<Output = StoreResult<Option<(Vec<u8>, graft_store::ChangesetRecord)>>> + Send
+        {
+            self.inner.changeset(repo, id)
+        }
+        fn get_ref(
+            &self,
+            repo: RepoId,
+            name: &str,
+        ) -> impl Future<Output = StoreResult<Option<graft_store::RefRecord>>> + Send {
+            self.inner.get_ref(repo, name)
+        }
+        fn list_refs(
+            &self,
+            repo: RepoId,
+            prefix: &str,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<graft_store::RefRecord>>> + Send {
+            self.inner.list_refs(repo, prefix, limit)
+        }
+        fn workspace(
+            &self,
+            repo: RepoId,
+            name: &str,
+        ) -> impl Future<Output = StoreResult<Option<graft_store::WorkspaceRecord>>> + Send
+        {
+            self.inner.workspace(repo, name)
+        }
+        fn expired_workspaces(
+            &self,
+            repo: RepoId,
+            before_ms: i64,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<graft_store::WorkspaceRecord>>> + Send {
+            self.inner.expired_workspaces(repo, before_ms, limit)
+        }
+        fn list_workspaces(
+            &self,
+            repo: RepoId,
+            owner: &str,
+            after: &str,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<graft_store::WorkspaceRecord>>> + Send {
+            self.inner.list_workspaces(repo, owner, after, limit)
+        }
+        fn count_records(
+            &self,
+            repo: RepoId,
+            state: graft_store::RecordState,
+        ) -> impl Future<Output = StoreResult<u64>> + Send {
+            self.inner.count_records(repo, state)
+        }
+        fn count_workspaces(
+            &self,
+            repo: RepoId,
+            before_ms: Option<i64>,
+        ) -> impl Future<Output = StoreResult<u64>> + Send {
+            self.inner.count_workspaces(repo, before_ms)
+        }
+        fn derived(
+            &self,
+            repo: RepoId,
+            kind: &str,
+            version: u32,
+            key: &[u8],
+        ) -> impl Future<Output = StoreResult<Option<Vec<u8>>>> + Send {
+            self.inner.derived(repo, kind, version, key)
+        }
+        fn line_pos(
+            &self,
+            repo: RepoId,
+            line: &str,
+            id: graft_model::ChangesetId,
+        ) -> impl Future<Output = StoreResult<Option<u64>>> + Send {
+            self.inner.line_pos(repo, line, id)
+        }
+        fn scan_line_path(
+            &self,
+            repo: RepoId,
+            line: &str,
+            path: &graft_model::RepoPath,
+            before: u64,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<(u64, graft_model::ChangesetId)>>> + Send
+        {
+            self.inner.scan_line_path(repo, line, path, before, limit)
+        }
+        fn holders(
+            &self,
+            repo: RepoId,
+            object: graft_model::ObjectId,
+        ) -> impl Future<Output = StoreResult<u32>> + Send {
+            self.inner.holders(repo, object)
+        }
+        fn land(
+            &self,
+            repo: RepoId,
+            draft: graft_model::ChangesetId,
+            line: &str,
+        ) -> impl Future<Output = StoreResult<Option<graft_model::ChangesetId>>> + Send {
+            self.inner.land(repo, draft, line)
+        }
+        fn journal(
+            &self,
+            repo: RepoId,
+            from: Lsn,
+            limit: u32,
+        ) -> impl Future<Output = StoreResult<Vec<(Lsn, String, Vec<u8>)>>> + Send {
+            self.inner.journal(repo, from, limit)
+        }
+        fn journal_tip(
+            &self,
+            repo: RepoId,
+        ) -> impl Future<Output = StoreResult<Option<Lsn>>> + Send {
+            let pending = self.pending.lock().unwrap().take();
+            let inner = self.inner.clone();
+            let planted = self.planted.clone();
+            async move {
+                let tip = inner.journal_tip(repo).await?;
+                if let Some((kind, body)) = pending {
+                    let outcome = inner
+                        .commit(
+                            repo,
+                            MetaTxn {
+                                preconditions: vec![],
+                                writes: vec![Write::Journal {
+                                    kind: kind.into(),
+                                    body: body.as_bytes().to_vec(),
+                                }],
+                            },
+                        )
+                        .await?;
+                    let lsn = match outcome {
+                        graft_store::TxnOutcome::Committed(lsns) => lsns[0],
+                        other => {
+                            return Err(graft_store::StoreError::Backend(format!(
+                                "plant journal: {other:?}"
+                            )));
+                        }
+                    };
+                    *planted.lock().unwrap() = Some(lsn);
+                }
+                Ok(tip)
+            }
+        }
+    }
+
     #[tokio::test]
     async fn delivery_is_signed_and_a_failure_retries_the_same_entry() {
         let harness = engine();
         let dir = harness._dir.path().to_path_buf();
         let keep = harness._dir;
+        let meta = harness.meta.clone();
         let engine = &harness.engine;
         let id = repo(engine).await;
         // Older journal the hook must not replay. The default start is the tip.
@@ -650,25 +824,16 @@ mod tests {
         spec.start = "tip".into();
         let metric = counter();
         let secret = "super-secret-value";
-        // First look: nothing after the tip, so the starting cursor is saved.
-        assert!(
-            !deliver_repo(
-                engine.stores().0,
-                &client,
-                &spec,
-                0,
-                id,
-                secret,
-                &Some(metric.clone())
-            )
-            .await
-            .unwrap()
-        );
-        assert!(inbox.seen.lock().unwrap().is_empty());
-        let first = journal(engine, id, "LandAttempt", r#"{"line":"main"}"#).await;
+        let wrapped = TipThenEntry {
+            inner: meta.clone(),
+            pending: Mutex::new(Some(("LandAttempt", r#"{"line":"main"}"#))),
+            planted: Arc::new(Mutex::new(None)),
+        };
+        // First-ever delivery already finds the entry at tip+1. The 5xx must
+        // leave the cursor row in place; there is no earlier empty look.
         assert!(
             deliver_repo(
-                engine.stores().0,
+                &wrapped,
                 &client,
                 &spec,
                 0,
@@ -679,6 +844,8 @@ mod tests {
             .await
             .is_err()
         );
+        let first = wrapped.planted.lock().unwrap().expect("entry planted");
+        assert_eq!(value(&metric, "failed"), 1);
         assert_eq!(value(&metric, "failed"), 1);
         assert_eq!(
             read_cursor(engine.stores().0, &spec, id, &cursor_key(0))
