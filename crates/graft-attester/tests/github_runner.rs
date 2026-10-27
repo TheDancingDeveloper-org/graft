@@ -77,7 +77,11 @@ struct FakeRun {
     running: u32,
     /// Job name to conclusion.
     jobs: BTreeMap<String, String>,
+    /// The run ended `cancelled`.
+    cancelled: bool,
     attested: bool,
+    /// Not dispatched by the runner under test (another checker's).
+    foreign: bool,
 }
 
 #[derive(Default)]
@@ -95,6 +99,41 @@ struct GhState {
     leaked: u32,
     /// Passes the workflow attested, `(changeset, check)`.
     attested: Vec<(String, String)>,
+    /// Jobs that end `cancelled` in runs dispatched from now on.
+    cancel_jobs: BTreeSet<String>,
+    /// Runs dispatched from now on end `cancelled`, every job with them.
+    cancel_runs: bool,
+    /// Most runs queued or in progress at once, counted at each dispatch
+    /// with the new run.
+    peak_in_flight: usize,
+}
+
+impl GhState {
+    /// Runs queued or in progress now, read without advancing them.
+    fn in_flight(&self) -> usize {
+        self.runs
+            .iter()
+            .filter(|r| peek(r, &self.mode) != "completed")
+            .count()
+    }
+
+    /// Adds a run of another checker on its own ref, finishing after
+    /// `polls` observations.
+    fn foreign_run(&mut self, polls: u32) {
+        let id = 1000 + self.runs.len() as u64;
+        self.runs.push(FakeRun {
+            id,
+            branch: format!("graft/check/other/{id}"),
+            changeset: String::new(),
+            request_id: format!("other-{id}"),
+            queued: 0,
+            running: polls,
+            jobs: BTreeMap::new(),
+            cancelled: false,
+            attested: false,
+            foreign: true,
+        });
+    }
 }
 
 struct Gh {
@@ -194,6 +233,17 @@ fn query(uri: &Uri) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// A run's status, without advancing it.
+fn peek(run: &FakeRun, mode: &Mode) -> &'static str {
+    match mode {
+        Mode::StaysQueued => "queued",
+        Mode::RunsForever => "in_progress",
+        _ if run.queued > 0 => "queued",
+        _ if run.running > 0 => "in_progress",
+        _ => "completed",
+    }
+}
+
 /// Reads a run's status, advancing it one poll.
 fn advance(run: &mut FakeRun, mode: &Mode) -> &'static str {
     match mode {
@@ -218,6 +268,12 @@ fn run_json(run: &FakeRun, status: &str) -> Value {
         "display_title": format!("graft post-land {}", run.request_id),
         "head_branch": run.branch,
         "status": status,
+        "conclusion": match status {
+            "completed" if run.cancelled => Value::from("cancelled"),
+            "completed" if run.jobs.values().any(|c| c != "success") => Value::from("failure"),
+            "completed" => Value::from("success"),
+            _ => Value::Null,
+        },
         "html_url": format!("https://github.example/runs/{}", run.id),
     })
 }
@@ -258,6 +314,32 @@ async fn handle(
         ("POST", ["workflows", "graft-post-land.yml", "dispatches"]) => dispatch(&gh, &body).await,
         ("GET", ["workflows", "graft-post-land.yml", "runs"]) => {
             let q = query(&uri);
+            if let Some(wanted) = q.get("status") {
+                // A count of the workflow's runs on every ref; each is
+                // observed, as time passing would.
+                let (n, completed) = {
+                    let mut st = gh.state.lock().expect("fake");
+                    let mode = st.mode.clone();
+                    let mut n = 0;
+                    let mut completed = Vec::new();
+                    for run in st.runs.iter_mut() {
+                        let status = advance(run, &mode);
+                        if status == wanted {
+                            n += 1;
+                        }
+                        if status == "completed" && !run.attested {
+                            run.attested = true;
+                            completed.push(run.clone());
+                        }
+                    }
+                    (n, completed)
+                };
+                attest_job(&gh, completed).await;
+                return reply(
+                    StatusCode::OK,
+                    json!({ "total_count": n, "workflow_runs": [] }),
+                );
+            }
             let completed = {
                 let mut st = gh.state.lock().expect("fake");
                 let mode = st.mode.clone();
@@ -382,11 +464,18 @@ async fn dispatch(gh: &Gh, body: &str) -> (StatusCode, String) {
         .iter()
         .map(|job| {
             let red = st.red.contains(*job) || (*job == "test" && broken);
-            let conclusion = if red { "failure" } else { "success" };
+            let conclusion = if st.cancel_runs || st.cancel_jobs.contains(*job) {
+                "cancelled"
+            } else if red {
+                "failure"
+            } else {
+                "success"
+            };
             ((*job).to_owned(), conclusion.to_owned())
         })
         .collect();
     let id = 1000 + st.runs.len() as u64;
+    let cancelled = st.cancel_runs;
     st.runs.push(FakeRun {
         id,
         branch,
@@ -398,8 +487,11 @@ async fn dispatch(gh: &Gh, body: &str) -> (StatusCode, String) {
         queued: 1,
         running: 1,
         jobs,
+        cancelled,
         attested: false,
+        foreign: false,
     });
+    st.peak_in_flight = st.peak_in_flight.max(st.in_flight());
     (StatusCode::NO_CONTENT, String::new())
 }
 
@@ -408,7 +500,7 @@ async fn attest_job(gh: &Gh, completed: Vec<FakeRun>) {
     let Some(engine) = &gh.engine else {
         return;
     };
-    for run in completed {
+    for run in completed.into_iter().filter(|r| !r.foreign) {
         let at = ChangesetId::parse(&run.changeset).expect("changeset id");
         for (job, conclusion) in &run.jobs {
             if conclusion != "success" {
@@ -1123,4 +1215,130 @@ async fn a_github_outage_never_gives_a_bad_verdict_or_a_revert() {
     assert_eq!(states.get(&landed[0]), Some(&LandCheckState::Good));
     assert_eq!(states.get(&landed[1]), Some(&LandCheckState::Reverted));
     rig.gh.assert_token_only_in_header();
+}
+
+// ---- the in-flight cap and cancelled runs (WI-2626) -----------------------
+
+/// The cap: with two runs of another checker in flight and a cap of 2,
+/// the runner waits for one to finish before it dispatches; with the cap
+/// held past the start timeout it dispatches nothing and gives `Err`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dispatch_waits_under_the_in_flight_cap() {
+    let gh = FakeGitHub::start(None).await;
+    gh.state().foreign_run(3);
+    gh.state().foreign_run(5);
+    assert_eq!(gh.state().in_flight(), 2);
+    let mut cfg = gh.config();
+    cfg.max_in_flight = 2;
+    let mut runner = gh.runner_with(cfg.clone());
+    let got = run_one(&mut runner, cs(50), FMT, 1).await.expect("run");
+    assert_eq!(got.outcome, Outcome::Passed);
+    assert_eq!(gh.state().dispatches.len(), 1);
+    assert!(
+        gh.state().peak_in_flight <= 2,
+        "{} in flight",
+        gh.state().peak_in_flight
+    );
+
+    // Held for good: no dispatch, no verdict.
+    gh.state().foreign_run(u32::MAX);
+    gh.state().foreign_run(u32::MAX);
+    cfg.start_timeout = Duration::ZERO;
+    let mut runner = gh.runner_with(cfg);
+    let got = run_one(&mut runner, cs(51), FMT, 1).await;
+    assert!(matches!(got, Err(Error::Forge(_))), "{got:?}");
+    assert_eq!(
+        gh.state().dispatches.len(),
+        1,
+        "nothing dispatched over the cap"
+    );
+}
+
+/// The cap end to end: bisecting eight lands with a cap of 1, while
+/// another checker's run is in flight at the start, never has more than
+/// one run queued or in progress, and still finds and reverts the bad land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_flight_cap_is_never_exceeded() {
+    let rig = Rig::new(0).await;
+    let landed = lands(&rig.engine, 8, 5).await;
+    // Outlasts one count of the runs in flight (five reads), so the first
+    // dispatch has to wait for it.
+    rig.gh.state().foreign_run(12);
+    let mut cfg = rig.gh.config();
+    cfg.max_in_flight = 1;
+    let mut c = rig.checker(cfg).await;
+    drain(&mut c).await;
+    let (dispatched, peak) = {
+        let st = rig.gh.state();
+        (st.dispatches.len(), st.peak_in_flight)
+    };
+    assert!(dispatched >= 3, "bisected: {dispatched}");
+    assert_eq!(peak, 1, "the cap was exceeded");
+    let reverted = entries(&rig.engine, "LandReverted").await;
+    assert_eq!(reverted.len(), 1, "{reverted:?}");
+    assert_eq!(reverted[0]["land"], landed[4].to_string());
+}
+
+/// A cancelled job, or a cancelled run, is no verdict: `Err`. The next
+/// call, and a restarted runner, dispatch a fresh run and read that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_run_is_an_error_and_runs_again() {
+    let gh = FakeGitHub::start(None).await;
+    gh.state().cancel_jobs.insert("test".to_owned());
+    let mut runner = gh.runner();
+    let got = run_one(&mut runner, cs(60), TEST, 1).await;
+    assert!(matches!(got, Err(Error::Forge(_))), "{got:?}");
+    gh.state().cancel_jobs.clear();
+    let got = run_one(&mut runner, cs(60), TEST, 1).await.expect("run");
+    assert_eq!(got.outcome, Outcome::Passed);
+    assert_eq!(gh.state().dispatches.len(), 2, "a fresh run");
+
+    gh.state().cancel_runs = true;
+    let got = run_one(&mut runner, cs(61), FMT, 1).await;
+    assert!(matches!(got, Err(Error::Forge(_))), "{got:?}");
+    gh.state().cancel_runs = false;
+    // Restarted: the cancelled run is not read as a result either.
+    let mut runner = gh.runner();
+    let got = run_one(&mut runner, cs(61), FMT, 1).await.expect("run");
+    assert_eq!(got.outcome, Outcome::Passed);
+    assert_eq!(gh.state().dispatches.len(), 4);
+}
+
+/// A cancelled run never fails a land: with no retries, a cancelled `test`
+/// posts no failure and reverts nothing; once runs complete, every land is
+/// good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_run_never_gives_a_bad_verdict_or_a_revert() {
+    let rig = Rig::new(0).await;
+    let landed = lands(&rig.engine, 2, 0).await;
+    rig.gh.state().cancel_jobs.insert("test".to_owned());
+    let mut c = rig.checker(rig.gh.config()).await;
+    for _ in 0..3 {
+        let step = c.step(0).await;
+        assert!(matches!(step, Err(Error::Forge(_))), "{step:?}");
+    }
+    assert!(
+        rig.gh.state().dispatches.len() >= 3,
+        "the fault was reached"
+    );
+    assert!(
+        attested(&rig.engine)
+            .await
+            .values()
+            .flatten()
+            .all(|passed| *passed),
+        "a failure was attested"
+    );
+    assert!(entries(&rig.engine, "LandReverted").await.is_empty());
+
+    rig.gh.state().cancel_jobs.clear();
+    drain(&mut c).await;
+    assert!(entries(&rig.engine, "LandReverted").await.is_empty());
+    let states = land_states(&rig.engine).await;
+    assert!(
+        landed
+            .iter()
+            .all(|id| states.get(id) == Some(&LandCheckState::Good)),
+        "{states:?}"
+    );
 }

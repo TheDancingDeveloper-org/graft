@@ -14,15 +14,27 @@
 //! [`Runner::attests_passes`] is true and the checker posts only those
 //! still missing.
 //!
+//! At most [`GitHubConfig::max_in_flight`] runs of the workflow are queued
+//! or in progress at once, counted on GitHub across every ref (a restart's
+//! runs and another checker's included). The workflow itself only caps one
+//! run per ref, and GitHub has no "N at a time" across refs that does not
+//! cancel runs. A new (snapshot, attempt) is not dispatched while the cap
+//! is reached: the runner waits for a run to finish, up to the start
+//! timeout, and then gives up with no verdict.
+//!
 //! What counts as a result, and what does not:
 //!
 //! - **No verdict** ([`Error::Forge`], tried again later): GitHub
 //!   unreachable, a 5xx, a rate limit or a refused credential, the
 //!   changeset's ref not pushed yet (422 `No ref found`), and a run that
-//!   is not found or still queued after the start timeout. A GitHub outage
+//!   is not found or still queued after the start timeout (or cannot be
+//!   dispatched under the in-flight cap by then). A run or job that ended
+//!   `cancelled`, whoever cancelled it, is no verdict either: that run is
+//!   set aside and the next call dispatches a fresh one. A GitHub outage
 //!   therefore never makes a land bad, and never reverts one.
 //! - **A failed run**: a completed job that did not succeed, a run past
-//!   the run timeout once it started (it is cancelled), a run that
+//!   the run timeout once it started (the runner cancels it, and the
+//!   timeout is the verdict, not the cancellation), a run that
 //!   completed without the job, and any other 422 on dispatch (the
 //!   workflow is not on that ref, or has no `workflow_dispatch`).
 //!
@@ -62,6 +74,15 @@ const RUNS_PAGE: u32 = 50;
 
 /// Most jobs of one run read.
 const JOBS_PAGE: u32 = 100;
+
+/// Default most runs queued or in progress at once.
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 2;
+
+/// Statuses of a run that is neither finished nor started.
+const UNSTARTED: [&str; 4] = ["queued", "waiting", "pending", "requested"];
+
+/// Most cancelled runs remembered as set aside.
+const IGNORED_CAP: usize = 1024;
 
 /// A GitHub token. Its `Debug` and `Display` never show it.
 #[derive(Clone)]
@@ -139,6 +160,9 @@ pub struct GitHubConfig {
     /// Check name to job name, for checks whose job is not the last `/`
     /// segment of the name.
     pub jobs: BTreeMap<String, String>,
+    /// Most runs of the workflow queued or in progress at once (at least
+    /// 1); no dispatch is made while that many are.
+    pub max_in_flight: usize,
 }
 
 impl GitHubConfig {
@@ -159,6 +183,7 @@ impl GitHubConfig {
             start_timeout: Duration::from_secs(30 * 60),
             run_timeout: Duration::from_secs(60 * 60),
             jobs: BTreeMap::new(),
+            max_in_flight: DEFAULT_MAX_IN_FLIGHT,
         })
     }
 
@@ -195,36 +220,50 @@ struct Job {
 #[derive(Clone, Debug)]
 enum Finished {
     /// It completed with these jobs.
-    Completed { url: String, jobs: Vec<Job> },
+    Completed {
+        id: u64,
+        url: String,
+        jobs: Vec<Job>,
+    },
     /// It ran past the run timeout and was cancelled.
     TimedOut { url: String },
     /// GitHub refused the dispatch for this ref (422).
     Refused { url: String, why: String },
 }
 
+fn find_job<'a>(jobs: &'a [Job], job: &str) -> Option<&'a Job> {
+    let called = format!("/ {job}");
+    jobs.iter()
+        .find(|j| j.name == job || j.name.ends_with(&called))
+}
+
 impl Finished {
+    /// The run, when `job` ended `cancelled` in it.
+    fn cancelled(&self, job: &str) -> Option<u64> {
+        match self {
+            Finished::Completed { id, jobs, .. } => find_job(jobs, job)
+                .filter(|j| j.conclusion == "cancelled")
+                .map(|_| *id),
+            _ => None,
+        }
+    }
+
     fn run_of(&self, job: &str) -> Run {
         match self {
-            Finished::Completed { url, jobs } => {
-                let called = format!("/ {job}");
-                match jobs
-                    .iter()
-                    .find(|j| j.name == job || j.name.ends_with(&called))
-                {
-                    Some(j) => Run {
-                        outcome: match j.conclusion.as_str() {
-                            "success" => Outcome::Passed,
-                            "timed_out" => Outcome::TimedOut,
-                            _ => Outcome::Failed(Some(1)),
-                        },
-                        url: j.url.clone(),
+            Finished::Completed { url, jobs, .. } => match find_job(jobs, job) {
+                Some(j) => Run {
+                    outcome: match j.conclusion.as_str() {
+                        "success" => Outcome::Passed,
+                        "timed_out" => Outcome::TimedOut,
+                        _ => Outcome::Failed(Some(1)),
                     },
-                    None => Run {
-                        outcome: Outcome::NotStarted(format!("no job {job} in the run")),
-                        url: url.clone(),
-                    },
-                }
-            }
+                    url: j.url.clone(),
+                },
+                None => Run {
+                    outcome: Outcome::NotStarted(format!("no job {job} in the run")),
+                    url: url.clone(),
+                },
+            },
             Finished::TimedOut { url } => Run {
                 outcome: Outcome::TimedOut,
                 url: url.clone(),
@@ -241,6 +280,7 @@ impl Finished {
 struct RunView {
     id: u64,
     status: String,
+    conclusion: String,
     url: String,
 }
 
@@ -255,6 +295,8 @@ pub struct GitHubRunner {
     done: BTreeMap<u32, Finished>,
     /// Dispatches sent, in all (for metrics and tests).
     dispatched: u64,
+    /// Runs that ended cancelled: never read again as a result.
+    ignored: std::collections::BTreeSet<u64>,
 }
 
 impl fmt::Debug for GitHubRunner {
@@ -291,6 +333,7 @@ impl GitHubRunner {
             at: None,
             done: BTreeMap::new(),
             dispatched: 0,
+            ignored: std::collections::BTreeSet::new(),
         })
     }
 
@@ -408,7 +451,42 @@ impl GitHubRunner {
                 })
             })
             .filter_map(run_view)
+            .filter(|r| r.conclusion != "cancelled" && !self.ignored.contains(&r.id))
             .max_by_key(|r| r.id))
+    }
+
+    /// Runs of the workflow queued or in progress now, on any ref.
+    async fn in_flight(&self) -> Result<u64, Error> {
+        let path = format!(
+            "{}/actions/workflows/{}/runs",
+            self.repo_path(),
+            self.cfg.workflow
+        );
+        let mut n = 0;
+        for status in UNSTARTED.iter().chain(&["in_progress"]) {
+            let query = [
+                ("status", (*status).to_owned()),
+                ("per_page", "1".to_owned()),
+            ];
+            let answer = self.send(reqwest::Method::GET, &path, &query, None).await?;
+            if answer.status != 200 {
+                return Err(self.forge_error("counting runs", &answer));
+            }
+            n += answer
+                .body
+                .get("total_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+        }
+        Ok(n)
+    }
+
+    /// Sets run `id` aside: it ended cancelled.
+    fn ignore(&mut self, id: u64) {
+        if self.ignored.len() >= IGNORED_CAP {
+            self.ignored.clear();
+        }
+        self.ignored.insert(id);
     }
 
     async fn get_run(&self, id: u64) -> Result<RunView, Error> {
@@ -506,6 +584,19 @@ impl GitHubRunner {
         let since = Instant::now();
         let mut run = self.find(&ref_name, &rid).await?;
         if run.is_none() {
+            // Under the cap: wait for a run to finish before adding one.
+            loop {
+                let n = self.in_flight().await?;
+                if n < self.cfg.max_in_flight.max(1) as u64 {
+                    break;
+                }
+                if since.elapsed() >= self.cfg.start_timeout {
+                    return Err(Error::Forge(format!(
+                        "{n} runs in flight, the most allowed; {rid} not dispatched"
+                    )));
+                }
+                tokio::time::sleep(self.cfg.poll).await;
+            }
             if let Some(why) = self.dispatch(&ref_name, at, attempt, &rid).await? {
                 return Ok(Finished::Refused {
                     url: self.workflow_url(),
@@ -518,9 +609,17 @@ impl GitHubRunner {
         loop {
             match &run {
                 None => {}
+                Some(r) if r.status == "completed" && r.conclusion == "cancelled" => {
+                    let id = r.id;
+                    self.ignore(id);
+                    return Err(Error::Forge(format!(
+                        "run {rid} on {ref_name} was cancelled; it runs again"
+                    )));
+                }
                 Some(r) if r.status == "completed" => {
                     let jobs = self.jobs(r.id).await?;
                     return Ok(Finished::Completed {
+                        id: r.id,
                         url: r.url.clone(),
                         jobs,
                     });
@@ -551,7 +650,7 @@ impl GitHubRunner {
 
 /// Statuses of a run that has not started.
 fn queued(status: &str) -> bool {
-    matches!(status, "queued" | "waiting" | "pending" | "requested")
+    UNSTARTED.contains(&status)
 }
 
 fn run_view(v: &Value) -> Option<RunView> {
@@ -559,6 +658,11 @@ fn run_view(v: &Value) -> Option<RunView> {
         id: v.get("id")?.as_u64()?,
         status: v
             .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        conclusion: v
+            .get("conclusion")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
@@ -586,7 +690,16 @@ impl<A> Runner<A> for GitHubRunner {
             let finished = self.finish(at, attempt).await?;
             self.done.insert(attempt, finished);
         }
-        Ok(self.done[&attempt].run_of(&self.cfg.job_of(&check.name)))
+        let job = self.cfg.job_of(&check.name);
+        if let Some(id) = self.done[&attempt].cancelled(&job) {
+            // No verdict: the next call dispatches a fresh run.
+            self.done.remove(&attempt);
+            self.ignore(id);
+            return Err(Error::Forge(format!(
+                "job {job} of run {id} was cancelled; it runs again"
+            )));
+        }
+        Ok(self.done[&attempt].run_of(&job))
     }
 
     async fn release(&mut self) {
