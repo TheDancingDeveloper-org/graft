@@ -311,6 +311,7 @@ Options:
       --repo <NAME>        Repository name (default: the working copy's)
       --stat               Per-file added and removed line counts, and a summary
       --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --name-only          Print only the changed paths
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help

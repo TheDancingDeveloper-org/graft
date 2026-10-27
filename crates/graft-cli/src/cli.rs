@@ -384,6 +384,9 @@ pub(crate) struct DiffArgs {
     /// Per-file added and removed line counts, and a summary
     #[arg(long)]
     pub(crate) stat: bool,
+    /// Print only the changed paths
+    #[arg(long, conflicts_with = "stat")]
+    pub(crate) name_only: bool,
 }
 
 #[derive(Debug, Args)]
