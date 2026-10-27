@@ -143,7 +143,7 @@ Lists landed changesets on a line that still need a passing review.
 - Arguments: required `repo` and `line`; optional `since_lsn`, `path_prefix`,
   `max_lines`, and `limit` (1-1,000, default 50).
 - Result: bounded `items` with changeset, position, journal LSN, author, touched
-  paths, and changed-line count, plus `next_since_lsn` for the next page.
+  paths, and changed-line count, plus `next_lsn` for the next page.
 - Errors: invalid lines, paths, limits, or cursors are typed.
 
 ### `graft_get_attestations`
@@ -161,7 +161,7 @@ Lists the effective check state of landed changesets on a line.
 
 - Arguments: required `repo` and `line`; optional `from_pos`, `limit` (1-1,000,
   default 50), and `cursor`.
-- Result: bounded `checks` with position, changeset, state, and optional revert,
+- Result: bounded `rows` with position, changeset, state, and optional revert,
   plus `next`. Keep paging with `cursor`.
 - Errors: invalid lines, positions, limits, and cursors are typed.
 
@@ -171,7 +171,7 @@ Records a check, review, or approval outcome for a changeset.
 
 - Arguments: required `repo`, `changeset`, `kind`, `check`, and `status`;
   optional display name `by` and `url`.
-- Result: the recorded bounded attestation.
+- Result: `{"changeset": "<id>", "recorded": true}`. The recorded attestation is not returned.
 - Errors: invalid changesets, kinds, statuses, or oversized fields are typed.
 
 ## Workspace and draft tools

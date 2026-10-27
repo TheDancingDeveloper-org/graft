@@ -273,11 +273,31 @@ impl RepoApi for Rig {
         if self.git_primary.contains(&req.line) {
             self.bridge(cx, req).await
         } else {
-            Err(fake())
+            self.engine.land(cx, req).await
         }
     }
     async fn attest(&self, _: &CallContext, _: Attest) -> ApiResult<()> {
         Err(fake())
+    }
+    async fn attest_v2(&self, cx: &CallContext, req: AttestV2) -> ApiResult<()> {
+        self.engine.attest_v2(cx, req).await
+    }
+    async fn get_attestations(
+        &self,
+        cx: &CallContext,
+        req: GetAttestations,
+    ) -> ApiResult<AttestationPage> {
+        self.engine.get_attestations(cx, req).await
+    }
+    async fn get_land_checks(
+        &self,
+        cx: &CallContext,
+        req: GetLandChecks,
+    ) -> ApiResult<LandCheckPage> {
+        self.engine.get_land_checks(cx, req).await
+    }
+    async fn review_queue(&self, cx: &CallContext, req: ReviewQueue) -> ApiResult<ReviewQueuePage> {
+        self.engine.review_queue(cx, req).await
     }
     async fn watch(&self, cx: &CallContext, req: Watch) -> ApiResult<JournalPage> {
         self.engine.watch(cx, req).await
@@ -396,8 +416,17 @@ fn key() -> SigningKey {
 
 /// A token for `subject` with `scopes`.
 fn token(subject: &str, scopes: &[&str]) -> String {
+    token_as(subject, scopes, PrincipalKind::Agent)
+}
+
+/// A token for `subject` of the given kind: the engine lets only humans and
+/// services attest, never agents.
+fn token_as(subject: &str, scopes: &[&str], kind: PrincipalKind) -> String {
     let claims = Claims {
-        principal: principal(subject, scopes),
+        principal: Principal {
+            kind,
+            ..principal(subject, scopes)
+        },
         exp: NOW_MS / 1000 + 3600,
         jti: format!("jti-{subject}"),
     };
@@ -1150,4 +1179,112 @@ async fn graft_land_runs_the_pre_land_check() {
         .await;
     assert_eq!(unchecked["kind"], "rejected", "{unchecked}");
     assert_eq!(unchecked["preflight"], json!({"checked": false}));
+}
+
+/// WI-2601: a model reviewer reads the queue over HTTP against the real
+/// engine, posts a passing `review`, and the land leaves the queue.
+#[tokio::test]
+async fn a_model_review_pass_empties_the_real_review_queue() {
+    let (rig, root) = Rig::new().await;
+    // A line the rig doesn't treat as git-primary, so the engine lands a draft.
+    let cx = admin();
+    rig.engine
+        .update_ref(
+            &cx,
+            UpdateRef {
+                repo: REPO.into(),
+                name: "work".into(),
+                expected: None,
+                new: root,
+                kind: RefKind::Line,
+            },
+        )
+        .await
+        .unwrap();
+    let blob = b"# r\n\nReviewed.\n";
+    let draft = rig
+        .engine
+        .create_changeset(
+            &cx,
+            CreateChangeset {
+                repo: REPO.into(),
+                parents: vec![root],
+                changes: vec![Change::Put {
+                    path: RepoPath::new("README.md").unwrap(),
+                    kind: EntryKind::File,
+                    id: BlobId::hash(blob).0,
+                }],
+                author: Author {
+                    name: "other".into(),
+                    email: "other@example.com".into(),
+                    kind: AuthorKind::Agent,
+                },
+                authored_at: Timestamp {
+                    ms: NOW_MS,
+                    offset_min: 0,
+                },
+                message: "to review".into(),
+                metadata: Metadata::new(),
+                inline_blobs: vec![Frame::encode(ObjectKind::Blob, blob)],
+                workspace: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let Landed::Landed { landed, .. } = rig
+        .engine
+        .land(
+            &cx,
+            Land {
+                repo: REPO.into(),
+                head: draft,
+                line: "work".into(),
+                squash: false,
+                merge: MergeMode::File,
+                deadline_ms: None,
+                merged_from: None,
+            },
+        )
+        .await
+        .expect("land")
+    else {
+        panic!("expected a landed result");
+    };
+    let addr = serve(rig).await;
+    let scopes = ["repo:r:read", "repo:r:attest"];
+    let mut reviewer =
+        Agent::connect(addr, token_as("reviewer", &scopes, PrincipalKind::Service)).await;
+    let queue = json!({"repo": REPO, "line": "work"});
+    let listed = |value: &Value, id: ChangesetId| {
+        value["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["changeset"] == id.to_string())
+    };
+
+    let before = reviewer.ok("graft_review_queue", queue.clone()).await;
+    assert!(listed(&before, landed), "{before}");
+
+    reviewer
+        .ok(
+            "graft_attest",
+            json!({
+                "repo": REPO, "changeset": landed.to_string(),
+                "kind": "review", "check": "model-review", "status": "pass",
+                "by": "model reviewer"
+            }),
+        )
+        .await;
+
+    let after = reviewer.ok("graft_review_queue", queue).await;
+    assert!(!listed(&after, landed), "{after}");
+    let attested = reviewer
+        .ok(
+            "graft_get_attestations",
+            json!({"repo": REPO, "changeset": landed.to_string()}),
+        )
+        .await;
+    assert_eq!(attested["attestations"].as_array().unwrap().len(), 1);
 }
