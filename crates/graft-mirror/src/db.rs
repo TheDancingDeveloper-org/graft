@@ -109,6 +109,19 @@ CREATE TABLE IF NOT EXISTS batch_commits (
     merged_sha BLOB,
     PRIMARY KEY (batch, seq)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS check_lines (
+    line TEXT PRIMARY KEY,
+    lsn INTEGER NOT NULL,
+    pos INTEGER NOT NULL,
+    dirty INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS check_refs (
+    line TEXT NOT NULL,
+    changeset BLOB NOT NULL,
+    sha BLOB NOT NULL,
+    pushed INTEGER NOT NULL,
+    PRIMARY KEY (line, changeset)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pr_imports (
     number INTEGER PRIMARY KEY,
     head_sha BLOB NOT NULL,
@@ -149,6 +162,31 @@ pub struct ExportState {
     pub diverged: bool,
     /// What upstream held when the lease was refused (`None`: no branch).
     pub stray: Option<GitSha>,
+}
+
+/// Check refs' record of one checked line ([`crate::check_refs`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CheckLine {
+    /// The next journal LSN to read.
+    pub lsn: u64,
+    /// The first `GetLandChecks` position that may still hold a live ref:
+    /// every row before it is settled and its ref deleted.
+    pub pos: u64,
+    /// The line moved (or check refs just started it) and its rows have
+    /// not been read since. Saved with the cursor, so a failed read is
+    /// retried even when the journal has nothing new.
+    pub dirty: bool,
+}
+
+/// One land's check ref, recorded before it is pushed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckRef {
+    /// The landed changeset.
+    pub changeset: ChangesetId,
+    /// Its exported commit, the ref's target.
+    pub sha: GitSha,
+    /// Whether the push is known to have reached upstream.
+    pub pushed: bool,
 }
 
 /// An authority switch in progress on one line (`docs/design.md` §11.3).
@@ -456,6 +494,87 @@ impl MirrorDb {
                     state.diverged,
                     state.stray.map(|s| s.0.to_vec()),
                 ],
+            )
+            .map(drop)
+            .map_err(db_err)
+    }
+
+    /// Check refs' record of `line`, if it has started it.
+    pub fn check_line(&self, line: &str) -> Result<Option<CheckLine>, GitError> {
+        self.conn()
+            .query_row(
+                "SELECT lsn, pos, dirty FROM check_lines WHERE line = ?1",
+                params![line],
+                |r| {
+                    Ok(CheckLine {
+                        lsn: r.get::<_, i64>(0)? as u64,
+                        pos: r.get::<_, i64>(1)? as u64,
+                        dirty: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    /// Replaces check refs' record of `line`, in one statement.
+    pub fn set_check_line(&self, line: &str, state: &CheckLine) -> Result<(), GitError> {
+        self.conn()
+            .execute(
+                "INSERT INTO check_lines (line, lsn, pos, dirty) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (line) DO UPDATE SET lsn = ?2, pos = ?3, dirty = ?4",
+                params![line, state.lsn as i64, state.pos as i64, state.dirty],
+            )
+            .map(drop)
+            .map_err(db_err)
+    }
+
+    /// The check refs `line` holds (pushed or about to be), by changeset.
+    pub fn check_refs(&self, line: &str) -> Result<Vec<CheckRef>, GitError> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT changeset, sha, pushed FROM check_refs WHERE line = ?1")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![line], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            })
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (changeset, sha, pushed) = row.map_err(db_err)?;
+            out.push(CheckRef {
+                changeset: ChangesetId(id_col(changeset)?),
+                sha: sha_col(Some(sha))?
+                    .ok_or_else(|| GitError::Map("mirror db: malformed sha".to_owned()))?,
+                pushed,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Records (or updates) `line`'s check ref for `r.changeset`.
+    pub fn put_check_ref(&self, line: &str, r: &CheckRef) -> Result<(), GitError> {
+        self.conn()
+            .execute(
+                "INSERT INTO check_refs (line, changeset, sha, pushed) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (line, changeset) DO UPDATE SET sha = ?3, pushed = ?4",
+                params![line, r.changeset.0.0.to_vec(), r.sha.0.to_vec(), r.pushed],
+            )
+            .map(drop)
+            .map_err(db_err)
+    }
+
+    /// Forgets `line`'s check ref for `changeset` (it was deleted upstream).
+    pub fn delete_check_ref(&self, line: &str, changeset: ChangesetId) -> Result<(), GitError> {
+        self.conn()
+            .execute(
+                "DELETE FROM check_refs WHERE line = ?1 AND changeset = ?2",
+                params![line, changeset.0.0.to_vec()],
             )
             .map(drop)
             .map_err(db_err)

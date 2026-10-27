@@ -15,6 +15,10 @@
 //! [[lines]]
 //! branch = "main"                      # upstream refs/heads/main
 //! line = "main"                        # graft line; default: the branch
+//!
+//! [[check_refs]]                       # optional; follow keeps per-land
+//! line = "backlog-1"                   # check refs for a post-land line
+//! prefix = "graft/check/backlog-1/"    # default graft/check/<line>/
 //! ```
 //!
 //! The token is never in the file or in process arguments: it comes from
@@ -28,6 +32,7 @@ use graft_git::GitSha;
 use serde::Deserialize;
 
 use crate::MirrorError;
+use crate::check_refs::{CheckRefLine, CheckRefsConfig, REQUIRED_PREFIX, default_prefix};
 use crate::credentials::StaticToken;
 use crate::export::ExportConfig;
 use crate::follow::{FollowConfig, FollowLine, POLL_INTERVAL};
@@ -79,6 +84,26 @@ pub struct FileConfig {
     /// Graft-primary export settings (`graft-mirror export --config`).
     #[serde(default)]
     pub export: Option<ExportFile>,
+    /// Post-land checked lines that `follow` keeps per-land check refs for.
+    #[serde(default)]
+    pub check_refs: Vec<CheckRefsFile>,
+}
+
+/// One `[[check_refs]]` line.
+///
+/// ```toml
+/// [[check_refs]]
+/// line = "backlog-1"
+/// prefix = "graft/check/backlog-1/"   # default graft/check/<line>/
+/// ```
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckRefsFile {
+    /// The graft line; its server config must be `post-land`.
+    pub line: String,
+    /// The upstream branch prefix, under `graft/` and ending in `/`.
+    #[serde(default)]
+    pub prefix: Option<String>,
 }
 
 /// Graft-primary export settings.
@@ -268,6 +293,24 @@ impl FileConfig {
         if config.export.as_ref().is_some_and(|e| e.import_pulls) && config.github.is_none() {
             return Err(bad("[export] import_pulls needs a [github] section"));
         }
+        let mut checked = Vec::new();
+        for c in config.check_refs() {
+            check_branch(&c.line)?;
+            if !c.prefix.starts_with(REQUIRED_PREFIX) || !c.prefix.ends_with('/') {
+                return Err(bad(format!(
+                    "[[check_refs]] prefix {:?} must start with {REQUIRED_PREFIX:?} and end in \"/\"",
+                    c.prefix
+                )));
+            }
+            check_branch(&c.prefix[..c.prefix.len() - 1])?;
+            if checked.contains(&c.line) {
+                return Err(bad(format!(
+                    "[[check_refs]] line {:?} is listed twice",
+                    c.line
+                )));
+            }
+            checked.push(c.line);
+        }
         Ok(config)
     }
 
@@ -340,6 +383,26 @@ impl FileConfig {
                 }
             });
         Mirror::new(&self.mirror_dir, &self.upstream).with_credential(credential)
+    }
+
+    /// The `[[check_refs]]` lines, each with its prefix.
+    pub fn check_refs(&self) -> Vec<CheckRefLine> {
+        self.check_refs
+            .iter()
+            .map(|c| CheckRefLine {
+                line: c.line.clone(),
+                prefix: c.prefix.clone().unwrap_or_else(|| default_prefix(&c.line)),
+            })
+            .collect()
+    }
+
+    /// The check refs settings.
+    pub fn check_refs_config(&self) -> CheckRefsConfig {
+        let mut config = CheckRefsConfig::new(self.repo.clone(), self.check_refs());
+        if let Some(secs) = self.poll_interval_secs {
+            config.interval = Duration::from_secs(secs);
+        }
+        config
     }
 
     /// The export settings.
@@ -464,6 +527,39 @@ db = "/var/lib/m.sqlite"
                 private_key_file: "/k".into()
             }
         );
+    }
+
+    #[test]
+    fn check_refs_default_their_prefix_and_refuse_bad_ones() {
+        let lines = format!("{BASE}[[lines]]\nbranch = \"main\"\n");
+        let c = FileConfig::parse(&format!(
+            "{lines}[[check_refs]]\nline = \"backlog-1\"\n\
+             [[check_refs]]\nline = \"b2\"\nprefix = \"graft/c/b2/\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            c.check_refs(),
+            [
+                CheckRefLine {
+                    line: "backlog-1".into(),
+                    prefix: "graft/check/backlog-1/".into()
+                },
+                CheckRefLine {
+                    line: "b2".into(),
+                    prefix: "graft/c/b2/".into()
+                }
+            ]
+        );
+        assert!(FileConfig::parse(&lines).unwrap().check_refs().is_empty());
+        let one = |extra: &str| format!("{lines}[[check_refs]]\nline = \"l\"\n{extra}");
+        for bad_prefix in ["check/l/", "graft/check/l", "graft/a..b/", "graft//"] {
+            assert!(
+                FileConfig::parse(&one(&format!("prefix = \"{bad_prefix}\"\n"))).is_err(),
+                "{bad_prefix}"
+            );
+        }
+        let twice = format!("{}[[check_refs]]\nline = \"l\"\n", one(""));
+        assert!(FileConfig::parse(&twice).is_err(), "a line listed twice");
     }
 
     #[test]

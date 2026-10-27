@@ -13,6 +13,7 @@ use crate::authority::{
     DEFAULT_LAST, Gate, HookGate, RulesetGate, Stage, Status, Switcher, Unfrozen,
 };
 use crate::batch::{BatchConfig, BatchOutcome, BatchRecord, Batcher};
+use crate::check_refs::CheckRefs;
 use crate::config::{AuthChoice, FileConfig, GithubFile, parse_shas};
 use crate::credentials::{CredentialProvider, GithubApp, NoCredentials, StaticToken};
 use crate::export::{Export, export_all};
@@ -38,7 +39,10 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
          temp dir (removed afterwards). Credentials come from git's own
          configuration; a URL with userinfo is refused.
   init-config [--out <file>]            write a commented sample mirror.toml
-  follow --config <file>                git-primary: follow GitHub main
+  follow --config <file>                git-primary: follow GitHub main;
+                                        with [[check_refs]], also keep one
+                                        branch per unsettled land of each
+                                        post-land line (refused otherwise)
   export --config <file>                graft-primary: export lines to GitHub
   export --to <bare-repo> --repo <name> full export (exit path, drill)
          --db <file> [--server <url>] [--token-file <file>]
@@ -470,9 +474,67 @@ async fn cmd_follow(args: &[String]) -> Result<(), CmdError> {
     );
     let mut follower = Follower::new(&api, mirror_cx(&file.repo), &db, mirror, follow)
         .with_metrics(telemetry.metrics().clone());
-    follower.run(shutdown()).await;
-    tracing::info!("mirror follow stopped");
-    Ok(())
+    if file.check_refs.is_empty() {
+        follower.run(shutdown()).await;
+        tracing::info!("mirror follow stopped");
+        return Ok(());
+    }
+    with_credentials(
+        file.github.as_ref(),
+        RunFollowChecked {
+            file: &file,
+            api: &api,
+            db: &db,
+            follower,
+        },
+    )
+    .await
+}
+
+/// `follow` with `[[check_refs]]`: each tick follows, then keeps the check
+/// refs. A line that is not post-land stops it before the first poll.
+struct RunFollowChecked<'a> {
+    file: &'a FileConfig,
+    api: &'a Server,
+    db: &'a MirrorDb,
+    follower: Follower<'a, Server>,
+}
+
+impl AsyncCredentialFn<()> for RunFollowChecked<'_> {
+    async fn call<C: CredentialProvider>(mut self, credentials: &C) -> Result<(), CmdError> {
+        let file = self.file;
+        let config = file.check_refs_config();
+        tracing::info!(
+            repo = %config.repo, lines = config.lines.len(), "mirror check refs starting"
+        );
+        let mut checks = CheckRefs::new(
+            self.api,
+            mirror_cx(&file.repo),
+            self.db,
+            file.mirror(),
+            credentials,
+            self.api,
+            config,
+        );
+        checks.verify().await?;
+        let mut tick = tokio::time::interval(checks.interval());
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut stop = std::pin::pin!(shutdown());
+        loop {
+            tokio::select! {
+                () = &mut stop => break,
+                _ = tick.tick() => {}
+            }
+            if let Err(e) = self.follower.poll_once().await {
+                tracing::warn!(error = %e, "mirror poll failed");
+            }
+            if let Err(e) = checks.poll_once().await {
+                tracing::warn!(error = %e, "mirror check refs poll failed");
+            }
+        }
+        tracing::info!("mirror follow stopped");
+        Ok(())
+    }
 }
 
 /// The default GitHub API root.
