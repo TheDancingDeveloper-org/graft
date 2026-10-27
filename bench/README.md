@@ -321,3 +321,28 @@ The oracle for "clean but broken" is `cargo check --workspace --all-targets`
 (CARGO_BUILD_JOBS=4) on each merged tree; a merge is broken when it fails and
 both its inputs pass. `--no-oracle` skips it. This is measurement, never a
 land check (D22).
+
+## Post-land measurement (WI-2627)
+
+`bench/postland/` records and reports the v0.2 exit measurements. It is
+Python only and talks to the server through `graft api`, so the same code
+runs against a fixture in tests and against graft-dev in the trial.
+
+| script | what it does |
+| --- | --- |
+| `postland/record.py` | follows one line from a stored LSN through `graft api watch` and `get_land_checks`, appends JSONL stamped with the observer's clock, resumes without duplicating a row, and flags entries that arrive late after a recorder gap |
+| `postland/plant.py` | `--variant fmt` or `--variant test` lands a bad change and one good follower as `GRAFT_SESSION_ID=postland-plant`, then prints both changeset ids |
+| `postland/report.py` | writes the M1, M2, M3 and D31 tables from that JSONL and the stated Prometheus samples |
+
+The M1 bound is p95 ≤ 30 min and max ≤ 4 h. Seconds a landing spends
+`blocked` are summed on their own row and subtracted from land-to-settled, so
+operator-held time is visible and not counted against the bound. `late` rows
+are excluded from the percentiles and counted for coverage. Every figure in
+the report is recomputed from the JSONL and from the query named in the D31
+section, `histogram_quantile(0.95, rate(graft_rpc_duration_seconds_bucket{op="Land"}[1d]))`.
+
+```sh
+python3 -I -m pytest -q bench/tests
+python3 -I bench/postland/record.py --repo graft --line backlog-1 \
+    --state /var/lib/postland/state.json --out /var/lib/postland/log.jsonl
+```

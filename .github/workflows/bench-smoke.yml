@@ -94,3 +94,14 @@ jobs:
             ${{ runner.temp }}/bench/summary.md
             ${{ runner.temp }}/bench/results.json
           if-no-files-found: warn
+
+  bench-tests:
+    name: bench pytest
+    runs-on: [self-hosted, linux, x64, gha-public-rust]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: pytest and ruff
+        run: |
+          python3 -I -m pytest -q bench/tests
+          if command -v ruff >/dev/null; then ruff check bench/postland bench/tests; fi
