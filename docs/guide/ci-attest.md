@@ -21,6 +21,9 @@ exchange returns a token that:
 
 ## Workflow shape
 
+`graft attest` and `graft ci` are experimental client commands in this
+release. Set `GRAFT_EXPERIMENTAL=1` in the job's environment to enable them.
+
 Grant `id-token: write` only to the attestation job. The job requests an OIDC
 token with the audience configured by the server, pipes it to
 `graft ci exchange`, and writes the graft token to a mode-0600 temporary file:
