@@ -34,10 +34,12 @@
 //!   posted only as part of a bad verdict, after the land's other checks.
 //!   A crash can leave that verdict short (fewer than `retries + 1`
 //!   failures, read `pending`), and a check run again after the restart
-//!   may pass. The restart therefore runs nothing for such a land: it
-//!   posts the failures still missing, with the links already posted, and
-//!   the land is reverted as any bad land is. A failure of a configured
-//!   check posted by anyone else counts the same way.
+//!   may pass. The restart therefore runs nothing for such a land, one
+//!   whose latest report of a check is a failure: it posts the failures
+//!   still missing, with the links already posted, and the land is
+//!   reverted as any bad land is. A failure of a configured check posted
+//!   by anyone else counts the same way; one followed by a pass is a flake
+//!   and is left as the server reads it.
 //! - **Revert.** The first bad land is reverted (each changeset of its
 //!   stack, newest first, with line merge) on the line's tip and landed
 //!   through the ordinary land path. The server stamps each revert
@@ -762,15 +764,24 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
         Ok(PostLandReport::Bad { land, check, good })
     }
 
-    /// The first unsettled land with a failure of a configured check: a
-    /// bad verdict a crash interrupted, and the check that failed.
+    /// The first unsettled land with a configured check whose latest
+    /// report, in journal order, is a failure: a bad verdict a crash
+    /// interrupted, and the check that failed. A failure followed by a pass
+    /// is a flake and settles nothing here. Unsettled means no check has
+    /// failed more than `retries` times.
     fn interrupted(&self) -> Option<(usize, String)> {
         self.lands.iter().enumerate().find_map(|(i, rec)| {
             if rec.reverted || self.state(rec) != State::Unsettled {
                 return None;
             }
-            let failed = rec.reports.iter().find(|r| !r.passed)?;
-            Some((i, failed.check.clone()))
+            self.cfg.checks.iter().find_map(|check| {
+                let latest = rec
+                    .reports
+                    .iter()
+                    .filter(|r| r.check == check.name)
+                    .max_by_key(|r| r.lsn)?;
+                (!latest.passed).then(|| (i, check.name.clone()))
+            })
         })
     }
 

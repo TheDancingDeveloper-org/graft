@@ -709,6 +709,88 @@ async fn a_check_failing_every_retry_is_bad() {
     assert_eq!(entries(&rig.engine, "LandReverted").await.len(), 1);
 }
 
+/// Posts a `check` report on `land` directly, as another attester would.
+async fn attest_directly(engine: &Eng, land: ChangesetId, check: &str, passed: bool) {
+    let cx = CallContext {
+        principal: checker_principal(),
+        request_id: "another-attester".to_owned(),
+        deadline_ms: None,
+    };
+    engine
+        .attest_v2(
+            &cx,
+            AttestV2 {
+                repo: REPO.to_owned(),
+                changeset: land,
+                kind: AttestKind::Check,
+                check: check.to_owned(),
+                status: if passed {
+                    AttestStatus::Pass
+                } else {
+                    AttestStatus::Fail
+                },
+                by: None,
+                url: format!("https://other.example/{land}/{check}/{passed}"),
+            },
+        )
+        .await
+        .expect("attest");
+}
+
+/// WI-2611 review: a check that failed and then passed within `retries`
+/// is a flake, not an interrupted bad verdict. The land holds a fail and
+/// then a pass of `ci/build` (`ci/test` not yet reported), the checker
+/// dies before posting anything, and the restart settles the land good:
+/// no failure added, no revert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_leaves_a_flake_that_already_passed_good() {
+    let rig = Rig::new(1).await;
+    let land = lands(&rig.engine, 1, 0).await[0];
+    attest_directly(&rig.engine, land, BUILD, false).await;
+    attest_directly(&rig.engine, land, BUILD, true).await;
+    assert_eq!(
+        land_states(&rig.engine).await.get(&land),
+        Some(&LandCheckState::Pending),
+        "{TEST} not reported yet"
+    );
+
+    // Dies on its first run, before posting anything.
+    let mut c = rig
+        .checker(Fake {
+            crash_at: Some(0),
+            ..Fake::default()
+        })
+        .await;
+    let first = c.step(0).await;
+    assert!(
+        first.is_err(),
+        "the checks run and the run crashes: {first:?}"
+    );
+    assert_eq!(c.runner().crashed, 1, "the crash fired");
+    drop(c);
+
+    // Restarted.
+    let mut c = rig.checker(Fake::default()).await;
+    let reports = drain(&mut c).await;
+    assert!(
+        reports
+            .iter()
+            .all(|r| matches!(r, PostLandReport::Good { .. } | PostLandReport::Idle)),
+        "{reports:?}"
+    );
+    let build: Vec<bool> = attested(&rig.engine).await[&land.to_string()]
+        .iter()
+        .filter(|(_, c, _)| c == BUILD)
+        .map(|(_, _, p)| *p)
+        .collect();
+    assert_eq!(build, [false, true], "no failure added");
+    assert!(entries(&rig.engine, "LandReverted").await.is_empty());
+    assert_eq!(
+        land_states(&rig.engine).await.get(&land),
+        Some(&LandCheckState::Good)
+    );
+}
+
 /// WI-2611: the checker finds a land bad (a flaky check failed every
 /// retry) and dies after posting only one of its failures. Restarted, the
 /// check would pass, but the posted failure is final: the restart posts the
