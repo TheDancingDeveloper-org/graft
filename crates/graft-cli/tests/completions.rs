@@ -6,9 +6,21 @@ use std::fs;
 
 use support::{assert_no_internal_references, graft, scratch};
 
-const HIDDEN_COMMANDS: &[&str] = &["attest", "ci", "serve", "node", "man"];
+const HIDDEN_COMMANDS: &[&str] = &[
+    "attest",
+    "attestations",
+    "checks",
+    "review-queue",
+    "ci",
+    "serve",
+    "node",
+    "man",
+];
 const HIDDEN_DESCRIPTIONS: &[&str] = &[
     "Record a check result for a changeset",
+    "List attestations for a changeset or line range",
+    "Show check state for landings on a line",
+    "List landings waiting for review",
     "CI helpers",
     "Run the authoritative server",
     "Run the host cache daemon",

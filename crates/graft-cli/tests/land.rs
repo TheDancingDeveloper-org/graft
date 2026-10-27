@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use assert_cmd::assert::Assert;
 use engine::{EngineRepo, Fault, Race};
+use graft_engine::EngineConfig;
+use graft_engine::policy::{LineChecks, LineConfig};
 use graft_model::ChangesetId;
 use graft_proto::ApiError;
 use graft_testkit::server::TestServer;
@@ -40,6 +42,8 @@ enum Policy {
     /// `main` attested on `ci/build` and `ci/test` (decision D6).
     D6,
     Direct,
+    /// `main` records a land-check row after every land (`LineChecks::PostLand`).
+    PostLand,
 }
 
 fn serve(policy: Policy) -> Served {
@@ -58,6 +62,24 @@ fn serve(policy: Policy) -> Served {
         match policy {
             Policy::D6 => EngineRepo::d6("demo", &files).await,
             Policy::Direct => EngineRepo::direct("demo", &files).await,
+            Policy::PostLand => {
+                EngineRepo::with_config(
+                    "demo",
+                    EngineConfig {
+                        lines: vec![LineConfig {
+                            name: "main".to_owned(),
+                            checks: LineChecks::PostLand {
+                                required: vec!["build".to_owned()],
+                                retries: 0,
+                            },
+                            ..LineConfig::direct("main")
+                        }],
+                        ..EngineConfig::default()
+                    },
+                    &files,
+                )
+                .await
+            }
         }
     });
     let server = rt.block_on(TestServer::tcp_workspaces(repo.clone()));
@@ -687,6 +709,155 @@ fn attest_records_a_check_for_ci() {
     run(&app, &["attest", &rev, "--check", "ci/test"]).code(2);
     // Both checks attested: the land goes through.
     assert_eq!(json_run(&app, &["land"])["landed"], json!(rev));
+}
+
+#[test]
+fn review_commands_work_in_text_and_json_and_resume_without_duplicates() {
+    // Land-check rows exist only on a checked line.
+    let s = serve(Policy::PostLand);
+    let dir = scratch();
+    let (app, first) = with_draft(&s, dir.path(), None);
+    let first = first.to_string();
+
+    let attested = json_run(
+        &app,
+        &[
+            "attest",
+            &first,
+            "--kind",
+            "approval",
+            "--status",
+            "pending",
+            "--name",
+            "maintainer",
+        ],
+    );
+    assert_valid("attest", &attested);
+    assert_eq!(
+        attested,
+        json!({
+            "changeset": first,
+            "kind": "approval",
+            "status": "pending",
+            "name": "maintainer",
+            "url": ""
+        })
+    );
+    let text = run(
+        &app,
+        &[
+            "attest", &first, "--kind", "approval", "--status", "pass", "--name", "release",
+        ],
+    )
+    .success();
+    assert!(stdout(&text).contains("attested approval release pass"));
+
+    let attestations = json_run(&app, &["attestations", &first]);
+    assert_valid("attestations", &attestations);
+    let rows = attestations["attestations"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["kind"], json!("approval"));
+    assert_eq!(rows[0]["status"], json!("pending"));
+    assert_eq!(rows[0]["name"], json!("maintainer"));
+    assert_eq!(rows[1]["kind"], json!("approval"));
+    assert_eq!(rows[1]["status"], json!("pass"));
+    assert_eq!(rows[1]["name"], json!("release"));
+    let text = run(&app, &["attestations", &first]).success();
+    let shown = stdout(&text);
+    assert!(shown.contains("approval pending maintainer"), "{shown:?}");
+    assert!(shown.contains("approval pass release"), "{shown:?}");
+
+    let landed = json_run(&app, &["land"]);
+    json_run(
+        &app,
+        &[
+            "attest",
+            landed["landed"].as_str().unwrap(),
+            "--kind",
+            "check",
+            "--status",
+            "pass",
+            "--name",
+            "build",
+        ],
+    );
+    fs::write(app.join("README.md"), "mine again\n").unwrap();
+    json_run(&app, &["commit", "-m", "mine again"]);
+    let landed = json_run(&app, &["land"]);
+    json_run(
+        &app,
+        &[
+            "attest",
+            landed["landed"].as_str().unwrap(),
+            "--kind",
+            "check",
+            "--status",
+            "pass",
+            "--name",
+            "build",
+        ],
+    );
+
+    let checks = json_run(&app, &["checks", "main"]);
+    assert_valid("checks", &checks);
+    let rows = checks["checks"].as_array().unwrap();
+    assert!(rows.len() >= 2);
+    assert!(rows.iter().all(|row| row["state"] == "good"));
+    let text = run(&app, &["checks", "main"]).success();
+    assert!(stdout(&text).contains(" good\n"));
+
+    let from = rows[0]["pos"].as_u64().unwrap().to_string();
+    let to = rows.last().unwrap()["pos"].as_u64().unwrap().to_string();
+    let ranged = json_run(
+        &app,
+        &[
+            "attestations",
+            "--line",
+            "main",
+            "--from",
+            &from,
+            "--to",
+            &to,
+        ],
+    );
+    assert_valid("attestations", &ranged);
+    assert_eq!(ranged["attestations"].as_array().unwrap().len(), 2);
+    run(
+        &app,
+        &[
+            "attestations",
+            "--line",
+            "main",
+            "--from",
+            &from,
+            "--to",
+            &to,
+        ],
+    )
+    .success();
+
+    let first_page = json_run(&app, &["review-queue", "main", "--limit", "1"]);
+    assert_valid("review-queue", &first_page);
+    let first_items = first_page["items"].as_array().unwrap();
+    assert_eq!(first_items.len(), 1);
+    let resume = first_page["next_lsn"].as_u64().expect("resume LSN");
+    let text = run(&app, &["review-queue", "main", "--limit", "1"]).success();
+    assert!(stdout(&text).contains(&format!("next_lsn {resume}\n")));
+
+    let resume = resume.to_string();
+    let second_page = json_run(
+        &app,
+        &["review-queue", "main", "--since", &resume, "--limit", "100"],
+    );
+    assert_valid("review-queue", &second_page);
+    let first_ids: Vec<_> = first_items.iter().map(|item| &item["changeset"]).collect();
+    assert!(
+        second_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| !first_ids.contains(&&item["changeset"]))
+    );
 }
 
 /// Two working copies in their own directories edit `src/lib.rs` and

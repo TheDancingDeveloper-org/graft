@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft review-queue --json",
+  "type": "object",
+  "required": ["line", "items", "next_lsn"],
+  "additionalProperties": false,
+  "properties": {
+    "line": {"type": "string"},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["changeset", "pos", "lsn", "author", "paths_touched", "lines_changed"],
+        "additionalProperties": false,
+        "properties": {
+          "changeset": {"type": "string", "pattern": "^[a-z][0-9a-f]{64}$"},
+          "pos": {"type": "integer", "minimum": 0},
+          "lsn": {"type": "integer", "minimum": 0},
+          "author": {
+            "type": "object",
+            "required": ["name", "email", "kind"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "email": {"type": "string"},
+              "kind": {"enum": ["human", "agent", "bot", "ci"]}
+            }
+          },
+          "paths_touched": {"type": "integer", "minimum": 0},
+          "lines_changed": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "next_lsn": {"type": ["integer", "null"], "minimum": 0}
+  }
+}

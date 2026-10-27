@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft attestations --json",
+  "type": "object",
+  "required": ["attestations", "next"],
+  "additionalProperties": false,
+  "properties": {
+    "attestations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["changeset", "kind", "status", "name", "by", "url"],
+        "additionalProperties": false,
+        "properties": {
+          "changeset": {"type": "string", "pattern": "^[a-z][0-9a-f]{64}$"},
+          "kind": {"enum": ["check", "review", "approval", "unknown"]},
+          "status": {"enum": ["pass", "fail", "pending", "error", "unknown"]},
+          "name": {"type": "string"},
+          "by": {"type": ["string", "null"]},
+          "url": {"type": "string"}
+        }
+      }
+    },
+    "next": {"type": ["string", "null"]}
+  }
+}

@@ -4,6 +4,7 @@
 pub(crate) mod attest;
 pub(crate) mod blame;
 pub(crate) mod cat;
+pub(crate) mod checks;
 pub(crate) mod ci;
 pub(crate) mod clone;
 pub(crate) mod commit;
@@ -22,6 +23,7 @@ pub(crate) mod lsp;
 pub(crate) mod mcp;
 pub(crate) mod pick;
 pub(crate) mod revert;
+pub(crate) mod review_queue;
 pub(crate) mod show;
 pub(crate) mod sparse;
 pub(crate) mod stack;
