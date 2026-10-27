@@ -52,7 +52,10 @@
 //!   [`Blocked`], and the checker stops for the operator.
 //!
 //! The line must be configured `checks = "post-land"` on the server, so its
-//! revert lands journal `LandReverted`. Costs follow the change: the read
+//! revert lands journal `LandReverted`. At start the binary reads that
+//! line's `retries` with `GetLineConfig` ([`crate::effective_retries`]);
+//! `--retries` overrides it, and a server that does not implement the RPC
+//! falls back to the flag or to 0. Costs follow the change: the read
 //! is O(journal entries since the oldest unsettled land), and the window of
 //! lands held is bounded ([`PostLand::set_window`]).
 
@@ -395,11 +398,9 @@ pub struct PostLand<A, R> {
 
 impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
     /// A checker of `cfg.line` with `cfg.checks`, retrying a failed check
-    /// `retries` times, reading from the saved position, if any. The
-    /// checker does not read the line's `retries` from the server
-    /// (`GetLineConfig`) yet, so the caller passes it and it must match the
-    /// line's setting: a mismatch makes this checker's verdict and the
-    /// server's land-checks row disagree.
+    /// `retries` times, reading from the saved position, if any.
+    /// `retries` is the line's setting from `GetLineConfig`, or `--retries`
+    /// when that flag was given.
     pub fn new(api: A, runner: R, cfg: Config, retries: u32) -> Result<Self, Error> {
         fs::create_dir_all(&cfg.work_dir)?;
         fs::create_dir_all(&cfg.log_dir)?;
