@@ -15,6 +15,9 @@
 //! - [`batch`]: batch mode (decision D21). An integration line forked from
 //!   the followed `main` is synced onto it, and its net change goes to
 //!   GitHub as one squashed PR per batch, which the operator merges.
+//! - [`check_refs`]: on a post-land checked line, one upstream branch per
+//!   unsettled land at its recorded export, so a post-land CI run can attest
+//!   it (WI-2624); deleted once the land settles.
 //! - [`authority`]: the switch of a line between git-primary and
 //!   graft-primary: freeze, verify, flip, unfreeze, in both directions.
 //! - [`reconcile`]: an operator resolves a stopped line, landing the stray
@@ -46,6 +49,7 @@ use crate::github::ForgeError;
 
 pub mod authority;
 pub mod batch;
+pub mod check_refs;
 pub mod config;
 pub mod credentials;
 pub mod db;

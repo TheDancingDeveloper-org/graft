@@ -443,6 +443,35 @@ impl Mirror {
         Err(failed("push", &out))
     }
 
+    /// Deletes `refs/heads/<branch>` on upstream with a lease: only if it
+    /// names `expected` now. A branch that is absent or names another
+    /// commit is [`PushOutcome::Rejected`], and nothing changes. The bearer
+    /// travels as in [`Mirror::push_lease`], never in argv.
+    pub async fn delete_lease(
+        &self,
+        branch: &str,
+        expected: GitSha,
+        bearer: Option<&str>,
+    ) -> Result<PushOutcome, GitCliError> {
+        let target = format!("refs/heads/{branch}");
+        let lease = format!("--force-with-lease={target}:{}", expected.to_hex());
+        let spec = format!(":{target}");
+        let out = git_env(
+            Some(&self.dir),
+            &["push", "-q", &lease, self.upstream.as_str(), &spec],
+            &self.auth_env(bearer),
+        )
+        .await?;
+        if out.code == Some(0) {
+            return Ok(PushOutcome::Pushed);
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+        if is_rejection(&stderr) {
+            return Ok(PushOutcome::Rejected);
+        }
+        Err(failed("push", &out))
+    }
+
     /// Fetches `(remote ref, local ref)` pairs from upstream, forced into the
     /// local refs, which must sit under the mirror's own namespace.
     pub async fn fetch_refs(&self, refs: &[(String, String)]) -> Result<(), GitCliError> {

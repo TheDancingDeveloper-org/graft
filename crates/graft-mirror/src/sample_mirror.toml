@@ -32,6 +32,14 @@ tags = "*"
 branch = "main"
 line = "main"
 
+# Per-land check refs (`follow`): one branch per unsettled land of a line whose
+# server config has checks = "post-land", at its export; deleted once it
+# settles. A line that is not post-land stops follow. Prefix default
+# graft/check/<line>/; it must start with graft/ and end in /.
+# [[check_refs]]
+# line = "backlog-1"
+# prefix = "graft/check/backlog-1/"
+
 # GitHub repository for pr-batch, pull import and the authority switch.
 # Omit the whole section to follow and import only.
 [github]

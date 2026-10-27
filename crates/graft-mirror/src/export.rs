@@ -144,7 +144,7 @@ struct RefMoved {
 
 /// Native changesets are dated when export first writes them; the mirror
 /// map keeps the result.
-struct WrittenAt(i64);
+pub(crate) struct WrittenAt(pub(crate) i64);
 
 impl LandTimes for WrittenAt {
     fn landed_at(&self, _id: ChangesetId) -> Result<Timestamp, graft_git::GitError> {
@@ -155,7 +155,7 @@ impl LandTimes for WrittenAt {
     }
 }
 
-fn system_ms() -> i64 {
+pub(crate) fn system_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
@@ -594,46 +594,10 @@ where
         Ok(Ok((state, start)))
     }
 
-    /// The LSN after the journal's last entry, by doubling then bisecting on
-    /// one-entry reads: O(log n) calls, never a scan.
+    /// The LSN after the journal's last entry ([`journal_end`]).
     async fn journal_end(&mut self) -> Result<u64, MirrorError> {
-        if !self.has_entry_at_or_after(1).await? {
-            return Ok(1);
-        }
-        let (mut lo, mut hi) = (1u64, 2u64);
-        while self.has_entry_at_or_after(hi).await? {
-            lo = hi;
-            hi = hi
-                .checked_mul(2)
-                .ok_or_else(|| config_err("journal LSN overflow"))?;
-        }
-        while hi - lo > 1 {
-            let mid = lo + (hi - lo) / 2;
-            if self.has_entry_at_or_after(mid).await? {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        Ok(hi)
-    }
-
-    async fn has_entry_at_or_after(&mut self, lsn: u64) -> Result<bool, MirrorError> {
         let cx = self.call("journal-end");
-        let page = self
-            .api
-            .watch(
-                &cx,
-                Watch {
-                    repo: self.config.repo.clone(),
-                    from_lsn: lsn,
-                    kinds: Vec::new(),
-                    limit: 1,
-                    wait_ms: 0,
-                },
-            )
-            .await?;
-        Ok(page.next_lsn > lsn)
+        journal_end(self.api, &cx, &self.config.repo).await
     }
 
     fn set_divergence(&self, line: &str, on: bool) {
@@ -651,6 +615,49 @@ where
             m.mirror_lag_seconds.with_label_values(&[line]).set(0.0);
         }
     }
+}
+
+/// The LSN after the journal's last entry, by doubling then bisecting on
+/// one-entry reads: O(log n) calls, never a scan.
+pub(crate) async fn journal_end<A: RepoApi>(
+    api: &A,
+    cx: &CallContext,
+    repo: &str,
+) -> Result<u64, MirrorError> {
+    let has = |lsn: u64| async move {
+        let page = api
+            .watch(
+                cx,
+                Watch {
+                    repo: repo.to_owned(),
+                    from_lsn: lsn,
+                    kinds: Vec::new(),
+                    limit: 1,
+                    wait_ms: 0,
+                },
+            )
+            .await?;
+        Ok::<_, MirrorError>(page.next_lsn > lsn)
+    };
+    if !has(1).await? {
+        return Ok(1);
+    }
+    let (mut lo, mut hi) = (1u64, 2u64);
+    while has(hi).await? {
+        lo = hi;
+        hi = hi
+            .checked_mul(2)
+            .ok_or_else(|| config_err("journal LSN overflow"))?;
+    }
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if has(mid).await? {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(hi)
 }
 
 /// `graft-mirror export --to <bare repo>`: writes every line and tag of
