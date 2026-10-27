@@ -4,6 +4,7 @@
 - [Concepts](concepts.md): glossary and the git-to-graft table.
 - [MCP](mcp.md): every MCP tool, with its arguments and results.
 - [Server](server.md): config, tokens, repositories, lines, metrics and upgrades.
+- [CI attestation](ci-attest.md): exchange a GitHub OIDC identity for a changeset-scoped attest-only token.
 - [Git migration](git-migration.md): import, follow GitHub, batch pull requests and export.
 - [FAQ](faq.md): git compatibility, offline use, lines, CI and the licence.
 - [Benchmarks](benchmarks.md): how the published timings were measured.
