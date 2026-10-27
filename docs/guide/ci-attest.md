@@ -48,7 +48,37 @@ read with `--token-file`. Never put either token in command arguments, logs,
 step output, artifacts, or an environment variable.
 
 Keep the attestation job separate from jobs that execute untrusted repository
-code. Pin the allowed workflow in server configuration, and protect the ref
-that contains it. The manual workflow is installed at
-`.github/workflows/graft-ci-attest.yml`, and an identical reusable sample is
-available at [`ci/github/graft-ci-attest.yml`](../../ci/github/graft-ci-attest.yml).
+code. The steps that request and exchange the identity token must come from a
+protected ref. A batch branch's files come from landed changesets, so a copy of
+those steps on the branch cannot be trusted to hold a token.
+
+Put the token-holding steps in a reusable workflow and pin every caller to the
+protected ref. The reusable workflow is
+[`.github/workflows/graft-ci-attest.yml`](../../.github/workflows/graft-ci-attest.yml)
+(`on: workflow_call`, with a `changeset` input). An identical sample is
+[`ci/github/graft-ci-attest.yml`](../../ci/github/graft-ci-attest.yml). Pin the
+server binding's workflow list to that file at `refs/heads/main`. GitHub then
+sets the OIDC `job_workflow_ref` to the called workflow on main, while `ref`
+and `sha` stay the branch the job was dispatched on.
+
+Dispatch it from
+[`.github/workflows/graft-ci-attest-dispatch.yml`](../../.github/workflows/graft-ci-attest-dispatch.yml).
+That workflow is `on: workflow_dispatch` with a `changeset` input and one job:
+
+```yaml
+jobs:
+  attest:
+    permissions:
+      contents: read
+      id-token: write
+    uses: TheDancingDeveloper-org/graft/.github/workflows/graft-ci-attest.yml@main
+    with:
+      changeset: ${{ inputs.changeset }}
+```
+
+The `@main` pin is required. Calling the reusable workflow by a relative path
+would make `job_workflow_ref` the branch's own file. To rehearse a batch
+branch, run this dispatch workflow on `refs/heads/graft/batch-N` and pass the
+changeset that branch's commit exports. Allow that ref with a prefix rule such
+as `refs/heads/graft/` (a trailing `/` matches every ref under the prefix) and
+keep `refs/heads/main` in the same list. Leave the job off the required checks.
