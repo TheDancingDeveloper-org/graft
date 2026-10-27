@@ -53,6 +53,7 @@
 //! §8.7, decision D25) checks what landed on one line instead; see
 //! [`post_land`]. Nothing post-land runs unless that mode is asked for.
 
+pub mod github_runner;
 pub mod post_land;
 
 use std::collections::{HashMap, VecDeque};
@@ -492,6 +493,9 @@ pub enum Error {
     Api(ApiError),
     /// A local file operation failed.
     Io(io::Error),
+    /// The CI forge running the checks failed or could not be reached:
+    /// nothing ran, and it is tried again later. Never carries a token.
+    Forge(String),
 }
 
 impl fmt::Display for Error {
@@ -499,6 +503,7 @@ impl fmt::Display for Error {
         match self {
             Error::Api(e) => write!(f, "api: {e}"),
             Error::Io(e) => write!(f, "io: {e}"),
+            Error::Forge(e) => write!(f, "forge: {e}"),
         }
     }
 }

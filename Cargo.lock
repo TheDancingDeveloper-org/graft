@@ -1852,6 +1852,7 @@ dependencies = [
 name = "graft-attester"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "graft-client",
  "graft-engine",
@@ -1859,6 +1860,7 @@ dependencies = [
  "graft-proto",
  "graft-store",
  "graft-testkit",
+ "reqwest",
  "rustix",
  "serde_json",
  "tempfile",

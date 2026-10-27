@@ -136,6 +136,15 @@ pub trait Runner<A> {
 
     /// Done with the current snapshot: drop its tree.
     fn release(&mut self) -> impl Future<Output = ()>;
+
+    /// Whether the checks attest their own passes, as a CI workflow that
+    /// posts them does. The checker then reads the journal again before it
+    /// attests, and posts only the passes still missing: it never posts a
+    /// second pass for a (land, check), and the posted ones count toward
+    /// `good`. Default: no.
+    fn attests_passes(&self) -> bool {
+        false
+    }
 }
 
 /// The real runner: checks the snapshot out under [`Config::work_dir`] and
@@ -728,7 +737,11 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
                 }
             }
         }
-        // Attest the good ones, oldest first.
+        // Attest the good ones, oldest first, after reading what the runs
+        // attested themselves.
+        if self.runner.attests_passes() {
+            self.read(0).await?;
+        }
         let mut good = Vec::new();
         if let Some(passed) = &lo_pass {
             for unit in &units[..=(lo as usize)] {
