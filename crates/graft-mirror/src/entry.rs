@@ -885,7 +885,8 @@ impl AsyncCredentialFn<()> for RunBatch<'_> {
             file.mirror(),
             &forge,
             self.batch,
-        )?;
+        )?
+        .with_export_log(self.api);
         if self.track {
             match batcher.track().await? {
                 Some(rec) => print_batch(&rec),

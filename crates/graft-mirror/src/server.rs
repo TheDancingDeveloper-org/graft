@@ -216,9 +216,6 @@ impl AdminApi for Server {
     }
 }
 
-/// The most exports one `RecordExports` call carries (the server's cap).
-const RECORD_BATCH: usize = 256;
-
 impl ExportLog for Server {
     fn record_exports<'s>(
         &'s self,
@@ -227,7 +224,7 @@ impl ExportLog for Server {
         exports: &'s [(ChangesetId, GitSha)],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApiResult<()>> + Send + 's>> {
         Box::pin(async move {
-            for chunk in exports.chunks(RECORD_BATCH) {
+            for chunk in exports.chunks(crate::MAX_RECORD_EXPORTS) {
                 let req = self.request(
                     cx,
                     pb::RecordExportsRequest {
