@@ -1366,7 +1366,8 @@ impl pb::review_service_server::ReviewService for Services {
         request: Request<pb::GetAttestationsRequest>,
     ) -> Result<Response<pb::AttestationPage>, Status> {
         let cx = self.cx(&request, "GetAttestations")?;
-        let req: GetAttestations = wire(request.into_inner())?;
+        let mut req: GetAttestations = wire(request.into_inner())?;
+        req.page.limit = crate::clamp_review_page(Some(req.page.limit));
         let repo = req.repo.clone();
         let page = self
             .app
@@ -1387,7 +1388,8 @@ impl pb::review_service_server::ReviewService for Services {
         request: Request<pb::GetLandChecksRequest>,
     ) -> Result<Response<pb::LandCheckPage>, Status> {
         let cx = self.cx(&request, "GetLandChecks")?;
-        let req: GetLandChecks = wire(request.into_inner())?;
+        let mut req: GetLandChecks = wire(request.into_inner())?;
+        req.page.limit = crate::clamp_review_page(Some(req.page.limit));
         let repo = req.repo.clone();
         let page = self
             .app
@@ -1404,7 +1406,8 @@ impl pb::review_service_server::ReviewService for Services {
         request: Request<pb::ReviewQueueRequest>,
     ) -> Result<Response<pb::ReviewQueuePage>, Status> {
         let cx = self.cx(&request, "ReviewQueue")?;
-        let req: ReviewQueue = wire(request.into_inner())?;
+        let mut req: ReviewQueue = wire(request.into_inner())?;
+        req.page.limit = crate::clamp_review_page(Some(req.page.limit));
         let repo = req.repo.clone();
         let page = self
             .app

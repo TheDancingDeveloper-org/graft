@@ -7,6 +7,19 @@
 //! `$GRAFT_SERVER_CONFIG`, else `/etc/graft/server.toml`.
 
 mod admin;
+
+use graft_proto::types::MAX_REVIEW_PAGE;
+
+/// The limit a review route asks the engine for.
+///
+/// `None` and `0` stay `0`, which the engine reads as its configured default
+/// page. Anything above [`MAX_REVIEW_PAGE`] becomes that cap.
+pub(crate) fn clamp_review_page(limit: Option<u32>) -> u32 {
+    match limit.unwrap_or(0) {
+        0 => 0,
+        n => n.min(MAX_REVIEW_PAGE),
+    }
+}
 mod admission;
 mod app;
 mod backup;
@@ -148,5 +161,19 @@ mod tests {
         assert_eq!(take_config(&mut a).expect("ok"), PathBuf::from("/d.toml"));
         assert_eq!(a, strs(&["serve"]));
         assert!(take_config(&mut strs(&["serve", "--config"])).is_err());
+    }
+
+    #[test]
+    fn review_page_clamps_over_cap_and_keeps_the_default() {
+        assert_eq!(
+            clamp_review_page(Some(MAX_REVIEW_PAGE + 1)),
+            MAX_REVIEW_PAGE
+        );
+        assert_eq!(clamp_review_page(Some(u32::MAX)), MAX_REVIEW_PAGE);
+        assert_eq!(clamp_review_page(Some(1)), 1);
+        assert_eq!(clamp_review_page(Some(MAX_REVIEW_PAGE)), MAX_REVIEW_PAGE);
+        // 0 and a missing limit are the engine's default page, not the cap.
+        assert_eq!(clamp_review_page(Some(0)), 0);
+        assert_eq!(clamp_review_page(None), 0);
     }
 }
