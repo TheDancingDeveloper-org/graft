@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use graft_attester::post_land::{
-    BlockReason, PostLand, PostLandReport, REVERT_CHECK, REVERTS, Run, Runner,
+    BlockReason, PostLand, PostLandReport, REVERT_CHECK, REVERTS, Run, Runner, flake_attempts,
+    flake_url,
 };
 use graft_attester::{Attester, Check, Config, Error, Outcome, call_context};
 use graft_client::{Endpoint, Remote};
@@ -685,6 +686,87 @@ async fn a_flaky_check_is_retried_and_counted() {
         "{states:?}"
     );
     assert!(entries(&rig.engine, "LandReverted").await.is_empty());
+}
+
+/// Pass urls per land and check, from the server's journal.
+async fn pass_urls(engine: &Eng) -> BTreeMap<(String, String), Vec<String>> {
+    let mut out: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    for (_, v) in entries(engine, "Attested").await {
+        let passed = match v.get("status").and_then(|s| s.as_str()) {
+            Some(s) => s == "pass",
+            None => v["passed"].as_bool().expect("passed"),
+        };
+        if passed {
+            out.entry((
+                v["changeset"].as_str().expect("changeset").to_owned(),
+                v["check"].as_str().expect("check").to_owned(),
+            ))
+            .or_default()
+            .push(v["url"].as_str().expect("url").to_owned());
+        }
+    }
+    out
+}
+
+/// WI-2616: a flake leaves a record on the server. Each land's pass of
+/// `ci/test` says it took 2 runs; `ci/build`, which passed first time,
+/// carries no marker. The record is read after the checker is gone and a
+/// restarted checker leaves it as it is (accept 2); the land reads good
+/// with no failure attested (accept 3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flake_is_recorded_on_the_server_and_survives_a_restart() {
+    let rig = Rig::new(2).await;
+    let landed = lands(&rig.engine, 2, 0).await;
+    let mut fake = Fake::default();
+    fake.flaky.insert(TEST.to_owned(), 1);
+    let mut c = rig.checker(fake).await;
+    drain(&mut c).await;
+    drop(c);
+
+    // Restarted, with nothing new to check.
+    let mut c = rig.checker(Fake::default()).await;
+    drain(&mut c).await;
+    assert_eq!(c.runner().runs.len(), 0, "nothing re-run");
+    assert!(c.flakes().is_empty(), "the counter is gone");
+    drop(c);
+
+    let urls = pass_urls(&rig.engine).await;
+    for id in &landed {
+        let test = &urls[&(id.to_string(), TEST.to_owned())];
+        assert_eq!(test.len(), 1, "{test:?}");
+        assert_eq!(flake_attempts(&test[0]), Some(2), "{test:?}");
+        let build = &urls[&(id.to_string(), BUILD.to_owned())];
+        assert_eq!(build.len(), 1, "{build:?}");
+        assert_eq!(flake_attempts(&build[0]), None, "{build:?}");
+    }
+    let got = attested(&rig.engine).await;
+    for id in &landed {
+        assert!(got[&id.to_string()].iter().all(|(_, _, p)| *p));
+    }
+    let states = land_states(&rig.engine).await;
+    assert!(
+        landed
+            .iter()
+            .all(|id| states.get(id) == Some(&LandCheckState::Good)),
+        "{states:?}"
+    );
+}
+
+/// The marker joins an existing fragment, reads back, and still fits the
+/// server's url limit when the run url is already at it.
+#[test]
+fn the_flake_marker_reads_back_and_fits() {
+    let u = flake_url("https://ci.example/run/7", 3);
+    assert_eq!(u, "https://ci.example/run/7#graft-attempts=3");
+    assert_eq!(flake_attempts(&u), Some(3));
+    let u = flake_url("https://ci.example/run/7#log", 2);
+    assert_eq!(u, "https://ci.example/run/7#log;graft-attempts=2");
+    assert_eq!(flake_attempts(&u), Some(2));
+    assert_eq!(flake_attempts("https://ci.example/run/7#log"), None);
+    let long = format!("https://ci.example/{}", "é".repeat(MAX_ATTEST_URL));
+    let u = flake_url(&long, 4);
+    assert!(u.len() <= MAX_ATTEST_URL, "{}", u.len());
+    assert_eq!(flake_attempts(&u), Some(4));
 }
 
 /// Accept 3, the other side: a check that fails every retry makes the land
