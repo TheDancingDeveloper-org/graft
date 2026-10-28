@@ -6,8 +6,9 @@
 //! graft-proto's `api.rs`, and each `impl <Trait> for <Wrapper>` block in
 //! this crate's `src/`, counting `fn name(` and macro lines `name(Req) -> Out;`.
 //!
-//! A `RepoApi` impl that uses `graft_proto::forward_repo_api!` forwards every
-//! method by construction (WI-2638): leaving one out fails to compile, and
+//! A `RepoApi` impl that uses `graft_proto::forward_repo_api!` (or a
+//! `WorkspaceApi` impl with `forward_workspace_api!`) forwards every
+//! method by construction (WI-2638, WI-2639): leaving one out fails to compile, and
 //! graft-proto's own test pins the macro's list to the trait. Those impls
 //! still count as seen here; the other traits are still read from source.
 
@@ -115,7 +116,9 @@ fn every_wrapper_forwards_every_api_method() {
             let wrapper = ident(header.split(" for ").nth(1).unwrap().trim());
             let want = trait_methods(&api, name);
             let body = block(src, at);
-            let have = if *name == "RepoApi" && body.contains("forward_repo_api!(") {
+            let have = if (*name == "RepoApi" && body.contains("forward_repo_api!("))
+                || (*name == "WorkspaceApi" && body.contains("forward_workspace_api!("))
+            {
                 trait_methods(&api, name)
             } else {
                 methods(body)
