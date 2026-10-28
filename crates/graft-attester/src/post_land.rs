@@ -24,7 +24,9 @@
 //!   it are attested good; it is attested failed.
 //! - **Retry.** A failed check is run again, up to `retries` more times.
 //!   One that then passes is a flake: the land is good, only the pass is
-//!   attested, and [`PostLand::flakes`] counts it. A check that keeps
+//!   attested, and [`PostLand::flakes`] counts it. The pass's url carries
+//!   `#graft-attempts=N` ([`flake_url`]), so the server keeps which check
+//!   on which land needed N runs across a restart. A check that keeps
 //!   failing is attested failed once per run, so the server's row reads
 //!   `bad`.
 //! - **A posted failure is final.** To the server a fail followed by a
@@ -72,8 +74,8 @@ use graft_client::workcopy::{self, WcConfig};
 use graft_model::ChangesetId;
 use graft_proto::api::{ObjectApi, RepoApi};
 use graft_proto::types::{
-    AttestKind, AttestStatus, AttestV2, GetChangesets, JournalEntry, Land, Landed, MergeMode,
-    ResolveRef, Revert, Watch,
+    AttestKind, AttestStatus, AttestV2, GetChangesets, JournalEntry, Land, Landed, MAX_ATTEST_URL,
+    MergeMode, ResolveRef, Revert, Watch,
 };
 use graft_proto::{ApiError, CallContext};
 
@@ -381,6 +383,35 @@ enum Verdict {
         urls: Vec<String>,
         passed: Vec<(String, String)>,
     },
+}
+
+/// The fragment key that marks a flake's pass attestation.
+const ATTEMPTS_KEY: &str = "graft-attempts=";
+
+/// `url` marked as a pass that took `attempts` runs: a
+/// `#graft-attempts=N` fragment (`;`-joined to a fragment the url already
+/// has). The pass attestation is the server's record of the flake, so it
+/// outlives a restart without a second report next to the pass. A url too
+/// long for the marker is cut, at a char boundary, so the marker fits in
+/// [`MAX_ATTEST_URL`].
+pub fn flake_url(url: &str, attempts: u32) -> String {
+    let sep = if url.contains('#') { ';' } else { '#' };
+    let marker = format!("{sep}{ATTEMPTS_KEY}{attempts}");
+    let mut end = url.len().min(MAX_ATTEST_URL.saturating_sub(marker.len()));
+    while !url.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{marker}", &url[..end])
+}
+
+/// The runs a pass attestation's `url` says the check took, from the
+/// marker [`flake_url`] adds: `Some(n)` for a flake, `None` for a pass on
+/// the first run.
+pub fn flake_attempts(url: &str) -> Option<u32> {
+    let (_, frag) = url.split_once('#')?;
+    frag.split(';')
+        .find_map(|p| p.strip_prefix(ATTEMPTS_KEY))
+        .and_then(|n| n.parse().ok())
 }
 
 /// The post-land checker over an API client and a check runner.
@@ -854,6 +885,11 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
             }
             match pass {
                 Some(url) => {
+                    let url = if urls.is_empty() {
+                        url
+                    } else {
+                        flake_url(&url, urls.len() as u32 + 1)
+                    };
                     if !urls.is_empty() {
                         let n = self.flakes.entry(check.name.clone()).or_insert(0);
                         *n += 1;
