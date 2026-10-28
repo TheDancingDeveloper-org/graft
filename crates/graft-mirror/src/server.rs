@@ -270,55 +270,19 @@ impl RepoApi for Server {
     graft_proto::forward_repo_api!(delegate);
 }
 
+/// One `WorkspaceApi` method of [`Server`], every argument passed through.
+macro_rules! delegate_workspace {
+    ($($name:ident($($arg:ident: $ty:ty),*) -> $out:ty;)*) => {
+        $(
+            async fn $name(&self, cx: &CallContext, $($arg: $ty),*) -> ApiResult<$out> {
+                self.remote.$name(cx, $($arg),*).await
+            }
+        )*
+    };
+}
+
 impl WorkspaceApi for Server {
-    delegate! {
-        open_workspace(OpenWorkspace) -> WorkspaceView;
-        get_workspace(WorkspaceRef) -> WorkspaceView;
-        set_head(SetHead) -> WorkspaceView;
-        get_conflicts(GetConflicts) -> Conflicts;
-        resolve(Resolve) -> Resolved;
-        overlapping_drafts(OverlappingDrafts) -> DraftOverlap;
-    }
-    async fn list_workspaces(
-        &self,
-        cx: &CallContext,
-        repo: String,
-        page: Page,
-    ) -> ApiResult<Vec<WorkspaceView>> {
-        self.remote.list_workspaces(cx, repo, page).await
-    }
-    async fn renew_lease(
-        &self,
-        cx: &CallContext,
-        req: WorkspaceRef,
-        lease_ms: u64,
-    ) -> ApiResult<WorkspaceView> {
-        self.remote.renew_lease(cx, req, lease_ms).await
-    }
-    async fn sync(
-        &self,
-        cx: &CallContext,
-        req: WorkspaceRef,
-        onto: Option<ChangesetId>,
-    ) -> ApiResult<Synced> {
-        self.remote.sync(cx, req, onto).await
-    }
-    async fn stack(
-        &self,
-        cx: &CallContext,
-        req: WorkspaceRef,
-        op: StackOp,
-    ) -> ApiResult<WorkspaceView> {
-        self.remote.stack(cx, req, op).await
-    }
-    async fn close_workspace(
-        &self,
-        cx: &CallContext,
-        req: WorkspaceRef,
-        keep_drafts: bool,
-    ) -> ApiResult<()> {
-        self.remote.close_workspace(cx, req, keep_drafts).await
-    }
+    graft_proto::forward_workspace_api!(delegate_workspace);
 }
 
 macro_rules! api_delegate {

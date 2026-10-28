@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use graft_model::{ChangesetId, ObjectId};
+use graft_model::ObjectId;
 use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::context::CallContext;
 use graft_proto::error::ApiResult;
@@ -89,71 +89,15 @@ impl RepoApi for Backend {
     graft_proto::forward_repo_api!(forward_repo);
 }
 
+/// One `WorkspaceApi` method of [`Backend`], through `forward!`.
+macro_rules! forward_workspace {
+    ($($name:ident($($arg:ident: $ty:ty),*) -> $out:ty;)*) => {$(
+        async fn $name(&self, cx: &CallContext, $($arg: $ty),*) -> ApiResult<$out> {
+            forward!(self.$name(cx $(, $arg)*))
+        }
+    )*};
+}
+
 impl WorkspaceApi for Backend {
-    async fn open_workspace(
-        &self,
-        cx: &CallContext,
-        req: OpenWorkspace,
-    ) -> ApiResult<WorkspaceView> {
-        forward!(self.open_workspace(cx, req))
-    }
-    async fn get_workspace(&self, cx: &CallContext, req: WorkspaceRef) -> ApiResult<WorkspaceView> {
-        forward!(self.get_workspace(cx, req))
-    }
-    async fn list_workspaces(
-        &self,
-        cx: &CallContext,
-        repo: String,
-        page: Page,
-    ) -> ApiResult<Vec<WorkspaceView>> {
-        forward!(self.list_workspaces(cx, repo, page))
-    }
-    async fn renew_lease(
-        &self,
-        cx: &CallContext,
-        req: WorkspaceRef,
-        lease_ms: u64,
-    ) -> ApiResult<WorkspaceView> {
-        forward!(self.renew_lease(cx, req, lease_ms))
-    }
-    async fn set_head(&self, cx: &CallContext, req: SetHead) -> ApiResult<WorkspaceView> {
-        forward!(self.set_head(cx, req))
-    }
-    async fn sync(
-        &self,
-        cx: &CallContext,
-        req: WorkspaceRef,
-        onto: Option<ChangesetId>,
-    ) -> ApiResult<Synced> {
-        forward!(self.sync(cx, req, onto))
-    }
-    async fn stack(
-        &self,
-        cx: &CallContext,
-        req: WorkspaceRef,
-        op: StackOp,
-    ) -> ApiResult<WorkspaceView> {
-        forward!(self.stack(cx, req, op))
-    }
-    async fn close_workspace(
-        &self,
-        cx: &CallContext,
-        req: WorkspaceRef,
-        keep_drafts: bool,
-    ) -> ApiResult<()> {
-        forward!(self.close_workspace(cx, req, keep_drafts))
-    }
-    async fn get_conflicts(&self, cx: &CallContext, req: GetConflicts) -> ApiResult<Conflicts> {
-        forward!(self.get_conflicts(cx, req))
-    }
-    async fn resolve(&self, cx: &CallContext, req: Resolve) -> ApiResult<Resolved> {
-        forward!(self.resolve(cx, req))
-    }
-    async fn overlapping_drafts(
-        &self,
-        cx: &CallContext,
-        req: OverlappingDrafts,
-    ) -> ApiResult<DraftOverlap> {
-        forward!(self.overlapping_drafts(cx, req))
-    }
+    graft_proto::forward_workspace_api!(forward_workspace);
 }

@@ -400,6 +400,50 @@ pub trait WorkspaceApi: Send + Sync {
     }
 }
 
+/// Hands every [`WorkspaceApi`] method to a forwarding macro, as
+/// [`forward_repo_api!`] does for [`RepoApi`] (WI-2639). `overlapping_drafts`
+/// has a default, so a hand-written wrapper that leaves it out still compiles
+/// and answers `Unavailable` even when the type behind it serves the RPC.
+///
+/// `forward_workspace_api!(m)` expands to `m! { name(arg: Ty, ...) -> Out;
+/// ... }` with one line per method, in trait order, naming every argument
+/// after `cx`. `m` writes each `async fn name(&self, cx: &CallContext, arg:
+/// Ty, ...) -> ApiResult<Out>`:
+///
+/// ```ignore
+/// macro_rules! delegate {
+///     ($($name:ident($($arg:ident: $ty:ty),*) -> $out:ty;)*) => {$(
+///         async fn $name(&self, cx: &CallContext, $($arg: $ty),*) -> ApiResult<$out> {
+///             self.inner.$name(cx, $($arg),*).await
+///         }
+///     )*};
+/// }
+/// impl WorkspaceApi for Wrapper {
+///     graft_proto::forward_workspace_api!(delegate);
+/// }
+/// ```
+///
+/// A method added to [`WorkspaceApi`] must be added here too; graft-proto's
+/// `forward_workspace_api` test fails until it is.
+#[macro_export]
+macro_rules! forward_workspace_api {
+    ($m:ident) => {
+        $m! {
+            open_workspace(req: $crate::types::OpenWorkspace) -> $crate::types::WorkspaceView;
+            get_workspace(req: $crate::types::WorkspaceRef) -> $crate::types::WorkspaceView;
+            list_workspaces(repo: ::std::string::String, page: $crate::types::Page) -> ::std::vec::Vec<$crate::types::WorkspaceView>;
+            renew_lease(req: $crate::types::WorkspaceRef, lease_ms: u64) -> $crate::types::WorkspaceView;
+            set_head(req: $crate::types::SetHead) -> $crate::types::WorkspaceView;
+            sync(req: $crate::types::WorkspaceRef, onto: ::std::option::Option<$crate::api::__private::ChangesetId>) -> $crate::types::Synced;
+            stack(req: $crate::types::WorkspaceRef, op: $crate::types::StackOp) -> $crate::types::WorkspaceView;
+            close_workspace(req: $crate::types::WorkspaceRef, keep_drafts: bool) -> ();
+            get_conflicts(req: $crate::types::GetConflicts) -> $crate::types::Conflicts;
+            resolve(req: $crate::types::Resolve) -> $crate::types::Resolved;
+            overlapping_drafts(req: $crate::types::OverlappingDrafts) -> $crate::types::DraftOverlap;
+        }
+    };
+}
+
 /// Admin operations.
 pub trait AdminApi: Send + Sync {
     /// Creates a repository.
