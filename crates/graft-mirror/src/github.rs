@@ -85,6 +85,8 @@ pub struct Pull {
     pub merge_commit: Option<String>,
     /// The head commit of its branch (40-hex).
     pub head_sha: String,
+    /// The name of its head branch.
+    pub head_ref: String,
     /// The PR body, as GitHub currently stores it.
     pub body: String,
 }
@@ -529,6 +531,8 @@ struct RawPull {
 #[derive(Deserialize)]
 struct RawHead {
     sha: String,
+    #[serde(rename = "ref", default)]
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -565,6 +569,7 @@ fn pull_from(v: Value) -> Result<Pull, ForgeError> {
         merged: raw.merged,
         merge_commit: raw.merge_commit_sha,
         head_sha: raw.head.sha,
+        head_ref: raw.head.name,
         body: raw.body.unwrap_or_default(),
     })
 }

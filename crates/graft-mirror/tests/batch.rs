@@ -77,6 +77,7 @@ impl FakeGitHub {
             merged: pr.merged.is_some(),
             merge_commit: pr.merged.clone(),
             head_sha: support::branch(&self.upstream, &pr.new.head).unwrap_or_default(),
+            head_ref: pr.new.head.clone(),
             body: pr.new.body.clone(),
         };
         let mut race = self.race_push.lock().unwrap();
@@ -3180,15 +3181,28 @@ async fn a_merged_batch_closes_the_outside_pr_it_re_landed_with_credit() {
         open: true,
         merged: None,
     });
+    // An earlier graft batch PR, #2, still open: never closed as a source.
+    w.github.prs.lock().unwrap().push(FakePr {
+        number: 2,
+        new: NewPull {
+            title: "graft batch 7".to_owned(),
+            body: String::new(),
+            head: "graft/batch-7".to_owned(),
+            base: "main".to_owned(),
+        },
+        open: true,
+        merged: None,
+    });
     let message = "outside fix\n\n\
                    Source-PR: https://github.com/o/r/pull/1\n\
+                   Source-PR: https://github.com/o/r/pull/2\n\
                    Source-PR: https://github.com/other/repo/pull/5\n\
                    Co-authored-by: xover-rs <12345+xover-rs@users.noreply.github.com>";
     w.land(&[("fix.txt", "fixed\n")], message, 1).await;
 
     let rec = opened(w.batcher().run().await.unwrap().outcome);
     let batch_pr = rec.pr_number.unwrap();
-    assert_eq!(batch_pr, 2);
+    assert_eq!(batch_pr, 3);
     let head = support::branch(&w.upstream, "graft/batch-1").unwrap();
     let text = git(&w.upstream, &["log", "-1", "--format=%B", &head]);
     assert!(
@@ -3209,9 +3223,10 @@ async fn a_merged_batch_closes_the_outside_pr_it_re_landed_with_credit() {
         w.github.comments(),
         [(
             1,
-            format!("Landed on main as {merged} via #2, credited as co-author — thanks!")
+            format!("Landed on main as {merged} via #3, credited as co-author — thanks!")
         )],
         "only the same repository's source PR is closed"
     );
     assert!(!w.github.prs()[0].open);
+    assert!(w.github.prs()[1].open, "a graft batch PR is left open");
 }

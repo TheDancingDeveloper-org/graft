@@ -1518,6 +1518,14 @@ where
                 }
                 match self.forge.get_pull(src.number).await {
                     Ok(p) if !p.open => continue,
+                    Ok(p) if p.head_ref.starts_with(BRANCH_PREFIX) => {
+                        tracing::warn!(
+                            batch = rec.number,
+                            pr = src.number,
+                            "mirror batch: source PR is a graft batch PR; left as it is"
+                        );
+                        continue;
+                    }
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(batch = rec.number, pr = src.number, error = %e, "mirror batch: cannot read source PR");

@@ -36,6 +36,12 @@ pub const SOURCE_PR_TRAILER: &str = "Source-PR:";
 /// The longest subject kept from a PR title.
 const SUBJECT_CHARS: usize = 200;
 
+/// The most paths an imported change may touch.
+pub const MAX_PATHS: usize = 5_000;
+
+/// The largest binary patch an import applies.
+pub const MAX_PATCH_BYTES: usize = 64 * 1024 * 1024;
+
 /// The local refs a PR's head and base are fetched to.
 const HEAD_REF: &str = "refs/graft-mirror/import-pr/head";
 const BASE_REF: &str = "refs/graft-mirror/import-pr/base";
@@ -236,15 +242,59 @@ pub fn close_comment(base_branch: &str, sha: GitSha, batch_pr: u64) -> String {
     )
 }
 
+/// Codepoints HFS+ ignores in names, so `.g\u{200c}it` opens `.git`.
+fn hfs_ignorable(c: char) -> bool {
+    matches!(c,
+        '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}' | '\u{feff}')
+}
+
+/// Whether one path component names `.git` or `.graft` on some filesystem:
+/// ASCII case, HFS+ ignorable codepoints, NTFS trailing dots and spaces,
+/// alternate data streams (`.git::$INDEX_ALLOCATION`) and 8.3 short names
+/// (`GIT~1`, `GRAFT~1`).
+fn metadata_component(c: &str) -> bool {
+    let c: String = c.chars().filter(|c| !hfs_ignorable(*c)).collect();
+    let c = c.split(':').next().unwrap_or("");
+    let c = c.trim_end_matches(['.', ' ']).to_ascii_lowercase();
+    if c == ".git" || c == ".graft" {
+        return true;
+    }
+    ["git~", "graft~"].iter().any(|p| {
+        c.strip_prefix(p)
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|d| d.is_ascii_digit()))
+    })
+}
+
 /// Whether a path from the PR would write graft's or git's own metadata.
 fn forbidden_path(path: &str) -> bool {
-    path.split('/')
-        .any(|c| c.eq_ignore_ascii_case(".git") || c.eq_ignore_ascii_case(".graft"))
+    path.split(['/', '\\']).any(metadata_component)
+}
+
+/// Refuses a PR whose web address is not the one asked for: GitHub's
+/// answer must name the same owner, repository and number as `spec`.
+fn check_same_pr(spec: &PrSpec, pull: &SourcePull) -> Result<(), MirrorError> {
+    let same = PrSpec::parse(&pull.url).is_some_and(|got| {
+        got.owner.eq_ignore_ascii_case(&spec.owner)
+            && got.repo.eq_ignore_ascii_case(&spec.repo)
+            && got.number == spec.number
+    });
+    if same {
+        Ok(())
+    } else {
+        Err(config_err(format!(
+            "GitHub answered {} for {}; refused",
+            clean_text(&pull.url, 200, false),
+            spec.url()
+        )))
+    }
 }
 
 /// Imports the PR `spec` into the working copy at `worktree`: reads it
 /// from `forge`, fetches its head and base read-only into `mirror` (a
-/// scratch bare repository, created if missing), and applies its net change (merge base to head) to `worktree`'s files.
+/// new scratch bare repository, which must not exist yet), and applies its
+/// net change (merge base to head) to `worktree`'s files. A change of more
+/// than [`MAX_PATHS`] paths or [`MAX_PATCH_BYTES`] bytes, or one touching
+/// repository metadata, a symlink or a submodule, is refused.
 /// Returns the PR and the re-land's message. Nothing is committed.
 pub async fn import_pr<C: CredentialProvider>(
     forge: &HttpForge<C>,
@@ -253,10 +303,11 @@ pub async fn import_pr<C: CredentialProvider>(
     worktree: &Path,
 ) -> Result<(SourcePull, String), MirrorError> {
     let pull = SourcePull::from_json(&forge.pull_json(spec.number).await?)?;
+    check_same_pr(spec, &pull)?;
     if !pull.open {
         return Err(config_err(format!("{} is not open", pull.url)));
     }
-    mirror.ensure().await?;
+    mirror.init_fresh().await?;
     mirror
         .fetch_refs(&[
             (
@@ -287,18 +338,25 @@ pub async fn import_pr<C: CredentialProvider>(
         .merge_base(base, head)
         .await?
         .ok_or_else(|| config_err("the PR shares no history with its base"))?;
-    let paths = mirror.changed_paths(from, head).await?;
+    let paths = mirror.changed_paths(from, head, MAX_PATHS).await?;
     if paths.is_empty() {
         return Err(config_err(format!("{} changes nothing", pull.url)));
     }
-    if let Some(bad) = paths.iter().find(|p| forbidden_path(p)) {
+    if let Some(bad) = paths.iter().find(|p| forbidden_path(&p.path)) {
         return Err(config_err(format!(
             "{} writes {:?}, which is repository metadata; refused",
             pull.url,
-            clean_text(bad, 200, false)
+            clean_text(&bad.path, 200, false)
         )));
     }
-    let patch = mirror.binary_diff(from, head).await?;
+    if let Some(bad) = paths.iter().find(|p| p.is_link()) {
+        return Err(config_err(format!(
+            "{} changes {:?}, a symlink or submodule; refused",
+            pull.url,
+            clean_text(&bad.path, 200, false)
+        )));
+    }
+    let patch = mirror.binary_diff(from, head, MAX_PATCH_BYTES).await?;
     mirror.apply_to(worktree, &patch).await?;
     let message = pull.message();
     Ok((pull, message))
@@ -423,6 +481,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pr_answered_for_another_repository_is_refused() {
+        let spec = PrSpec::parse("acme/widget#296").unwrap();
+        let pull = SourcePull::from_json(&pr_json()).unwrap();
+        assert!(check_same_pr(&spec, &pull).is_ok());
+        let mut v = pr_json();
+        v["html_url"] = json!("https://github.com/evil/widget/pull/296");
+        let pull = SourcePull::from_json(&v).unwrap();
+        let err = check_same_pr(&spec, &pull).unwrap_err().to_string();
+        assert!(err.contains("evil/widget"), "{err}");
+        let other = PrSpec::parse("acme/gadget#296").unwrap();
+        assert!(check_same_pr(&other, &SourcePull::from_json(&pr_json()).unwrap()).is_err());
+    }
+
+    #[test]
     fn the_close_comment_names_the_sha_and_batch() {
         assert_eq!(
             close_comment("main", GitSha([0xab; 20]), 302),
@@ -437,6 +509,20 @@ mod tests {
     fn metadata_paths_are_forbidden() {
         assert!(forbidden_path(".git/hooks/pre-commit"));
         assert!(forbidden_path("sub/.GRAFT/state"));
+        for bad in [
+            ".g\u{200c}it/config",
+            "\u{feff}.graft/state",
+            ".git./config",
+            ".graft. /state",
+            ".git::$INDEX_ALLOCATION/config",
+            "GIT~1/config",
+            "a/GRAFT~1/state",
+            "a\\.git\\config",
+        ] {
+            assert!(forbidden_path(bad), "{bad:?}");
+        }
+        assert!(!forbidden_path("git~x/file"));
+        assert!(!forbidden_path("a/graft~/file"));
         assert!(!forbidden_path("src/.gitignore"));
         assert!(!forbidden_path("docs/graft.md"));
     }

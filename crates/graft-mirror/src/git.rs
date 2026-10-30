@@ -49,6 +49,27 @@ pub struct UpstreamTag {
 /// the real gate on GitHub is the ruleset's bypass for the mirror's App.
 pub const MIRROR_PUSH_ENV: &str = "GRAFT_MIRROR_PUSH";
 
+/// One entry of a tree diff: its path and its git modes before and after
+/// (`000000` where it is absent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangedPath {
+    /// The path, `/`-separated.
+    pub path: String,
+    /// The mode in the old tree.
+    pub old_mode: String,
+    /// The mode in the new tree.
+    pub new_mode: String,
+}
+
+impl ChangedPath {
+    /// Whether either side is a symlink (`120000`) or a gitlink (`160000`).
+    pub fn is_link(&self) -> bool {
+        [&self.old_mode, &self.new_mode]
+            .iter()
+            .any(|m| *m == "120000" || *m == "160000")
+    }
+}
+
 /// A git CLI failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitCliError(pub String);
@@ -260,6 +281,28 @@ impl Mirror {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| GitCliError(format!("creating the mirror directory: {e}")))?;
         ok(Some(&self.dir), &["init", "-q", "--bare"]).await?;
+        Ok(())
+    }
+
+    /// Creates the bare repository in a new directory, made exclusively with
+    /// mode 0700: an existing directory is an error and is never reused, so
+    /// nobody else can plant its config. Hooks and fsmonitor are switched
+    /// off in its own config, which overrides the user's and the system's.
+    /// For scratch repositories that read untrusted content.
+    pub async fn init_fresh(&self) -> Result<(), GitCliError> {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&self.dir).map_err(|e| {
+            GitCliError(format!(
+                "creating the scratch repository {}: {e}",
+                self.dir.display()
+            ))
+        })?;
+        ok(Some(&self.dir), &["init", "-q", "--bare"]).await?;
+        for (key, value) in [("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false")] {
+            ok(Some(&self.dir), &["config", key, value]).await?;
+        }
         Ok(())
     }
 
@@ -497,19 +540,21 @@ impl Mirror {
         ))
     }
 
-    /// The paths that differ between `from` and `to`. No diff driver or
-    /// textconv runs: the trees may be untrusted.
+    /// The entries that differ between `from` and `to`, at most
+    /// `max_paths` of them; more is an error. No diff driver or textconv
+    /// runs: the trees may be untrusted.
     pub async fn changed_paths(
         &self,
         from: GitSha,
         to: GitSha,
-    ) -> Result<Vec<String>, GitCliError> {
+        max_paths: usize,
+    ) -> Result<Vec<ChangedPath>, GitCliError> {
         let (from, to) = (from.to_hex(), to.to_hex());
         let out = ok(
             Some(&self.dir),
             &[
                 "diff",
-                "--name-only",
+                "--raw",
                 "-z",
                 "--no-renames",
                 "--no-ext-diff",
@@ -520,18 +565,42 @@ impl Mirror {
             ],
         )
         .await?;
-        Ok(out
-            .split(|b| *b == 0)
-            .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8_lossy(p).into_owned())
-            .collect())
+        let malformed = || GitCliError("git diff: malformed --raw output".to_owned());
+        let mut fields = out.split(|b| *b == 0).filter(|f| !f.is_empty());
+        let mut paths = Vec::new();
+        while let Some(meta) = fields.next() {
+            let path = fields.next().ok_or_else(malformed)?;
+            if paths.len() == max_paths {
+                return Err(GitCliError(format!(
+                    "the change touches more than {max_paths} paths; refused"
+                )));
+            }
+            let meta = String::from_utf8_lossy(meta);
+            let mut parts = meta.trim_start_matches(':').split(' ');
+            let (old_mode, new_mode) = (
+                parts.next().ok_or_else(malformed)?.to_owned(),
+                parts.next().ok_or_else(malformed)?.to_owned(),
+            );
+            paths.push(ChangedPath {
+                path: String::from_utf8_lossy(path).into_owned(),
+                old_mode,
+                new_mode,
+            });
+        }
+        Ok(paths)
     }
 
     /// The binary patch from `from` to `to`, with no diff driver or
-    /// textconv: the trees may be untrusted.
-    pub async fn binary_diff(&self, from: GitSha, to: GitSha) -> Result<Vec<u8>, GitCliError> {
+    /// textconv: the trees may be untrusted. A patch over `max_bytes` is
+    /// an error.
+    pub async fn binary_diff(
+        &self,
+        from: GitSha,
+        to: GitSha,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, GitCliError> {
         let (from, to) = (from.to_hex(), to.to_hex());
-        ok(
+        let patch = ok(
             Some(&self.dir),
             &[
                 "diff",
@@ -545,7 +614,14 @@ impl Mirror {
                 &to,
             ],
         )
-        .await
+        .await?;
+        if patch.len() > max_bytes {
+            return Err(GitCliError(format!(
+                "the change's patch is {} bytes, over the {max_bytes}-byte cap; refused",
+                patch.len()
+            )));
+        }
+        Ok(patch)
     }
 
     /// Applies `patch` to the files under `worktree` (not to any index),
