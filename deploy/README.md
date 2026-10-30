@@ -11,7 +11,7 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 | `image.env` | `GRAFT_IMAGE`, the image pinned by `@sha256` digest |
 | `server.toml` | graft-server config (`max_token_ttl_s = 2592000`, 30 days) |
 | `mirror.toml` | graft-mirror follows rustTorrent `main` into repo `rusttorrent` |
-| `mirror-fluent2.toml`, `mirror-vogt.toml` | graft-mirror-fluent2 and graft-mirror-vogt follow fluent2-egui `main` and vogt `rust-core` into repos `fluent2-egui` and `vogt` (trial 3) |
+| `mirror-fluent2.toml`, `mirror-vogt.toml` | graft-mirror-fluent2 and graft-mirror-vogt follow fluent2-egui `main` and vogt `main` and `rust-core` into repos `fluent2-egui` and `vogt` (trial 3) |
 | `mirrors.tsv`, `compose.onboarded.yml` | followed-repository registry and generated Compose services |
 | `onboard-repo.sh` | one-step, idempotent repository onboarding; `--dry-run` prints the plan |
 | `up.sh` | idempotent deploy: bootstrap secrets, pull, config pre-flight, `up -d --wait`, readiness gate with rollback, health check |
@@ -81,16 +81,15 @@ port:
 |---|---|---|---|---|---|---|
 | `graft-mirror` | rustTorrent `main` → `main` | `rusttorrent` | `mirror.toml` | `mirror-token` | `graft-dev-mirror` | 17890 |
 | `graft-mirror-fluent2` | fluent2-egui `main` → `main` | `fluent2-egui` | `mirror-fluent2.toml` | `mirror-token-fluent2` | `graft-dev-mirror-fluent2` | 17891 |
-| `graft-mirror-vogt` | vogt `rust-core` → `rust-core` | `vogt` | `mirror-vogt.toml` | `mirror-token-vogt` | `graft-dev-mirror-vogt` | 17892 |
+| `graft-mirror-vogt` | vogt `main` → `main`, `rust-core` → `rust-core` | `vogt` | `mirror-vogt.toml` | `mirror-token-vogt` | `graft-dev-mirror-vogt` | 17892 |
 
-vogt follows `rust-core`, not `main` (operator decision): the Rust port
-(crate `engine/core`) lives there. The mirror fetches only the branch its
-config names, so the initial import is `rust-core`'s history, and the graft
-repository `vogt` has the line `rust-core` and no `main`. The line keeps the
-branch's name so that `graft-mirror pr-batch <line> --base rust-core` reads
-plainly: trial-3 batch PRs for vogt target `rust-core`. A trial line on vogt
-forks from `rust-core` (for `trial/create-trial-line.sh`, the import maps
-`refs/heads/rust-core`, not `main`).
+vogt follows two branches. `main` → line `main` is the base of the
+integration line `backlog-1`, which Vogt lands through like the other repos:
+`graft-mirror pr-batch backlog-1 --base main` opens the batch PR into `main`.
+`rust-core` → line `rust-core` is trial 3's Rust port (crate `engine/core`,
+operator decision); its batch PRs use `pr-batch <line> --base rust-core`. The
+two branches have diverged upstream, so the lines are independent; a trial
+line forks from whichever base it names (`GRAFT_TRIAL_BASE`).
 
 There is no separate import step. `up.sh` creates every repository
 (`admin repo create`, idempotent) and mints each mirror's token before it
