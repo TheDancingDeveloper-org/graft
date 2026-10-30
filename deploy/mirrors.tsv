@@ -1,7 +1,7 @@
 # service|repo|owner/repo|base|token-file|config|metrics-port|compose
 graft-mirror|rusttorrent|TheDancingDeveloper-org/rustTorrent|main|mirror-token|mirror.toml|17890|builtin
 graft-mirror-fluent2|fluent2-egui|TheDancingDeveloper-org/fluent2-egui|main|mirror-token-fluent2|mirror-fluent2.toml|17891|builtin
-graft-mirror-vogt|vogt|TheDancingDeveloper-org/vogt|rust-core|mirror-token-vogt|mirror-vogt.toml|17892|builtin
+graft-mirror-vogt|vogt|TheDancingDeveloper-org/vogt|main|mirror-token-vogt|mirror-vogt.toml|17892|builtin
 graft-mirror-rustnzb|rustnzb|TheDancingDeveloper-org/rustnzb|main|mirror-token-rustnzb|mirror-rustnzb.toml|17893|generated|0
 graft-mirror-myaiagent|myaiagent|TheDancingDeveloper-org/myaiagent|main|mirror-token-myaiagent|mirror-myaiagent.toml|17894|generated|1
 graft-mirror-rdpapp|rdpapp|TheDancingDeveloper-org/rdpapp|main|mirror-token-rdpapp|mirror-rdpapp.toml|17895|generated|1
