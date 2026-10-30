@@ -138,9 +138,10 @@ so GitHub still parses `Co-authored-by`.
 
 GitHub cannot mark the original pull request merged, because its commits are
 re-created. When the batch holding the land merges, `pr-batch` closes the
-original pull request with a comment: "Landed on main as `<sha>` via
-#`<batch>`, credited as co-author — thanks!". Only pull requests of the batch's
-own repository are closed; a failure to comment is logged and leaves the pull
+original pull request with a comment: "Landed on `<base>` as `<sha>` via
+#`<batch>`, credited as co-author — thanks!", where `<base>` is the branch the
+batch merged into. Only pull requests of the batch's own repository are
+closed, and never a graft batch PR; a failure to comment is logged and leaves the pull
 request open for you.
 
 ## Export the complete repository

@@ -764,15 +764,16 @@ async fn cmd_import_pr(args: &[String]) -> Result<(), CmdError> {
         StaticToken::new(token.clone()),
         RetryPolicy::default(),
     )?;
-    let scratch = std::env::temp_dir().join(format!(
-        "graft-mirror-import-pr-{}-{}",
-        std::process::id(),
-        spec.number
-    ));
+    // A new directory, made exclusively with mode 0700, never one that
+    // exists already: a planted repository's config could steal the token.
+    let scratch = tempfile::Builder::new()
+        .prefix("graft-mirror-import-pr-")
+        .tempdir()
+        .map_err(|e| MirrorError::Config(format!("creating a scratch directory: {e}")))?;
     let git_url = format!("https://github.com/{}/{}.git", spec.owner, spec.repo);
-    let mirror = Mirror::new(&scratch, git_url).with_credential(Some(token));
+    let mirror = Mirror::new(scratch.path().join("repo"), git_url).with_credential(Some(token));
     let result = import_pr(&forge, &spec, &mirror, &dir).await;
-    let _ = std::fs::remove_dir_all(&scratch);
+    drop(scratch);
     let (pull, message) = result?;
     match &message_out {
         Some(path) => std::fs::write(path, &message)
