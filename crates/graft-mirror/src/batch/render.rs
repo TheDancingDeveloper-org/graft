@@ -163,16 +163,50 @@ pub(crate) fn land_row(land: &LandLine, appended: bool) -> String {
     )
 }
 
+/// A message with CRLF made LF, trailing whitespace cut from every line,
+/// and leading and trailing blank lines dropped.
+fn normalize_message(message: &str) -> String {
+    let lines: Vec<&str> = message.lines().map(str::trim_end).collect();
+    lines.join("\n").trim_matches('\n').to_owned()
+}
+
+/// Whether a line is a git trailer: `Token: value`, the token made of
+/// letters, digits and `-`.
+fn is_trailer_line(line: &str) -> bool {
+    line.split_once(':').is_some_and(|(token, _)| {
+        !token.is_empty() && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
+}
+
+/// Whether a normalized message ends in a trailer block: a last paragraph,
+/// not the subject, whose lines are all trailers (or their indented
+/// continuations).
+pub(crate) fn ends_in_trailers(message: &str) -> bool {
+    let Some((_, last)) = message.rsplit_once("\n\n") else {
+        return false;
+    };
+    let mut lines = last.lines();
+    lines.next().is_some_and(is_trailer_line)
+        && lines.all(|l| is_trailer_line(l) || l.starts_with([' ', '\t']))
+}
+
 /// A land's per-land commit message (D26): its own message (or a stand-in
 /// when it has none), then the `Graft-*` trailers.
 pub(crate) fn land_message(number: u64, land: &LandLine) -> String {
-    let text = land.message.trim();
+    let text = normalize_message(&land.message);
     let mut m = if text.is_empty() {
         format!("graft land {}", short(land.id))
     } else {
-        text.to_owned()
+        text
     };
-    m.push_str(&format!("\n\n{CHANGESET_TRAILER} {}\n", land.id));
+    // Join a final trailer block (as `git interpret-trailers` does), so a
+    // forge that parses only the last block still sees `Co-authored-by`.
+    if ends_in_trailers(&m) {
+        m.push('\n');
+    } else {
+        m.push_str("\n\n");
+    }
+    m.push_str(&format!("{CHANGESET_TRAILER} {}\n", land.id));
     if let Some(s) = &land.trailer_session {
         m.push_str(&format!("Graft-Session: {s}\n"));
     }

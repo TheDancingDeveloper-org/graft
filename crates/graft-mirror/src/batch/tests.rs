@@ -519,3 +519,67 @@ fn the_land_cap_applies_within_the_settled_prefix_and_never_splits_a_revert() {
     let rows = rows_of(&[Some(Bad), Some(Good), Some(Good)]);
     assert_eq!(settled_keep(&lands, &rows, 1).0, 2);
 }
+
+fn message_for(text: &str) -> String {
+    let mut l = land(1, false);
+    l.message = text.to_owned();
+    l.trailer_session = None;
+    l.trailer_work_item = None;
+    land_message(4, &l)
+}
+
+#[test]
+fn trailers_join_a_final_trailer_block() {
+    let msg = message_for("fix: thing\n\nbody text\n\nCo-authored-by: X <x@example.com>\n");
+    let id = land(1, false).id;
+    assert_eq!(
+        msg,
+        format!(
+            "fix: thing\n\nbody text\n\nCo-authored-by: X <x@example.com>\n\
+             Graft-Changeset: {id}\nGraft-Batch: 4\n"
+        )
+    );
+}
+
+#[test]
+fn trailers_start_a_new_block_after_a_plain_body() {
+    let id = land(1, false).id;
+    assert_eq!(
+        message_for("fix: thing\n\nbody text"),
+        format!("fix: thing\n\nbody text\n\nGraft-Changeset: {id}\nGraft-Batch: 4\n")
+    );
+    // A subject alone is never a trailer block, even with a colon.
+    assert_eq!(
+        message_for("fix: thing"),
+        format!("fix: thing\n\nGraft-Changeset: {id}\nGraft-Batch: 4\n")
+    );
+}
+
+#[test]
+fn a_body_line_with_a_colon_is_not_a_trailer() {
+    let id = land(1, false).id;
+    assert_eq!(
+        message_for("subject\n\nThis fixes the parser: it now stops."),
+        format!(
+            "subject\n\nThis fixes the parser: it now stops.\n\n\
+             Graft-Changeset: {id}\nGraft-Batch: 4\n"
+        )
+    );
+    // One prose line spoils the block, as in git.
+    assert!(
+        message_for("subject\n\nSigned-off-by: A <a@example.com>\nand some prose")
+            .contains("prose\n\nGraft-Changeset:")
+    );
+}
+
+#[test]
+fn crlf_and_trailing_whitespace_still_join_the_block() {
+    let id = land(1, false).id;
+    assert_eq!(
+        message_for("subject  \r\n\r\nCo-authored-by: X <x@example.com>  \r\n\r\n  "),
+        format!(
+            "subject\n\nCo-authored-by: X <x@example.com>\n\
+             Graft-Changeset: {id}\nGraft-Batch: 4\n"
+        )
+    );
+}
