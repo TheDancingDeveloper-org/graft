@@ -377,6 +377,15 @@ impl<C: CredentialProvider> HttpForge<C> {
     }
 }
 
+impl<C: CredentialProvider> HttpForge<C> {
+    /// PR `number` as GitHub's REST API returns it, for a caller that needs
+    /// fields [`Pull`] does not keep (its author, title and base).
+    pub async fn pull_json(&self, number: u64) -> Result<Value, ForgeError> {
+        let path = format!("{}/pulls/{number}", self.repo_path());
+        self.send(reqwest::Method::GET, &path, &[], None).await
+    }
+}
+
 /// A repository ruleset, as the authority gate reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ruleset {

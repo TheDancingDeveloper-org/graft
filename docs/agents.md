@@ -25,6 +25,8 @@ The token is a bearer credential. Never print it, never pass it as an argument, 
 
 When a line is exported to a git host as a batch pull request, a land that arrives while that batch is still open is appended to it as one more commit. Earlier commits keep their identities. A sealed batch (merge already started) takes no more commits; those lands wait for the next batch. graft itself runs no build, test or checker.
 
+To re-land an outside contributor's GitHub pull request with their credit, run `graft-mirror import-pr <owner>/<repo>#<n> --github-token-file <file> --message-out <file>` in the working copy, review `graft diff`, then commit with that message and land. The message carries `Source-PR` and `Co-authored-by` trailers; the original pull request is closed with a note when its batch merges. See [the git migration guide](guide/git-migration.md#re-land-an-outside-contributors-pull-request).
+
 ## Conflicts (exit 3)
 
 The working copy moves onto the tip with your changes on top and the conflicts written into the files:

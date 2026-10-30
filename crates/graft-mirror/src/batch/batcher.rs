@@ -19,6 +19,7 @@ use crate::db::MirrorDb;
 use crate::follow::{Follower, LineOutcome};
 use crate::git::{Mirror, PushOutcome};
 use crate::github::{Forge, Pull};
+use crate::import_pr::{PrSpec, close_comment, commit_message, source_prs};
 use crate::text::{clean_message, clean_text};
 use crate::{ExportLog, MAX_RECORD_EXPORTS, MirrorError, current_ref, move_ref};
 
@@ -1490,6 +1491,55 @@ where
         Ok(commits)
     }
 
+    /// Closes each outside PR a land of this merged batch re-landed (its
+    /// `Source-PR` trailer, WI-2716), with a comment saying where it landed:
+    /// GitHub cannot mark it merged, as its commits were re-created. Only
+    /// PRs of the batch's own repository are touched. Best effort: the batch
+    /// is already settled, so a failure is logged and that PR is left open
+    /// for the operator.
+    async fn close_source_prs(&self, rec: &BatchRecord, merge: GitSha, commits: &[BatchCommit]) {
+        let Some(batch) = rec.pr_url.as_deref().and_then(PrSpec::parse) else {
+            return;
+        };
+        for c in commits {
+            let Ok(raw) = self.mirror.read_commit(c.sha).await else {
+                continue;
+            };
+            for src in source_prs(&commit_message(&raw)) {
+                if !src.owner.eq_ignore_ascii_case(&batch.owner)
+                    || !src.repo.eq_ignore_ascii_case(&batch.repo)
+                    || src.number == batch.number
+                {
+                    tracing::warn!(
+                        batch = rec.number, source = %src.url(),
+                        "mirror batch: source PR is not in this repository; left as it is"
+                    );
+                    continue;
+                }
+                match self.forge.get_pull(src.number).await {
+                    Ok(p) if !p.open => continue,
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(batch = rec.number, pr = src.number, error = %e, "mirror batch: cannot read source PR");
+                        continue;
+                    }
+                }
+                let comment =
+                    close_comment(&rec.base_branch, c.merged.unwrap_or(merge), batch.number);
+                match self.forge.close_pr(src.number, &comment).await {
+                    Ok(()) => tracing::info!(
+                        batch = rec.number,
+                        pr = src.number,
+                        "mirror batch: source PR closed"
+                    ),
+                    Err(e) => {
+                        tracing::warn!(batch = rec.number, pr = src.number, error = %e, "mirror batch: cannot close source PR")
+                    }
+                }
+            }
+        }
+    }
+
     /// Runs whichever step the batch is at, until it waits on the operator
     /// or is final.
     async fn advance(&mut self, rec: &mut BatchRecord) -> Result<(), MirrorError> {
@@ -1998,6 +2048,7 @@ where
                 line = %rec.line, batch = rec.number, merge = %merge,
                 "mirror batch merged"
             );
+            self.close_source_prs(rec, merge, &commits).await;
             return Ok(());
         }
         if !pull.open {
