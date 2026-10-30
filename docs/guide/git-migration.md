@@ -99,6 +99,50 @@ Graft runs no build, test, check, checker, or CI job when work lands. Required
 checks run in the user's forge on the batch pull request, and the user's merge
 process decides when the pull request may enter the protected branch.
 
+## Re-land an outside contributor's pull request
+
+A pull request opened on GitHub by someone outside graft cannot be merged
+there while the line lands through graft. Re-land it through graft instead,
+with the contributor credited as co-author:
+
+```sh
+cd <graft working copy of the line>
+graft-mirror import-pr <owner>/<repo>#<n> \
+  --github-token-file <file> --message-out /tmp/pr.msg
+graft diff                       # review the change
+graft commit -m "$(cat /tmp/pr.msg)"
+graft land
+```
+
+`import-pr` reads the pull request through the GitHub API, fetches its head
+and base read-only into a scratch repository, and applies its net change
+(merge base to head) to the working copy's files. Nothing from the pull
+request runs: no hooks, diff drivers or textconv, and a change to a `.git` or
+`.graft` path is refused. A closed pull request, or one whose head moves
+while it is read, is refused too.
+
+The message is the pull request's title, then one trailer block:
+
+```text
+Fix the frobnicator
+
+Source-PR: https://github.com/<owner>/<repo>/pull/<n>
+Co-authored-by: <login> <<id>+<login>@users.noreply.github.com>
+```
+
+The project identity stays the commit author; the contributor is a
+co-author, and GitHub links the noreply address to their account. When the
+pull request author's id or login is missing, the import stops rather than
+land without credit. The batch commit's `Graft-*` trailers join this block,
+so GitHub still parses `Co-authored-by`.
+
+GitHub cannot mark the original pull request merged, because its commits are
+re-created. When the batch holding the land merges, `pr-batch` closes the
+original pull request with a comment: "Landed on main as `<sha>` via
+#`<batch>`, credited as co-author — thanks!". Only pull requests of the batch's
+own repository are closed; a failure to comment is logged and leaves the pull
+request open for you.
+
 ## Export the complete repository
 
 A full export is the exit path. It writes every line, tag, and landed

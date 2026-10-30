@@ -485,6 +485,85 @@ impl Mirror {
         Ok(())
     }
 
+    /// The best common ancestor of `a` and `b`, if they share history.
+    pub async fn merge_base(&self, a: GitSha, b: GitSha) -> Result<Option<GitSha>, GitCliError> {
+        let (a, b) = (a.to_hex(), b.to_hex());
+        let out = git(Some(&self.dir), &["merge-base", "--end-of-options", &a, &b]).await?;
+        if out.code != Some(0) {
+            return Ok(None);
+        }
+        Ok(GitSha::from_hex(
+            String::from_utf8_lossy(&out.stdout).trim(),
+        ))
+    }
+
+    /// The paths that differ between `from` and `to`. No diff driver or
+    /// textconv runs: the trees may be untrusted.
+    pub async fn changed_paths(
+        &self,
+        from: GitSha,
+        to: GitSha,
+    ) -> Result<Vec<String>, GitCliError> {
+        let (from, to) = (from.to_hex(), to.to_hex());
+        let out = ok(
+            Some(&self.dir),
+            &[
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--end-of-options",
+                &from,
+                &to,
+            ],
+        )
+        .await?;
+        Ok(out
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect())
+    }
+
+    /// The binary patch from `from` to `to`, with no diff driver or
+    /// textconv: the trees may be untrusted.
+    pub async fn binary_diff(&self, from: GitSha, to: GitSha) -> Result<Vec<u8>, GitCliError> {
+        let (from, to) = (from.to_hex(), to.to_hex());
+        ok(
+            Some(&self.dir),
+            &[
+                "diff",
+                "--binary",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--end-of-options",
+                &from,
+                &to,
+            ],
+        )
+        .await
+    }
+
+    /// Applies `patch` to the files under `worktree` (not to any index),
+    /// using this bare repository only as git's directory, so no repository
+    /// that `worktree` sits in is touched. git refuses paths outside the
+    /// tree and writes through symlinks.
+    pub async fn apply_to(&self, worktree: &Path, patch: &[u8]) -> Result<(), GitCliError> {
+        let git_dir = format!("--git-dir={}", self.dir.display());
+        let work_tree = format!("--work-tree={}", worktree.display());
+        git_input(
+            worktree,
+            &[&git_dir, &work_tree, "apply", "--binary", "-"],
+            patch,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// The commit a local ref of the mirror names, if any.
     pub async fn local_ref(&self, name: &str) -> Result<Option<GitSha>, GitCliError> {
         let spec = format!("{name}^{{commit}}");
