@@ -594,3 +594,49 @@ fn ignored_paths_stay_out_of_status_and_the_draft_but_tracked_files_do_not() {
         ]
     );
 }
+
+/// Edits README.md again and asserts `graft diff` (patch and `--stat`)
+/// shows that edit against the committed content.
+fn assert_diff_of_second_edit(app: &Path) {
+    fs::write(app.join("README.md"), "first\nsecond\n").unwrap();
+    let patch = text(&run(app, &["diff"]).success());
+    assert!(patch.contains("+second"), "diff:\n{patch}");
+    assert!(!patch.contains("-first"), "diff:\n{patch}");
+    let stat = json_run(app, &["diff", "--stat"]);
+    assert_eq!(stat["files"].as_array().map(Vec::len), Some(1), "{stat}");
+}
+
+/// A committed file edited again diffs against the committed content: the
+/// blob `commit` put in the index is one `diff` can read without a server.
+#[test]
+fn diff_after_commit_reads_the_committed_blob() {
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join("README.md"), "first\n").unwrap();
+    run(&app, &["commit", "-m", "first"]).success();
+    assert_diff_of_second_edit(&app);
+}
+
+/// The email-rs backlog-1 sequence: this working copy commits and lands a
+/// file, another lands elsewhere, `sync` moves the base, and a new edit to
+/// the first file must still diff.
+#[test]
+fn diff_after_land_and_sync_reads_the_landed_blob() {
+    let s = serve();
+    let dir = scratch();
+    let app = clone_app(&s, dir.path());
+    fs::write(app.join("README.md"), "first\n").unwrap();
+    run(&app, &["commit", "-m", "first"]).success();
+    run(&app, &["land"]).success();
+
+    let other_dir = scratch();
+    let other = clone_app(&s, other_dir.path());
+    fs::write(other.join("docs/guide.md"), "moved on\n").unwrap();
+    run(&other, &["commit", "-m", "elsewhere"]).success();
+    run(&other, &["land"]).success();
+
+    let synced = json_run(&app, &["sync"]);
+    assert_ne!(synced["from"], synced["base"], "{synced}");
+    assert_diff_of_second_edit(&app);
+}
