@@ -24,6 +24,9 @@
 //!   commits through graft or replacing them on a lease.
 //! - [`pulls`]: GitHub PRs imported as drafts in `github-pr/<n>` workspaces,
 //!   landed through graft once approved.
+//! - [`import_pr`]: re-landing an outside contributor's GitHub PR through
+//!   graft with their credit (`Source-PR` and `Co-authored-by` trailers),
+//!   and closing the PR once its batch merges.
 //! - [`land`]: the hand-off to graft's `Land`, and holding imported stacks as
 //!   drafts.
 //! - [`db`]: the mirror DB (SQLite), implementing `graft-git`'s `MirrorMap`
@@ -58,6 +61,7 @@ pub mod follow;
 pub mod git;
 pub mod github;
 pub mod import;
+pub mod import_pr;
 pub mod land;
 pub mod pulls;
 pub mod reconcile;

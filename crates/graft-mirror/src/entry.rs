@@ -18,8 +18,10 @@ use crate::config::{AuthChoice, FileConfig, GithubFile, parse_shas};
 use crate::credentials::{CredentialProvider, GithubApp, NoCredentials, StaticToken};
 use crate::export::{Export, export_all};
 use crate::follow::Follower;
+use crate::git::Mirror;
 use crate::github::{HttpForge, RetryPolicy};
 use crate::import::import_repo;
+use crate::import_pr::{PrSpec, import_pr};
 use crate::land::NativeLand;
 use crate::pulls::PrImporter;
 use crate::reconcile::{Resolution, reconcile};
@@ -65,6 +67,17 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
                                         not run. An older server that does
                                         not implement GetLineConfig warns and
                                         cannot be checked.
+  import-pr <owner>/<repo>#<n> --github-token-file <file>
+           [--dir <working-copy>] [--message-out <file>] [--api <url>]
+                                        apply an outside GitHub PR's net
+                                        change to a graft working copy
+                                        (default: here) and write the commit
+                                        message: the PR title, then
+                                        Source-PR and Co-authored-by
+                                        trailers. Read-only on GitHub;
+                                        nothing from the PR runs. Commit and
+                                        land as usual; when the batch merges,
+                                        pr-batch closes the PR with a note.
   authority <status|freeze|verify|flip|unfreeze> --config <file> --line <l>
          [--last N]                     switch a line's authority safely
 
@@ -90,6 +103,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         Some("export") => execute(cmd_export(&args[1..])),
         Some("reconcile") => execute(cmd_reconcile(&args[1..])),
         Some("pr-batch") => execute(cmd_pr_batch(&args[1..])),
+        Some("import-pr") => execute(cmd_import_pr(&args[1..])),
         Some("verify") => execute(cmd_authority(Step::Verify, &args[1..])),
         Some("authority") => match args.get(1).map(String::as_str).and_then(Step::parse) {
             Some(step) => execute(cmd_authority(step, &args[2..])),
@@ -695,6 +709,84 @@ impl AsyncCredentialFn<()> for RunExport<'_> {
         tracing::info!("mirror export stopped");
         Ok(())
     }
+}
+
+/// `import-pr`: re-land an outside GitHub PR with its author credited
+/// (WI-2716). See [`crate::import_pr`].
+async fn cmd_import_pr(args: &[String]) -> Result<(), CmdError> {
+    let mut spec = None;
+    let mut token_file = None;
+    let mut dir = None;
+    let mut message_out = None;
+    let mut api = "https://api.github.com".to_owned();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |flag: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| CmdError::Usage(format!("{flag} needs a value")))
+        };
+        match a.as_str() {
+            "--github-token-file" => {
+                token_file = Some(PathBuf::from(value("--github-token-file")?))
+            }
+            "--dir" => dir = Some(PathBuf::from(value("--dir")?)),
+            "--message-out" => message_out = Some(PathBuf::from(value("--message-out")?)),
+            "--api" => api = value("--api")?,
+            s if spec.is_none() && !s.starts_with('-') => {
+                spec = Some(PrSpec::parse(s).ok_or_else(|| {
+                    CmdError::Usage(format!("not a PR: {s:?} (want <owner>/<repo>#<n>)"))
+                })?);
+            }
+            s => return Err(CmdError::Usage(format!("unexpected argument {s}"))),
+        }
+    }
+    let spec = spec.ok_or_else(|| CmdError::Usage("import-pr needs <owner>/<repo>#<n>".into()))?;
+    let token_file =
+        token_file.ok_or_else(|| CmdError::Usage("import-pr needs --github-token-file".into()))?;
+    let dir = match dir {
+        Some(d) => d,
+        None => std::env::current_dir()
+            .map_err(|e| MirrorError::Config(format!("no current directory: {e}")))?,
+    };
+    if !dir.join(".graft").is_dir() {
+        return Err(MirrorError::Config(format!(
+            "{} is not a graft working copy (no .graft); clone the line first",
+            dir.display()
+        ))
+        .into());
+    }
+    let token = StaticToken::load(&token_file)?.into_secret();
+    let forge = HttpForge::new(
+        &api,
+        &spec.owner,
+        &spec.repo,
+        StaticToken::new(token.clone()),
+        RetryPolicy::default(),
+    )?;
+    let scratch = std::env::temp_dir().join(format!(
+        "graft-mirror-import-pr-{}-{}",
+        std::process::id(),
+        spec.number
+    ));
+    let git_url = format!("https://github.com/{}/{}.git", spec.owner, spec.repo);
+    let mirror = Mirror::new(&scratch, git_url).with_credential(Some(token));
+    let result = import_pr(&forge, &spec, &mirror, &dir).await;
+    let _ = std::fs::remove_dir_all(&scratch);
+    let (pull, message) = result?;
+    match &message_out {
+        Some(path) => std::fs::write(path, &message)
+            .map_err(|e| MirrorError::Config(format!("writing {}: {e}", path.display())))?,
+        None => print!("{message}"),
+    }
+    eprintln!(
+        "applied {} (head {}) to {}; crediting {}.\nReview the change, then commit with this message and land:\n  graft commit -m \"$(cat <message file>)\" && graft land",
+        pull.url,
+        pull.head.to_hex(),
+        dir.display(),
+        pull.login
+    );
+    Ok(())
 }
 
 async fn cmd_export_to(args: &[String]) -> Result<(), CmdError> {

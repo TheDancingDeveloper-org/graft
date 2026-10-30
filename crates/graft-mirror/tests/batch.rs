@@ -3163,3 +3163,55 @@ async fn a_batch_over_the_record_cap_is_recorded_in_chunks() {
     assert_eq!(assert_recorded(&w, &log, rec.number).len(), lands);
     assert_eq!(log.calls(), [MAX_RECORD_EXPORTS, 3]);
 }
+
+#[tokio::test]
+async fn a_merged_batch_closes_the_outside_pr_it_re_landed_with_credit() {
+    let w = World::new().await;
+    w.start().await;
+    // An outside contributor's PR #1, open on GitHub.
+    w.github.prs.lock().unwrap().push(FakePr {
+        number: 1,
+        new: NewPull {
+            title: "outside fix".to_owned(),
+            body: String::new(),
+            head: "contrib/fix".to_owned(),
+            base: "main".to_owned(),
+        },
+        open: true,
+        merged: None,
+    });
+    let message = "outside fix\n\n\
+                   Source-PR: https://github.com/o/r/pull/1\n\
+                   Source-PR: https://github.com/other/repo/pull/5\n\
+                   Co-authored-by: xover-rs <12345+xover-rs@users.noreply.github.com>";
+    w.land(&[("fix.txt", "fixed\n")], message, 1).await;
+
+    let rec = opened(w.batcher().run().await.unwrap().outcome);
+    let batch_pr = rec.pr_number.unwrap();
+    assert_eq!(batch_pr, 2);
+    let head = support::branch(&w.upstream, "graft/batch-1").unwrap();
+    let text = git(&w.upstream, &["log", "-1", "--format=%B", &head]);
+    assert!(
+        text.contains(
+            "Co-authored-by: xover-rs <12345+xover-rs@users.noreply.github.com>\nGraft-Changeset:"
+        ),
+        "graft's trailers join the PR's trailer block: {text}"
+    );
+    assert!(
+        w.github.comments().is_empty(),
+        "nothing closes before the merge"
+    );
+
+    let merged = w.github.rebase_merge(batch_pr);
+    let settled = w.batcher().run().await.unwrap().settled.expect("settled");
+    assert_eq!(settled.state, BatchState::Merged);
+    assert_eq!(
+        w.github.comments(),
+        [(
+            1,
+            format!("Landed on main as {merged} via #2, credited as co-author — thanks!")
+        )],
+        "only the same repository's source PR is closed"
+    );
+    assert!(!w.github.prs()[0].open);
+}
