@@ -296,6 +296,15 @@ impl Drop for TempClone {
 /// else is a local directory. Userinfo is refused: credentials stay in
 /// git's own configuration, never in argv or a URL.
 pub(crate) async fn prepare_clone(source: &Path) -> Result<Option<TempClone>, CmdError> {
+    prepare_clone_in(source, &std::env::temp_dir()).await
+}
+
+/// [`prepare_clone`] with the parent dir of the clone given, so a test can
+/// own that dir and check what a failed clone leaves in it.
+pub(crate) async fn prepare_clone_in(
+    source: &Path,
+    parent: &Path,
+) -> Result<Option<TempClone>, CmdError> {
     let raw = source.to_str().unwrap_or("");
     if !is_git_url(raw) {
         return Ok(None);
@@ -305,7 +314,7 @@ pub(crate) async fn prepare_clone(source: &Path) -> Result<Option<TempClone>, Cm
             "refusing a URL with userinfo; credentials come from git's configuration".into(),
         ));
     }
-    let dest = std::env::temp_dir().join(format!(
+    let dest = parent.join(format!(
         "graft-mirror-import-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()

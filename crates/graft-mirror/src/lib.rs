@@ -84,6 +84,21 @@ pub async fn import_source(source: &std::path::Path) -> Result<Option<entry::Tem
     })
 }
 
+/// [`import_source`] with the clone's parent dir given. Exists so tests can
+/// check a failed clone in a dir they own; not part of the API.
+#[doc(hidden)]
+pub async fn import_source_in(
+    source: &std::path::Path,
+    parent: &std::path::Path,
+) -> Result<Option<entry::TempClone>, String> {
+    entry::prepare_clone_in(source, parent)
+        .await
+        .map_err(|e| match e {
+            entry::CmdError::Usage(what) => what,
+            entry::CmdError::Failed(err) => err.to_string(),
+        })
+}
+
 mod entry;
 
 /// A mirror failure.
