@@ -6,24 +6,19 @@ an issue to discuss a change to the design first.
 
 ## How changes land
 
-graft follows trunk-based development, with a merge queue.
+graft lands through its own mirror, batched. Workers `g land` on graft line
+`backlog-1`. Oversight cuts one batch PR from the line (`graft-mirror
+pr-batch`) and merges it with `land-pr --method rebase`, so each land keeps
+its own commit (D28). When a backlog of work is under way, all of it goes into
+a single batch PR. Batch rules: workspace `.claude/rules/delivery-process.md`
+("Landing").
 
-1. **Branch** off `main`: one short-lived branch per work item or change,
-   named `g<phase>-<n>-<slug>` for plan items. Keep PRs small, and merge them
-   within hours, not days.
-2. **Push** the branch and open a PR against `main`. Agent workers push and
-   stop. Oversight opens the PR.
-3. **Review.** Every PR gets a review, from a different model than the author
-   where an agent wrote it. Blockers go back to the author.
-4. **Merge queue.** A clean review is added to the merge queue, which
-   **squashes**: each PR lands as one commit on `main`. The queue runs the
-   required checks on the latest `main`, then merges. Nobody pushes to `main`
-   directly.
-5. **Behind or conflicting with `main`?** Run `git merge origin/main` on your
-   branch, resolve, and push normally. Never rebase a pushed branch or
-   force-push. Resolve the root `Cargo.toml` by keeping every dependency line,
-   sorted. Resolve `Cargo.lock` by taking `main`'s copy and running
-   `cargo update -w`.
+- Graft line: `backlog-1`; mirror: `graft-dev-mirror-graft`
+- Required checks: `fmt`, `clippy`, `test` (`.github/workflows/ci.yml`)
+- Review: every batch gets a review from a different model than the author
+  where an agent wrote it. Blockers go back to the author.
+- Every change adds a changelog fragment (see [Rules for every change](#rules-for-every-change)).
+- Hand-made PRs (rare, operator-agreed) still squash through the merge queue.
 
 **Required checks** (`.github/workflows/ci.yml`, on `pull_request` and
 `merge_group`):
