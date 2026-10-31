@@ -95,6 +95,28 @@ commit in the batch. `graft-mirror` creates or updates the pull request but
 never merges it. Review and merge that pull request with your normal process;
 afterward, `follow` imports the resulting GitHub history and settles the batch.
 
+To avoid many small batches, set cut thresholds in `mirror.toml`:
+
+```toml
+[batch]
+min_lands = 6          # default 6
+min_age_minutes = 60   # default 60
+import_size = 256      # optional; replaces a top-level `batch = 256`
+```
+
+With the `[batch]` table (or the `--min-lands N` / `--min-age MINUTES`
+flags, which override it), `pr-batch` cuts a batch only when at least
+`min_lands` lands are waiting, or the previous batch merged or was closed at
+least `min_age_minutes` ago, or the line has no previous batch. Otherwise it
+opens nothing, exits 0 and prints
+`batch deferred: <k> land(s) waiting, next cut at <time> or <N> lands`. The
+age counts from the run that saw the previous batch merged or closed. A
+release blocker can skip the wait with `--force`; the pull request body then
+says the batch was forced. Without the table or flags, `pr-batch` cuts
+whenever there is something to batch. A top-level `batch = N` (the import
+size) and a `[batch]` table cannot both appear; move the size into
+`import_size`.
+
 Graft runs no build, test, check, checker, or CI job when work lands. Required
 checks run in the user's forge on the batch pull request, and the user's merge
 process decides when the pull request may enter the protected branch.

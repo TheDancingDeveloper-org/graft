@@ -55,6 +55,7 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
   pr-batch <line> --base <branch> --config <file> [--track]
            [--exclude <changeset>]... [--reason <text>]
            [--max-lands <n>] [--max-age <seconds>]
+           [--min-lands <n>] [--min-age <minutes>] [--force]
            [--checks post-land|off]
                                         sync an integration line onto the
                                         followed base, export its net change
@@ -66,7 +67,12 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
                                         would ship lands whose checks have
                                         not run. An older server that does
                                         not implement GetLineConfig warns and
-                                        cannot be checked.
+                                        cannot be checked. With --min-lands
+                                        or --min-age (or [batch] in the
+                                        config) a batch is cut only once that
+                                        many lands wait or the previous batch
+                                        settled that long ago; otherwise the
+                                        run is deferred. --force cuts anyway.
   import-pr <owner>/<repo>#<n> --github-token-file <file>
            [--dir <working-copy>] [--message-out <file>] [--api <url>]
                                         apply an outside GitHub PR's net
@@ -943,6 +949,9 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     let mut max_lands = None;
     let mut max_age_ms = None;
     let mut checked = false;
+    let mut min_lands = None;
+    let mut min_age_mins = None;
+    let mut force = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = |flag: &str| {
@@ -979,6 +988,23 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
                     .ok_or_else(|| CmdError::Usage("--max-age needs seconds".into()))?;
                 max_age_ms = Some(secs.saturating_mul(1000));
             }
+            "--min-lands" => {
+                let n: usize = value("--min-lands")?
+                    .parse()
+                    .ok()
+                    .filter(|n| *n >= 1)
+                    .ok_or_else(|| {
+                        CmdError::Usage("--min-lands needs a count of at least 1".into())
+                    })?;
+                min_lands = Some(n);
+            }
+            "--min-age" => {
+                let mins: u64 = value("--min-age")?
+                    .parse()
+                    .map_err(|_| CmdError::Usage("--min-age needs minutes".into()))?;
+                min_age_mins = Some(mins);
+            }
+            "--force" => force = true,
             "--checks" => match value("--checks")?.as_str() {
                 "post-land" => checked = true,
                 "off" => checked = false,
@@ -1020,6 +1046,16 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     batch.max_lands = max_lands;
     batch.max_age_ms = max_age_ms;
     batch.checked = checked;
+    // A flag overrides `[batch]`; setting either flag turns the thresholds
+    // on, as the table does.
+    let file_cut = file.batch_cut();
+    if min_lands.is_some() || min_age_mins.is_some() || file_cut.is_some() {
+        batch.min_lands = min_lands.or(file_cut.map(|c| c.0));
+        batch.min_age_ms = min_age_mins
+            .or(file_cut.map(|c| c.1))
+            .map(|m| i64::try_from(m.saturating_mul(60_000)).unwrap_or(i64::MAX));
+    }
+    batch.force = force;
     with_credentials(
         file.github.as_ref(),
         RunBatch {
@@ -1110,6 +1146,11 @@ impl AsyncCredentialFn<()> for RunBatch<'_> {
                      not due for a batch yet"
                 );
             }
+            BatchOutcome::Deferred {
+                lands,
+                min_lands,
+                due_ms,
+            } => println!("{}", deferred_line(lands, min_lands, due_ms)),
             BatchOutcome::Unsettled { lands, waiting } => {
                 println!(
                     "line {line}: {lands} land(s) waiting; post-land checks of {waiting} \
@@ -1119,6 +1160,40 @@ impl AsyncCredentialFn<()> for RunBatch<'_> {
         }
         Ok(())
     }
+}
+
+/// `pr-batch`'s report of a batch held back by the cut thresholds.
+fn deferred_line(lands: usize, min_lands: Option<usize>, due_ms: Option<i64>) -> String {
+    let at = due_ms.map(utc);
+    let next = match (at, min_lands) {
+        (Some(at), Some(n)) => format!("{at} or {n} lands"),
+        (Some(at), None) => at,
+        (None, Some(n)) => format!("{n} lands"),
+        (None, None) => "the next run".to_owned(),
+    };
+    format!("batch deferred: {lands} land(s) waiting, next cut at {next}")
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` for `ms` since the epoch.
+fn utc(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let (days, day) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        day / 3600,
+        day % 3600 / 60,
+        day % 60
+    )
 }
 
 fn print_batch(rec: &BatchRecord) {
@@ -1379,6 +1454,25 @@ async fn shutdown() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
+    }
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    use super::{deferred_line, utc};
+
+    #[test]
+    fn deferred_line_names_the_next_cut() {
+        assert_eq!(utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc(1_793_448_000_000), "2026-10-31T12:00:00Z");
+        assert_eq!(
+            deferred_line(2, Some(6), Some(1_793_448_000_000)),
+            "batch deferred: 2 land(s) waiting, next cut at 2026-10-31T12:00:00Z or 6 lands"
+        );
+        assert_eq!(
+            deferred_line(1, Some(6), None),
+            "batch deferred: 1 land(s) waiting, next cut at 6 lands"
+        );
     }
 }
 

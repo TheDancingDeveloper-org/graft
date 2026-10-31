@@ -24,7 +24,8 @@ use crate::text::{clean_message, clean_text};
 use crate::{ExportLog, MAX_RECORD_EXPORTS, MirrorError, current_ref, move_ref};
 
 use super::render::{
-    BatchHeader, keep_with_reverts, land_commit, parse_commit, render, settled_keep,
+    BatchHeader, FORCED_LINE, defer_cut, keep_with_reverts, land_commit, parse_commit, render,
+    settled_keep,
 };
 use super::types::{
     Attested, BATCH, BRANCH_PREFIX, BatchCommit, BatchConfig, BatchLine, BatchOutcome, BatchRecord,
@@ -1106,6 +1107,27 @@ where
             .max_lands
             .unwrap_or(MAX_COMMITS)
             .min(MAX_COMMITS);
+        if !self.config.force {
+            // The thresholds count from the line's previous batch, which is
+            // settled here (an open one stops the run before the plan). A
+            // batch settled before WI-2719 counts from when it was made.
+            let settled = match (self.config.min_lands, self.config.min_age_ms) {
+                (None, None) => None,
+                _ => self
+                    .db
+                    .last_batch(&self.config.line)?
+                    .map(|r| r.settled_ms.unwrap_or(r.created_ms)),
+            };
+            if let Some(deferred) = defer_cut(
+                lands.len(),
+                self.config.min_lands,
+                self.config.min_age_ms,
+                settled,
+                (self.clock)(),
+            ) {
+                return Ok(Err(deferred));
+            }
+        }
         if let Some(age) = self.config.max_age_ms {
             let oldest_ms = lands.iter().map(|l| l.authored_ms).min().unwrap_or(0);
             let full = lands.len() >= max_lands;
@@ -1277,6 +1299,7 @@ where
                 checked: self.config.checked,
                 fallback: fallback.clone(),
                 appended: HashSet::new(),
+                forced: self.config.force,
             },
             &lands,
         );
@@ -1324,6 +1347,7 @@ where
             detail: String::new(),
             merge_sha: None,
             merged: None,
+            settled_ms: None,
         };
         if !self.db.insert_batch(&rec, &commits)? {
             return Err(config_err(format!(
@@ -1826,6 +1850,7 @@ where
                 checked: self.config.checked,
                 fallback: None,
                 appended,
+                forced: rec.body.contains(FORCED_LINE),
             },
             &lands,
         );
@@ -2027,6 +2052,7 @@ where
             let commits = self.map_merged(rec, merge).await?;
             rec.merged = Some(merged);
             rec.state = BatchState::Merged;
+            rec.settled_ms = Some((self.clock)());
             rec.detail = format!("merged as {merge} (graft {merged})");
             // The merge commit's snapshot is the batch tip's (plus whatever
             // GitHub's main gained meanwhile), so the next sync diffs from
@@ -2132,6 +2158,7 @@ where
             "mirror batch rejected; the line is left as it is"
         );
         rec.state = BatchState::Rejected;
+        rec.settled_ms = Some((self.clock)());
         rec.detail = detail;
         self.db.put_batch(rec)?;
         Ok(())

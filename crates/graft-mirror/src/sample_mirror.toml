@@ -20,7 +20,8 @@ poll_interval_secs = 15
 metrics_addr = "127.0.0.1:9465"
 # Emit logs as JSON lines instead of text.
 json_logs = false
-# Changesets sent in one import batch. Default 256.
+# Changesets sent in one import batch. Default 256. To set the pr-batch
+# thresholds below as well, drop this line and use [batch] import_size.
 batch = 256
 # Upstream commits (40 hex characters) allowed to fail the fidelity check.
 allow_lossy = []
@@ -41,6 +42,16 @@ line = "main"
 # [[check_refs]]
 # line = "backlog-1"
 # prefix = "graft/check/backlog-1/"
+
+# pr-batch cut thresholds. With this table, pr-batch cuts a batch only when
+# min_lands lands wait, or the previous batch merged or closed min_age_minutes
+# ago, or there is no previous batch; otherwise it reports "batch deferred"
+# and exits 0. --min-lands, --min-age and --force override it. Omit the table
+# to cut whenever there is something to batch.
+# [batch]
+# min_lands = 6            # default 6
+# min_age_minutes = 60     # default 60
+# import_size = 256        # replaces the top-level `batch = 256`
 
 # GitHub repository for pr-batch, pull import and the authority switch.
 # Omit the whole section to follow and import only.

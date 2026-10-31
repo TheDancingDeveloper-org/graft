@@ -11,8 +11,8 @@ use graft_proto::types::{LandCheck, LandCheckState};
 use crate::text::clean_text;
 
 use super::types::{
-    BATCH_TRAILER, BRANCH_PREFIX, CHANGESET_TRAILER, Dropped, FIELD_CHARS, LandLine, MAX_CHECKS,
-    MAX_DROPS_LISTED, MAX_LANDS, MAX_PR_BODY, git_time_at, short,
+    BATCH_TRAILER, BRANCH_PREFIX, BatchOutcome, CHANGESET_TRAILER, Dropped, FIELD_CHARS, LandLine,
+    MAX_CHECKS, MAX_DROPS_LISTED, MAX_LANDS, MAX_PR_BODY, git_time_at, short,
 };
 
 /// What a batch's PR body and commit message say before the land list.
@@ -42,6 +42,41 @@ pub(crate) struct BatchHeader {
     pub(crate) fallback: Option<String>,
     /// Lands added after the PR opened.
     pub(crate) appended: HashSet<ChangesetId>,
+    /// Cut with `--force`, past the batch thresholds (WI-2719).
+    pub(crate) forced: bool,
+}
+
+/// The PR body line of a batch cut with `--force`.
+pub(crate) const FORCED_LINE: &str =
+    "- Forced: cut with `--force`, ignoring the batch thresholds (forced)\n";
+
+/// Whether a batch with `lands` waiting is held back by the cut thresholds
+/// (WI-2719): `Some(Deferred)` unless `min_lands` lands wait, or the
+/// previous batch settled (at `settled_ms`) at least `min_age_ms` before
+/// `now_ms`, or there is no previous batch. Both thresholds `None` never
+/// defers.
+pub(crate) fn defer_cut(
+    lands: usize,
+    min_lands: Option<usize>,
+    min_age_ms: Option<i64>,
+    settled_ms: Option<i64>,
+    now_ms: i64,
+) -> Option<BatchOutcome> {
+    if min_lands.is_none() && min_age_ms.is_none() {
+        return None;
+    }
+    let settled_ms = settled_ms?;
+    if min_lands.is_some_and(|n| lands >= n) {
+        return None;
+    }
+    if min_age_ms.is_some_and(|a| now_ms.saturating_sub(settled_ms) >= a) {
+        return None;
+    }
+    Some(BatchOutcome::Deferred {
+        lands,
+        min_lands,
+        due_ms: min_age_ms.map(|a| settled_ms.saturating_add(a)),
+    })
 }
 
 /// How many of `lands` (newest first) a batch capped at `max` takes, oldest
@@ -349,6 +384,9 @@ pub(crate) fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
     }
     if let Some(why) = &h.uncut {
         head.push_str(&format!("- Not cut: {why}\n"));
+    }
+    if h.forced {
+        head.push_str(FORCED_LINE);
     }
     if !h.drops.is_empty() {
         head.push_str(&format!(
