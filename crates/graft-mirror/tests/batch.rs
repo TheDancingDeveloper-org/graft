@@ -3230,3 +3230,50 @@ async fn a_merged_batch_closes_the_outside_pr_it_re_landed_with_credit() {
     assert!(!w.github.prs()[0].open);
     assert!(w.github.prs()[1].open, "a graft batch PR is left open");
 }
+
+#[tokio::test]
+async fn min_lands_defers_a_small_batch_after_a_recent_one_until_forced() {
+    let w = World::new().await;
+    w.start().await;
+    let thresholds = |c: &mut BatchConfig| {
+        c.min_lands = Some(3);
+        c.min_age_ms = Some(i64::MAX);
+    };
+    // No previous batch: the first is cut at once.
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let rec = opened(
+        w.batcher_with(&w.db, thresholds)
+            .run()
+            .await
+            .unwrap()
+            .outcome,
+    );
+    assert_eq!(rec.lands, 1);
+    w.github.squash_merge(1);
+    // The previous batch just merged and one land waits: deferred.
+    w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    let run = w.batcher_with(&w.db, thresholds).run().await.unwrap();
+    assert_eq!(run.settled.unwrap().state, BatchState::Merged);
+    assert!(matches!(
+        run.outcome,
+        BatchOutcome::Deferred {
+            lands: 1,
+            min_lands: Some(3),
+            ..
+        }
+    ));
+    assert_eq!(w.github.prs().len(), 1);
+    // --force cuts anyway and says so.
+    let rec = opened(
+        w.batcher_with(&w.db, |c| {
+            thresholds(c);
+            c.force = true;
+        })
+        .run()
+        .await
+        .unwrap()
+        .outcome,
+    );
+    assert_eq!(rec.lands, 1);
+    assert!(rec.body.contains("(forced)"));
+}

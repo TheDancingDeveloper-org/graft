@@ -172,6 +172,9 @@ pub struct BatchRecord {
     pub merge_sha: Option<GitSha>,
     /// The changeset follow imported that merge commit as.
     pub merged: Option<ChangesetId>,
+    /// When a run found the batch merged or closed (ms); `None` while open,
+    /// and for a batch settled before WI-2719.
+    pub settled_ms: Option<i64>,
 }
 
 /// One per-land commit of a batch (D26).
@@ -248,6 +251,16 @@ pub struct BatchConfig {
     /// checked line batched with this `false` would ship lands whose checks
     /// have not run. An unimplemented RPC is a warning, not a refusal.
     pub checked: bool,
+    /// Cut thresholds (WI-2719): with either set, a batch is cut only when
+    /// at least `min_lands` lands wait, or the previous batch settled at
+    /// least `min_age_ms` ago, or the line has no previous batch. Both
+    /// `None` cuts whenever there is something to batch.
+    pub min_lands: Option<usize>,
+    /// See [`min_lands`](Self::min_lands) (ms).
+    pub min_age_ms: Option<i64>,
+    /// Cut regardless of `min_lands` and `min_age_ms` (a release blocker);
+    /// the PR body says so.
+    pub force: bool,
 }
 
 impl BatchConfig {
@@ -267,6 +280,9 @@ impl BatchConfig {
             max_lands: None,
             max_age_ms: None,
             checked: false,
+            min_lands: None,
+            min_age_ms: None,
+            force: false,
         }
     }
 }
@@ -298,6 +314,16 @@ pub enum BatchOutcome {
         lands: usize,
         /// The oldest one's author time (ms).
         oldest_ms: i64,
+    },
+    /// Fewer than `min_lands` lands wait and the previous batch settled
+    /// less than `min_age_ms` ago; no batch yet (WI-2719).
+    Deferred {
+        /// Lands waiting.
+        lands: usize,
+        /// The land count that makes a batch due, if set.
+        min_lands: Option<usize>,
+        /// When the age threshold makes a batch due (ms), if set.
+        due_ms: Option<i64>,
     },
     /// The line is checked and its oldest land's post-land checks are not
     /// settled (pending, or bad with no revert yet); no batch yet.

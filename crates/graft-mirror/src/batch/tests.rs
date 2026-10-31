@@ -50,6 +50,7 @@ fn header(capped: bool) -> BatchHeader {
         checked: false,
         fallback: Some("test".to_owned()),
         appended: std::collections::HashSet::new(),
+        forced: false,
     }
 }
 
@@ -582,4 +583,82 @@ fn crlf_and_trailing_whitespace_still_join_the_block() {
              Graft-Changeset: {id}\nGraft-Batch: 4\n"
         )
     );
+}
+
+mod cut_thresholds {
+    use super::super::render::{FORCED_LINE, defer_cut, render};
+    use super::super::types::BatchOutcome;
+    use super::{header, land};
+
+    const MIN: i64 = 60_000;
+    const SETTLED: i64 = 1_000 * MIN;
+
+    #[test]
+    fn below_both_thresholds_defers() {
+        let out = defer_cut(
+            2,
+            Some(6),
+            Some(60 * MIN),
+            Some(SETTLED),
+            SETTLED + 20 * MIN,
+        );
+        assert_eq!(
+            out,
+            Some(BatchOutcome::Deferred {
+                lands: 2,
+                min_lands: Some(6),
+                due_ms: Some(SETTLED + 60 * MIN),
+            })
+        );
+    }
+
+    #[test]
+    fn enough_lands_cuts() {
+        assert_eq!(
+            defer_cut(6, Some(6), Some(60 * MIN), Some(SETTLED), SETTLED + MIN),
+            None
+        );
+        assert_eq!(defer_cut(9, Some(6), None, Some(SETTLED), SETTLED), None);
+    }
+
+    #[test]
+    fn old_enough_previous_batch_cuts() {
+        assert_eq!(
+            defer_cut(
+                1,
+                Some(6),
+                Some(60 * MIN),
+                Some(SETTLED),
+                SETTLED + 60 * MIN
+            ),
+            None
+        );
+        assert_eq!(
+            defer_cut(1, None, Some(60 * MIN), Some(SETTLED), SETTLED + 61 * MIN),
+            None
+        );
+    }
+
+    #[test]
+    fn no_previous_batch_cuts() {
+        assert_eq!(defer_cut(1, Some(6), Some(60 * MIN), None, 0), None);
+    }
+
+    #[test]
+    fn unset_thresholds_cut() {
+        assert_eq!(defer_cut(1, None, None, Some(SETTLED), SETTLED), None);
+    }
+
+    #[test]
+    fn forced_batch_says_so_in_the_body() {
+        let mut h = header(false);
+        h.fallback = None;
+        let (plain, _) = render(&h, &[land(1, false)]);
+        assert!(!plain.contains(FORCED_LINE));
+        h.forced = true;
+        let (forced, message) = render(&h, &[land(1, false)]);
+        assert!(forced.contains(FORCED_LINE));
+        assert!(forced.contains("(forced)"));
+        assert!(message.contains("forced"));
+    }
 }
