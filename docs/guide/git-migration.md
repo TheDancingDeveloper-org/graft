@@ -110,7 +110,8 @@ flags, which override it), `pr-batch` cuts a batch only when at least
 least `min_age_minutes` ago, or the line has no previous batch. Otherwise it
 opens nothing, exits 0 and prints
 `batch deferred: <k> land(s) waiting, next cut at <time> or <N> lands`. The
-age counts from the run that saw the previous batch merged or closed. A
+age counts from the time GitHub records the previous batch's pull request
+as merged or closed, not from the run that first notices it. A
 release blocker can skip the wait with `--force`; the pull request body then
 says the batch was forced. Without the table or flags, `pr-batch` cuts
 whenever there is something to batch. A top-level `batch = N` (the import

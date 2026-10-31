@@ -1046,15 +1046,7 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     batch.max_lands = max_lands;
     batch.max_age_ms = max_age_ms;
     batch.checked = checked;
-    // A flag overrides `[batch]`; setting either flag turns the thresholds
-    // on, as the table does.
-    let file_cut = file.batch_cut();
-    if min_lands.is_some() || min_age_mins.is_some() || file_cut.is_some() {
-        batch.min_lands = min_lands.or(file_cut.map(|c| c.0));
-        batch.min_age_ms = min_age_mins
-            .or(file_cut.map(|c| c.1))
-            .map(|m| i64::try_from(m.saturating_mul(60_000)).unwrap_or(i64::MAX));
-    }
+    (batch.min_lands, batch.min_age_ms) = cut_thresholds(min_lands, min_age_mins, file.batch_cut());
     batch.force = force;
     with_credentials(
         file.github.as_ref(),
@@ -1163,6 +1155,25 @@ impl AsyncCredentialFn<()> for RunBatch<'_> {
 }
 
 /// `pr-batch`'s report of a batch held back by the cut thresholds.
+/// The cut thresholds from the flags and the `[batch]` table: a flag
+/// overrides the table, and setting either flag turns the thresholds on, as
+/// the table does. Neither keeps today's cut-whenever-pending behaviour.
+fn cut_thresholds(
+    min_lands: Option<usize>,
+    min_age_mins: Option<u64>,
+    file_cut: Option<(usize, u64)>,
+) -> (Option<usize>, Option<i64>) {
+    if min_lands.is_none() && min_age_mins.is_none() && file_cut.is_none() {
+        return (None, None);
+    }
+    (
+        min_lands.or(file_cut.map(|c| c.0)),
+        min_age_mins
+            .or(file_cut.map(|c| c.1))
+            .map(|m| i64::try_from(m.saturating_mul(60_000)).unwrap_or(i64::MAX)),
+    )
+}
+
 fn deferred_line(lands: usize, min_lands: Option<usize>, due_ms: Option<i64>) -> String {
     let at = due_ms.map(utc);
     let next = match (at, min_lands) {
@@ -1459,7 +1470,48 @@ async fn shutdown() {
 
 #[cfg(test)]
 mod deferred_tests {
-    use super::{deferred_line, utc};
+    use super::{CmdError, cmd_pr_batch, cut_thresholds, deferred_line, utc};
+
+    #[tokio::test]
+    async fn bad_threshold_values_are_usage_errors() {
+        for bad in [
+            ["--min-lands", "0"],
+            ["--min-lands", "six"],
+            ["--min-age", "-5"],
+            ["--min-age", "1h"],
+        ] {
+            let args: Vec<String> = ["backlog-1"]
+                .into_iter()
+                .chain(bad)
+                .map(str::to_owned)
+                .collect();
+            assert!(
+                matches!(cmd_pr_batch(&args).await, Err(CmdError::Usage(_))),
+                "{bad:?} should be a usage error"
+            );
+        }
+        let args = ["backlog-1".to_owned(), "--min-age".to_owned()];
+        assert!(matches!(cmd_pr_batch(&args).await, Err(CmdError::Usage(_))));
+    }
+
+    #[test]
+    fn threshold_flags_override_the_batch_table() {
+        assert_eq!(cut_thresholds(None, None, None), (None, None));
+        assert_eq!(
+            cut_thresholds(None, None, Some((6, 60))),
+            (Some(6), Some(3_600_000))
+        );
+        assert_eq!(
+            cut_thresholds(Some(2), None, Some((6, 60))),
+            (Some(2), Some(3_600_000))
+        );
+        assert_eq!(
+            cut_thresholds(None, Some(5), Some((6, 60))),
+            (Some(6), Some(300_000))
+        );
+        assert_eq!(cut_thresholds(Some(3), None, None), (Some(3), None));
+        assert_eq!(cut_thresholds(None, Some(0), None), (None, Some(0)));
+    }
 
     #[test]
     fn deferred_line_names_the_next_cut() {

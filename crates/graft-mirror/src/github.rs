@@ -89,6 +89,8 @@ pub struct Pull {
     pub head_ref: String,
     /// The PR body, as GitHub currently stores it.
     pub body: String,
+    /// When it was merged, else closed (Unix ms), as GitHub recorded it.
+    pub settled_ms: Option<i64>,
 }
 
 /// A PR to open.
@@ -526,6 +528,10 @@ struct RawPull {
     head: RawHead,
     #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
+    merged_at: Option<String>,
+    #[serde(default)]
+    closed_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -571,7 +577,47 @@ fn pull_from(v: Value) -> Result<Pull, ForgeError> {
         head_sha: raw.head.sha,
         head_ref: raw.head.name,
         body: raw.body.unwrap_or_default(),
+        settled_ms: raw
+            .merged_at
+            .as_deref()
+            .or(raw.closed_at.as_deref())
+            .and_then(parse_utc_ms),
     })
+}
+
+/// Parses GitHub's `YYYY-MM-DDTHH:MM:SSZ` timestamp to Unix ms; anything
+/// else is `None`.
+fn parse_utc_ms(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let t = &s[r];
+        t.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| t.parse().ok())?
+    };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Howard Hinnant's days_from_civil.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some((days * 86_400 + hh * 3_600 + mm * 60 + ss) * 1_000)
 }
 
 impl<C: CredentialProvider> Forge for HttpForge<C> {
@@ -881,6 +927,40 @@ mod tests {
             "head": { "sha": "not-a-sha" }
         });
         assert!(matches!(pull_from(v), Err(ForgeError::Refused(_))));
+    }
+
+    #[test]
+    fn a_pull_settles_at_githubs_merge_else_close_time() {
+        let sha = "a".repeat(40);
+        let pull = |extra: Value| {
+            let mut v = json!({
+                "number": 1, "html_url": "u", "node_id": "n", "state": "closed",
+                "head": { "sha": sha }
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            pull_from(v).unwrap().settled_ms
+        };
+        // 2023-11-14T22:13:20Z is Unix 1_700_000_000 s.
+        assert_eq!(
+            pull(
+                json!({ "merged_at": "2023-11-14T22:13:20Z", "closed_at": "2023-11-14T23:00:00Z" })
+            ),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            pull(json!({ "merged_at": null, "closed_at": "2023-11-14T22:13:20Z" })),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(pull(json!({})), None);
+        assert_eq!(pull(json!({ "closed_at": "yesterday" })), None);
+        assert_eq!(parse_utc_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_utc_ms("2024-02-29T12:00:00Z"),
+            Some(1_709_208_000_000)
+        );
+        assert_eq!(parse_utc_ms("2024-13-01T00:00:00Z"), None);
     }
 
     #[test]

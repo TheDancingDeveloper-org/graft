@@ -2052,7 +2052,7 @@ where
             let commits = self.map_merged(rec, merge).await?;
             rec.merged = Some(merged);
             rec.state = BatchState::Merged;
-            rec.settled_ms = Some((self.clock)());
+            rec.settled_ms = Some(pull.settled_ms.unwrap_or_else(|| (self.clock)()));
             rec.detail = format!("merged as {merge} (graft {merged})");
             // The merge commit's snapshot is the batch tip's (plus whatever
             // GitHub's main gained meanwhile), so the next sync diffs from
@@ -2086,7 +2086,11 @@ where
             return Ok(());
         }
         if !pull.open {
-            return self.reject(rec, format!("closed without merging: {}", pull.url));
+            return self.reject_at(
+                rec,
+                format!("closed without merging: {}", pull.url),
+                pull.settled_ms,
+            );
         }
         if pull.head_sha != rec.squash_sha.to_hex() {
             rec.detail = format!(
@@ -2152,13 +2156,23 @@ where
     }
 
     fn reject(&self, rec: &mut BatchRecord, detail: String) -> Result<(), MirrorError> {
+        self.reject_at(rec, detail, None)
+    }
+
+    /// Rejects the batch as settled at `at` (GitHub's close time), else now.
+    fn reject_at(
+        &self,
+        rec: &mut BatchRecord,
+        detail: String,
+        at: Option<i64>,
+    ) -> Result<(), MirrorError> {
         let detail = clean_text(&detail, 500, false);
         tracing::warn!(
             line = %rec.line, batch = rec.number, detail = %detail,
             "mirror batch rejected; the line is left as it is"
         );
         rec.state = BatchState::Rejected;
-        rec.settled_ms = Some((self.clock)());
+        rec.settled_ms = Some(at.unwrap_or_else(|| (self.clock)()));
         rec.detail = detail;
         self.db.put_batch(rec)?;
         Ok(())
