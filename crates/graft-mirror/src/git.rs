@@ -121,27 +121,57 @@ struct Output {
     stderr: Vec<u8>,
 }
 
+/// The environment of one git command: variables to set, and inherited
+/// variables to remove first.
+#[derive(Clone, Debug, Default)]
+struct GitEnv {
+    set: Vec<(String, String)>,
+    unset: &'static [&'static str],
+}
+
+impl GitEnv {
+    /// Only `set`: nothing inherited is removed.
+    fn set(set: Vec<(String, String)>) -> GitEnv {
+        GitEnv { set, unset: &[] }
+    }
+}
+
+/// Inherited variables an isolated mirror removes. Each can point git at
+/// another config, repository, object store or helper, or re-add a rewrite
+/// that `git -c` passed down (`GIT_CONFIG_PARAMETERS`). The
+/// `GIT_CONFIG_COUNT` header a credential sets is not in this list.
+const ISOLATION_UNSET: &[&str] = &[
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+];
+
 async fn git(dir: Option<&Path>, args: &[&str]) -> Result<Output, GitCliError> {
-    git_env(dir, args, &[]).await
+    git_env(dir, args, &GitEnv::default()).await
 }
 
 /// [`git`] with extra environment variables. Secrets go here, never in argv.
-async fn git_env(
-    dir: Option<&Path>,
-    args: &[&str],
-    env: &[(String, String)],
-) -> Result<Output, GitCliError> {
+async fn git_env(dir: Option<&Path>, args: &[&str], env: &GitEnv) -> Result<Output, GitCliError> {
     let mut cmd = Command::new("git");
     if let Some(dir) = dir {
         cmd.arg("-C").arg(dir);
     }
     cmd.args(args)
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(env.set.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for name in env.unset {
+        cmd.env_remove(name);
+    }
     let what = args.first().copied().unwrap_or("git");
     let child = cmd
         .spawn()
@@ -163,19 +193,22 @@ async fn git_input(
     dir: &Path,
     args: &[&str],
     input: &[u8],
-    env: &[(String, String)],
+    env: &GitEnv,
 ) -> Result<Vec<u8>, GitCliError> {
     use tokio::io::AsyncWriteExt;
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(dir)
         .args(args)
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(env.set.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for name in env.unset {
+        cmd.env_remove(name);
+    }
     let what = args.first().copied().unwrap_or("git");
     let mut child = cmd
         .spawn()
@@ -218,15 +251,11 @@ fn failed(what: &str, out: &Output) -> GitCliError {
 }
 
 async fn ok(dir: Option<&Path>, args: &[&str]) -> Result<Vec<u8>, GitCliError> {
-    ok_env(dir, args, &[]).await
+    ok_env(dir, args, &GitEnv::default()).await
 }
 
 /// [`ok`] with extra environment variables.
-async fn ok_env(
-    dir: Option<&Path>,
-    args: &[&str],
-    env: &[(String, String)],
-) -> Result<Vec<u8>, GitCliError> {
+async fn ok_env(dir: Option<&Path>, args: &[&str], env: &GitEnv) -> Result<Vec<u8>, GitCliError> {
     let out = git_env(dir, args, env).await?;
     if out.code == Some(0) {
         Ok(out.stdout)
@@ -285,15 +314,19 @@ impl Mirror {
     }
 
     /// The environment that keeps this mirror's git off the user's and the
-    /// system's config: empty unless it is a [`Mirror::scratch`].
-    fn isolation_env(&self) -> Vec<(String, String)> {
+    /// system's config, and off any other repository or config the process
+    /// inherited: empty unless it is a [`Mirror::scratch`].
+    fn isolation_env(&self) -> GitEnv {
         if !self.isolated {
-            return Vec::new();
+            return GitEnv::default();
         }
-        vec![
-            ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
-            ("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned()),
-        ]
+        GitEnv {
+            set: vec![
+                ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
+                ("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned()),
+            ],
+            unset: ISOLATION_UNSET,
+        }
     }
 
     /// This mirror, with `credential` sent on every git network command
@@ -715,8 +748,8 @@ impl Mirror {
     /// Runs a read-only network command (ls-remote, fetch) against
     /// upstream with the mirror's credential; succeeds only on exit 0.
     async fn remote(&self, args: &[&str]) -> Result<Vec<u8>, GitCliError> {
-        let mut env = self.credential_env(None);
-        env.extend(self.isolation_env());
+        let mut env = self.isolation_env();
+        env.set.extend(self.credential_env(None));
         let out = git_env(Some(&self.dir), args, &env).await?;
         if out.code == Some(0) {
             Ok(out.stdout)
@@ -726,10 +759,10 @@ impl Mirror {
     }
 
     /// The environment of a push: [`MIRROR_PUSH_ENV`], and the credential.
-    fn auth_env(&self, bearer: Option<&str>) -> Vec<(String, String)> {
+    fn auth_env(&self, bearer: Option<&str>) -> GitEnv {
         let mut env = vec![(MIRROR_PUSH_ENV.to_owned(), "1".to_owned())];
         env.extend(self.credential_env(bearer));
-        env
+        GitEnv::set(env)
     }
 
     /// The `http.extraHeader` for an HTTPS upstream: `bearer` if given,
@@ -791,7 +824,7 @@ impl Mirror {
             &self.dir,
             &["hash-object", "-t", "commit", "-w", "--stdin"],
             raw,
-            &[],
+            &GitEnv::default(),
         )
         .await?;
         GitSha::from_hex(String::from_utf8_lossy(&out).trim())
