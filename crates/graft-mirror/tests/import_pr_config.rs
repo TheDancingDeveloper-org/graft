@@ -95,3 +95,69 @@ async fn check_in_child(dir: &Path) {
         .map(|sha| sha.to_hex());
     assert_eq!(fetched.as_deref(), Some(real_head.as_str()));
 }
+
+const PARAMS_TEST_NAME: &str = "a_config_parameter_does_not_redirect_the_scratch_fetch";
+
+/// `real` and `decoy` in `dir`, each with one commit on `main`.
+fn real_and_decoy(dir: &Path) -> (PathBuf, PathBuf) {
+    let (real, decoy) = (dir.join("real"), dir.join("decoy"));
+    repo_with_commit(&real, "real");
+    repo_with_commit(&decoy, "decoy");
+    (real, decoy)
+}
+
+#[tokio::test]
+async fn a_config_parameter_does_not_redirect_the_scratch_fetch() {
+    if let Some(dir) = std::env::var_os(CHILD_DIR_ENV) {
+        check_parameter_in_child(&PathBuf::from(dir)).await;
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (real, decoy) = real_and_decoy(tmp.path());
+    // What `git -c url.<decoy>.insteadOf=<real>` leaves in the environment
+    // of every child git: the same rewrite as the global config test.
+    let params = format!("'url.{}.insteadOf'='{}'", decoy.display(), real.display());
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            PARAMS_TEST_NAME,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("GIT_CONFIG_PARAMETERS", params)
+        .env(CHILD_DIR_ENV, tmp.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child check failed: {status}");
+}
+
+/// The checks, run with the `-c` rewrite in the environment.
+async fn check_parameter_in_child(dir: &Path) {
+    let (real, decoy) = (dir.join("real"), dir.join("decoy"));
+    let real_head = git(&real, &["rev-parse", "HEAD"]);
+    let decoy_head = git(&decoy, &["rev-parse", "HEAD"]);
+    assert_ne!(real_head, decoy_head);
+    let real_url = real.to_str().unwrap();
+
+    // Control: a mirror without isolation follows the rewrite, so the
+    // isolated fetch below can only pass by ignoring the inherited variable.
+    let plain = Mirror::new(dir.join("plain"), real_url);
+    plain.ensure().await.unwrap();
+    plain.fetch(&["main"]).await.unwrap();
+    let followed = plain
+        .local_ref(&Mirror::upstream_ref("main"))
+        .await
+        .unwrap()
+        .map(|sha| sha.to_hex());
+    assert_eq!(followed.as_deref(), Some(decoy_head.as_str()));
+
+    let mirror = Mirror::scratch(dir.join("repo"), real_url);
+    mirror.init_fresh().await.unwrap();
+    mirror.fetch(&["main"]).await.unwrap();
+    let fetched = mirror
+        .local_ref(&Mirror::upstream_ref("main"))
+        .await
+        .unwrap()
+        .map(|sha| sha.to_hex());
+    assert_eq!(fetched.as_deref(), Some(real_head.as_str()));
+}
