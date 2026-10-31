@@ -319,6 +319,96 @@ services:
       retries: 3
       start_period: 20s
 
+  graft-mirror-indexarr-rs:
+    image: ${GRAFT_IMAGE:?set GRAFT_IMAGE (compose --env-file deploy/image.env)}
+    user: "10001:10001"
+    read_only: true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [graft-dev]
+    container_name: graft-dev-mirror-indexarr-rs
+    hostname: graft-dev-mirror-indexarr-rs
+    depends_on:
+      graft-server:
+        condition: service_healthy
+    environment:
+      GRAFT_DEPLOY_CONFIG_HASH: ${GRAFT_CONFIG_HASH:-}
+    command: ["graft-mirror", "follow", "--config", "/etc/graft/deploy/mirror.toml"]
+    ports:
+      - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_INDEXARR_RS_METRICS_PORT:-17900}:9465"
+    volumes:
+      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-indexarr-rs.toml:/etc/graft/deploy/mirror.toml:ro
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-indexarr-rs
+        target: /run/secrets/graft-mirror-token
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - graft-dev-mirror-indexarr-rs:/var/lib/graft/mirror
+    healthcheck:
+      test: [CMD, bash, -c, "exec 3<>/dev/tcp/127.0.0.1/9465 && printf 'GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  graft-mirror-egressy:
+    image: ${GRAFT_IMAGE:?set GRAFT_IMAGE (compose --env-file deploy/image.env)}
+    user: "10001:10001"
+    read_only: true
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [graft-dev]
+    container_name: graft-dev-mirror-egressy
+    hostname: graft-dev-mirror-egressy
+    depends_on:
+      graft-server:
+        condition: service_healthy
+    environment:
+      GRAFT_DEPLOY_CONFIG_HASH: ${GRAFT_CONFIG_HASH:-}
+    command: ["graft-mirror", "follow", "--config", "/etc/graft/deploy/mirror.toml"]
+    ports:
+      - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_EGRESSY_METRICS_PORT:-17901}:9465"
+    volumes:
+      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-egressy.toml:/etc/graft/deploy/mirror.toml:ro
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-egressy
+        target: /run/secrets/graft-mirror-token
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
+        target: /run/secrets/github-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - graft-dev-mirror-egressy:/var/lib/graft/mirror
+    healthcheck:
+      test: [CMD, bash, -c, "exec 3<>/dev/tcp/127.0.0.1/9465 && printf 'GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
 volumes:
   graft-dev-mirror-rustnzb:
     name: graft-dev-mirror-rustnzb
@@ -340,3 +430,9 @@ volumes:
 
   graft-dev-mirror-fluent-gpui:
     name: graft-dev-mirror-fluent-gpui
+
+  graft-dev-mirror-indexarr-rs:
+    name: graft-dev-mirror-indexarr-rs
+
+  graft-dev-mirror-egressy:
+    name: graft-dev-mirror-egressy
