@@ -771,7 +771,7 @@ async fn cmd_import_pr(args: &[String]) -> Result<(), CmdError> {
         .tempdir()
         .map_err(|e| MirrorError::Config(format!("creating a scratch directory: {e}")))?;
     let git_url = format!("https://github.com/{}/{}.git", spec.owner, spec.repo);
-    let mirror = Mirror::new(scratch.path().join("repo"), git_url).with_credential(Some(token));
+    let mirror = Mirror::scratch(scratch.path().join("repo"), git_url).with_credential(Some(token));
     let result = import_pr(&forge, &spec, &mirror, &dir).await;
     drop(scratch);
     let (pull, message) = result?;

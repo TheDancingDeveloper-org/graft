@@ -109,6 +109,9 @@ pub struct Mirror {
     upstream: String,
     /// The HTTPS credential every network command carries (WI-2571).
     credential: Option<SecretToken>,
+    /// Whether git ignores the user's and the system's config here (the
+    /// import-pr scratch repository, WI-2716). See [`Mirror::scratch`].
+    isolated: bool,
 }
 
 /// The exit status and stdout of a finished command.
@@ -154,13 +157,20 @@ async fn git_env(
     })
 }
 
-/// Runs `git` in `dir` with `input` on stdin; succeeds only on exit 0.
-async fn git_input(dir: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, GitCliError> {
+/// Runs `git` in `dir` with `input` on stdin and `env` added; succeeds only
+/// on exit 0.
+async fn git_input(
+    dir: &Path,
+    args: &[&str],
+    input: &[u8],
+    env: &[(String, String)],
+) -> Result<Vec<u8>, GitCliError> {
     use tokio::io::AsyncWriteExt;
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(dir)
         .args(args)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -208,7 +218,16 @@ fn failed(what: &str, out: &Output) -> GitCliError {
 }
 
 async fn ok(dir: Option<&Path>, args: &[&str]) -> Result<Vec<u8>, GitCliError> {
-    let out = git(dir, args).await?;
+    ok_env(dir, args, &[]).await
+}
+
+/// [`ok`] with extra environment variables.
+async fn ok_env(
+    dir: Option<&Path>,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<Vec<u8>, GitCliError> {
+    let out = git_env(dir, args, env).await?;
     if out.code == Some(0) {
         Ok(out.stdout)
     } else {
@@ -247,7 +266,34 @@ impl Mirror {
             dir: dir.into(),
             upstream: upstream.into(),
             credential: None,
+            isolated: false,
         }
+    }
+
+    /// The mirror at `dir` for a scratch repository that reads untrusted
+    /// content (import-pr). Its git commands ignore the user's and the
+    /// system's config (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL`), so a
+    /// `url.<x>.insteadOf`, an `includeIf` or a credential helper there
+    /// cannot redirect a fetch or see the token. `HOME` is unchanged, and
+    /// the token travels in its own `GIT_CONFIG_*` variables, which this
+    /// does not touch (WI-2716).
+    pub fn scratch(dir: impl Into<PathBuf>, upstream: impl Into<String>) -> Mirror {
+        Mirror {
+            isolated: true,
+            ..Mirror::new(dir, upstream)
+        }
+    }
+
+    /// The environment that keeps this mirror's git off the user's and the
+    /// system's config: empty unless it is a [`Mirror::scratch`].
+    fn isolation_env(&self) -> Vec<(String, String)> {
+        if !self.isolated {
+            return Vec::new();
+        }
+        vec![
+            ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
+            ("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned()),
+        ]
     }
 
     /// This mirror, with `credential` sent on every git network command
@@ -299,9 +345,10 @@ impl Mirror {
                 self.dir.display()
             ))
         })?;
-        ok(Some(&self.dir), &["init", "-q", "--bare"]).await?;
+        let env = self.isolation_env();
+        ok_env(Some(&self.dir), &["init", "-q", "--bare"], &env).await?;
         for (key, value) in [("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false")] {
-            ok(Some(&self.dir), &["config", key, value]).await?;
+            ok_env(Some(&self.dir), &["config", key, value], &env).await?;
         }
         Ok(())
     }
@@ -531,7 +578,12 @@ impl Mirror {
     /// The best common ancestor of `a` and `b`, if they share history.
     pub async fn merge_base(&self, a: GitSha, b: GitSha) -> Result<Option<GitSha>, GitCliError> {
         let (a, b) = (a.to_hex(), b.to_hex());
-        let out = git(Some(&self.dir), &["merge-base", "--end-of-options", &a, &b]).await?;
+        let out = git_env(
+            Some(&self.dir),
+            &["merge-base", "--end-of-options", &a, &b],
+            &self.isolation_env(),
+        )
+        .await?;
         if out.code != Some(0) {
             return Ok(None);
         }
@@ -550,7 +602,7 @@ impl Mirror {
         max_paths: usize,
     ) -> Result<Vec<ChangedPath>, GitCliError> {
         let (from, to) = (from.to_hex(), to.to_hex());
-        let out = ok(
+        let out = ok_env(
             Some(&self.dir),
             &[
                 "diff",
@@ -563,6 +615,7 @@ impl Mirror {
                 &from,
                 &to,
             ],
+            &self.isolation_env(),
         )
         .await?;
         let malformed = || GitCliError("git diff: malformed --raw output".to_owned());
@@ -600,7 +653,7 @@ impl Mirror {
         max_bytes: usize,
     ) -> Result<Vec<u8>, GitCliError> {
         let (from, to) = (from.to_hex(), to.to_hex());
-        let patch = ok(
+        let patch = ok_env(
             Some(&self.dir),
             &[
                 "diff",
@@ -613,6 +666,7 @@ impl Mirror {
                 &from,
                 &to,
             ],
+            &self.isolation_env(),
         )
         .await?;
         if patch.len() > max_bytes {
@@ -635,6 +689,7 @@ impl Mirror {
             worktree,
             &[&git_dir, &work_tree, "apply", "--binary", "-"],
             patch,
+            &self.isolation_env(),
         )
         .await?;
         Ok(())
@@ -643,9 +698,10 @@ impl Mirror {
     /// The commit a local ref of the mirror names, if any.
     pub async fn local_ref(&self, name: &str) -> Result<Option<GitSha>, GitCliError> {
         let spec = format!("{name}^{{commit}}");
-        let out = git(
+        let out = git_env(
             Some(&self.dir),
             &["rev-parse", "-q", "--verify", "--end-of-options", &spec],
+            &self.isolation_env(),
         )
         .await?;
         if out.code != Some(0) {
@@ -659,7 +715,9 @@ impl Mirror {
     /// Runs a read-only network command (ls-remote, fetch) against
     /// upstream with the mirror's credential; succeeds only on exit 0.
     async fn remote(&self, args: &[&str]) -> Result<Vec<u8>, GitCliError> {
-        let out = git_env(Some(&self.dir), args, &self.credential_env(None)).await?;
+        let mut env = self.credential_env(None);
+        env.extend(self.isolation_env());
+        let out = git_env(Some(&self.dir), args, &env).await?;
         if out.code == Some(0) {
             Ok(out.stdout)
         } else {
@@ -733,6 +791,7 @@ impl Mirror {
             &self.dir,
             &["hash-object", "-t", "commit", "-w", "--stdin"],
             raw,
+            &[],
         )
         .await?;
         GitSha::from_hex(String::from_utf8_lossy(&out).trim())
