@@ -37,6 +37,8 @@ struct FakePr {
     new: NewPull,
     open: bool,
     merged: Option<String>,
+    /// GitHub's merged_at/closed_at (Unix ms), once settled.
+    settled_ms: Option<i64>,
 }
 
 /// A fake GitHub API: PRs in memory, branch heads read from the bare
@@ -79,6 +81,7 @@ impl FakeGitHub {
             head_sha: support::branch(&self.upstream, &pr.new.head).unwrap_or_default(),
             head_ref: pr.new.head.clone(),
             body: pr.new.body.clone(),
+            settled_ms: pr.settled_ms,
         };
         let mut race = self.race_push.lock().unwrap();
         if let Some((reads, _, _)) = race.as_mut()
@@ -126,6 +129,7 @@ impl FakeGitHub {
         git(&self.upstream, &["update-ref", "refs/heads/main", &sha]);
         pr.open = false;
         pr.merged = Some(sha.clone());
+        pr.settled_ms = Some(support::clock());
         sha
     }
 
@@ -213,6 +217,7 @@ impl Forge for FakeGitHub {
                     },
                     open: false,
                     merged: Some(main),
+                    settled_ms: None,
                 });
                 *foreign = None;
             } else {
@@ -232,6 +237,7 @@ impl Forge for FakeGitHub {
             new: new.clone(),
             open: true,
             merged: None,
+            settled_ms: None,
         };
         prs.push(pr.clone());
         Ok(self.pull(&pr))
@@ -2113,6 +2119,7 @@ fn leftover_merged_pr(w: &World, head: &str, merged: &str) -> u64 {
         },
         open: false,
         merged: Some(merged.to_owned()),
+        settled_ms: None,
     });
     number
 }
@@ -3180,6 +3187,7 @@ async fn a_merged_batch_closes_the_outside_pr_it_re_landed_with_credit() {
         },
         open: true,
         merged: None,
+        settled_ms: None,
     });
     // An earlier graft batch PR, #2, still open: never closed as a source.
     w.github.prs.lock().unwrap().push(FakePr {
@@ -3192,6 +3200,7 @@ async fn a_merged_batch_closes_the_outside_pr_it_re_landed_with_credit() {
         },
         open: true,
         merged: None,
+        settled_ms: None,
     });
     let message = "outside fix\n\n\
                    Source-PR: https://github.com/o/r/pull/1\n\
@@ -3276,4 +3285,35 @@ async fn min_lands_defers_a_small_batch_after_a_recent_one_until_forced() {
     );
     assert_eq!(rec.lands, 1);
     assert!(rec.body.contains("(forced)"));
+}
+
+#[tokio::test]
+async fn min_age_counts_from_githubs_merge_time_not_when_it_was_seen() {
+    let w = World::new().await;
+    w.start().await;
+    let min_age = 60 * 60_000;
+    let thresholds = |c: &mut BatchConfig| {
+        c.min_lands = Some(3);
+        c.min_age_ms = Some(min_age);
+    };
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    opened(
+        w.batcher_with(&w.db, thresholds)
+            .run()
+            .await
+            .unwrap()
+            .outcome,
+    );
+    // GitHub merges it now; no pr-batch run sees that for an hour.
+    w.github.squash_merge(1);
+    let merged_at = clock();
+    support::advance(min_age);
+    w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    // The first run to see the merge records GitHub's time, so the batch
+    // is already old enough and one waiting land is cut.
+    let run = w.batcher_with(&w.db, thresholds).run().await.unwrap();
+    assert_eq!(run.settled.unwrap().settled_ms, Some(merged_at));
+    let rec = opened(run.outcome);
+    assert_eq!(rec.lands, 1);
+    assert!(!rec.body.contains("(forced)"));
 }
