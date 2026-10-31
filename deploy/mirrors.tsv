@@ -8,3 +8,4 @@ graft-mirror-rdpapp|rdpapp|TheDancingDeveloper-org/rdpapp|main|mirror-token-rdpa
 graft-mirror-graft|graft|TheDancingDeveloper-org/graft|main|mirror-token-graft|mirror-graft.toml|17896|generated|0
 graft-mirror-komodo|komodo|TheDancingDeveloper-org/komodo|tdd/patches|mirror-token-komodo|mirror-komodo.toml|17897|generated|0
 graft-mirror-email-rs|email-rs|TheDancingDeveloper-org/email-rs|main|mirror-token-email-rs|mirror-email-rs.toml|17898|generated|1
+graft-mirror-fluent-gpui|fluent-gpui|thedancingdeveloper/fluent-gpui|main|mirror-token-fluent-gpui|mirror-fluent-gpui.toml|17899|generated|0
