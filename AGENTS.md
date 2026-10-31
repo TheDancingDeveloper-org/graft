@@ -60,16 +60,13 @@ cargo nextest run -p <crate> --all-features   # or: cargo test -p <crate>
 ## Finishing
 
 - Add a changelog fragment `changes/<item>.md`.
-- If your branch conflicts with `main`, run `git merge origin/main` and push
-  normally. Never rebase a pushed branch or force-push: the merge queue squashes,
-  so merge commits on a branch are fine.
-- Batch PRs (`graft/batch-<n>`, made by `pr-batch`) are the exception: they
-  bypass the merge queue, and `land-pr` rebase-merges them with `--admin` once
-  the required checks pass, so each land's commit survives (D28). Every other
-  PR squashes through the queue.
-- Commit with the identity in your brief, push the branch, and **stop**.
-  Don't open the PR, don't poll CI. Oversight opens it, reviews it and lands
-  it.
+- Land with `g land` on the graft line (`backlog-1`): commit, `g sync`, then
+  `g land`. Once landed, **stop**. Don't open a PR, don't poll CI.
+- Batch PRs are the normal path. Oversight cuts one batch PR from the line
+  (`graft/batch-<n>`, made by `pr-batch`) and `land-pr` rebase-merges it with
+  `--admin` once the required checks pass, so each land's commit survives
+  (D28). Hand-made PRs squash through the merge queue.
+- Commit with the identity in your brief.
 - Leave a Vogt hand-off comment on your work item: branch, head sha, and
   which checks you ran. Then list **every** Deliver and Accept item from the
   work item, each with the file and test that meets it, or `NOT DONE: <why>`.
