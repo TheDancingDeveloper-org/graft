@@ -9,7 +9,7 @@ use std::process::Command;
 use graft_git::GitError;
 use graft_git::import::{ImportConfig, import};
 use graft_git::map::MemoryMirrorMap;
-use graft_mirror::import_source;
+use graft_mirror::{import_source, import_source_in};
 use graft_testkit::fake_api::{FakeApi, admin_cx, block_on};
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -149,30 +149,16 @@ async fn a_rejected_commit_is_named_and_the_clone_is_removed() {
 async fn a_failed_clone_leaves_no_temp_dir() {
     let missing = tempfile::tempdir().unwrap();
     let url = format!("file://{}/no-such-repo.git", missing.path().display());
-    let before: Vec<_> = std::fs::read_dir(std::env::temp_dir())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("graft-mirror-import-"))
-        })
-        .collect();
-    let err = import_source(Path::new(&url))
+    // The clone parent is a fresh dir this test owns, so nothing else in the
+    // process (or a parallel test run) can write into it.
+    let parent = tempfile::tempdir().unwrap();
+    let err = import_source_in(Path::new(&url), parent.path())
         .await
         .expect_err("clone fails");
     assert!(err.contains("git"), "{err}");
-    let after: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+    let left: Vec<_> = std::fs::read_dir(parent.path())
         .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("graft-mirror-import-"))
-                && !before.contains(p)
-        })
+        .map(|e| e.unwrap().path())
         .collect();
-    assert!(after.is_empty(), "failed clone left temp dirs: {after:?}");
+    assert!(left.is_empty(), "failed clone left temp dirs: {left:?}");
 }
