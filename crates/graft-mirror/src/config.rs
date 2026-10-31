@@ -64,9 +64,10 @@ pub struct FileConfig {
     /// Emit JSON logs.
     #[serde(default)]
     pub json_logs: bool,
-    /// Changesets per import batch.
+    /// Changesets per import batch (`batch = 256`), or the `[batch]` table
+    /// of `pr-batch` cut thresholds (which can also hold the import size).
     #[serde(default)]
-    pub batch: Option<usize>,
+    pub batch: Option<BatchKey>,
     /// Commits allowed to fail the fidelity check (40-hex shas).
     #[serde(default)]
     pub allow_lossy: Vec<String>,
@@ -88,6 +89,48 @@ pub struct FileConfig {
     #[serde(default)]
     pub check_refs: Vec<CheckRefsFile>,
 }
+
+/// The top-level `batch` key: the import size as a count (the original
+/// form), or a `[batch]` table.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum BatchKey {
+    /// `batch = 256`: changesets per import batch.
+    Size(usize),
+    /// `[batch]`: `pr-batch` cut thresholds.
+    Table(BatchFile),
+}
+
+/// `pr-batch` cut thresholds (WI-2719). With the table present, a batch is
+/// cut only when at least `min_lands` lands wait, or the previous batch
+/// merged or closed at least `min_age_minutes` ago, or there is no previous
+/// batch. Without it `pr-batch` cuts whenever there is something to batch.
+///
+/// ```toml
+/// [batch]
+/// min_lands = 6          # default 6
+/// min_age_minutes = 60   # default 60
+/// import_size = 256      # changesets per import batch; replaces `batch = 256`
+/// ```
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BatchFile {
+    /// Lands that make a batch due. Default [`DEFAULT_MIN_LANDS`].
+    #[serde(default)]
+    pub min_lands: Option<usize>,
+    /// Minutes after the previous batch settled that make a batch due.
+    /// Default [`DEFAULT_MIN_AGE_MINUTES`].
+    #[serde(default)]
+    pub min_age_minutes: Option<u64>,
+    /// Changesets per import batch.
+    #[serde(default)]
+    pub import_size: Option<usize>,
+}
+
+/// `[batch] min_lands` when the table omits it.
+pub const DEFAULT_MIN_LANDS: usize = 6;
+/// `[batch] min_age_minutes` when the table omits it.
+pub const DEFAULT_MIN_AGE_MINUTES: u64 = 60;
 
 /// One `[[check_refs]]` line.
 ///
@@ -280,6 +323,11 @@ impl FileConfig {
             }
             seen.push(line);
         }
+        if let Some(BatchKey::Table(t)) = &config.batch
+            && t.min_lands == Some(0)
+        {
+            return Err(bad("[batch] min_lands must be at least 1"));
+        }
         if config.poll_interval_secs == Some(0) {
             return Err(bad("poll_interval_secs must be at least 1"));
         }
@@ -348,6 +396,19 @@ impl FileConfig {
                 line: l.line.clone().unwrap_or_else(|| l.branch.clone()),
             })
             .collect()
+    }
+
+    /// The `[batch]` cut thresholds `(min_lands, min_age_minutes)`, with
+    /// their defaults, when the table is present; `None` keeps `pr-batch`
+    /// cutting whenever there is something to batch.
+    pub fn batch_cut(&self) -> Option<(usize, u64)> {
+        match &self.batch {
+            Some(BatchKey::Table(t)) => Some((
+                t.min_lands.unwrap_or(DEFAULT_MIN_LANDS),
+                t.min_age_minutes.unwrap_or(DEFAULT_MIN_AGE_MINUTES),
+            )),
+            _ => None,
+        }
     }
 
     /// The `[export] default_author` identity, when set.
@@ -437,7 +498,13 @@ impl FileConfig {
             repo: self.repo.clone(),
             lines: self.lines(),
             allow_lossy: parse_shas(&self.allow_lossy)?,
-            batch: self.batch.unwrap_or(256).max(1),
+            batch: match &self.batch {
+                Some(BatchKey::Size(n)) => Some(*n),
+                Some(BatchKey::Table(t)) => t.import_size,
+                None => None,
+            }
+            .unwrap_or(256)
+            .max(1),
             interval: self
                 .poll_interval_secs
                 .map_or(POLL_INTERVAL, Duration::from_secs),
@@ -498,6 +565,24 @@ db = "/var/lib/m.sqlite"
             "{BASE}[export]\ndefault_author = \"no-angles\"\n[[lines]]\nbranch = \"main\"\n"
         );
         assert!(FileConfig::parse(&bad).unwrap().default_author().is_err());
+    }
+
+    #[test]
+    fn batch_table_sets_cut_thresholds_with_defaults() {
+        let lines = "[[lines]]\nbranch = \"main\"\n";
+        let unset = FileConfig::parse(&format!("{BASE}batch = 64\n{lines}")).unwrap();
+        assert_eq!(unset.batch_cut(), None);
+        assert_eq!(unset.follow().unwrap().batch, 64);
+        let empty = FileConfig::parse(&format!("{BASE}{lines}[batch]\n")).unwrap();
+        assert_eq!(empty.batch_cut(), Some((6, 60)));
+        assert_eq!(empty.follow().unwrap().batch, 256);
+        let set = FileConfig::parse(&format!(
+            "{BASE}{lines}[batch]\nmin_lands = 3\nmin_age_minutes = 15\nimport_size = 32\n"
+        ))
+        .unwrap();
+        assert_eq!(set.batch_cut(), Some((3, 15)));
+        assert_eq!(set.follow().unwrap().batch, 32);
+        assert!(FileConfig::parse(&format!("{BASE}{lines}[batch]\nmin_lands = 0\n")).is_err());
     }
 
     #[test]

@@ -257,6 +257,7 @@ impl MirrorDb {
             "initial_lands",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        add_column(&conn, "batches", "settled_ms", "INTEGER")?;
         conn.execute(
             "UPDATE batches SET initial_lands = lands WHERE initial_lands = 0",
             [],
@@ -917,7 +918,7 @@ impl MirrorDb {
             .prepare(&format!(
                 "SELECT number, line, base_branch, base, base_sha, start, tip, lands,
                         initial_lands, created_ms, branch, title, body, squash_sha, pr_number,
-                        pr_url, state, detail, merge_sha, merged
+                        pr_url, state, detail, merge_sha, merged, settled_ms
                  FROM batches {filter}"
             ))
             .map_err(db_err)?;
@@ -944,6 +945,7 @@ impl MirrorDb {
                     detail: r.get(17)?,
                     merge_sha: r.get(18)?,
                     merged: r.get(19)?,
+                    settled_ms: r.get(20)?,
                 })
             })
             .map_err(db_err)?;
@@ -1143,14 +1145,14 @@ fn write_batch(conn: &Connection, rec: &BatchRecord) -> Result<(), GitError> {
     conn.execute(
         "INSERT INTO batches (number, line, base_branch, base, base_sha, start, tip, lands,
              initial_lands, created_ms, branch, title, body, squash_sha, pr_number, pr_url, state,
-             detail, merge_sha, merged)
+             detail, merge_sha, merged, settled_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-             ?18, ?19, ?20)
+             ?18, ?19, ?20, ?21)
          ON CONFLICT (number) DO UPDATE SET line = ?2, base_branch = ?3, base = ?4,
              base_sha = ?5, start = ?6, tip = ?7, lands = ?8, initial_lands = ?9,
              created_ms = ?10, branch = ?11, title = ?12, body = ?13, squash_sha = ?14,
              pr_number = ?15, pr_url = ?16, state = ?17, detail = ?18, merge_sha = ?19,
-             merged = ?20",
+             merged = ?20, settled_ms = ?21",
         params![
             rec.number as i64,
             rec.line,
@@ -1172,6 +1174,7 @@ fn write_batch(conn: &Connection, rec: &BatchRecord) -> Result<(), GitError> {
             rec.detail,
             rec.merge_sha.map(|s| s.0.to_vec()),
             rec.merged.map(|c| c.0.0.to_vec()),
+            rec.settled_ms,
         ],
     )
     .map(drop)
@@ -1200,6 +1203,7 @@ struct BatchRow {
     detail: String,
     merge_sha: Option<Vec<u8>>,
     merged: Option<Vec<u8>>,
+    settled_ms: Option<i64>,
 }
 
 impl BatchRow {
@@ -1227,6 +1231,7 @@ impl BatchRow {
             detail: self.detail,
             merge_sha: sha_col(self.merge_sha)?,
             merged: self.merged.map(id).transpose()?,
+            settled_ms: self.settled_ms,
         })
     }
 }
