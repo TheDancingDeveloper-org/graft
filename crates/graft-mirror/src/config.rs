@@ -442,7 +442,11 @@ impl FileConfig {
             .as_ref()
             .and_then(|e| e.claimed_author_domains.as_ref())
         {
-            Some(list) => list.iter().map(|d| d.trim().to_ascii_lowercase()).collect(),
+            Some(list) => list
+                .iter()
+                .map(|d| d.trim().to_ascii_lowercase())
+                .filter(|d| !d.is_empty() && !d.contains('@'))
+                .collect(),
             None => DEFAULT_CLAIMED_AUTHOR_DOMAINS
                 .iter()
                 .map(|d| (*d).to_owned())
@@ -604,6 +608,25 @@ db = "/var/lib/m.sqlite"
                 .claimed_author_domains()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn claimed_author_domains_drop_empty_and_at_entries() {
+        let set = format!(
+            "{BASE}[export]\nclaimed_author_domains = [\"\", \"  \", \"@x\", \"a@x.com\", \" Ok.com \"]\n[[lines]]\nbranch = \"main\"\n"
+        );
+        assert_eq!(
+            FileConfig::parse(&set).unwrap().claimed_author_domains(),
+            vec!["ok.com".to_owned()]
+        );
+    }
+
+    #[test]
+    fn claimed_author_domains_wrong_type_fails() {
+        let bad = format!(
+            "{BASE}[export]\nclaimed_author_domains = \"x\"\n[[lines]]\nbranch = \"main\"\n"
+        );
+        assert!(FileConfig::parse(&bad).is_err());
     }
 
     #[test]

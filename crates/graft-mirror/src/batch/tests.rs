@@ -269,6 +269,42 @@ fn idents_and_offsets_are_safe() {
         claimed_author_trailer(&gh, &none, None, &noreply).as_deref(),
         Some("Claimed-Author: Tess <123+tess@Users.Noreply.GitHub.com>")
     );
+    // Look-alike domains, no `@`, several `@`s and control characters all
+    // fall back to the name only; whitespace around an allowed domain is trimmed.
+    let name_only = |email: &str| {
+        claimed_author_trailer(
+            &Author {
+                email: email.to_owned(),
+                ..claimed.clone()
+            },
+            &none,
+            None,
+            &noreply,
+        )
+    };
+    for bad in [
+        "x@evil-users.noreply.github.com",
+        "x@users.noreply.github.com.evil.com",
+        "no-at-sign",
+        "evil@x.com @users.noreply.github.com",
+        "a@b@users.noreply.github.com",
+    ] {
+        assert_eq!(
+            name_only(bad).as_deref(),
+            Some("Claimed-Author: Tess"),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        name_only("  x@users.noreply.github.com \t").as_deref(),
+        Some("Claimed-Author: Tess <x@users.noreply.github.com>")
+    );
+    let injected = name_only("x@evil.com\nSigned-off-by: a@users.noreply.github.com").unwrap();
+    assert!(
+        !injected.contains('\n') && !injected.contains('\r'),
+        "{injected}"
+    );
+    assert_eq!(injected, "Claimed-Author: Tess");
     // An address matching a configured identity is redundant: dropped.
     let is_fallback = Author {
         email: "Export@Example.com".to_owned(),
