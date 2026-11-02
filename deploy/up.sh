@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deploy the graft-dev stack (deploy/compose.yml) on this host. Idempotent: run
-# it by hand or from .github/workflows/deploy-dev.yml; a second run with
+# it by hand (the deploy-dev workflow is retired); a second run with
 # nothing changed leaves the containers alone.
 #
 #   1. Bootstrap secrets under /etc/graft, if missing: the server signing key,

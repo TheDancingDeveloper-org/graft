@@ -19,10 +19,9 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 | `monitoring/` | Prometheus alert rules and scrape config for the ops repo (WI-2307) |
 | `attester/Dockerfile` | the trial attester's image (profile `attester`, off by default; see below), and target `checker`, the post-land checker's (profile `post-land`, off by default) |
 
-The workflow is `.github/workflows/deploy-dev.yml`: on a push to `main` that
-touches `deploy/**`, and on `workflow_dispatch`, it runs `deploy/up.sh` on the
-runner labelled `[self-hosted, graft-dev]`. It is not a required check. The image is public on GHCR, so the job does
-not log in to a registry.
+The `deploy-dev` workflow is retired: graft-dev runs on a k8s pod, and a deploy
+is a digest bump in the ops repo, `apps/graft-dev/gen.py`. `deploy/up.sh` is for
+by-hand use only.
 
 ## Backups and alerts
 
@@ -353,9 +352,7 @@ guards both sides of the swap:
   `/etc/graft/last-good/` (root-owned, 0644; no secrets). The first deploy
   with this script has none to roll back to, and says so.
 
-`deploy-dev.yml` fails the run when `up.sh` exits non-zero: an `::error::`
-annotation names the cause, and the job summary says the deploy was refused
-or rolled back.
+When `up.sh` exits non-zero, an `::error::` annotation names the cause.
 
 ## Deploy by hand
 
