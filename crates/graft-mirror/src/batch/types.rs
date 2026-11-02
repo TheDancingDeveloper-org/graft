@@ -521,7 +521,11 @@ pub(crate) fn claimed_author_trailer(
     if configured {
         return None;
     }
-    let domain = email.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase());
+    // Exactly one `@`: `a@b @allowed.com` must not match on its last `@`.
+    let domain = email
+        .split_once('@')
+        .filter(|(_, d)| !d.contains('@'))
+        .map(|(_, d)| d.to_ascii_lowercase());
     if domain.is_some_and(|d| domains.contains(&d)) {
         Some(format!("Claimed-Author: {name} <{email}>"))
     } else if name == "unknown" {
