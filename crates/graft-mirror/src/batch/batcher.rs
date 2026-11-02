@@ -895,7 +895,12 @@ where
             // cells drop `@`; the commit trailers keep it.
             let shown = |key| attribution_cell(&cs.metadata, key);
             let trailer = |key| attribution_trailer(&cs.metadata, key);
-            let claimed = claimed_author_trailer(&cs.author);
+            let claimed = claimed_author_trailer(
+                &cs.author,
+                &self.config.authors,
+                self.config.default_author.as_ref(),
+                &self.config.claimed_author_domains,
+            );
             lands.push(LandLine {
                 id: *id,
                 author: clean_text(&cs.author.name, FIELD_CHARS, false),

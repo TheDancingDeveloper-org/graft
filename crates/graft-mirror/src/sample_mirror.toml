@@ -76,6 +76,9 @@ token_file = "/path/to/token"
 import_pulls = false
 # "Name <email>" used when the authenticated principal has no authors entry.
 default_author = "Example Author <author@example.com>"
+# Email domains a batch commit's Claimed-Author trailer may name; any other
+# claimed email is dropped and the name kept. Default shown.
+# claimed_author_domains = ["users.noreply.github.com"]
 
 # Git identity per authenticated principal.
 [export.authors]
