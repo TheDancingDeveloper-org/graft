@@ -1,7 +1,7 @@
 # graft-dev: the graft development stack on the graft-dev VM (WI-2251).
 #
-# Self-contained: no Komodo, no ops repo. deploy/up.sh runs it, by hand or from
-# the deploy-dev workflow on the VM's own runner. Read README.md first.
+# Self-contained: no Komodo, no ops repo. deploy/up.sh runs it, by hand (the
+# deploy-dev workflow is retired). Read README.md first.
 #
 #   graft-server  gRPC, the /v1 JSON facade, /healthz, /readyz, /metrics
 #   graft-mirror  follows github.com/TheDancingDeveloper-org/rustTorrent main

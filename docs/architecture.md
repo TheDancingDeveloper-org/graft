@@ -258,7 +258,7 @@ flowchart TB
   w1 & w2 & w3 -- "tailnet" --> srv
   ghrt -- "follow (read-only)" --> mir
   ghsrc -- "PR checks / merge queue" --> ghci
-  ghsrc -- "merge to main → deploy-dev.yml" --> runner
+  ghsrc -- "digest bump in ops apps/graft-dev/gen.py (ArgoCD)" --> runner
   runner -- "deploy/up.sh" --> srv
 ```
 
