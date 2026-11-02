@@ -248,16 +248,49 @@ fn idents_and_offsets_are_safe() {
         name: "Tess".to_owned(),
         ..token
     };
+    let noreply = vec!["users.noreply.github.com".to_owned()];
+    let none = BTreeMap::new();
+    // A personal address off the allow-list keeps the name only.
     assert_eq!(
-        claimed_author_trailer(&claimed).as_deref(),
+        claimed_author_trailer(&claimed, &none, None, &noreply).as_deref(),
+        Some("Claimed-Author: Tess")
+    );
+    let allowed = vec!["example.com".to_owned()];
+    assert_eq!(
+        claimed_author_trailer(&claimed, &none, None, &allowed).as_deref(),
         Some("Claimed-Author: Tess <tess@example.com>")
     );
+    // A noreply address is kept, whatever its case.
+    let gh = Author {
+        email: "123+tess@Users.Noreply.GitHub.com".to_owned(),
+        ..claimed.clone()
+    };
+    assert_eq!(
+        claimed_author_trailer(&gh, &none, None, &noreply).as_deref(),
+        Some("Claimed-Author: Tess <123+tess@Users.Noreply.GitHub.com>")
+    );
+    // An address matching a configured identity is redundant: dropped.
+    let is_fallback = Author {
+        email: "Export@Example.com".to_owned(),
+        ..claimed.clone()
+    };
+    assert!(claimed_author_trailer(&is_fallback, &none, Some(&fallback), &allowed).is_none());
+    let is_mapped = Author {
+        email: "ada@example.com".to_owned(),
+        ..claimed.clone()
+    };
+    assert!(claimed_author_trailer(&is_mapped, &authors, None, &allowed).is_none());
     assert!(
-        claimed_author_trailer(&Author {
-            name: "ada".to_owned(),
-            email: String::new(),
-            kind: AuthorKind::Human,
-        })
+        claimed_author_trailer(
+            &Author {
+                name: "ada".to_owned(),
+                email: String::new(),
+                kind: AuthorKind::Human,
+            },
+            &none,
+            None,
+            &noreply,
+        )
         .is_none()
     );
     let t = Timestamp {

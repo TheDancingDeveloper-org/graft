@@ -233,6 +233,9 @@ pub struct BatchConfig {
     /// Per-repo author when the authenticated principal has no mapping
     /// (`[export] default_author`).
     pub default_author: Option<AuthorIdentity>,
+    /// Email domains a `Claimed-Author` trailer may name, lowercased
+    /// (`[export] claimed_author_domains`).
+    pub claimed_author_domains: Vec<String>,
     /// Lands to drop from the line's batches: each is reverted on the line.
     pub exclude: Vec<ChangesetId>,
     /// Why the lands are dropped (named in the PR body).
@@ -275,6 +278,10 @@ impl BatchConfig {
             committer: default_committer(),
             authors: BTreeMap::new(),
             default_author: None,
+            claimed_author_domains: crate::config::DEFAULT_CLAIMED_AUTHOR_DOMAINS
+                .iter()
+                .map(|d| (*d).to_owned())
+                .collect(),
             exclude: Vec::new(),
             drop_reason: None,
             max_lands: None,
@@ -486,9 +493,18 @@ pub(crate) fn land_ident(
     (ident_part(&committer.name), ident_part(&committer.email))
 }
 
-/// A claimed author as a trailer, only when it is not empty and not the
-/// identity already written as the git author. Never a token.
-pub(crate) fn claimed_author_trailer(author: &Author) -> Option<String> {
+/// A claimed author as a trailer, only when it is not empty and not an
+/// identity already configured for export. Never a token.
+///
+/// The claimed email is client-supplied, so it is written only when its
+/// domain is on `domains`; otherwise the trailer keeps the name alone
+/// (WI-3053). A pure function of its inputs, so a batch renders the same.
+pub(crate) fn claimed_author_trailer(
+    author: &Author,
+    authors: &BTreeMap<String, AuthorIdentity>,
+    default_author: Option<&AuthorIdentity>,
+    domains: &[String],
+) -> Option<String> {
     let name = ident_part(&author.name);
     let email = author.email.trim();
     if email.is_empty() {
@@ -498,7 +514,21 @@ pub(crate) fn claimed_author_trailer(author: &Author) -> Option<String> {
     if name == "unknown" && email == "unknown" {
         return None;
     }
-    Some(format!("Claimed-Author: {name} <{email}>"))
+    let configured = authors
+        .values()
+        .chain(default_author)
+        .any(|id| id.email.trim().eq_ignore_ascii_case(&email));
+    if configured {
+        return None;
+    }
+    let domain = email.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase());
+    if domain.is_some_and(|d| domains.contains(&d)) {
+        Some(format!("Claimed-Author: {name} <{email}>"))
+    } else if name == "unknown" {
+        None
+    } else {
+        Some(format!("Claimed-Author: {name}"))
+    }
 }
 
 /// A short form of a changeset id for listings.

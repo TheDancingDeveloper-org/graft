@@ -1706,6 +1706,7 @@ async fn claimed_author_is_only_a_trailer_of_the_authenticated_principals() {
             ]
             .into_iter()
             .collect();
+            c.claimed_author_domains = vec!["example.com".to_owned()];
         })
         .run()
         .await
@@ -1781,10 +1782,10 @@ async fn an_unmapped_principal_exports_as_default_author() {
         &w.upstream,
         &["log", "-1", "--format=%B", &commits[0].sha.to_hex()],
     );
-    assert!(
-        message.contains("Claimed-Author: Zed <z@example.com>"),
-        "{message}"
-    );
+    // example.com is not on the default allow-list: the name stays, the
+    // client-supplied email does not (WI-3053).
+    assert!(message.contains("Claimed-Author: Zed\n"), "{message}");
+    assert!(!message.contains("z@example.com"), "{message}");
     assert!(!message.contains("subject-z"), "{message}");
 }
 

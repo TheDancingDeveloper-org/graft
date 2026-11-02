@@ -161,6 +161,9 @@ pub struct CheckRefsFile {
 ///
 /// # used when the principal has no mapping above
 /// default_author = "Graft Export <export@example.com>"
+///
+/// # emails kept in a batch commit's Claimed-Author trailer, by domain
+/// claimed_author_domains = ["users.noreply.github.com"]
 /// ```
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -176,7 +179,15 @@ pub struct ExportFile {
     /// `Name <email>` used when the authenticated principal has no mapping.
     #[serde(default)]
     pub default_author: Option<String>,
+    /// Email domains a `Claimed-Author` trailer may name. Any other claimed
+    /// email is dropped and only the name is kept (WI-3053). Unset means
+    /// [`DEFAULT_CLAIMED_AUTHOR_DOMAINS`].
+    #[serde(default)]
+    pub claimed_author_domains: Option<Vec<String>>,
 }
+
+/// The `[export] claimed_author_domains` default.
+pub const DEFAULT_CLAIMED_AUTHOR_DOMAINS: &[&str] = &["users.noreply.github.com"];
 
 /// A git identity in `[export.authors]`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -423,6 +434,22 @@ impl FileConfig {
         parse_author_identity(raw).map(Some)
     }
 
+    /// The `[export] claimed_author_domains` allow-list, lowercased, with
+    /// its default when unset.
+    pub fn claimed_author_domains(&self) -> Vec<String> {
+        match self
+            .export
+            .as_ref()
+            .and_then(|e| e.claimed_author_domains.as_ref())
+        {
+            Some(list) => list.iter().map(|d| d.trim().to_ascii_lowercase()).collect(),
+            None => DEFAULT_CLAIMED_AUTHOR_DOMAINS
+                .iter()
+                .map(|d| (*d).to_owned())
+                .collect(),
+        }
+    }
+
     /// Git identities from `[export.authors]`, keyed by principal.
     pub fn author_map(&self) -> BTreeMap<String, crate::batch::AuthorIdentity> {
         let Some(export) = &self.export else {
@@ -551,6 +578,33 @@ upstream = "/srv/upstream.git"
 mirror_dir = "/var/lib/m.git"
 db = "/var/lib/m.sqlite"
 "#;
+
+    #[test]
+    fn claimed_author_domains_parse_with_default() {
+        let none = format!("{BASE}[[lines]]\nbranch = \"main\"\n");
+        assert_eq!(
+            FileConfig::parse(&none).unwrap().claimed_author_domains(),
+            vec!["users.noreply.github.com".to_owned()]
+        );
+        let set = format!(
+            "{BASE}[export]\nclaimed_author_domains = [\"Example.COM\", \"users.noreply.github.com\"]\n[[lines]]\nbranch = \"main\"\n"
+        );
+        assert_eq!(
+            FileConfig::parse(&set).unwrap().claimed_author_domains(),
+            vec![
+                "example.com".to_owned(),
+                "users.noreply.github.com".to_owned()
+            ]
+        );
+        let empty =
+            format!("{BASE}[export]\nclaimed_author_domains = []\n[[lines]]\nbranch = \"main\"\n");
+        assert!(
+            FileConfig::parse(&empty)
+                .unwrap()
+                .claimed_author_domains()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn default_author_is_name_and_email() {
