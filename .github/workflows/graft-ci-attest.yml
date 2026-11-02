@@ -24,9 +24,12 @@ jobs:
       contents: read
       id-token: write
     env:
-      # The server address the runner can reach; set the repository
-      # variable GRAFT_ENDPOINT when the server is not on loopback.
-      GRAFT_ENDPOINT: ${{ vars.GRAFT_ENDPOINT || 'http://127.0.0.1:17888' }}
+      # graft-dev runs as a k8s Service; the runner is in the same cluster.
+      # Override with the repository variable GRAFT_ENDPOINT.
+      GRAFT_ENDPOINT: ${{ vars.GRAFT_ENDPOINT || 'http://graft-dev.graft-dev.svc:17888' }}
+      # Image the client binary is taken from. Keep in step with IMAGE in
+      # ops apps/graft-dev/gen.py, or override with the variable GRAFT_IMAGE.
+      GRAFT_IMAGE: ${{ vars.GRAFT_IMAGE || 'ghcr.io/thedancingdeveloper-org/graft@sha256:84d3c91ca5d11259d12833e153100c235e0cbd72d8c53acc68074401c000c44a' }}
       GRAFT_REPO: graft
       # attest and ci are experimental client commands in this release.
       GRAFT_EXPERIMENTAL: "1"
@@ -34,12 +37,14 @@ jobs:
       CHANGESET: ${{ inputs.changeset }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - name: Install the graft client from the deployed server image
+      - name: Install the graft client from the server image
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bin"
-          docker cp graft-dev-server:/usr/local/bin/graft "$RUNNER_TEMP/bin/graft"
+          cid=$(docker create "$GRAFT_IMAGE")
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          docker cp "$cid:/usr/local/bin/graft" "$RUNNER_TEMP/bin/graft"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Exchange identity and attest
         shell: bash

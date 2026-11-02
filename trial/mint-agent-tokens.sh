@@ -6,19 +6,22 @@
 #
 # Each token is kind agent, scopes repo:<repo>:read, :write, :drafts (so
 # the pre-land check's draft-overlap read runs, WI-2417) and :land:<line>
-# (never the base line), valid for one day by default. Minting runs on the VM through
-# `tailscale ssh sprooty@graft-dev`; the token travels back on the ssh stdout
+# (never the base line), valid for one day by default. Minting runs in the graft-dev pod
+# (k8s on winrarhost1) through `ssh winrarhost1 sudo k3s kubectl -n graft-dev
+# exec -i deploy/graft-dev -c graft-server`; with GRAFT_TRIAL_HOST set it uses
+# the old VM path (`tailscale ssh $GRAFT_TRIAL_HOST docker exec`). The token
+# travels back on the ssh stdout
 # straight into the file. It is never printed, never in argv, never in a
 # variable. Re-running replaces the files with fresh tokens.
 #
-#   GRAFT_TRIAL_HOST    ssh target (default sprooty@graft-dev)
+#   GRAFT_TRIAL_HOST    old VM ssh target, e.g. sprooty@graft-dev-vm (unset: use k8s)
 #   GRAFT_TRIAL_REPO    graft repository (default rusttorrent)
 #   GRAFT_TRIAL_BASE    followed base line, never landable (default main)
 #   GRAFT_TRIAL_LINE    line the tokens may land on (default trial-1)
 #   GRAFT_TRIAL_DIR     token directory (default ~/.config/graft)
 set -euo pipefail
 
-host=${GRAFT_TRIAL_HOST:-sprooty@graft-dev}
+host=${GRAFT_TRIAL_HOST:-}
 dir=${GRAFT_TRIAL_DIR:-$HOME/.config/graft}
 repo=${GRAFT_TRIAL_REPO:-rusttorrent}
 base=${GRAFT_TRIAL_BASE:-main}
@@ -45,7 +48,7 @@ done
 [ -n "$n" ] || usage
 # These are interpolated into the remote command line: accept only safe shapes.
 [[ $n =~ ^[1-9][0-9]*$ ]] && [ "$n" -le 64 ] || die "N must be 1..64"
-[[ $host =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$ ]] || die "bad GRAFT_TRIAL_HOST"
+[ -z "$host" ] || [[ $host =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$ ]] || die "bad GRAFT_TRIAL_HOST"
 [[ $repo =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || die "bad GRAFT_TRIAL_REPO"
 [[ $base =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "bad GRAFT_TRIAL_BASE"
 [[ $line =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "bad GRAFT_TRIAL_LINE"
@@ -54,7 +57,7 @@ done
 [ -z "$session" ] || [[ $session =~ ^ses_[A-Za-z0-9]+$ ]] || die "--session must look like ses_…"
 [ -z "$work_item" ] || [[ $work_item =~ ^WI-[0-9]+$ ]] || die "--work-item must look like WI-123"
 
-command -v tailscale >/dev/null || die "tailscale is required"
+if [ -n "$host" ]; then command -v tailscale >/dev/null || die "tailscale is required"; fi
 
 extra=
 [ -z "$session" ] || extra="$extra --session $session"
@@ -69,7 +72,14 @@ for i in $(seq 1 "$n"); do
   tmp=$out.new
   rm -f "$tmp"
   # shellcheck disable=SC2086 # $extra is validated words, split on purpose
-  if ! tailscale ssh "$host" docker exec graft-dev-server graft-server admin token mint \
+  # graft-dev runs on k8s since 2026-11-02 (pod on winrarhost1). Set
+  # GRAFT_TRIAL_HOST to use the old VM path (`docker exec graft-dev-server`).
+  if [ -n "${GRAFT_TRIAL_HOST:-}" ]; then
+    run_mint() { tailscale ssh "$host" docker exec graft-dev-server graft-server "$@"; }
+  else
+    run_mint() { ssh winrarhost1 sudo k3s kubectl -n graft-dev exec -i deploy/graft-dev -c graft-server -- graft-server "$@"; }
+  fi
+  if ! run_mint admin token mint \
       --subject "trial-agent-$i" --kind agent \
       --scope "repo:$repo:read" --scope "repo:$repo:write" --scope "repo:$repo:drafts" \
       --scope "repo:$repo:land:$line" \
