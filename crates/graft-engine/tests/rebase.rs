@@ -421,6 +421,28 @@ fn identical_file_to_directory_changes_are_dropped<M: MetaStore>(f: &Fixture<M>)
     assert_eq!(paths(r.rebase(h, onto)), ["a/b/x"]);
 }
 
+/// WI-3140: a pick of a landed changeset into a snapshot that is its own
+/// parent (it landed on a line forked there) is a new unheld draft stamped
+/// with its source, not the landed changeset itself ("nothing to commit").
+fn a_landed_changeset_onto_its_own_parent_is_a_new_pick<M: MetaStore>(f: &Fixture<M>) {
+    let r = R::new(f, &[("a", b"1")]);
+    let landed = r.land(&[("b", b"2")], &[]);
+    let picked = r.rebase(landed, r.root).expect("rebase");
+    assert_ne!(picked, landed);
+    let view = r.view(picked);
+    assert_eq!(view.changeset.parents, vec![r.root]);
+    assert_eq!(view.changeset.changes, r.view(landed).changeset.changes);
+    assert_eq!(
+        view.changeset.metadata.get(REBASED_FROM),
+        Some(&landed.to_string())
+    );
+    assert_ne!(view.state, DraftState::Landed);
+    assert_eq!(r.snapshot(picked), r.snapshot(landed));
+    // A retry makes the same id; the changeset onto itself is still a no-op.
+    assert_eq!(r.rebase(landed, r.root), Ok(picked));
+    assert_eq!(r.rebase(landed, landed), Ok(landed));
+}
+
 /// The minimal proptest input, as a stack: the bottom draft is the target
 /// itself, and the draft above turns `a` back into a file.
 fn a_stack_on_an_identical_bottom_is_kept<M: MetaStore>(f: &Fixture<M>) {
@@ -771,6 +793,7 @@ on_both_stores!(
     modes_and_symlinks_are_changes,
     file_directory_clashes_conflict,
     identical_file_to_directory_changes_are_dropped,
+    a_landed_changeset_onto_its_own_parent_is_a_new_pick,
     a_stack_on_an_identical_bottom_is_kept,
     stacks_rebase_bottom_up,
     rebase_checks_scopes_and_limits,

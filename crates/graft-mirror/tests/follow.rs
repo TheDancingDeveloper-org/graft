@@ -703,3 +703,65 @@ async fn tag_listing_failure_is_a_typed_fetch_error() {
     );
     assert_eq!(lag_changesets(&m), -1);
 }
+
+/// WI-3140: follow keeps the line's followed marker at the upstream head it
+/// last imported, and a diverged line keeps the marker where it was.
+#[tokio::test(flavor = "current_thread")]
+async fn follow_marks_the_line_at_the_imported_head() {
+    let w = World::new().await;
+    let db = w.open_db();
+    let m = metrics();
+    let marker = || async {
+        current_ref(
+            &w.api,
+            &cx(),
+            REPO,
+            &graft_proto::types::followed_ref("main"),
+        )
+        .await
+        .unwrap()
+    };
+
+    let a = w.commit();
+    w.push();
+    let mut f = w.follower(&db, &m);
+    assert!(matches!(poll(&mut f).await, LineOutcome::Imported { .. }));
+    assert_eq!(marker().await, db.changeset_of(a).unwrap());
+    assert_eq!(marker().await, w.tip().await);
+
+    let b = w.commit();
+    w.push();
+    assert!(matches!(poll(&mut f).await, LineOutcome::Imported { .. }));
+    assert_eq!(marker().await, db.changeset_of(b).unwrap());
+    assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
+    assert_eq!(marker().await, db.changeset_of(b).unwrap());
+
+    // A force-push stops the line; the marker stays at the last head.
+    git(&w.work, &["reset", "-q", "--hard", &a.to_hex()]);
+    w.commit();
+    w.force_push();
+    assert!(matches!(poll(&mut f).await, LineOutcome::Diverged { .. }));
+    assert_eq!(marker().await, db.changeset_of(b).unwrap());
+}
+
+/// WI-3140: a line set by an import (or an older mirror, before markers)
+/// gets its marker on the first follow poll, though it is up to date.
+#[tokio::test(flavor = "current_thread")]
+async fn an_imported_line_is_marked_on_the_first_poll() {
+    let w = World::new().await;
+    let b = w.commit();
+    let db = w.open_db();
+    let config = ImportConfig::new(w.work.join(".git"), REPO);
+    import_repo(&w.api, &cx(), &db, &config).await.unwrap();
+    let name = graft_proto::types::followed_ref("main");
+    assert_eq!(current_ref(&w.api, &cx(), REPO, &name).await.unwrap(), None);
+
+    w.push();
+    let m = metrics();
+    let mut f = w.follower(&db, &m);
+    assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
+    assert_eq!(
+        current_ref(&w.api, &cx(), REPO, &name).await.unwrap(),
+        db.changeset_of(b).unwrap()
+    );
+}

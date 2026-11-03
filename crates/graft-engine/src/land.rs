@@ -55,7 +55,7 @@ use std::time::Duration;
 
 use graft_model::{Changeset, ChangesetId, ObjectId, ObjectKind, RepoPath};
 use graft_proto::error::{MAX_STALE_PATHS, StaleBase};
-use graft_proto::types::{Attest, Land, Landed};
+use graft_proto::types::{Attest, Land, Landed, followed_ref};
 use graft_proto::{ApiError, CallContext, PrincipalKind};
 use graft_store::{
     MetaStore, MetaTxn, ObjectStore, Precondition, RecordState, RefKind, RefRecord, RepoId,
@@ -684,6 +684,22 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 "authority",
                 format!(
                     "line {} is git-primary; land through the PR bridge",
+                    req.line
+                ),
+            ));
+        }
+        // A line the mirror follows moves only by the mirror's import.
+        if self
+            .meta
+            .get_ref(repo, &followed_ref(&req.line))
+            .await
+            .map_err(errors::store)?
+            .is_some()
+        {
+            return Err(rejected(
+                "followed",
+                format!(
+                    "line {} is followed from GitHub; land on an integration line forked from it",
                     req.line
                 ),
             ));

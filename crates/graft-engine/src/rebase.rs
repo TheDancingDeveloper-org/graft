@@ -637,6 +637,24 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let plan = self
             .plan(repo, &stack, req.onto, req.merge, &self.config.default_line)
             .await?;
+        // A landed changeset rebased onto its own parent (a pick into a
+        // snapshot that is that parent: it landed on a line forked there)
+        // is kept as it is, which is the landed changeset, not a draft.
+        // Re-make it as the pick it is: stamped with its source, unheld.
+        if let [(id, cs)] = stack.as_slice()
+            && plan.head == *id
+            && cs.first_parent() == Some(req.onto)
+            && self.changeset(repo, *id).await?.1.state == RecordState::Landed
+        {
+            let mut picked = cs.clone();
+            picked
+                .metadata
+                .insert(REBASED_FROM.to_owned(), id.to_string());
+            if req.dry_run {
+                return Ok(picked.id());
+            }
+            return Ok(self.insert_unheld(repo, picked, Vec::new()).await?.id);
+        }
         // A dry run returns the id the rebase would make; planning reads only.
         if !req.dry_run {
             self.store_plan(repo, &plan).await?;
