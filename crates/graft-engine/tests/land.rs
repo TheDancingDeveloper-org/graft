@@ -847,6 +847,92 @@ fn post_land_failures_request_a_revert<M: MetaStore>((f, hooks): (Fixture<M>, Ar
     assert_eq!(hooks.reverts.lock().expect("reverts").len(), 1);
 }
 
+/// WI-3140: a line with a followed marker (`graft.followed/<line>`) is
+/// moved only by the mirror's admin `UpdateRef`; every `Land` on it is
+/// refused, and only an admin may set or move the marker.
+fn followed_lines_refuse_lands<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+    let t = T::new(&f, &[("a", b"1")]);
+    let marker = followed_ref("trunk");
+    // A worker with land and write on the line cannot mark (or unmark) it.
+    let worker = cx(&["repo:r:land:trunk", "repo:r:write"]);
+    let mark = |cx: &CallContext, expected, new| {
+        block_on(t.r.e().update_ref(
+            cx,
+            UpdateRef {
+                repo: "r".to_owned(),
+                name: marker.clone(),
+                expected,
+                new,
+                kind: RefKind::Tool,
+            },
+        ))
+    };
+    assert_eq!(
+        mark(&worker, None, t.root),
+        Err(ApiError::PermissionDenied {
+            scope: "repo:r:admin".to_owned(),
+            path: None,
+        })
+    );
+    // The marker is a tool ref, never a line.
+    assert_eq!(
+        t.r.update_ref(&marker, None, t.root, RefKind::Line),
+        Err(ApiError::InvalidChange {
+            path: String::new(),
+            rule: "ref-kind".to_owned(),
+        })
+    );
+    // Nor can a line be created under the marker prefix, even by an admin.
+    assert!(matches!(
+        block_on(t.r.e().create_line(
+            &t.r.cx,
+            CreateLine {
+                repo: "r".to_owned(),
+                name: followed_ref("x"),
+                from: t.root,
+            },
+        )),
+        Err(ApiError::InvalidChange { .. })
+    ));
+    let first = t.commit(t.root, &[("b", b"2")]);
+    landed(t.land_as(&worker, first, "trunk"));
+
+    // The mirror (admin) marks the line at the head it imported.
+    mark(&t.r.cx, None, first).expect("mark");
+    let draft = t.commit(first, &[("c", b"3")]);
+    let (policy, detail) = rejected(t.land_as(&worker, draft, "trunk"));
+    assert_eq!(policy, "followed");
+    assert_eq!(
+        detail,
+        "line trunk is followed from GitHub; land on an integration line forked from it"
+    );
+    // An admin's land is refused too: only the mirror's move advances it.
+    assert_eq!(rejected(t.land(draft, "trunk")).0, "followed");
+    assert_eq!(t.tip("trunk").target, first);
+    assert_ne!(t.record(draft).state, RecordState::Landed);
+    assert_eq!(
+        mark(&worker, Some(first), t.root).map(drop),
+        Err(ApiError::PermissionDenied {
+            scope: "repo:r:admin".to_owned(),
+            path: None,
+        })
+    );
+
+    // The mirror still advances the line by fast-forward, and its marker.
+    let upstream = t.commit(first, &[("d", b"4")]);
+    t.r.update_ref("trunk", Some(first), upstream, RefKind::Line)
+        .expect("mirror move");
+    mark(&t.r.cx, Some(first), upstream).expect("re-mark");
+    assert_eq!(t.tip("trunk").target, upstream);
+    assert_eq!(t.tip(&marker).target, upstream);
+
+    // A line forked from it is an ordinary line: lands go there.
+    t.r.update_ref("integration", None, upstream, RefKind::Line)
+        .expect("fork");
+    let work = t.commit(upstream, &[("e", b"5")]);
+    landed(t.land(work, "integration"));
+}
+
 fn refused_lands<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
     let t = T::new(&f, &[("a", b"1")]);
     let draft = t.commit(t.root, &[("b", b"2")]);
@@ -909,6 +995,7 @@ on_both![
     candidates_are_held_by_a_land_lease,
     post_land_failures_request_a_revert,
     refused_lands,
+    followed_lines_refuse_lands,
 ];
 
 /// Decision D22: with the default config every line, `main` included, is

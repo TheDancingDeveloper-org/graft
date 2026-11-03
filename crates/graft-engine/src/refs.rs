@@ -10,7 +10,9 @@ use std::collections::HashSet;
 
 use graft_index::kinds::Skips;
 use graft_model::{Changeset, ChangesetId};
-use graft_proto::types::{CreateLine, ListRefs, RefKind, RefView, ResolveRef, UpdateRef};
+use graft_proto::types::{
+    CreateLine, FOLLOWED_REF_PREFIX, ListRefs, RefKind, RefView, ResolveRef, UpdateRef,
+};
 use graft_proto::{ApiError, CallContext};
 use graft_store::{
     ChangesetRecord, MAX_PAGE, MetaStore, MetaTxn, ObjectStore, Precondition, RecordState,
@@ -132,12 +134,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .await
             .map_err(errors::store)?;
         let kind = current.as_ref().map_or(to_stored(req.kind), |r| r.kind);
+        // A followed-line marker is admin-only: it decides who may land.
+        let marker = req.name.starts_with(FOLLOWED_REF_PREFIX);
         let need = match kind {
             StoredKind::Line => Need::Admin,
+            StoredKind::Tool if marker => Need::Admin,
             StoredKind::Tag | StoredKind::Tool => Need::Write(None),
         };
         require(cx, &req.repo, need)?;
-        if current.is_some() && to_stored(req.kind) != kind {
+        if (current.is_some() && to_stored(req.kind) != kind)
+            || (marker && kind != StoredKind::Tool)
+        {
             return Err(errors::invalid(None, "ref-kind"));
         }
 
@@ -175,6 +182,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let repo = self.repo_id(&req.repo).await?;
         require(cx, &req.repo, Need::Land(&req.name))?;
         check_ref_name(&req.name)?;
+        if req.name.starts_with(FOLLOWED_REF_PREFIX) {
+            return Err(errors::invalid(None, "ref-name"));
+        }
         if let Some(r) = self
             .meta
             .get_ref(repo, &req.name)

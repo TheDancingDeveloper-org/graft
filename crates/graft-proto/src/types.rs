@@ -205,6 +205,18 @@ pub struct UpdateRef {
     pub kind: RefKind,
 }
 
+/// The prefix of a followed-line marker: the tool ref
+/// `graft.followed/<line>` says that `<line>` is followed from an upstream
+/// git branch, and points at the last upstream head the mirror imported.
+/// Only an admin may write such a ref, and a line that has one refuses
+/// `Land` (`Rejected { policy: "followed" }`): only the mirror moves it.
+pub const FOLLOWED_REF_PREFIX: &str = "graft.followed/";
+
+/// The followed-line marker ref of `line`.
+pub fn followed_ref(line: &str) -> String {
+    format!("{FOLLOWED_REF_PREFIX}{line}")
+}
+
 /// `CreateLine` request: fork line `name` at `from`.
 ///
 /// A compare-and-swap from absent to `from`, journalled as a `RefMoved`

@@ -573,6 +573,61 @@ fn pick_reapplies_a_landed_changeset_and_writes_its_conflicts() {
     assert_eq!(s.rt.block_on(s.repo.files(tip))["README.md"], b"both\n");
 }
 
+/// WI-3140: the first pick in a fresh clone of a changeset whose parent is
+/// the clone's base (it landed on a sibling line forked there) applies it.
+/// The server's rebase of a changeset onto its own parent is the changeset
+/// itself; that is not "nothing to commit" when the base lacks it.
+#[test]
+fn pick_onto_the_changesets_own_parent_applies_it() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let outside = |args: &[&str]| {
+        graft(dir.path())
+            .args(["--endpoint", &s.url, "--repo", "demo"])
+            .args(args)
+            .assert()
+    };
+    outside(&["line", "create", "side", "--from", "main"]).success();
+    graft(dir.path())
+        .args([
+            "--endpoint",
+            &s.url,
+            "clone",
+            "demo",
+            "side",
+            "--line",
+            "side",
+        ])
+        .assert()
+        .success();
+    let side = dir.path().join("side");
+    fs::write(side.join("README.md"), "picked\n").unwrap();
+    json_run(&side, &["commit", "-m", "on side"]);
+    let landed = json_run(&side, &["land"]);
+    let picked = landed["landed"].as_str().expect("landed id").to_owned();
+
+    let app = clone_app(&s, dir.path());
+    assert_eq!(
+        fs::read_to_string(app.join("README.md")).unwrap(),
+        "hello\n"
+    );
+    let value = json_run(&app, &["pick", &picked]);
+    assert_valid("pick", &value);
+    assert_eq!(value["picked"], json!(picked));
+    assert_ne!(
+        value["id"],
+        json!(picked),
+        "a new draft, not the landed one"
+    );
+    assert_eq!(
+        fs::read_to_string(app.join("README.md")).unwrap(),
+        "picked\n"
+    );
+    json_run(&app, &["land"]);
+    let tip = s.rt.block_on(s.repo.tip());
+    assert_eq!(s.rt.block_on(s.repo.files(tip))["README.md"], b"picked\n");
+}
+
 #[test]
 fn stack_operations_rewrite_the_drafts() {
     let s = serve(Policy::Direct);

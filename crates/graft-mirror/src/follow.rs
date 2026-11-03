@@ -17,6 +17,10 @@
 //! 4. Import the new commits with `graft-git` (the mirror DB is the mirror
 //!    map, so nothing already imported is sent again), then move the line by
 //!    admin `UpdateRef` CAS from the tip read in step 2.
+//! 5. Keep the line's followed marker (the admin-only tool ref
+//!    `graft.followed/<line>`) at the head just imported. The server
+//!    refuses `Land` on a line that has a marker, so only follow moves it.
+//!    A diverged line keeps its marker at the last upstream head imported.
 //!
 //! Tags (`docs/design.md` §4.6, §11.1 step 6): when
 //! [`FollowConfig::tags`] is set, each poll also lists upstream's matching
@@ -37,6 +41,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use graft_git::GitSha;
@@ -44,7 +49,7 @@ use graft_git::import::{ImportConfig, import};
 use graft_git::map::{ImportedTag, MirrorMap};
 use graft_model::ChangesetId;
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
-use graft_proto::types::RefKind;
+use graft_proto::types::{RefKind, followed_ref};
 use graft_proto::{ApiError, CallContext};
 use graft_telemetry::Metrics;
 
@@ -178,6 +183,9 @@ pub struct Follower<'a, A> {
     /// Tags settled in graft (created, already there, or conflicting).
     seen_tags: HashMap<String, SeenTag>,
     last_tags: TagReport,
+    /// Followed markers known to be set, by line: one marker read per line
+    /// per run, not per poll.
+    marked: Mutex<HashMap<String, ChangesetId>>,
 }
 
 fn system_ms() -> i64 {
@@ -209,6 +217,7 @@ where
             polls: 0,
             seen_tags: HashMap::new(),
             last_tags: TagReport::default(),
+            marked: Mutex::new(HashMap::new()),
         }
     }
 
@@ -472,6 +481,9 @@ where
             return Ok(LineOutcome::MissingUpstream);
         };
         if state.upstream == Some(up) && state.diverged.is_none() {
+            if let Some(id) = self.db.changeset_of(up)? {
+                self.mark_followed(&l.line, id).await?;
+            }
             self.set_lag_changesets(&l.line, 0);
             return Ok(LineOutcome::UpToDate);
         }
@@ -507,6 +519,9 @@ where
         };
         if graft_sha == Some(up) {
             // Moved by a run that stopped before recording it.
+            if let Some(id) = tip {
+                self.mark_followed(&l.line, id).await?;
+            }
             self.caught_up(l, &mut state, up)?;
             return Ok(LineOutcome::UpToDate);
         }
@@ -541,6 +556,7 @@ where
             }
             Err(e) => return Err(e.into()),
         }
+        self.mark_followed(&l.line, to).await?;
         self.caught_up(l, &mut state, up)?;
         tracing::info!(
             repo = %repo, line = %l.line, upstream = %up, commits = report.commits,
@@ -551,6 +567,25 @@ where
             from: tip,
             to,
         })
+    }
+
+    /// Moves `line`'s followed marker to `id`, the upstream head it holds,
+    /// by CAS from what the marker holds now. Skipped when this run already
+    /// set it there.
+    async fn mark_followed(&self, line: &str, id: ChangesetId) -> Result<(), MirrorError> {
+        if self.marked.lock().expect("marked").get(line) == Some(&id) {
+            return Ok(());
+        }
+        let repo = &self.config.repo;
+        let name = followed_ref(line);
+        let cx = self.call("mark-followed");
+        let current = current_ref(self.api, &cx, repo, &name).await?;
+        move_ref(self.api, &cx, repo, &name, current, id, RefKind::Tool).await?;
+        self.marked
+            .lock()
+            .expect("marked")
+            .insert(line.to_owned(), id);
+        Ok(())
     }
 
     fn caught_up(

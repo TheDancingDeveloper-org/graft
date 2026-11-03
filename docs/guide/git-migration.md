@@ -79,6 +79,19 @@ graft-mirror follow --config /etc/graft/mirror.toml
 The followed `main` line remains Git-primary. Do not land directly on it;
 GitHub remains the place where its protected default branch moves.
 
+The follower marks each line it follows with the admin-only tool ref
+`graft.followed/<line>`, which points at the last GitHub head it imported. The
+server refuses every `land` on a marked line, whatever the server's line
+configuration says:
+
+```text
+line main is followed from GitHub; land on an integration line forked from it
+```
+
+Fork an integration line from the followed line (`graft line create`) and land
+there. The follower sets the marker on its first poll, including for a line it
+already holds.
+
 ## Deliver lands as batch pull requests
 
 Land work on the graft `integration` line. To publish its pending lands, sync
