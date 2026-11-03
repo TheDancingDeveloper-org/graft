@@ -57,6 +57,9 @@ jobs:
               # registered with --no-default-labels, so its only label is
               # graft-dev.
               "[self-hosted]"|"[self-hosted,"*"]"|"[graft-dev]") ;;
+              # The ARC scale set: ci-small, as a bare string or a list,
+              # without self-hosted.
+              ci-small|"[ci-small]") ;;
               # Operator decision 2026-10-26: release builds in release.yml
               # only use these hosted labels, matched exactly. Required PR
               # checks in ci.yml stay self-hosted.
