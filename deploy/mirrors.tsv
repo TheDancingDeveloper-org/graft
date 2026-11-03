@@ -11,3 +11,4 @@ graft-mirror-email-rs|email-rs|TheDancingDeveloper-org/email-rs|main|mirror-toke
 graft-mirror-fluent-gpui|fluent-gpui|thedancingdeveloper/fluent-gpui|main|mirror-token-fluent-gpui|mirror-fluent-gpui.toml|17899|generated|0
 graft-mirror-indexarr-rs|indexarr-rs|TheDancingDeveloper-org/indexarr-rs|main|mirror-token-indexarr-rs|mirror-indexarr-rs.toml|17900|generated|0
 graft-mirror-egressy|egressy|TheDancingDeveloper-org/egressy|main|mirror-token-egressy|mirror-egressy.toml|17901|generated|0
+graft-mirror-trolley|trolley|TheDancingDeveloper-org/trolley|main|mirror-token-trolley|mirror-trolley.toml|17902|generated|1
