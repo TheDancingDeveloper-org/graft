@@ -97,7 +97,7 @@ jobs:
 
   bench-tests:
     name: bench pytest
-    runs-on: [self-hosted, linux, x64, gha-public-rust]
+    runs-on: [self-hosted, rust-heavy]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
