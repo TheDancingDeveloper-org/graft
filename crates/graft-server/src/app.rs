@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use graft_auth::{NoDenylist, SigningKey, Token, VerifyingKey};
 use graft_engine::Engine;
-use graft_proto::{ApiError, CallContext, PROTOCOL_VERSION};
+use graft_proto::{ApiError, CallContext, PROTOCOL_VERSION, PrincipalKind};
 use graft_store_fs::FsObjectStore;
 use graft_store_sqlite::SqliteMetaStore;
 use graft_telemetry::Telemetry;
@@ -208,6 +208,72 @@ impl App {
             Ok(Ok(true)) => Err(ApiError::Unauthenticated),
             _ => {
                 tracing::error!("denylist unreadable; refusing the write");
+                Err(ApiError::Unavailable {
+                    retry_after_ms: 1_000,
+                })
+            }
+        }
+    }
+
+    /// Records that the service principal `caller` minted `token` through the
+    /// API, so it may revoke it later. Other callers' tokens are not
+    /// recorded. A record that cannot be written fails the mint: a token
+    /// nobody could revoke must not be handed out.
+    pub(crate) async fn record_mint(&self, caller: &Caller, token: &Token) -> Result<(), ApiError> {
+        if caller.principal.kind != PrincipalKind::Service {
+            return Ok(());
+        }
+        let now = self.now_s();
+        let minted =
+            graft_auth::verify(&self.verifying, token, now, &NoDenylist).map_err(|_| {
+                ApiError::Unavailable {
+                    retry_after_ms: 1_000,
+                }
+            })?;
+        let deny = self.denylist.clone();
+        let minter = caller.principal.subject.clone();
+        match tokio::task::spawn_blocking(move || {
+            deny.record_mint(&minted.jti, &minter, minted.exp, now)
+        })
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            _ => {
+                tracing::error!("mint record unwritable; refusing the mint");
+                Err(ApiError::Unavailable {
+                    retry_after_ms: 1_000,
+                })
+            }
+        }
+    }
+
+    /// Whether the service principal `minter` minted token `jti` through the
+    /// API. A record that cannot be read is an error, not "no".
+    pub(crate) async fn minted_by(&self, jti: &str, minter: &str) -> Result<bool, ApiError> {
+        let deny = self.denylist.clone();
+        let (jti, minter) = (jti.to_owned(), minter.to_owned());
+        match tokio::task::spawn_blocking(move || deny.minted_by(&jti, &minter)).await {
+            Ok(Ok(found)) => Ok(found),
+            _ => {
+                tracing::error!("mint records unreadable; refusing the revoke");
+                Err(ApiError::Unavailable {
+                    retry_after_ms: 1_000,
+                })
+            }
+        }
+    }
+
+    /// Adds `jti`, which expires at `exp`, to the denylist. Writes by that
+    /// token are refused from the next one: the denylist is read per write,
+    /// never cached.
+    pub(crate) async fn revoke_jti(&self, jti: &str, exp: i64) -> Result<(), ApiError> {
+        let deny = self.denylist.clone();
+        let jti = jti.to_owned();
+        let now = self.now_s();
+        match tokio::task::spawn_blocking(move || deny.revoke(&jti, exp, now)).await {
+            Ok(Ok(())) => Ok(()),
+            _ => {
+                tracing::error!("denylist unwritable; the token is not revoked");
                 Err(ApiError::Unavailable {
                     retry_after_ms: 1_000,
                 })

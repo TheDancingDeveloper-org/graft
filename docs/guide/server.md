@@ -177,6 +177,14 @@ Revocation stores only the token ID and expiry. It takes effect for writes;
 read-only requests continue to accept an otherwise valid revoked token until it
 expires.
 
+An orchestrator revokes over the API with `AdminService.RevokeToken`, passing
+the token to revoke. A service principal may revoke the tokens it minted with
+`MintToken`; a caller holding `repo:<name>:admin` on every repository the token
+names may revoke it too. Anyone else gets `PermissionDenied`, and a token that
+is expired, malformed or signed by another key is `InvalidChange`. The next
+write by the revoked token is refused. Each revoke and refusal is logged on the
+`audit` target with the caller's subject and the token ID, never the token.
+
 ## Repositories and lines
 
 Create a repository with the offline administration command:
