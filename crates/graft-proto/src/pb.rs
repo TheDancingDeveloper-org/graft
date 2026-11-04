@@ -23,3 +23,11 @@ impl std::fmt::Debug for ExchangeCiTokenRequest {
             .finish()
     }
 }
+
+impl std::fmt::Debug for RevokeTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevokeTokenRequest")
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}

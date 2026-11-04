@@ -8,7 +8,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .btree_map(".")
         // Tokens never appear in `Debug` output; `pb.rs` redacts these.
-        .skip_debug(["graft.v1.Token", "graft.v1.ExchangeCiTokenRequest"])
+        .skip_debug([
+            "graft.v1.Token",
+            "graft.v1.ExchangeCiTokenRequest",
+            "graft.v1.RevokeTokenRequest",
+        ])
         .compile_fds(fds)?;
     Ok(())
 }

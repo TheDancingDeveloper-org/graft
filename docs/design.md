@@ -1930,7 +1930,29 @@ compact format) and carry: `sub`, principal `kind`, `session` (`ses_…` when th
 - `objects:read`
 
 Verification is local and needs no store lookup. Revocation is by short
-expiry, plus a `jti` denylist in the MetaStore checked on writes.
+expiry, plus a `jti` denylist in the MetaStore checked on writes. The denylist
+is read on every write, never cached, so a revoked token's next write is
+refused with `Unauthenticated`. Reads keep accepting an otherwise valid revoked
+token until it expires.
+
+`RevokeToken { token }` adds a live token of this server to the denylist, as
+`graft-server admin token revoke` does on the host. Over the API:
+
+- a **service principal** may revoke the tokens it minted through `MintToken`.
+  The server records the minting service's subject beside the `jti` when it
+  mints (the token's encoding is unchanged), so a service that rotated its own
+  token still revokes what it minted earlier. Tokens minted before the record
+  existed, or on the host, have no minter;
+- an **admin** may revoke a token when it holds `repo:<r>:admin` on every
+  repository the token names (and the token names at least one). There is no
+  server-wide admin scope, so a token that names no repository, such as
+  `objects:read`, is revoked by its minter or on the host;
+- everyone else is refused with `PermissionDenied`. A revoked caller is refused
+  as it is for `MintToken`, and a token that is expired, malformed or signed by
+  another key is `InvalidChange`. Revoking twice is fine.
+
+Every revoke and every refusal is logged on the `audit` target with the
+caller's subject, kind and `jti` and the target's `jti`, never a token value.
 
 ### 12.2 Enforcement
 

@@ -25,9 +25,10 @@ use tonic::codec::CompressionEncoding;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::app::{App, CallError, Caller, ServerEngine};
+use crate::app::{App, CallError, Caller, ServerEngine, error_name};
 use crate::exports;
 use crate::mint;
+use crate::revoke;
 
 /// Frame bytes per `GetObjects` stream message. A single frame larger than
 /// this travels alone.
@@ -1226,10 +1227,79 @@ impl pb::admin_service_server::AdminService for Services {
             self.app.refused("MintToken", &e);
             Status::from(CallError::Api(e))
         })?;
+        self.app.record_mint(&cx, &token).await.map_err(|e| {
+            self.app.refused("MintToken", &e);
+            Status::from(CallError::Api(e))
+        })?;
         tracing::info!(op = "MintToken", principal = %cx.principal.subject, "minted a token");
         Ok(Response::new(pb::Token {
             token: token.expose().to_owned(),
         }))
+    }
+
+    /// Revokes a live token (`crate::revoke` says who may). Every revoke and
+    /// every refusal is logged on the `audit` target by the caller's
+    /// principal and the token's `jti`, never the token itself.
+    async fn revoke_token(
+        &self,
+        request: Request<pb::RevokeTokenRequest>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        const OP: &str = "RevokeToken";
+        let cx = self.cx(&request, OP)?;
+        let token = request.into_inner().token;
+        let audit = |outcome: &str, jti: &str, basis: &str| {
+            tracing::info!(
+                target: "audit",
+                op = OP,
+                outcome = %outcome,
+                principal = %cx.principal.subject,
+                kind = ?cx.principal.kind,
+                caller_jti = %cx.jti,
+                token_jti = %jti,
+                basis = %basis,
+                "token revocation"
+            );
+        };
+        let refuse = |e: ApiError, jti: &str| {
+            audit(error_name(&e), jti, "");
+            self.app.refused(OP, &e);
+            Status::from(CallError::Api(e))
+        };
+        // A revoked caller revokes nothing, as it mints nothing.
+        self.app
+            .check_not_revoked(&cx.jti)
+            .await
+            .map_err(|e| refuse(e, ""))?;
+        // Only a live token of this server has a `jti` to revoke.
+        let target = graft_auth::verify(
+            &self.app.verifying,
+            &graft_auth::Token::from_encoded(token.trim().to_owned()),
+            self.app.now_s(),
+            &graft_auth::NoDenylist,
+        )
+        .map_err(|_| {
+            refuse(
+                ApiError::InvalidChange {
+                    path: String::new(),
+                    rule: "token".into(),
+                },
+                "",
+            )
+        })?;
+        let minted = self
+            .app
+            .minted_by(&target.jti, &cx.principal.subject)
+            .await
+            .map_err(|e| refuse(e, &target.jti))?;
+        let basis = revoke::may_revoke(&cx.principal, &target.principal.scopes, minted)
+            .map_err(|e| refuse(e, &target.jti))?;
+        self.app
+            .revoke_jti(&target.jti, target.exp)
+            .await
+            .map_err(|e| refuse(e, &target.jti))?;
+        self.app.observe(OP, "ok", Instant::now());
+        audit("revoked", &target.jti, basis.as_str());
+        Ok(Response::new(pb::Empty {}))
     }
 }
 
