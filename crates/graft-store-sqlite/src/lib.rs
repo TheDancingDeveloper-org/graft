@@ -320,6 +320,19 @@ impl MetaStore for SqliteMetaStore {
         }
     }
 
+    async fn create_owned_repo(&self, name: &str, owner: &str) -> StoreResult<RepoId> {
+        let op = WriteOp::CreateOwnedRepo(name.to_owned(), owner.to_owned());
+        match self.write("create_owned_repo", op).await? {
+            Written::Repo(id) => Ok(id),
+            _ => Err(StoreError::Backend("unexpected writer reply".to_owned())),
+        }
+    }
+
+    async fn repo_owner(&self, repo: RepoId) -> StoreResult<Option<String>> {
+        self.read("repo_owner", move |c| reader::repo_owner(c, repo))
+            .await
+    }
+
     async fn repo(&self, name: &str) -> StoreResult<Option<RepoId>> {
         let name = name.to_owned();
         self.read("repo", move |c| reader::repo(c, &name)).await

@@ -95,7 +95,12 @@ fn token_mint(config: &ServerConfig, args: &[&str]) -> Result<(), Failure> {
                     "agent" => PrincipalKind::Agent,
                     "ci" => PrincipalKind::Ci,
                     "service" => PrincipalKind::Service,
-                    _ => return Err(Failure::usage("--kind is human, agent, ci or service")),
+                    "mirror" => PrincipalKind::Mirror,
+                    _ => {
+                        return Err(Failure::usage(
+                            "--kind is human, agent, ci, service or mirror",
+                        ));
+                    }
                 }
             }
             "--session" => req.session = Some(value()?),

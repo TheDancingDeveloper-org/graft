@@ -11,7 +11,7 @@ pub mod oidc;
 mod scope;
 mod token;
 
-pub use scope::{Scope, authorize};
+pub use scope::{ANY_REPO, Scope, authorize};
 pub use token::{
     Claims, Denylist, MAX_TOKEN_LEN, NoDenylist, SigningKey, Token, VerifyingKey, mint, new_jti,
     verify,

@@ -30,13 +30,15 @@ pub(crate) fn now_s() -> i64 {
 }
 
 /// Mints `req` at `now_s`. Fails with `InvalidChange` on an empty subject,
-/// a scope that does not parse, or a zero TTL.
+/// a scope that does not parse, a zero TTL, or a scope its kind may not
+/// carry ([`check_kind`]).
 pub(crate) fn mint(key: &SigningKey, req: MintRequest, now_s: i64) -> Result<Token, ApiError> {
     if req.ttl_s == 0 {
         return Err(invalid("ttl"));
     }
     for s in &req.scopes {
-        Scope::parse(s).map_err(|_| invalid("scope"))?;
+        let scope = Scope::parse(s).map_err(|_| invalid("scope"))?;
+        check_kind(&req, &scope)?;
     }
     let jti = graft_auth::new_jti().map_err(|_| ApiError::Unavailable {
         retry_after_ms: 1_000,
@@ -54,6 +56,27 @@ pub(crate) fn mint(key: &SigningKey, req: MintRequest, now_s: i64) -> Result<Tok
         jti,
     };
     graft_auth::mint(key, &claims).map_err(|_| invalid("subject"))
+}
+
+/// Which token kinds may carry `scope` (D41):
+///
+/// - `mirror:bind` and `mirror:export` only the operator kind: a human token
+///   with no session. Never an agent, session, CI or service token.
+/// - The mirror permission set (`repo:*:mirror`) only the `mirror` kind, and
+///   the `mirror` kind nothing else.
+fn check_kind(req: &MintRequest, scope: &Scope) -> Result<(), ApiError> {
+    let operator = req.kind == PrincipalKind::Human && req.session.is_none();
+    let mirror_set = matches!(scope, Scope::Mirror { .. });
+    let allowed = if req.kind == PrincipalKind::Mirror {
+        mirror_set
+    } else {
+        !mirror_set && (operator || !scope.is_operator_only())
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(invalid("scope-kind"))
+    }
 }
 
 /// Most scopes one minted token may carry.
@@ -373,5 +396,111 @@ mod tests {
                 Err(ApiError::InvalidChange { .. })
             ));
         }
+    }
+
+    fn admin_mint(
+        kind: PrincipalKind,
+        session: Option<&str>,
+        scopes: &[&str],
+    ) -> Result<Token, ApiError> {
+        let key = SigningKey::from_seed(&[7; 32]);
+        mint(
+            &key,
+            MintRequest {
+                subject: "s".into(),
+                kind,
+                scopes: scopes.iter().map(|s| s.to_string()).collect(),
+                ttl_s: 60,
+                session: session.map(Into::into),
+                work_item: None,
+            },
+            1_000,
+        )
+    }
+
+    fn refused(r: Result<Token, ApiError>) -> bool {
+        matches!(r, Err(ApiError::InvalidChange { rule, .. }) if rule == "scope-kind")
+    }
+
+    #[test]
+    fn a_mirror_token_carries_only_the_mirror_set() {
+        let ok = admin_mint(PrincipalKind::Mirror, None, &["repo:*:mirror"]).expect("mints");
+        let claims = graft_auth::verify(
+            &SigningKey::from_seed(&[7; 32]).verifying_key(),
+            &ok,
+            1_000,
+            &NoDenylist,
+        )
+        .expect("valid");
+        assert_eq!(claims.principal.kind, PrincipalKind::Mirror);
+        for extra in [
+            "repo:r:read",
+            "repo:*:read",
+            "repo:r:admin",
+            "repos:admin",
+            "mirror:bind",
+            "mirror:export",
+            "objects:read",
+        ] {
+            assert!(
+                refused(admin_mint(
+                    PrincipalKind::Mirror,
+                    None,
+                    &["repo:*:mirror", extra]
+                )),
+                "{extra}"
+            );
+        }
+        // And no other kind carries the mirror set.
+        for kind in [
+            PrincipalKind::Human,
+            PrincipalKind::Agent,
+            PrincipalKind::Ci,
+            PrincipalKind::Service,
+        ] {
+            assert!(
+                refused(admin_mint(kind, None, &["repo:*:mirror"])),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bind_and_export_mint_only_into_the_operator_kind() {
+        for scope in ["mirror:bind", "mirror:export"] {
+            admin_mint(PrincipalKind::Human, None, &[scope]).expect("operator mints");
+            for (kind, session) in [
+                (PrincipalKind::Agent, Some("ses_1")),
+                (PrincipalKind::Agent, None),
+                (PrincipalKind::Human, Some("ses_1")),
+                (PrincipalKind::Ci, None),
+                (PrincipalKind::Service, None),
+            ] {
+                assert!(
+                    refused(admin_mint(kind, session, &[scope])),
+                    "{scope} into {kind:?} {session:?}"
+                );
+            }
+        }
+        // repos:admin is delegable.
+        admin_mint(PrincipalKind::Agent, Some("ses_1"), &["repos:admin"]).expect("delegable");
+    }
+
+    #[test]
+    fn a_service_cannot_delegate_bind_or_export_to_an_agent() {
+        let key = SigningKey::from_seed(&[7; 32]);
+        let vogt = caller(&["mirror:bind", "mirror:export", "repos:admin"]);
+        for scope in ["mirror:bind", "mirror:export"] {
+            assert!(refused(mint_for(
+                &key,
+                &vogt,
+                4_600,
+                ask(&[scope], 60),
+                3600,
+                1_000
+            )));
+        }
+        mint_for(&key, &vogt, 4_600, ask(&["repos:admin"], 60), 3600, 1_000)
+            .expect("repos:admin delegates");
     }
 }

@@ -933,6 +933,71 @@ fn followed_lines_refuse_lands<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)
     landed(t.land(work, "integration"));
 }
 
+/// D41: the `mirror` kind, holding only `repo:*:mirror`, moves a followed
+/// line by CAS and is refused on an unfollowed one. The scope on another
+/// kind admits nothing.
+fn the_mirror_moves_only_followed_lines<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+    let t = T::new(&f, &[("a", b"1")]);
+    let mut mirror = cx(&["repo:*:mirror"]);
+    mirror.principal.kind = PrincipalKind::Mirror;
+    let mut service = cx(&["repo:*:mirror"]);
+    service.principal.kind = PrincipalKind::Service;
+    let first = t.commit(t.root, &[("b", b"2")]);
+    t.r.update_ref("up", None, first, RefKind::Line)
+        .expect("line");
+    t.r.update_ref("other", None, first, RefKind::Line)
+        .expect("line");
+    t.r.update_ref(&followed_ref("up"), None, first, RefKind::Tool)
+        .expect("mark");
+    let next = t.commit(first, &[("c", b"3")]);
+    let move_as = |cx: &CallContext, line: &str, expected| {
+        block_on(t.r.e().update_ref(
+            cx,
+            UpdateRef {
+                repo: "r".to_owned(),
+                name: line.to_owned(),
+                expected,
+                new: next,
+                kind: RefKind::Line,
+            },
+        ))
+    };
+    let denied = Err(ApiError::PermissionDenied {
+        scope: "repo:r:admin".to_owned(),
+        path: None,
+    });
+    // An unfollowed line, and a followed one moved by another kind holding
+    // the same scope, are refused.
+    assert_eq!(move_as(&mirror, "other", Some(first)).map(drop), denied);
+    assert!(matches!(
+        move_as(&service, "up", Some(first)),
+        Err(ApiError::PermissionDenied { .. })
+    ));
+    assert_eq!(t.tip("other").target, first);
+    // CAS only: a stale expectation conflicts.
+    assert!(matches!(
+        move_as(&mirror, "up", Some(t.root)),
+        Err(ApiError::RefConflict { .. })
+    ));
+    assert_eq!(t.tip("up").target, first);
+    move_as(&mirror, "up", Some(first)).expect("mirror moves the followed line");
+    assert_eq!(t.tip("up").target, next);
+    // Nor can it move the marker, a tag or a tool ref.
+    assert!(matches!(
+        block_on(t.r.e().update_ref(
+            &mirror,
+            UpdateRef {
+                repo: "r".to_owned(),
+                name: followed_ref("other"),
+                expected: None,
+                new: first,
+                kind: RefKind::Tool,
+            },
+        )),
+        Err(ApiError::PermissionDenied { .. })
+    ));
+}
+
 fn refused_lands<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
     let t = T::new(&f, &[("a", b"1")]);
     let draft = t.commit(t.root, &[("b", b"2")]);
@@ -996,6 +1061,7 @@ on_both![
     post_land_failures_request_a_revert,
     refused_lands,
     followed_lines_refuse_lands,
+    the_mirror_moves_only_followed_lines,
 ];
 
 /// Decision D22: with the default config every line, `main` included, is

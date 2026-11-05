@@ -9,8 +9,14 @@ use graft_proto::Principal;
 
 use crate::AuthError;
 
-/// A scope, in the text form `repo:<name>:<perm>[:<arg>]` or `objects:read`.
-/// `<perm>` is `read`, `write`, `land`, `attest`, `admin` or `drafts`.
+/// A scope, in the text form `repo:<name>:<perm>[:<arg>]`, `objects:read`,
+/// `repos:admin`, `mirror:bind` or `mirror:export`. `<perm>` is `read`,
+/// `write`, `land`, `attest`, `admin`, `drafts` or (only as
+/// `repo:*:mirror`) `mirror`.
+///
+/// `<name>` may be `*` ([`ANY_REPO`]): the scope then holds on every
+/// repository, now and later. A scope that is needed always names one
+/// repository.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Scope {
     /// Read a repository: `repo:<name>:read`.
@@ -53,13 +59,35 @@ pub enum Scope {
     /// Read objects for any repository the caller can read (node daemon):
     /// `objects:read`.
     ObjectsRead,
+    /// Create, delete and list repositories: `repos:admin`. The holder
+    /// administers a repository it creates (D41).
+    ReposAdmin,
+    /// Bind a repository to an upstream: `mirror:bind`. Operator-only, and
+    /// implied by no other scope (D41).
+    MirrorBind,
+    /// Turn on export to an upstream: `mirror:export`. Operator-only, and
+    /// implied by no other scope (D41).
+    MirrorExport,
+    /// The mirror permission set: held as `repo:*:mirror`, only by the
+    /// `mirror` token kind (D41). `admin` does not grant it.
+    Mirror {
+        /// Repository (`*` when held).
+        repo: String,
+    },
 }
+
+/// The repository name that matches every repository in a held scope.
+pub const ANY_REPO: &str = "*";
 
 impl Scope {
     /// Parses the text form.
     pub fn parse(s: &str) -> Result<Self, AuthError> {
-        if s == "objects:read" {
-            return Ok(Self::ObjectsRead);
+        match s {
+            "objects:read" => return Ok(Self::ObjectsRead),
+            "repos:admin" => return Ok(Self::ReposAdmin),
+            "mirror:bind" => return Ok(Self::MirrorBind),
+            "mirror:export" => return Ok(Self::MirrorExport),
+            _ => {}
         }
         let rest = s.strip_prefix("repo:").ok_or(AuthError::Malformed)?;
         let (repo, rest) = rest.split_once(':').ok_or(AuthError::Malformed)?;
@@ -88,6 +116,7 @@ impl Scope {
             ("attest", None) => Ok(Self::Attest { repo }),
             ("admin", None) => Ok(Self::Admin { repo }),
             ("drafts", None) => Ok(Self::Drafts { repo }),
+            ("mirror", None) if repo == ANY_REPO => Ok(Self::Mirror { repo }),
             _ => Err(AuthError::Malformed),
         }
     }
@@ -100,9 +129,16 @@ impl Scope {
             | Self::Land { repo, .. }
             | Self::Attest { repo }
             | Self::Drafts { repo }
-            | Self::Admin { repo } => Some(repo),
-            Self::ObjectsRead => None,
+            | Self::Admin { repo }
+            | Self::Mirror { repo } => Some(repo),
+            Self::ObjectsRead | Self::ReposAdmin | Self::MirrorBind | Self::MirrorExport => None,
         }
+    }
+
+    /// Whether only the operator token kind may hold this scope
+    /// (`mirror:bind`, `mirror:export`).
+    pub fn is_operator_only(&self) -> bool {
+        matches!(self, Self::MirrorBind | Self::MirrorExport)
     }
 
     /// Whether holding `self` grants `needed`, for an operation on `path`
@@ -112,19 +148,27 @@ impl Scope {
     /// `read` on theirs. A `write` with a prefix grants writes to that prefix
     /// and below only, never a write that names no path. `land` is per line.
     /// `attest`, `drafts` and `objects:read` are granted only by themselves
-    /// (and `attest` and `drafts` by `admin`).
+    /// (and `attest` and `drafts` by `admin`). `repos:admin`, `mirror:bind`,
+    /// `mirror:export` and `mirror` are granted only by themselves: `admin`
+    /// grants none of them. A held `*` repository matches any repository.
     fn grants(&self, needed: &Scope, path: Option<&RepoPath>) -> bool {
+        let same = |held: &str, want: &str| held == ANY_REPO || held == want;
         if let Self::Admin { repo } = self {
-            return needed.repo() == Some(repo.as_str());
+            return !matches!(needed, Self::Mirror { .. })
+                && needed.repo().is_some_and(|want| same(repo, want));
         }
         match (self, needed) {
-            (Self::ObjectsRead, Self::ObjectsRead) => true,
+            (Self::ObjectsRead, Self::ObjectsRead)
+            | (Self::ReposAdmin, Self::ReposAdmin)
+            | (Self::MirrorBind, Self::MirrorBind)
+            | (Self::MirrorExport, Self::MirrorExport) => true,
+            (Self::Mirror { repo }, Self::Mirror { repo: want }) => same(repo, want),
             (
                 Self::Read { repo } | Self::Write { repo, .. } | Self::Land { repo, .. },
                 Self::Read { repo: want },
-            ) => repo == want,
+            ) => same(repo, want),
             (Self::Write { repo, prefix }, Self::Write { repo: want, .. }) => {
-                repo == want
+                same(repo, want)
                     && match (prefix, path) {
                         (None, _) => true,
                         (Some(prefix), Some(path)) => path.starts_with(prefix),
@@ -137,9 +181,9 @@ impl Scope {
                     repo: want,
                     line: want_line,
                 },
-            ) => repo == want && line == want_line,
+            ) => same(repo, want) && line == want_line,
             (Self::Attest { repo }, Self::Attest { repo: want })
-            | (Self::Drafts { repo }, Self::Drafts { repo: want }) => repo == want,
+            | (Self::Drafts { repo }, Self::Drafts { repo: want }) => same(repo, want),
             _ => false,
         }
     }
@@ -166,7 +210,11 @@ impl fmt::Display for Scope {
             Self::Attest { repo } => write!(f, "repo:{repo}:attest"),
             Self::Drafts { repo } => write!(f, "repo:{repo}:drafts"),
             Self::Admin { repo } => write!(f, "repo:{repo}:admin"),
+            Self::Mirror { repo } => write!(f, "repo:{repo}:mirror"),
             Self::ObjectsRead => f.write_str("objects:read"),
+            Self::ReposAdmin => f.write_str("repos:admin"),
+            Self::MirrorBind => f.write_str("mirror:bind"),
+            Self::MirrorExport => f.write_str("mirror:export"),
         }
     }
 }
@@ -202,5 +250,95 @@ pub fn authorize(
             scope: needed.to_string(),
             path: path.map(|p| p.as_str().to_owned()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graft_proto::PrincipalKind;
+
+    fn holder(scopes: &[&str]) -> Principal {
+        Principal {
+            subject: "p".into(),
+            kind: PrincipalKind::Human,
+            session: None,
+            work_item: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn holds(scopes: &[&str], needed: &str) -> bool {
+        let needed = Scope::parse(needed).expect("needed scope parses");
+        authorize(&holder(scopes), &needed, None).is_ok()
+    }
+
+    #[test]
+    fn the_new_forms_round_trip_through_text() {
+        for text in [
+            "repos:admin",
+            "mirror:bind",
+            "mirror:export",
+            "repo:*:mirror",
+            "repo:*:read",
+            "repo:*:land:main",
+            "repo:*:write:src",
+        ] {
+            let scope = Scope::parse(text).expect(text);
+            assert_eq!(scope.to_string(), text);
+        }
+        // The mirror set is held only on every repository.
+        for text in [
+            "repo:r:mirror",
+            "repo:*:mirror:x",
+            "mirror:all",
+            "repos:read",
+        ] {
+            assert_eq!(Scope::parse(text), Err(AuthError::Malformed), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_wildcard_repository_holds_on_every_repository() {
+        assert!(holds(&["repo:*:read"], "repo:a:read"));
+        assert!(holds(&["repo:*:land:main"], "repo:b:land:main"));
+        assert!(!holds(&["repo:*:land:main"], "repo:b:land:dev"));
+        assert!(!holds(&["repo:*:read"], "repo:a:write"));
+        assert!(holds(&["repo:*:mirror"], "repo:*:mirror"));
+    }
+
+    #[test]
+    fn bind_and_export_are_implied_by_nothing_else() {
+        for needed in ["mirror:bind", "mirror:export"] {
+            for held in [
+                "repo:r:admin",
+                "repo:*:admin",
+                "repos:admin",
+                "repo:*:mirror",
+                "objects:read",
+            ] {
+                assert!(!holds(&[held], needed), "{held} grants {needed}");
+            }
+            assert!(holds(&[needed], needed));
+        }
+        assert!(!holds(&["mirror:bind"], "mirror:export"));
+        assert!(!holds(&["mirror:export"], "mirror:bind"));
+        assert!(Scope::MirrorBind.is_operator_only());
+        assert!(Scope::MirrorExport.is_operator_only());
+        assert!(!Scope::ReposAdmin.is_operator_only());
+    }
+
+    #[test]
+    fn repos_admin_and_the_mirror_set_grant_only_themselves() {
+        assert!(holds(&["repos:admin"], "repos:admin"));
+        assert!(!holds(&["repo:r:admin"], "repos:admin"));
+        assert!(!holds(&["repo:*:admin"], "repos:admin"));
+        assert!(!holds(&["repos:admin"], "repo:r:read"));
+        assert!(!holds(&["repos:admin"], "repo:r:admin"));
+        // Admin does not grant the mirror set, and the set is not admin.
+        assert!(!holds(&["repo:*:admin"], "repo:*:mirror"));
+        for needed in ["repo:r:read", "repo:r:write", "repo:r:admin", "repos:admin"] {
+            assert!(!holds(&["repo:*:mirror"], needed), "{needed}");
+        }
     }
 }

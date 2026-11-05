@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use graft_model::ObjectId;
-use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
+use graft_proto::api::{AdminApi as _, ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::context::CallContext;
 use graft_proto::error::ApiResult;
 use graft_proto::types::*;
@@ -62,6 +62,14 @@ macro_rules! forward {
             },
         }
     };
+}
+
+impl Backend {
+    /// Creates repository `name` (`CreateRepo`). A local repository has
+    /// one repository, so only its own name succeeds there.
+    pub async fn create_repo(&self, cx: &CallContext, name: String) -> ApiResult<()> {
+        forward!(self.create_repo(cx, name))
+    }
 }
 
 impl ObjectApi for Backend {

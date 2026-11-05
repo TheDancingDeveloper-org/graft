@@ -109,6 +109,8 @@ pub(crate) enum Command {
     Line(LineArgs),
     /// Create or list immutable tags
     Tag(TagArgs),
+    /// Create repositories
+    Repo(RepoArgs),
     /// List, squash, reorder, split or drop the drafts between the base and the head
     Stack(StackArgs),
     /// Move the base to the line tip (the server rebases a stack; conflicts are written into the files)
@@ -611,6 +613,22 @@ pub(crate) enum LineAction {
         /// Resume token from a previous page
         #[arg(long, value_name = "TOKEN")]
         cursor: Option<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RepoArgs {
+    /// What to do
+    #[command(subcommand)]
+    pub(crate) action: RepoAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RepoAction {
+    /// Create a repository; needs repos:admin (the creator then administers it) or the repository's admin
+    Create {
+        /// The repository's name, or a graft URL naming it
+        name: String,
     },
 }
 

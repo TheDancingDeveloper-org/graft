@@ -264,6 +264,7 @@ fn kind_byte(kind: PrincipalKind) -> u8 {
         PrincipalKind::Agent => 1,
         PrincipalKind::Ci => 2,
         PrincipalKind::Service => 3,
+        PrincipalKind::Mirror => 4,
     }
 }
 
@@ -295,6 +296,7 @@ fn decode_attestation(bytes: &[u8]) -> Option<Attestation> {
         1 => PrincipalKind::Agent,
         2 => PrincipalKind::Ci,
         3 => PrincipalKind::Service,
+        4 => PrincipalKind::Mirror,
         _ => return None,
     };
     let _at_ms = r.u64()?;
