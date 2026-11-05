@@ -302,6 +302,24 @@ where
         (&self.meta, &self.objects)
     }
 
+    /// Adds `repo:<repo>:admin` to `cx` when its caller holds `repos:admin`
+    /// and created `repo` (D41): the creator administers what it creates.
+    /// One indexed read, and only for a `repos:admin` holder that does not
+    /// already administer `repo`. An unknown repository adds nothing.
+    pub async fn grant_creator(&self, cx: &mut CallContext, repo: &str) -> ApiResult<()> {
+        if !access::holds_repos_admin(cx) || access::is_admin(cx, repo) {
+            return Ok(());
+        }
+        let Some(id) = self.meta.repo(repo).await.map_err(errors::store)? else {
+            return Ok(());
+        };
+        let owner = self.meta.repo_owner(id).await.map_err(errors::store)?;
+        if owner.as_deref() == Some(cx.principal.subject.as_str()) {
+            cx.principal.scopes.push(format!("repo:{repo}:admin"));
+        }
+        Ok(())
+    }
+
     /// The lease clock.
     pub fn clock(&self) -> &dyn Clock {
         self.clock.as_ref()

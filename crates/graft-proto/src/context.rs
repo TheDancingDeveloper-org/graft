@@ -9,8 +9,11 @@ pub enum PrincipalKind {
     Agent,
     /// A CI job.
     Ci,
-    /// A graft service (node daemon, mirror).
+    /// A graft service (node daemon, attester).
     Service,
+    /// The mirror service (D41). It may hold only `repo:*:mirror`, and is
+    /// the one principal that moves a followed line.
+    Mirror,
 }
 
 /// An authenticated caller, as established by `graft-auth` from a token.

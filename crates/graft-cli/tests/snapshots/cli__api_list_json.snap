@@ -1,6 +1,6 @@
 ---
 source: crates/graft-cli/tests/cli.rs
-assertion_line: 361
+assertion_line: 607
 expression: value
 ---
 [
@@ -209,8 +209,8 @@ expression: value
   },
   {
     "api": "AdminApi",
-    "command": null,
-    "excluded": "server administration only",
+    "command": "repo",
+    "excluded": null,
     "op": "create_repo",
     "raw": false
   },

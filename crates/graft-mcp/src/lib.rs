@@ -7,6 +7,7 @@
 mod drafts;
 pub mod preflight;
 mod render;
+mod repos;
 mod review;
 mod server;
 mod upstream;
@@ -15,6 +16,7 @@ mod write;
 
 pub use drafts::DraftOverlapArgs;
 pub use render::{MAX_RESULT_BYTES, PATCH_MAX_BYTES};
+pub use repos::{RepoAdmin, RepoAdminFuture, RepoCreateArgs};
 pub use review::{
     AttestArgs, AttestKindArg, AttestStatusArg, GetAttestationsArgs, GetLandChecksArgs,
     ReviewQueueArgs,
@@ -188,6 +190,12 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "graft_merge",
         description: "Merge one line into another, recording a merge point.",
+        read_only: false,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_repo_create",
+        description: "Create a repository; needs repos:admin or its admin.",
         read_only: false,
         bound: ToolBound::Capped,
     },

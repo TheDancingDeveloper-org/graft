@@ -100,6 +100,8 @@ fn help_is_public_facing_for_every_command() {
         &["tag"],
         &["tag", "create"],
         &["tag", "list"],
+        &["repo"],
+        &["repo", "create"],
         &["stack"],
         &["stack", "list"],
         &["stack", "squash"],
@@ -736,7 +738,7 @@ fn every_schema_file_compiles() {
         count += 1;
     }
     assert_eq!(
-        count, 32,
+        count, 33,
         "one schema per command, plus error, api-list, line-list, line-merge, line-merges, tag-list and workspace-list"
     );
 }

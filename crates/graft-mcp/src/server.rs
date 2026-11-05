@@ -44,6 +44,7 @@ use crate::render::{
     FIELD_MAX_BYTES, MESSAGE_MAX_BYTES, PATCH_MAX_BYTES, ToolError, bounded, clip, fit,
     parse_resource_uri,
 };
+use crate::repos::RepoAdmin;
 use crate::workcopy::WorkingCopyTools;
 use crate::write::COMMIT_MAX_BYTES;
 
@@ -236,6 +237,8 @@ pub struct McpServer<A> {
     /// is refused. Absent (the in-process HTTP mount) means a URL is refused:
     /// the process has no remote endpoint to match.
     pub(crate) endpoint: Option<String>,
+    /// Serves `graft_repo_create`, when the launcher provides it.
+    pub(crate) repo_admin: Option<Arc<dyn RepoAdmin>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -246,6 +249,7 @@ impl<A> Clone for McpServer<A> {
             principal: self.principal.clone(),
             working_copy: self.working_copy.clone(),
             endpoint: self.endpoint.clone(),
+            repo_admin: self.repo_admin.clone(),
             tool_router: self.tool_router.clone(),
         }
     }
@@ -270,7 +274,8 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             + Self::write_tool_router()
             + Self::upstream_tool_router()
             + Self::drafts_tool_router()
-            + Self::review_tool_router();
+            + Self::review_tool_router()
+            + Self::repos_tool_router();
         // Tests only. The tool returns a payload larger than the cap and
         // does not bound itself, so only `call_tool` can refuse it.
         #[cfg(test)]
@@ -280,6 +285,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             principal,
             working_copy: None,
             endpoint: None,
+            repo_admin: None,
             tool_router,
         }
     }

@@ -283,6 +283,17 @@ Merges one line into another while recording a merge point.
 - Errors: conflicts return `conflict`; stale or contended target updates are
   typed and never move two refs at once.
 
+### `graft_repo_create`
+
+Creates a repository.
+
+- Arguments: required `repo`, the new repository's name.
+- Result: the repository name.
+- Errors: without `repos:admin` (or the repository's admin) the call is
+  `permission_denied`. A repository that exists is a success. The tool is
+  unavailable where the launcher provides no repository administration.
+  With `repos:admin`, the creator then administers the repository.
+
 ### `graft_tag`
 
 Creates an immutable tag at a changeset.

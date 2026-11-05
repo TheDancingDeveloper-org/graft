@@ -293,12 +293,17 @@ impl App {
         );
         let started = Instant::now();
         let jti = caller.jti.clone();
-        let cx = caller.cx;
+        let mut cx = caller.cx;
         let result = async {
             if write {
                 self.check_not_revoked(&jti).await?;
                 self.admission.check_write(self.telemetry.metrics())?;
             }
+            // A `repos:admin` creator administers its repository (D41).
+            self.engine
+                .grant_creator(&mut cx, repo)
+                .await
+                .map_err(CallError::Api)?;
             let task = tokio::spawn(f(self.engine.clone(), cx).in_current_span());
             match task.await {
                 Ok(result) => result.map_err(CallError::Api),

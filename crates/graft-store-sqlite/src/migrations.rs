@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -270,6 +270,15 @@ CREATE TABLE review_queue (
     PRIMARY KEY (repo, line, lsn)
 ) WITHOUT ROWID;
 CREATE INDEX review_queue_changeset ON review_queue (repo, changeset, line);
+";
+
+/// Version 9: the subject that created a repository under `repos:admin`
+/// (D41), which administers it.
+const V9: &str = "
+CREATE TABLE repo_owners (
+    repo  INTEGER PRIMARY KEY REFERENCES repos(id),
+    owner TEXT NOT NULL
+);
 ";
 
 /// The database's schema version.
