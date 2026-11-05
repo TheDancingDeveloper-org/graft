@@ -252,6 +252,9 @@ fn holds(conn: &Connection, repo_id: RepoId, pre: &Precondition) -> StoreResult<
             key,
             value,
         } => Ok(crate::reader::derived(conn, repo_id, kind, *version, key)? == *value),
+        Precondition::MirrorVersionIs { upstream, version } => {
+            Ok(crate::mirrors::version(conn, repo, upstream)? == *version)
+        }
     }
 }
 
@@ -772,6 +775,39 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
             | Write::MarkDeleting(_)
             | Write::Undoom(_)
             | Write::SetGcProtection(_)) => protect(conn, repo, write)?,
+            Write::PutMirror(record) => {
+                mirror_guarded(&txn.preconditions, &record.upstream)?;
+                let current = crate::mirrors::version(conn, repo, &record.upstream)?.unwrap_or(0);
+                if record.version != current + 1 {
+                    return Err(StoreError::Invalid(format!(
+                        "mirror {} version {} does not follow {current}",
+                        record.upstream, record.version
+                    )));
+                }
+                crate::mirrors::put(conn, repo, &record)?;
+            }
+            Write::DeleteMirror(upstream) => {
+                mirror_guarded(&txn.preconditions, &upstream)?;
+                crate::mirrors::delete(conn, repo, &upstream)?;
+            }
+            Write::DeleteRef(name) => {
+                let guarded = txn
+                    .preconditions
+                    .iter()
+                    .any(|p| matches!(p, Precondition::RefIs { name: n, .. } if *n == name));
+                if !guarded {
+                    return Err(StoreError::Invalid(format!(
+                        "ref {name} is deleted without a RefIs precondition"
+                    )));
+                }
+                conn.prepare_cached("DELETE FROM refs WHERE repo = ?1 AND name = ?2")
+                    .and_then(|mut s| s.execute(params![repo, name]))
+                    .map_err(sql_err)?;
+                versions.remove(&name);
+            }
+            Write::SetMirrorStatus { upstream, status } => {
+                crate::mirrors::set_status(conn, repo, &upstream, &status)?;
+            }
             Write::Journal { kind, body } => {
                 let lsn = int(next_lsn)?;
                 conn.prepare_cached(
@@ -785,6 +821,21 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
         }
     }
     Ok(TxnOutcome::Committed(lsns))
+}
+
+/// A mirror row is written only under a `MirrorVersionIs` precondition on
+/// it, so every settings write is a compare-and-swap.
+fn mirror_guarded(pre: &[Precondition], upstream: &str) -> StoreResult<()> {
+    let guarded = pre
+        .iter()
+        .any(|p| matches!(p, Precondition::MirrorVersionIs { upstream: u, .. } if u == upstream));
+    if guarded {
+        Ok(())
+    } else {
+        Err(StoreError::Invalid(format!(
+            "mirror {upstream} is written without a MirrorVersionIs precondition"
+        )))
+    }
 }
 
 /// The rows a first-time land indexes: the review-queue entry (with `pos`)

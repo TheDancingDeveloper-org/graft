@@ -132,6 +132,32 @@ pub(crate) struct ServerConfig {
     pub(crate) bootstrap_admin_repos: Vec<String>,
     /// Outbound journal webhooks. Empty: none run.
     pub(crate) webhooks: Vec<crate::webhooks::WebhookSpec>,
+    /// Mirror settings rules (D41).
+    pub(crate) mirror: MirrorSection,
+}
+
+/// `[mirror]`: which upstreams a mirror row may name, and how often it may
+/// poll. Only the operator changes these.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub(crate) struct MirrorSection {
+    /// Hosts an upstream URL may name, matched exactly (case-insensitive).
+    pub(crate) allowed_hosts: Vec<String>,
+    /// The shortest `interval_s` a row may ask for.
+    pub(crate) min_interval_s: u32,
+    /// The server's own DNS names, never accepted as an upstream host
+    /// (`localhost` and the `listen` host always are refused).
+    pub(crate) server_names: Vec<String>,
+}
+
+impl Default for MirrorSection {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: vec!["github.com".into()],
+            min_interval_s: crate::mirrors::DEFAULT_INTERVAL_S,
+            server_names: Vec::new(),
+        }
+    }
 }
 
 /// `[gc]`: the sweep scheduler. It is off by default, and even when it is
@@ -232,6 +258,7 @@ impl Default for ServerConfig {
             bootstrap_admin_token_file: None,
             bootstrap_admin_repos: Vec::new(),
             webhooks: Vec::new(),
+            mirror: MirrorSection::default(),
         }
     }
 }
@@ -279,6 +306,9 @@ impl ServerConfig {
             ("put_wait_ms", self.put_wait_ms),
             ("put_idle_ms", self.put_idle_ms),
         ];
+        if self.mirror.min_interval_s == 0 {
+            return Err(ConfigError("mirror.min_interval_s must be positive".into()));
+        }
         if let Some((key, _)) = positive.iter().find(|(_, v)| *v == 0) {
             return Err(ConfigError(format!("{key} must be positive")));
         }
@@ -332,6 +362,34 @@ impl ServerConfig {
     }
 
     /// The engine configuration: the defaults with the line sections applied.
+    /// The mirror policy: `[mirror]`, plus the server's own names.
+    pub(crate) fn mirror_policy(&self) -> crate::mirrors::MirrorPolicy {
+        let mut own_names = vec!["localhost".to_owned()];
+        let listen_host = self
+            .listen
+            .rsplit_once(':')
+            .map_or(self.listen.as_str(), |(h, _)| h)
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        own_names.push(listen_host.to_ascii_lowercase());
+        own_names.extend(
+            self.mirror
+                .server_names
+                .iter()
+                .map(|n| n.to_ascii_lowercase()),
+        );
+        crate::mirrors::MirrorPolicy {
+            allowed_hosts: self
+                .mirror
+                .allowed_hosts
+                .iter()
+                .map(|h| h.to_ascii_lowercase())
+                .collect(),
+            min_interval_s: self.mirror.min_interval_s,
+            own_names,
+        }
+    }
+
     pub(crate) fn engine_config(&self) -> graft_engine::EngineConfig {
         crate::lines::engine_config(&self.lines, self.default_line.as_ref())
     }
@@ -389,6 +447,28 @@ metrics = "0.0.0.0:9464"
         assert!(ServerConfig::parse("max_watches = 0").is_err());
         assert!(ServerConfig::parse("max_put_call_bytes = 10\nput_buffer_bytes = 5").is_err());
         assert!(ServerConfig::parse("min_free_fraction = 1.0").is_ok());
+    }
+
+    #[test]
+    fn the_mirror_policy_defaults_to_github_and_refuses_the_servers_own_names() {
+        let d = ServerConfig::parse("").expect("defaults").mirror_policy();
+        assert_eq!(d.allowed_hosts, vec!["github.com"]);
+        assert_eq!(d.min_interval_s, 15);
+        assert_eq!(d.own_names, vec!["localhost", "127.0.0.1"]);
+
+        let c = ServerConfig::parse(
+            "listen = \"graft.internal:7878\"\n[mirror]\nallowed_hosts = [\"GitHub.com\", \"git.example.org\"]\nmin_interval_s = 60\nserver_names = [\"Graft.Example.com\"]\n",
+        )
+        .expect("parse")
+        .mirror_policy();
+        assert_eq!(c.allowed_hosts, vec!["github.com", "git.example.org"]);
+        assert_eq!(c.min_interval_s, 60);
+        assert_eq!(
+            c.own_names,
+            vec!["localhost", "graft.internal", "graft.example.com"]
+        );
+        assert!(ServerConfig::parse("[mirror]\nmin_interval_s = 0").is_err());
+        assert!(ServerConfig::parse("[mirror]\nallowed = []").is_err());
     }
 
     #[test]

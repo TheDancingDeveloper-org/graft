@@ -207,7 +207,8 @@ async fn run(
             denylist,
             exports,
         )
-        .with_ci(ci),
+        .with_ci(ci)
+        .with_mirror(config.mirror_policy()),
     );
 
     if std::env::var_os(HOLD_START_UP_ENV).is_some() {
