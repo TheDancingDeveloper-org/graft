@@ -18,13 +18,14 @@ use std::time::{Duration, Instant};
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
     AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandingRow, LineMergeRow, Lsn,
-    MetaStore, MetaTxn, Protection, RecordState, RefRecord, RepoId, StoreError, StoreResult,
-    TimedRow, TxnOutcome, WorkspaceRecord,
+    MetaStore, MetaTxn, MirrorListing, MirrorQuery, MirrorRecord, Protection, RecordState,
+    RefRecord, RepoId, StoreError, StoreResult, TimedRow, TxnOutcome, WorkspaceRecord,
 };
 use rusqlite::{Connection, OpenFlags};
 
 mod codec;
 pub mod migrations;
+mod mirrors;
 mod oneshot;
 mod reader;
 mod writer;
@@ -330,6 +331,20 @@ impl MetaStore for SqliteMetaStore {
 
     async fn repo_owner(&self, repo: RepoId) -> StoreResult<Option<String>> {
         self.read("repo_owner", move |c| reader::repo_owner(c, repo))
+            .await
+    }
+
+    async fn get_mirror(&self, repo: RepoId, upstream: &str) -> StoreResult<Option<MirrorRecord>> {
+        let upstream = upstream.to_owned();
+        self.read("get_mirror", move |c| {
+            reader::check_repo(c, repo)?;
+            mirrors::get(c, repo, &upstream)
+        })
+        .await
+    }
+
+    async fn list_mirrors(&self, query: MirrorQuery) -> StoreResult<Vec<MirrorListing>> {
+        self.read("list_mirrors", move |c| mirrors::list(c, &query))
             .await
     }
 

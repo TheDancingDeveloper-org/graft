@@ -1,0 +1,1521 @@
+//! Mirror settings (D41, `docs/notes/mirror-service.md` §3.2): the
+//! `repo_mirrors` rows behind `MirrorService.SetMirror`, `GetMirror`,
+//! `ListMirrors`, `RemoveMirror`, `PurgeMirror` and `SetMirrorStatus`.
+//!
+//! The server stores an upstream URL and branch names as strings and never
+//! fetches them (rule 6). It validates the URL here, at the boundary
+//! (rule 9): `https` or `ssh` only, no address the server's own network can
+//! reach privately, and only a host the operator allowed. The mirror
+//! service checks again after DNS resolution.
+//!
+//! Grants (§3.1): creating a row needs `mirror:bind`; turning on export or
+//! changing the export author map needs `mirror:export`; a repository admin
+//! (or a `mirror:bind` holder) may change the rest of an existing row.
+//! Removal and purge need `mirror:bind`; status needs `repo:*:mirror`.
+//!
+//! `RemoveMirror --clear-followed` deletes each line's followed marker in
+//! the removal's transaction, with one `RefDeleted` journal entry per
+//! marker: `{"name":"graft.followed/main","old":"c…","version":3,"actor":"…"}`.
+
+use std::net::{IpAddr, Ipv4Addr};
+
+use graft_auth::Scope;
+use graft_model::{ChangesetId, ObjectId};
+use graft_proto::types::followed_ref;
+use graft_proto::{ApiError, Principal, pb};
+use graft_store::{
+    MetaStore, MetaTxn, MirrorDirection, MirrorExportRecord, MirrorLineRecord, MirrorQuery,
+    MirrorRecord, MirrorStatusRecord, Precondition, RepoId, StoreError, TxnOutcome, Write,
+};
+
+/// The poll interval a row gets when it names none (D9).
+pub(crate) const DEFAULT_INTERVAL_S: u32 = 15;
+
+/// The longest upstream URL accepted.
+const MAX_URL: usize = 2048;
+
+/// The longest branch, line, principal or identity accepted.
+const MAX_NAME: usize = 256;
+
+/// The most lines, and the most export authors, on one row.
+const MAX_LINES: usize = 64;
+const MAX_AUTHORS: usize = 256;
+
+/// The longest status message, in characters.
+pub(crate) const MAX_STATUS_MESSAGE: usize = 200;
+
+/// The most rows one `ListMirrors` page returns.
+pub(crate) const MAX_PAGE: u32 = 200;
+
+/// The journal kind of a deleted followed marker.
+pub(crate) const REF_DELETED: &str = "RefDeleted";
+
+/// The operator's mirror settings (`[mirror]` in the server config).
+#[derive(Clone, Debug)]
+pub(crate) struct MirrorPolicy {
+    /// Hosts an upstream may name, lowercase, matched exactly.
+    pub(crate) allowed_hosts: Vec<String>,
+    /// The shortest poll interval a row may ask for.
+    pub(crate) min_interval_s: u32,
+    /// The server's own names and addresses, never an upstream.
+    pub(crate) own_names: Vec<String>,
+}
+
+impl Default for MirrorPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: vec!["github.com".into()],
+            min_interval_s: DEFAULT_INTERVAL_S,
+            own_names: vec!["localhost".into()],
+        }
+    }
+}
+
+fn refused(policy: &str, detail: impl Into<String>) -> ApiError {
+    ApiError::Rejected {
+        policy: policy.to_owned(),
+        detail: detail.into(),
+    }
+}
+
+/// Why an upstream URL is refused. The URL itself is never echoed: it may
+/// carry a credential.
+fn url_refused(reason: &str) -> ApiError {
+    refused("mirror-url", reason)
+}
+
+/// Checks `url` against the allowlist (§3.2). Text only: nothing is
+/// resolved or fetched.
+pub(crate) fn check_upstream(url: &str, policy: &MirrorPolicy) -> Result<(), ApiError> {
+    if url.is_empty() || url.len() > MAX_URL {
+        return Err(url_refused("the upstream URL is empty or too long"));
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(url_refused(
+            "the upstream URL holds whitespace or a control character",
+        ));
+    }
+    let scheme_end = url.find("://");
+    // A transport helper, `<x>::<address>`: git would run `git-remote-<x>`.
+    if let Some(i) = url.find("::")
+        && scheme_end.is_none_or(|s| i < s)
+    {
+        return Err(url_refused("transport helpers (<x>::) are not allowed"));
+    }
+    let host = match scheme_end {
+        Some(s) => {
+            let scheme = url[..s].to_ascii_lowercase();
+            if scheme != "https" && scheme != "ssh" {
+                return Err(url_refused("the scheme must be https or ssh"));
+            }
+            let rest = &url[s + 3..];
+            let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+            let host_port = match authority.rsplit_once('@') {
+                Some(_) if scheme == "https" => {
+                    return Err(url_refused("an https upstream may not carry user info"));
+                }
+                Some((_, hp)) => hp,
+                None => authority,
+            };
+            host_of(host_port, true)?
+        }
+        None => {
+            // The scp-like form `[user@]host:path`.
+            let Some((before, path)) = url.split_once(':') else {
+                return Err(url_refused(
+                    "the upstream must be https://, ssh:// or user@host:path",
+                ));
+            };
+            if before.contains('/') || before.starts_with('.') || path.is_empty() {
+                return Err(url_refused("local paths are not allowed"));
+            }
+            let host = before.rsplit_once('@').map_or(before, |(_, h)| h);
+            host_of(host, false)?
+        }
+    };
+    check_host(&host, policy)
+}
+
+/// The host of `host[:port]` (or `[v6][:port]`), lowercased, without a
+/// trailing dot.
+fn host_of(hp: &str, port_allowed: bool) -> Result<String, ApiError> {
+    let (host, port) = if let Some(rest) = hp.strip_prefix('[') {
+        let (h, after) = rest
+            .split_once(']')
+            .ok_or_else(|| url_refused("an unclosed IPv6 address"))?;
+        (h, after.strip_prefix(':'))
+    } else {
+        match hp.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (hp, None),
+        }
+    };
+    if let Some(p) = port
+        && (!port_allowed || p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(url_refused("a bad port"));
+    }
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return Err(url_refused("the upstream names no host"));
+    }
+    Ok(host)
+}
+
+fn check_host(host: &str, policy: &MirrorPolicy) -> Result<(), ApiError> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if !is_public(ip) {
+            return Err(url_refused(
+                "loopback, link-local, private, CGNAT and unique-local addresses are not allowed",
+            ));
+        }
+    } else {
+        let dns = host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+        // The last label must be alphabetic (or IDNA), so a numeric form such
+        // as `2130706433` or `0x7f.1` is never read as an address.
+        let tld = host.rsplit('.').next().unwrap_or("");
+        let tld_ok = tld.starts_with("xn--") || tld.bytes().all(|b| b.is_ascii_alphabetic());
+        if !dns || !tld_ok || host.len() > 253 {
+            return Err(url_refused("the host is not a DNS name or an address"));
+        }
+        let blocked_suffix = ["localhost", "svc", "cluster.local"]
+            .iter()
+            .any(|s| host == *s || host.ends_with(&format!(".{s}")));
+        if blocked_suffix {
+            return Err(url_refused(
+                "localhost and cluster service names are not allowed",
+            ));
+        }
+    }
+    if policy
+        .own_names
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(host))
+    {
+        return Err(url_refused("the server's own name is not an upstream"));
+    }
+    if !policy
+        .allowed_hosts
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(host))
+    {
+        return Err(url_refused("the host is not in mirror.allowed_hosts"));
+    }
+    Ok(())
+}
+
+/// Whether `ip` is a public unicast address.
+fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => public_v4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return public_v4(v4);
+            }
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (first & 0xffc0) == 0xfe80) // link-local fe80::/10
+        }
+    }
+}
+
+fn public_v4(v4: Ipv4Addr) -> bool {
+    let [a, b, ..] = v4.octets();
+    !(v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || a == 0
+        || (a == 100 && (64..128).contains(&b))) // CGNAT 100.64.0.0/10
+}
+
+/// A branch, line, principal or identity: non-empty, bounded, no control
+/// characters.
+fn name(field: &str, s: &str) -> Result<String, ApiError> {
+    if s.is_empty() || s.len() > MAX_NAME || s.chars().any(char::is_control) {
+        return Err(refused(
+            "mirror-field",
+            format!("{field} must be 1..={MAX_NAME} bytes with no control characters"),
+        ));
+    }
+    Ok(s.to_owned())
+}
+
+fn lines(wire: Vec<pb::MirrorLine>) -> Result<Vec<MirrorLineRecord>, ApiError> {
+    if wire.is_empty() || wire.len() > MAX_LINES {
+        return Err(refused(
+            "mirror-field",
+            format!("a mirror has 1..={MAX_LINES} lines"),
+        ));
+    }
+    let mut out: Vec<MirrorLineRecord> = Vec::with_capacity(wire.len());
+    for l in wire {
+        let line = MirrorLineRecord {
+            branch: name("lines.branch", &l.branch)?,
+            line: name("lines.line", &l.line)?,
+            direction: MirrorDirection::parse(&l.direction).ok_or_else(|| {
+                refused("mirror-field", "lines.direction is follow, export or both")
+            })?,
+        };
+        if out.iter().any(|o| o.line == line.line) {
+            return Err(refused("mirror-field", "a line is mirrored once per row"));
+        }
+        out.push(line);
+    }
+    Ok(out)
+}
+
+fn export(wire: Option<pb::MirrorExport>) -> Result<MirrorExportRecord, ApiError> {
+    let wire = wire.unwrap_or_default();
+    if wire.authors.len() > MAX_AUTHORS {
+        return Err(refused(
+            "mirror-field",
+            format!("at most {MAX_AUTHORS} export authors"),
+        ));
+    }
+    let mut authors = wire
+        .authors
+        .into_iter()
+        .map(|a| {
+            Ok((
+                name("export.authors.principal", &a.principal)?,
+                name("export.authors.identity", &a.identity)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    authors.sort();
+    authors.dedup_by(|a, b| a.0 == b.0);
+    Ok(MirrorExportRecord {
+        default_author: wire
+            .default_author
+            .map(|a| name("export.default_author", &a))
+            .transpose()?,
+        authors,
+    })
+}
+
+/// Holds any of `scopes`; the refusal names the first.
+fn any_of(p: &Principal, scopes: &[Scope]) -> Result<(), ApiError> {
+    if scopes
+        .iter()
+        .any(|s| graft_auth::authorize(p, s, None).is_ok())
+    {
+        return Ok(());
+    }
+    Err(ApiError::PermissionDenied {
+        scope: scopes[0].to_string(),
+        path: None,
+    })
+}
+
+/// Whether `new` turns on export somewhere `old` did not, or changes the
+/// author map: either needs `mirror:export`.
+fn changes_export(
+    old: Option<&MirrorRecord>,
+    lines: &[MirrorLineRecord],
+    export: &MirrorExportRecord,
+) -> bool {
+    let exported = |l: &MirrorLineRecord| l.direction.exports();
+    let new_export = lines
+        .iter()
+        .filter(|l| exported(l))
+        .any(|l| !old.is_some_and(|o| o.lines.iter().any(|ol| ol == l)));
+    let map_changed = match old {
+        Some(o) => o.export != *export,
+        None => *export != MirrorExportRecord::default(),
+    };
+    new_export || map_changed
+}
+
+fn store(e: StoreError) -> ApiError {
+    tracing::error!(error = ?e, "mirror store call failed");
+    ApiError::Unavailable {
+        retry_after_ms: 1_000,
+    }
+}
+
+async fn repo_id<M: MetaStore>(meta: &M, repo: &str) -> Result<RepoId, ApiError> {
+    meta.repo(repo)
+        .await
+        .map_err(store)?
+        .ok_or_else(|| ApiError::NotFound {
+            what: format!("repository {repo}"),
+        })
+}
+
+fn version_conflict(expected: Option<u64>, actual: Option<u64>) -> ApiError {
+    let show = |v: Option<u64>| v.map_or_else(|| "absent".to_owned(), |v| v.to_string());
+    refused(
+        "mirror-version",
+        format!(
+            "expected version {}, the row is {}",
+            show(expected),
+            show(actual)
+        ),
+    )
+}
+
+fn not_found(repo: &str) -> ApiError {
+    ApiError::NotFound {
+        what: format!("mirror of repository {repo}"),
+    }
+}
+
+/// The wire form of a row. Never the credential: only whether one is set.
+pub(crate) fn view(repo: &str, r: MirrorRecord) -> pb::Mirror {
+    pb::Mirror {
+        repo: repo.to_owned(),
+        upstream: r.upstream,
+        lines: r
+            .lines
+            .into_iter()
+            .map(|l| pb::MirrorLine {
+                branch: l.branch,
+                line: l.line,
+                direction: l.direction.as_str().to_owned(),
+            })
+            .collect(),
+        interval_s: r.interval_s,
+        enabled: r.enabled,
+        credential_set: r.credential.is_some(),
+        kek_id: r.kek_id,
+        export: Some(pb::MirrorExport {
+            default_author: r.export.default_author,
+            authors: r
+                .export
+                .authors
+                .into_iter()
+                .map(|(principal, identity)| pb::MirrorAuthor {
+                    principal,
+                    identity,
+                })
+                .collect(),
+        }),
+        version: r.version,
+        status: r.status.map(status_view),
+        created_by: r.created_by,
+        updated_by: r.updated_by,
+        updated_at_ms: r.updated_at_ms,
+    }
+}
+
+fn status_view(s: MirrorStatusRecord) -> pb::MirrorStatus {
+    pb::MirrorStatus {
+        last_poll_at_ms: s.last_poll_at_ms,
+        last_success_at_ms: s.last_success_at_ms,
+        last_imported_sha: s.last_imported_sha,
+        last_changeset: s.last_changeset.map(|c| c.0.0.to_vec()),
+        lag_changesets: s.lag_changesets,
+        lag_seconds: s.lag_seconds,
+        error_code: s
+            .error_code
+            .as_deref()
+            .and_then(|c| {
+                pb::MirrorErrorCode::from_str_name(&format!(
+                    "{CODE_PREFIX}{}",
+                    c.to_ascii_uppercase()
+                ))
+            })
+            .unwrap_or(pb::MirrorErrorCode::Unspecified) as i32,
+        error_message: s.error_message,
+        backoff_until_ms: s.backoff_until_ms,
+        lease_epoch: s.lease_epoch,
+    }
+}
+
+/// `SetMirror`: create or replace a row's settings by CAS on `version`.
+pub(crate) async fn set<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    policy: &MirrorPolicy,
+    now_ms: i64,
+    req: pb::SetMirrorRequest,
+) -> Result<pb::Mirror, ApiError> {
+    check_upstream(&req.upstream, policy)?;
+    let interval_s = match req.interval_s {
+        0 => DEFAULT_INTERVAL_S.max(policy.min_interval_s),
+        n if n < policy.min_interval_s => {
+            return Err(refused(
+                "mirror-interval",
+                format!("interval_s must be at least {}", policy.min_interval_s),
+            ));
+        }
+        n => n,
+    };
+    let lines = lines(req.lines)?;
+    let export = export(req.export)?;
+    let id = repo_id(meta, &req.repo).await?;
+    let old = meta.get_mirror(id, &req.upstream).await.map_err(store)?;
+    // Grants first, so a caller without them learns nothing of the row.
+    match &old {
+        None => any_of(p, &[Scope::MirrorBind])?,
+        Some(_) => any_of(
+            p,
+            &[
+                Scope::Admin {
+                    repo: req.repo.clone(),
+                },
+                Scope::MirrorBind,
+            ],
+        )?,
+    }
+    if changes_export(old.as_ref(), &lines, &export) {
+        any_of(p, &[Scope::MirrorExport])?;
+    }
+    let current = old.as_ref().map(|o| o.version);
+    if req.expected_version != current {
+        return Err(version_conflict(req.expected_version, current));
+    }
+    let record = MirrorRecord {
+        upstream: req.upstream.clone(),
+        lines,
+        interval_s,
+        enabled: req.enabled,
+        credential: old.as_ref().and_then(|o| o.credential.clone()),
+        kek_id: old.as_ref().and_then(|o| o.kek_id.clone()),
+        export,
+        version: current.unwrap_or(0) + 1,
+        status: old.as_ref().and_then(|o| o.status.clone()),
+        created_by: old
+            .as_ref()
+            .map_or_else(|| p.subject.clone(), |o| o.created_by.clone()),
+        updated_by: p.subject.clone(),
+        updated_at_ms: now_ms,
+    };
+    let txn = MetaTxn {
+        preconditions: vec![Precondition::MirrorVersionIs {
+            upstream: req.upstream.clone(),
+            version: current,
+        }],
+        writes: vec![Write::PutMirror(record.clone())],
+    };
+    match meta.commit(id, txn).await.map_err(store)? {
+        TxnOutcome::Committed(_) => Ok(view(&req.repo, record)),
+        TxnOutcome::PreconditionFailed(_) => {
+            let now = meta.get_mirror(id, &req.upstream).await.map_err(store)?;
+            Err(version_conflict(current, now.map(|r| r.version)))
+        }
+    }
+}
+
+/// The read grant on one repository's rows.
+fn may_read(p: &Principal, repo: &str) -> Result<(), ApiError> {
+    any_of(
+        p,
+        &[
+            Scope::Read {
+                repo: repo.to_owned(),
+            },
+            Scope::Mirror {
+                repo: repo.to_owned(),
+            },
+        ],
+    )
+}
+
+/// `GetMirror`.
+pub(crate) async fn get<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    req: pb::MirrorKey,
+) -> Result<pb::Mirror, ApiError> {
+    may_read(p, &req.repo)?;
+    let id = repo_id(meta, &req.repo).await?;
+    let row = meta.get_mirror(id, &req.upstream).await.map_err(store)?;
+    row.map(|r| view(&req.repo, r))
+        .ok_or_else(|| not_found(&req.repo))
+}
+
+fn page_token(repo: RepoId, upstream: &str) -> String {
+    format!("{}:{upstream}", repo.0)
+}
+
+fn parse_token(t: &str) -> Result<Option<(RepoId, String)>, ApiError> {
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let bad = || refused("mirror-field", "page_token is not one this server issued");
+    let (id, upstream) = t.split_once(':').ok_or_else(bad)?;
+    let id = id.parse::<u32>().map_err(|_| bad())?;
+    Ok(Some((RepoId(id), upstream.to_owned())))
+}
+
+/// `ListMirrors`: one repository's rows, or every repository's.
+pub(crate) async fn list<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    req: pb::ListMirrorsRequest,
+) -> Result<pb::MirrorPage, ApiError> {
+    let repo = if req.repo.is_empty() {
+        let any = graft_auth::ANY_REPO.to_owned();
+        any_of(
+            p,
+            &[
+                Scope::Read { repo: any.clone() },
+                Scope::Mirror { repo: any },
+                Scope::ReposAdmin,
+            ],
+        )?;
+        None
+    } else {
+        may_read(p, &req.repo)?;
+        Some(repo_id(meta, &req.repo).await?)
+    };
+    let limit = match req.limit {
+        0 => MAX_PAGE,
+        n => n.min(MAX_PAGE),
+    };
+    let rows = meta
+        .list_mirrors(MirrorQuery {
+            repo,
+            enabled: req.enabled,
+            after: parse_token(&req.page_token)?,
+            limit,
+        })
+        .await
+        .map_err(store)?;
+    let next_page_token = match rows.last() {
+        Some(last) if rows.len() == limit as usize => page_token(last.repo, &last.record.upstream),
+        _ => String::new(),
+    };
+    Ok(pb::MirrorPage {
+        mirrors: rows
+            .into_iter()
+            .map(|l| view(&l.repo_name, l.record))
+            .collect(),
+        next_page_token,
+    })
+}
+
+/// The `RefDeleted` journal body of a cleared marker.
+fn ref_deleted(name: &str, old: ChangesetId, version: u64, actor: &str) -> Vec<u8> {
+    serde_json::json!({
+        "name": name,
+        "old": old.to_string(),
+        "version": version,
+        "actor": actor,
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// `RemoveMirror`: delete the row and, with `clear_followed`, its lines'
+/// followed markers, in one transaction.
+pub(crate) async fn remove<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    req: pb::RemoveMirrorRequest,
+) -> Result<pb::RemoveMirrorResult, ApiError> {
+    any_of(p, &[Scope::MirrorBind])?;
+    let id = repo_id(meta, &req.repo).await?;
+    let row = meta
+        .get_mirror(id, &req.upstream)
+        .await
+        .map_err(store)?
+        .ok_or_else(|| not_found(&req.repo))?;
+    if req.expected_version.is_some_and(|v| v != row.version) {
+        return Err(version_conflict(req.expected_version, Some(row.version)));
+    }
+    let mut txn = MetaTxn {
+        preconditions: vec![Precondition::MirrorVersionIs {
+            upstream: req.upstream.clone(),
+            version: Some(row.version),
+        }],
+        writes: Vec::new(),
+    };
+    let mut cleared = Vec::new();
+    if req.clear_followed {
+        for line in &row.lines {
+            let name = followed_ref(&line.line);
+            let Some(marker) = meta.get_ref(id, &name).await.map_err(store)? else {
+                continue;
+            };
+            txn.preconditions.push(Precondition::RefIs {
+                name: name.clone(),
+                expected: Some((marker.target, marker.version)),
+            });
+            txn.writes.push(Write::DeleteRef(name.clone()));
+            txn.writes.push(Write::Journal {
+                kind: REF_DELETED.to_owned(),
+                body: ref_deleted(&name, marker.target, marker.version, &p.subject),
+            });
+            cleared.push(name);
+        }
+    }
+    txn.writes.push(Write::DeleteMirror(req.upstream.clone()));
+    match meta.commit(id, txn).await.map_err(store)? {
+        TxnOutcome::Committed(_) => Ok(pb::RemoveMirrorResult { cleared }),
+        // The row or a marker moved since the read: nothing was removed.
+        TxnOutcome::PreconditionFailed(_) => Err(refused(
+            "mirror-version",
+            "the row or a followed marker changed; read it again and retry",
+        )),
+    }
+}
+
+/// `PurgeMirror`: only for a removed or disabled row. Recording the purge
+/// request arrives with the request table (WI-3310); until then the call
+/// checks its grant and the row's state, then answers `unimplemented`.
+pub(crate) async fn purge<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    req: pb::PurgeMirrorRequest,
+) -> Result<(), ApiError> {
+    any_of(p, &[Scope::MirrorBind])?;
+    let id = repo_id(meta, &req.repo).await?;
+    if let Some(row) = meta.get_mirror(id, &req.upstream).await.map_err(store)?
+        && row.enabled
+    {
+        return Err(refused(
+            "mirror-enabled",
+            "disable or remove the mirror before purging its data",
+        ));
+    }
+    Err(ApiError::unimplemented("PurgeMirror"))
+}
+
+/// The wire prefix of every `MirrorErrorCode` name.
+const CODE_PREFIX: &str = "MIRROR_ERROR_CODE_";
+
+/// The text form of a status error code, as stored: `timeout`,
+/// `auth_failed`, ….
+fn error_code(code: i32) -> Result<Option<String>, ApiError> {
+    let code = pb::MirrorErrorCode::try_from(code)
+        .map_err(|_| refused("mirror-field", "status.error_code is not a known code"))?;
+    Ok(match code {
+        pb::MirrorErrorCode::Unspecified => None,
+        c => Some(
+            c.as_str_name()
+                .trim_start_matches(CODE_PREFIX)
+                .to_ascii_lowercase(),
+        ),
+    })
+}
+
+/// `SetMirrorStatus`: operational state from the mirror service. Not
+/// journalled; it never creates a row. The lease-epoch check arrives with
+/// the lease (WI-3309).
+pub(crate) async fn set_status<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    req: pb::SetMirrorStatusRequest,
+) -> Result<(), ApiError> {
+    any_of(
+        p,
+        &[Scope::Mirror {
+            repo: req.repo.clone(),
+        }],
+    )?;
+    let s = req.status.unwrap_or_default();
+    let message = s
+        .error_message
+        .map(|m| {
+            if m.chars().count() > MAX_STATUS_MESSAGE || m.chars().any(char::is_control) {
+                Err(refused(
+                    "mirror-field",
+                    format!(
+                        "status.error_message is at most {MAX_STATUS_MESSAGE} characters with no control characters"
+                    ),
+                ))
+            } else {
+                Ok(m)
+            }
+        })
+        .transpose()?;
+    let sha = s
+        .last_imported_sha
+        .map(|v| name("status.last_imported_sha", &v))
+        .transpose()?;
+    let changeset = s
+        .last_changeset
+        .map(|b| {
+            <[u8; 32]>::try_from(b.as_slice())
+                .map(|a| ChangesetId(ObjectId(a)))
+                .map_err(|_| refused("mirror-field", "status.last_changeset is not a 32-byte id"))
+        })
+        .transpose()?;
+    let status = MirrorStatusRecord {
+        last_poll_at_ms: s.last_poll_at_ms,
+        last_success_at_ms: s.last_success_at_ms,
+        last_imported_sha: sha,
+        last_changeset: changeset,
+        lag_changesets: s.lag_changesets,
+        lag_seconds: s.lag_seconds,
+        error_code: error_code(s.error_code)?,
+        error_message: message,
+        backoff_until_ms: s.backoff_until_ms,
+        lease_epoch: s.lease_epoch,
+    };
+    let id = repo_id(meta, &req.repo).await?;
+    if meta
+        .get_mirror(id, &req.upstream)
+        .await
+        .map_err(store)?
+        .is_none()
+    {
+        return Err(not_found(&req.repo));
+    }
+    let txn = MetaTxn {
+        preconditions: vec![],
+        writes: vec![Write::SetMirrorStatus {
+            upstream: req.upstream,
+            status,
+        }],
+    };
+    meta.commit(id, txn).await.map_err(store)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graft_proto::PrincipalKind;
+    use graft_store::memory::MemoryStore;
+    use graft_store::{RefKind, RefRecord};
+
+    const UP: &str = "https://github.com/o/r.git";
+
+    fn who(scopes: &[&str]) -> Principal {
+        Principal {
+            subject: "p".into(),
+            kind: PrincipalKind::Human,
+            session: None,
+            work_item: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn policy() -> MirrorPolicy {
+        MirrorPolicy {
+            allowed_hosts: vec!["github.com".into()],
+            min_interval_s: 15,
+            own_names: vec!["localhost".into(), "graft.example.com".into()],
+        }
+    }
+
+    fn line(branch: &str, direction: &str) -> pb::MirrorLine {
+        pb::MirrorLine {
+            branch: branch.into(),
+            line: branch.into(),
+            direction: direction.into(),
+        }
+    }
+
+    fn req(
+        upstream: &str,
+        expected: Option<u64>,
+        lines: Vec<pb::MirrorLine>,
+    ) -> pb::SetMirrorRequest {
+        pb::SetMirrorRequest {
+            repo: "r".into(),
+            upstream: upstream.into(),
+            lines,
+            interval_s: 0,
+            enabled: true,
+            export: None,
+            expected_version: expected,
+        }
+    }
+
+    async fn store() -> MemoryStore {
+        let s = MemoryStore::new();
+        s.create_repo("r").await.expect("repo");
+        s
+    }
+
+    fn denied(r: Result<impl std::fmt::Debug, ApiError>, scope: &str) {
+        match r {
+            Err(ApiError::PermissionDenied { scope: s, .. }) => assert_eq!(s, scope),
+            other => panic!("expected a denial of {scope}, got {other:?}"),
+        }
+    }
+
+    fn rejected(r: Result<impl std::fmt::Debug, ApiError>, policy: &str) {
+        match r {
+            Err(ApiError::Rejected { policy: p, .. }) => assert_eq!(p, policy),
+            other => panic!("expected {policy}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn https_and_ssh_upstreams_on_an_allowed_host_pass() {
+        for url in [
+            UP,
+            "https://GitHub.com./o/r",
+            "https://github.com:443/o/r",
+            "ssh://git@github.com/o/r.git",
+            "ssh://git@github.com:22/o/r.git",
+            "git@github.com:o/r.git",
+            "github.com:o/r.git",
+        ] {
+            assert_eq!(check_upstream(url, &policy()), Ok(()), "{url}");
+        }
+    }
+
+    /// Each blocked class is refused even when its host is allowlisted, so
+    /// the class check, not the allowlist, is what refuses it.
+    #[test]
+    fn every_blocked_url_class_is_refused() {
+        let cases: &[(&str, &str)] = &[
+            // Schemes and transports.
+            ("file:///srv/repo.git", ""),
+            ("git://github.com/o/r", ""),
+            ("http://github.com/o/r", ""),
+            ("ext::sh -c touch% /tmp/x", ""),
+            ("ext::sh", ""),
+            ("fd::17", ""),
+            ("foo::https://github.com/o/r", ""),
+            ("/srv/repo.git", ""),
+            ("./repo:x", ""),
+            ("../x/y:z", ""),
+            ("", ""),
+            ("https://github.com/o r", ""),
+            ("https://tok@github.com/o/r", "github.com"),
+            ("https://github.com:x/o/r", "github.com"),
+            // Loopback.
+            ("https://127.0.0.1/o/r", "127.0.0.1"),
+            ("https://127.1.2.3/o/r", "127.1.2.3"),
+            ("https://[::1]/o/r", "::1"),
+            ("ssh://git@localhost/o/r", "localhost"),
+            ("git@app.localhost:o/r", "app.localhost"),
+            ("https://0.0.0.0/o/r", "0.0.0.0"),
+            ("https://[::]/o/r", "::"),
+            // Numeric forms some resolvers read as addresses.
+            ("https://2130706433/o/r", "2130706433"),
+            ("https://0x7f.1/o/r", "0x7f.1"),
+            // Link-local, including the cloud metadata address.
+            ("https://169.254.169.254/latest", "169.254.169.254"),
+            ("https://[fe80::1]/o/r", "fe80::1"),
+            // RFC 1918.
+            ("https://10.0.0.1/o/r", "10.0.0.1"),
+            ("https://172.16.5.4/o/r", "172.16.5.4"),
+            ("git@192.168.1.10:o/r", "192.168.1.10"),
+            // CGNAT (the tailnet range).
+            ("https://100.64.0.1/o/r", "100.64.0.1"),
+            ("https://100.127.255.1/o/r", "100.127.255.1"),
+            // Unique-local IPv6, and v4-mapped loopback.
+            ("https://[fd00::1]/o/r", "fd00::1"),
+            ("https://[::ffff:127.0.0.1]/o/r", "::ffff:127.0.0.1"),
+            ("https://[::ffff:10.1.1.1]/o/r", "::ffff:10.1.1.1"),
+            // Cluster service names.
+            (
+                "https://kubernetes.default.svc/o/r",
+                "kubernetes.default.svc",
+            ),
+            (
+                "https://git.ns.svc.cluster.local/o/r",
+                "git.ns.svc.cluster.local",
+            ),
+            ("ssh://git@cluster.local/o/r", "cluster.local"),
+            // The server's own name.
+            ("https://graft.example.com/o/r", "graft.example.com"),
+            // Not allowlisted at all.
+            ("https://gitlab.com/o/r", ""),
+            ("https://github.com.evil.example/o/r", ""),
+        ];
+        for (url, host) in cases {
+            let mut p = policy();
+            if !host.is_empty() {
+                p.allowed_hosts.push((*host).to_owned());
+            }
+            rejected(check_upstream(url, &p), "mirror-url");
+        }
+        // A public address passes the class check and is held to the
+        // allowlist like any host.
+        let mut p = policy();
+        p.allowed_hosts.push("140.82.112.3".into());
+        assert_eq!(check_upstream("https://140.82.112.3/o/r", &p), Ok(()));
+        rejected(check_upstream("https://140.82.112.4/o/r", &p), "mirror-url");
+    }
+
+    #[test]
+    fn a_refusal_never_echoes_the_url() {
+        let Err(ApiError::Rejected { detail, .. }) =
+            check_upstream("https://secret-token@github.com/o/r", &policy())
+        else {
+            panic!("refused");
+        };
+        assert!(!detail.contains("secret-token"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn the_interval_floor_is_enforced() {
+        let s = store().await;
+        let bind = who(&["mirror:bind"]);
+        let mut r = req(UP, None, vec![line("main", "follow")]);
+        r.interval_s = 14;
+        rejected(
+            set(&s, &bind, &policy(), 0, r.clone()).await,
+            "mirror-interval",
+        );
+        let mut p = policy();
+        p.min_interval_s = 60;
+        r.interval_s = 0;
+        assert_eq!(
+            set(&s, &bind, &p, 0, r).await.expect("default").interval_s,
+            60
+        );
+        let mut r = req(UP, Some(1), vec![line("main", "follow")]);
+        r.interval_s = 15;
+        assert_eq!(
+            set(&s, &bind, &policy(), 0, r)
+                .await
+                .expect("floor")
+                .interval_s,
+            15
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_writes_are_compare_and_swap_on_version() {
+        let s = store().await;
+        let bind = who(&["mirror:bind"]);
+        let created = set(
+            &s,
+            &bind,
+            &policy(),
+            1,
+            req(UP, None, vec![line("main", "follow")]),
+        )
+        .await
+        .expect("create");
+        assert_eq!(created.version, 1);
+        // Creating again (no expected version) and a stale etag both lose.
+        rejected(
+            set(
+                &s,
+                &bind,
+                &policy(),
+                2,
+                req(UP, None, vec![line("main", "follow")]),
+            )
+            .await,
+            "mirror-version",
+        );
+        rejected(
+            set(
+                &s,
+                &bind,
+                &policy(),
+                2,
+                req(UP, Some(5), vec![line("main", "follow")]),
+            )
+            .await,
+            "mirror-version",
+        );
+        let mut r = req(UP, Some(1), vec![line("main", "follow")]);
+        r.enabled = false;
+        let updated = set(&s, &bind, &policy(), 3, r.clone())
+            .await
+            .expect("update");
+        assert_eq!((updated.version, updated.enabled), (2, false));
+        // The same etag again is now stale.
+        rejected(set(&s, &bind, &policy(), 4, r).await, "mirror-version");
+    }
+
+    #[tokio::test]
+    async fn the_grant_matrix_holds() {
+        let s = store().await;
+        let admin = who(&["repo:r:admin"]);
+        let reader = who(&["repo:r:read"]);
+        let bind = who(&["mirror:bind"]);
+        let operator = who(&["mirror:bind", "mirror:export", "repo:r:admin"]);
+        let mirror = who(&["repo:*:mirror"]);
+        let follow = vec![line("main", "follow")];
+
+        // Creating a row (binding an upstream) needs mirror:bind: a repo
+        // admin, reader or mirror token cannot.
+        for p in [&admin, &reader, &mirror] {
+            denied(
+                set(&s, p, &policy(), 0, req(UP, None, follow.clone())).await,
+                "mirror:bind",
+            );
+        }
+        // Export on create needs mirror:export too.
+        denied(
+            set(
+                &s,
+                &bind,
+                &policy(),
+                0,
+                req(UP, None, vec![line("main", "both")]),
+            )
+            .await,
+            "mirror:export",
+        );
+        set(&s, &bind, &policy(), 0, req(UP, None, follow.clone()))
+            .await
+            .expect("bind creates");
+
+        // A repo admin may enable/disable, change the interval and edit
+        // follow lines.
+        let mut r = req(
+            UP,
+            Some(1),
+            vec![line("main", "follow"), line("dev", "follow")],
+        );
+        r.interval_s = 120;
+        r.enabled = false;
+        let v = set(&s, &admin, &policy(), 0, r)
+            .await
+            .expect("admin edits")
+            .version;
+        // ... but not turn on export, or change the author map.
+        denied(
+            set(
+                &s,
+                &admin,
+                &policy(),
+                0,
+                req(UP, Some(v), vec![line("main", "export")]),
+            )
+            .await,
+            "mirror:export",
+        );
+        let mut r = req(UP, Some(v), follow.clone());
+        r.export = Some(pb::MirrorExport {
+            default_author: Some("Bot <b@example.com>".into()),
+            authors: vec![],
+        });
+        denied(
+            set(&s, &admin, &policy(), 0, r.clone()).await,
+            "mirror:export",
+        );
+        // A reader edits nothing.
+        denied(
+            set(&s, &reader, &policy(), 0, req(UP, Some(v), follow.clone())).await,
+            "repo:r:admin",
+        );
+        // The operator may do all of it.
+        let v = set(&s, &operator, &policy(), 0, r)
+            .await
+            .expect("export map")
+            .version;
+        let v = set(&s, &operator, &policy(), 0, {
+            let mut r = req(UP, Some(v), vec![line("main", "both")]);
+            r.export = Some(pb::MirrorExport {
+                default_author: Some("Bot <b@example.com>".into()),
+                authors: vec![],
+            });
+            r
+        })
+        .await
+        .expect("export line")
+        .version;
+        // Keeping an export line that is already on needs no export grant.
+        let mut keep = req(UP, Some(v), vec![line("main", "both")]);
+        keep.interval_s = 30;
+        keep.export = Some(pb::MirrorExport {
+            default_author: Some("Bot <b@example.com>".into()),
+            authors: vec![],
+        });
+        set(&s, &admin, &policy(), 0, keep)
+            .await
+            .expect("admin keeps export");
+
+        // Status: only the mirror permission set; admin does not grant it.
+        let status = pb::SetMirrorStatusRequest {
+            repo: "r".into(),
+            upstream: UP.into(),
+            status: Some(pb::MirrorStatus::default()),
+        };
+        denied(
+            set_status(&s, &admin, status.clone()).await,
+            "repo:r:mirror",
+        );
+        denied(
+            set_status(&s, &operator, status.clone()).await,
+            "repo:r:mirror",
+        );
+        set_status(&s, &mirror, status)
+            .await
+            .expect("mirror writes status");
+
+        // Remove and purge need mirror:bind.
+        let key = pb::RemoveMirrorRequest {
+            repo: "r".into(),
+            upstream: UP.into(),
+            expected_version: None,
+            clear_followed: false,
+        };
+        for p in [&admin, &mirror] {
+            denied(remove(&s, p, key.clone()).await, "mirror:bind");
+            denied(
+                purge(
+                    &s,
+                    p,
+                    pb::PurgeMirrorRequest {
+                        repo: "r".into(),
+                        upstream: UP.into(),
+                    },
+                )
+                .await,
+                "mirror:bind",
+            );
+        }
+        // Reads: the repository's readers and the mirror token.
+        for p in [&reader, &admin, &mirror] {
+            get(
+                &s,
+                p,
+                pb::MirrorKey {
+                    repo: "r".into(),
+                    upstream: UP.into(),
+                },
+            )
+            .await
+            .expect("read");
+        }
+        denied(
+            get(
+                &s,
+                &who(&["repo:x:read"]),
+                pb::MirrorKey {
+                    repo: "r".into(),
+                    upstream: UP.into(),
+                },
+            )
+            .await,
+            "repo:r:read",
+        );
+        remove(&s, &bind, key).await.expect("bind removes");
+    }
+
+    #[tokio::test]
+    async fn purge_needs_a_disabled_or_removed_row() {
+        let s = store().await;
+        let bind = who(&["mirror:bind"]);
+        set(
+            &s,
+            &bind,
+            &policy(),
+            0,
+            req(UP, None, vec![line("main", "follow")]),
+        )
+        .await
+        .expect("create");
+        let key = pb::PurgeMirrorRequest {
+            repo: "r".into(),
+            upstream: UP.into(),
+        };
+        rejected(purge(&s, &bind, key.clone()).await, "mirror-enabled");
+        let mut off = req(UP, Some(1), vec![line("main", "follow")]);
+        off.enabled = false;
+        set(&s, &bind, &policy(), 0, off).await.expect("disable");
+        // Recording the request arrives with WI-3310.
+        rejected(purge(&s, &bind, key).await, "unimplemented");
+    }
+
+    async fn marker(s: &MemoryStore, line: &str) {
+        let id = s.repo("r").await.expect("repo").expect("exists");
+        let name = followed_ref(line);
+        let txn = MetaTxn {
+            preconditions: vec![Precondition::RefIs {
+                name: name.clone(),
+                expected: None,
+            }],
+            writes: vec![Write::SetRef(RefRecord {
+                name,
+                target: ChangesetId(ObjectId([1; 32])),
+                version: 1,
+                kind: RefKind::Tool,
+            })],
+        };
+        assert!(matches!(
+            s.commit(id, txn).await,
+            Ok(TxnOutcome::Committed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn removal_keeps_markers_unless_asked_to_clear_them() {
+        let s = store().await;
+        let id = s.repo("r").await.expect("repo").expect("exists");
+        let bind = who(&["mirror:bind"]);
+        let lines = vec![line("main", "follow"), line("dev", "follow")];
+        marker(&s, "main").await;
+        marker(&s, "dev").await;
+
+        set(&s, &bind, &policy(), 0, req(UP, None, lines.clone()))
+            .await
+            .expect("create");
+        let tip = s.journal_tip(id).await.expect("tip");
+        let kept = remove(
+            &s,
+            &bind,
+            pb::RemoveMirrorRequest {
+                repo: "r".into(),
+                upstream: UP.into(),
+                expected_version: Some(1),
+                clear_followed: false,
+            },
+        )
+        .await
+        .expect("remove");
+        assert!(kept.cleared.is_empty());
+        assert_eq!(s.get_mirror(id, UP).await.expect("get"), None);
+        assert!(
+            s.get_ref(id, "graft.followed/main")
+                .await
+                .expect("ref")
+                .is_some()
+        );
+        assert_eq!(s.journal_tip(id).await.expect("tip"), tip);
+
+        set(&s, &bind, &policy(), 0, req(UP, None, lines))
+            .await
+            .expect("re-add");
+        rejected(
+            remove(
+                &s,
+                &bind,
+                pb::RemoveMirrorRequest {
+                    repo: "r".into(),
+                    upstream: UP.into(),
+                    expected_version: Some(9),
+                    clear_followed: true,
+                },
+            )
+            .await,
+            "mirror-version",
+        );
+        let cleared = remove(
+            &s,
+            &bind,
+            pb::RemoveMirrorRequest {
+                repo: "r".into(),
+                upstream: UP.into(),
+                expected_version: None,
+                clear_followed: true,
+            },
+        )
+        .await
+        .expect("remove and clear");
+        assert_eq!(
+            cleared.cleared,
+            vec!["graft.followed/main", "graft.followed/dev"]
+        );
+        assert_eq!(
+            s.get_ref(id, "graft.followed/main").await.expect("ref"),
+            None
+        );
+        assert_eq!(
+            s.get_ref(id, "graft.followed/dev").await.expect("ref"),
+            None
+        );
+        // One journal entry per cleared marker.
+        let entries = s.journal(id, tip.unwrap_or(0), 10).await.expect("journal");
+        let deleted: Vec<String> = entries
+            .iter()
+            .filter(|(_, kind, _)| kind == REF_DELETED)
+            .map(|(_, _, body)| {
+                let v: serde_json::Value = serde_json::from_slice(body).expect("json");
+                v["name"].as_str().expect("name").to_owned()
+            })
+            .collect();
+        assert_eq!(deleted, vec!["graft.followed/main", "graft.followed/dev"]);
+    }
+
+    #[tokio::test]
+    async fn pages_are_bounded_and_cross_repo_listing_needs_a_global_grant() {
+        let s = store().await;
+        s.create_repo("q").await.expect("repo");
+        let bind = who(&["mirror:bind"]);
+        for i in 0..(MAX_PAGE + 5) {
+            set(
+                &s,
+                &bind,
+                &policy(),
+                0,
+                req(
+                    &format!("https://github.com/o/r{i:04}"),
+                    None,
+                    vec![line("main", "follow")],
+                ),
+            )
+            .await
+            .expect("create");
+        }
+        let mut other = req(UP, None, vec![line("main", "follow")]);
+        other.repo = "q".into();
+        set(&s, &bind, &policy(), 0, other)
+            .await
+            .expect("create in q");
+
+        let reader = who(&["repo:r:read"]);
+        let page = list(
+            &s,
+            &reader,
+            pb::ListMirrorsRequest {
+                repo: "r".into(),
+                enabled: None,
+                limit: 0,
+                page_token: String::new(),
+            },
+        )
+        .await
+        .expect("list");
+        assert_eq!(page.mirrors.len(), MAX_PAGE as usize);
+        let rest = list(
+            &s,
+            &reader,
+            pb::ListMirrorsRequest {
+                repo: "r".into(),
+                enabled: None,
+                limit: 1000,
+                page_token: page.next_page_token,
+            },
+        )
+        .await
+        .expect("rest");
+        assert_eq!(rest.mirrors.len(), 5);
+        assert!(rest.next_page_token.is_empty());
+
+        // Every repository: only with repo:*:read, repo:*:mirror or
+        // repos:admin.
+        let all = pb::ListMirrorsRequest {
+            repo: String::new(),
+            enabled: Some(true),
+            limit: 3,
+            page_token: String::new(),
+        };
+        denied(list(&s, &reader, all.clone()).await, "repo:*:read");
+        for scopes in [["repo:*:read"], ["repo:*:mirror"], ["repos:admin"]] {
+            let page = list(&s, &who(&scopes), all.clone()).await.expect("all");
+            assert_eq!(page.mirrors.len(), 3);
+            assert!(!page.next_page_token.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_carry_whether_a_credential_is_set_never_its_bytes() {
+        let s = store().await;
+        let id = s.repo("r").await.expect("repo").expect("exists");
+        let bind = who(&["mirror:bind"]);
+        set(
+            &s,
+            &bind,
+            &policy(),
+            0,
+            req(UP, None, vec![line("main", "follow")]),
+        )
+        .await
+        .expect("create");
+        // As SetMirrorCredential (WI-3209) will leave it.
+        let mut row = s.get_mirror(id, UP).await.expect("get").expect("row");
+        row.credential = Some(b"sealed-secret".to_vec());
+        row.kek_id = Some("kek-1".into());
+        row.version = 2;
+        let txn = MetaTxn {
+            preconditions: vec![Precondition::MirrorVersionIs {
+                upstream: UP.into(),
+                version: Some(1),
+            }],
+            writes: vec![Write::PutMirror(row)],
+        };
+        s.commit(id, txn).await.expect("seal");
+
+        let got = get(
+            &s,
+            &bind,
+            pb::MirrorKey {
+                repo: "r".into(),
+                upstream: UP.into(),
+            },
+        )
+        .await;
+        let got = got.expect_err("bind alone does not read");
+        assert!(matches!(got, ApiError::PermissionDenied { .. }));
+        let got = get(
+            &s,
+            &who(&["repo:r:read"]),
+            pb::MirrorKey {
+                repo: "r".into(),
+                upstream: UP.into(),
+            },
+        )
+        .await
+        .expect("get");
+        assert!(got.credential_set);
+        assert_eq!(got.kek_id.as_deref(), Some("kek-1"));
+        assert!(!format!("{got:?}").contains("sealed-secret"));
+        // An admin edit keeps the credential.
+        let v = set(
+            &s,
+            &who(&["repo:r:admin"]),
+            &policy(),
+            0,
+            req(UP, Some(2), vec![line("main", "follow")]),
+        )
+        .await
+        .expect("edit");
+        assert!(v.credential_set);
+    }
+
+    #[tokio::test]
+    async fn status_is_bounded_typed_and_never_creates_a_row() {
+        let s = store().await;
+        let mirror = who(&["repo:*:mirror"]);
+        let status = |message: String| pb::SetMirrorStatusRequest {
+            repo: "r".into(),
+            upstream: UP.into(),
+            status: Some(pb::MirrorStatus {
+                error_code: pb::MirrorErrorCode::Timeout as i32,
+                error_message: Some(message),
+                ..pb::MirrorStatus::default()
+            }),
+        };
+        assert!(matches!(
+            set_status(&s, &mirror, status("x".into())).await,
+            Err(ApiError::NotFound { .. })
+        ));
+        set(
+            &s,
+            &who(&["mirror:bind"]),
+            &policy(),
+            0,
+            req(UP, None, vec![line("main", "follow")]),
+        )
+        .await
+        .expect("create");
+        rejected(
+            set_status(&s, &mirror, status("x".repeat(201))).await,
+            "mirror-field",
+        );
+        set_status(&s, &mirror, status("é".repeat(200)))
+            .await
+            .expect("200 characters");
+        let id = s.repo("r").await.expect("repo").expect("exists");
+        let row = s.get_mirror(id, UP).await.expect("get").expect("row");
+        assert_eq!(row.version, 1, "status is not part of the version");
+        assert_eq!(
+            row.status.expect("status").error_code.as_deref(),
+            Some("timeout")
+        );
+        let got = get(
+            &s,
+            &mirror,
+            pb::MirrorKey {
+                repo: "r".into(),
+                upstream: UP.into(),
+            },
+        )
+        .await
+        .expect("get");
+        assert_eq!(
+            got.status.expect("status").error_code,
+            pb::MirrorErrorCode::Timeout as i32
+        );
+    }
+}
