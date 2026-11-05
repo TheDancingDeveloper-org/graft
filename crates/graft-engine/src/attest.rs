@@ -252,7 +252,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         // exchange pinned it to (`ci:<provider>:<repo>#<changeset>`); an
         // unpinned one attests nothing.
         let refused = match cx.principal.kind {
-            PrincipalKind::Agent => true,
+            // The mirror's permission set has no attest (D41).
+            PrincipalKind::Agent | PrincipalKind::Mirror => true,
             PrincipalKind::Ci => !pinned_here(),
             PrincipalKind::Human | PrincipalKind::Service => false,
         };

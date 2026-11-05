@@ -12,6 +12,7 @@ use graft_index::kinds::Skips;
 use graft_model::{Changeset, ChangesetId};
 use graft_proto::types::{
     CreateLine, FOLLOWED_REF_PREFIX, ListRefs, RefKind, RefView, ResolveRef, UpdateRef,
+    followed_ref,
 };
 use graft_proto::{ApiError, CallContext};
 use graft_store::{
@@ -19,7 +20,7 @@ use graft_store::{
     RefKind as StoredKind, RefRecord, RepoId, TxnOutcome, Write,
 };
 
-use crate::access::{Need, require};
+use crate::access::{Need, is_mirror, require};
 use crate::protect::distinct_parents;
 use crate::workspace::{CAS_RETRIES, contended};
 use crate::{Engine, errors, journal};
@@ -127,7 +128,14 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         req: UpdateRef,
     ) -> Result<RefView, ApiError> {
         check_ref_name(&req.name)?;
-        let repo = self.repo_id_for_ref(cx, &req).await?;
+        // The mirror service moves a followed line, by CAS, and nothing
+        // else; its set has no read (D41, WI-3140).
+        let mirror = is_mirror(cx, &req.repo);
+        let repo = if mirror {
+            self.repo_id(&req.repo).await?
+        } else {
+            self.repo_id_for_ref(cx, &req).await?
+        };
         let current = self
             .meta
             .get_ref(repo, &req.name)
@@ -137,11 +145,14 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         // A followed-line marker is admin-only: it decides who may land.
         let marker = req.name.starts_with(FOLLOWED_REF_PREFIX);
         let need = match kind {
-            StoredKind::Line => Need::Admin,
-            StoredKind::Tool if marker => Need::Admin,
-            StoredKind::Tag | StoredKind::Tool => Need::Write(None),
+            StoredKind::Line if mirror && self.is_followed(repo, &req.name).await? => None,
+            StoredKind::Line => Some(Need::Admin),
+            StoredKind::Tool if marker => Some(Need::Admin),
+            StoredKind::Tag | StoredKind::Tool => Some(Need::Write(None)),
         };
-        require(cx, &req.repo, need)?;
+        if let Some(need) = need {
+            require(cx, &req.repo, need)?;
+        }
         if (current.is_some() && to_stored(req.kind) != kind)
             || (marker && kind != StoredKind::Tool)
         {
@@ -273,6 +284,16 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 
     /// The repository id for an `UpdateRef`. Without any scope on the
     /// repository the caller learns nothing, not even whether it exists.
+    /// Whether `line` carries the followed-line marker.
+    async fn is_followed(&self, repo: RepoId, line: &str) -> Result<bool, ApiError> {
+        let marker = self
+            .meta
+            .get_ref(repo, &followed_ref(line))
+            .await
+            .map_err(errors::store)?;
+        Ok(marker.is_some())
+    }
+
     async fn repo_id_for_ref(&self, cx: &CallContext, req: &UpdateRef) -> Result<RepoId, ApiError> {
         require(cx, &req.repo, Need::Read)?;
         self.repo_id(&req.repo).await

@@ -22,8 +22,8 @@ use graft_client::workcopy::{
 use graft_client::workspace::{DEFAULT_LEASE_MS, HEARTBEAT_EVERY, with_heartbeat};
 use graft_client::{Backend, Error as ClientError, LocalRepo};
 use graft_mcp::{
-    McpServer, WorkingCopyCommit, WorkingCopyError, WorkingCopyFuture, WorkingCopyLand,
-    WorkingCopySync, WorkingCopyTools, WorkingCopyUpstream,
+    McpServer, RepoAdmin, RepoAdminFuture, WorkingCopyCommit, WorkingCopyError, WorkingCopyFuture,
+    WorkingCopyLand, WorkingCopySync, WorkingCopyTools, WorkingCopyUpstream,
 };
 use graft_model::{Author, AuthorKind, Metadata, Timestamp};
 use graft_proto::types::WorkspaceRef;
@@ -64,7 +64,8 @@ pub(crate) fn run(g: &Global, args: &McpArgs) -> Result<(), Failure> {
             }
             None => call_context().principal,
         };
-        let mut server = McpServer::new(Arc::clone(&remote), principal);
+        let mut server = McpServer::new(Arc::clone(&remote), principal)
+            .with_repo_admin(Arc::new(Admin(Arc::clone(&remote))));
         if let Some(endpoint) = remote.endpoint() {
             server = server.with_endpoint(endpoint.to_string());
         }
@@ -79,6 +80,15 @@ pub(crate) fn run(g: &Global, args: &McpArgs) -> Result<(), Failure> {
         server.serve_stdio().await?;
         Ok(())
     })
+}
+
+/// `graft_repo_create` over this process's connection.
+struct Admin(Arc<Backend>);
+
+impl RepoAdmin for Admin {
+    fn create_repo<'a>(&'a self, cx: &'a CallContext, name: String) -> RepoAdminFuture<'a> {
+        Box::pin(self.0.create_repo(cx, name))
+    }
 }
 
 /// Prints the registration snippet for `client`. Inside a working copy the

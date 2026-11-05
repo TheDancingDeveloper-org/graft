@@ -22,6 +22,7 @@ pub(crate) mod ls;
 pub(crate) mod lsp;
 pub(crate) mod mcp;
 pub(crate) mod pick;
+pub(crate) mod repo;
 pub(crate) mod revert;
 pub(crate) mod review_queue;
 pub(crate) mod show;

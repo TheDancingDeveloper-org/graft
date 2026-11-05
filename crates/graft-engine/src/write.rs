@@ -32,7 +32,7 @@ use graft_store::{
     StoreError, TxnOutcome, WorkspaceRecord, Write,
 };
 
-use crate::access::{Need, require, require_changes};
+use crate::access::{Need, holds_repos_admin, is_admin, require, require_changes};
 use crate::objects::Upload;
 use crate::source::{Trees, empty_tree, model_root};
 use crate::workspace::{
@@ -110,8 +110,18 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         name: String,
     ) -> Result<(), ApiError> {
         check_repo_name(&name)?;
-        require(cx, &name, Need::Admin)?;
-        match self.meta.create_repo(&name).await {
+        // `repos:admin` creates a repository and records its creator, who
+        // then administers it (D41). A retry, or a name already taken,
+        // grants nothing new.
+        let created = if !is_admin(cx, &name) && holds_repos_admin(cx) {
+            self.meta
+                .create_owned_repo(&name, &cx.principal.subject)
+                .await
+        } else {
+            require(cx, &name, Need::Admin)?;
+            self.meta.create_repo(&name).await
+        };
+        match created {
             // Creating a repository that exists is a successful retry.
             Ok(_) | Err(StoreError::Exists) => Ok(()),
             Err(e) => Err(errors::store(e)),
@@ -1125,7 +1135,7 @@ fn put_blobs(changes: &[Change]) -> Vec<ObjectId> {
 /// mirror) act for others and are trusted.
 fn check_identity(cx: &CallContext, metadata: &Metadata) -> Result<(), ApiError> {
     let p = &cx.principal;
-    if p.kind == PrincipalKind::Service {
+    if matches!(p.kind, PrincipalKind::Service | PrincipalKind::Mirror) {
         return Ok(());
     }
     for (key, held, rule) in [

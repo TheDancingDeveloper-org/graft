@@ -476,6 +476,23 @@ pub trait MetaStore: Send + Sync {
     fn create_repo(&self, name: &str) -> impl Future<Output = StoreResult<RepoId>> + Send;
     /// Looks up a repository by name.
     fn repo(&self, name: &str) -> impl Future<Output = StoreResult<Option<RepoId>>> + Send;
+    /// Creates a repository as `create_repo` does, recording `owner` (the
+    /// subject that created it under `repos:admin`, D41) in the same
+    /// transaction.
+    fn create_owned_repo(
+        &self,
+        _name: &str,
+        _owner: &str,
+    ) -> impl Future<Output = StoreResult<RepoId>> + Send {
+        async { Err(unsupported("create_owned_repo")) }
+    }
+    /// The subject recorded by `create_owned_repo`, if any. One indexed read.
+    fn repo_owner(
+        &self,
+        _repo: RepoId,
+    ) -> impl Future<Output = StoreResult<Option<String>>> + Send {
+        async { Ok(None) }
+    }
     /// Applies a transaction atomically.
     fn commit(
         &self,
@@ -968,6 +985,16 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
     }
     fn repo(&self, name: &str) -> impl Future<Output = StoreResult<Option<RepoId>>> + Send {
         (**self).repo(name)
+    }
+    fn create_owned_repo(
+        &self,
+        name: &str,
+        owner: &str,
+    ) -> impl Future<Output = StoreResult<RepoId>> + Send {
+        (**self).create_owned_repo(name, owner)
+    }
+    fn repo_owner(&self, repo: RepoId) -> impl Future<Output = StoreResult<Option<String>>> + Send {
+        (**self).repo_owner(repo)
     }
     fn commit(
         &self,

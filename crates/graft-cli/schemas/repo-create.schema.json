@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "graft repo create --json",
+  "type": "object",
+  "required": [
+    "repo"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "description": "The repository's name. It exists after the call, whether this call created it or an earlier one did."
+    }
+  }
+}

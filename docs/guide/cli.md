@@ -40,6 +40,8 @@ Generated from `graft --help`. Hidden commands are left out.
 - [`graft tag`](#tag)
 - [`graft tag create`](#tag-create)
 - [`graft tag list`](#tag-list)
+- [`graft repo`](#repo)
+- [`graft repo create`](#repo-create)
 - [`graft stack`](#stack)
 - [`graft stack list`](#stack-list)
 - [`graft stack squash`](#stack-squash)
@@ -855,6 +857,47 @@ Options:
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --limit <LIMIT>      Refs per page [default: 100]
       --cursor <TOKEN>     Resume token from a previous page
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo`
+
+```text
+Create repositories
+
+Usage: graft repo [OPTIONS] <COMMAND>
+
+Commands:
+  create  Create a repository; needs repos:admin (the creator then administers it) or the repository's admin
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo create`
+
+```text
+Create a repository; needs repos:admin (the creator then administers it) or the repository's admin
+
+Usage: graft repo create [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  The repository's name, or a graft URL naming it
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
       --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument

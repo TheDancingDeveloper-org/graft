@@ -19,6 +19,7 @@ use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::error::ApiResult;
 use graft_proto::frame::{HEADER_LEN, MAX_FRAME_PAYLOAD};
 use graft_proto::pb;
+use graft_proto::pb::admin_service_client::AdminServiceClient;
 use graft_proto::pb::object_service_client::ObjectServiceClient;
 use graft_proto::pb::repo_service_client::RepoServiceClient;
 use graft_proto::pb::review_service_client::ReviewServiceClient;
@@ -166,6 +167,14 @@ impl Remote {
             .max_encoding_message_size(MAX_MESSAGE_BYTES)
     }
 
+    fn admin(&self) -> AdminServiceClient<Channel> {
+        AdminServiceClient::new(self.channel.clone())
+            .send_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .max_decoding_message_size(MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_MESSAGE_BYTES)
+    }
+
     fn repo(&self) -> RepoServiceClient<Channel> {
         RepoServiceClient::new(self.channel.clone())
             .send_compressed(CompressionEncoding::Gzip)
@@ -307,6 +316,15 @@ macro_rules! unary {
         $self.check_version(resp.metadata())?;
         resp.into_inner()
     }};
+}
+
+impl Remote {
+    /// Creates repository `name` (`CreateRepo`, under `repos:admin` or the
+    /// repository's admin, D41). A repository that exists is a success.
+    pub async fn create_repo(&self, cx: &CallContext, name: String) -> ApiResult<()> {
+        unary!(self, cx, admin, create_repo, pb::CreateRepoRequest { name });
+        Ok(())
+    }
 }
 
 impl ObjectApi for Remote {

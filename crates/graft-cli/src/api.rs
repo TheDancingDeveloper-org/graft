@@ -133,12 +133,7 @@ pub(crate) const OPS: &[Op] = &[
         Surface::Command("workspace"),
         false,
     ),
-    op(
-        "create_repo",
-        "AdminApi",
-        Surface::Excluded("server administration only"),
-        false,
-    ),
+    op("create_repo", "AdminApi", Surface::Command("repo"), false),
     op(
         "import_changesets",
         "AdminApi",

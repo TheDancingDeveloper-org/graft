@@ -478,6 +478,7 @@ async fn every_registered_tool_result_fits_and_an_oversized_status_is_typed() {
             "graft_tag",
             json!({"repo": "r", "name": "v0", "at": "main"}),
         ),
+        ("graft_repo_create", json!({"repo": "new"})),
         (
             "graft_workspace",
             json!({"repo": "r", "action": "get", "name": "w"}),

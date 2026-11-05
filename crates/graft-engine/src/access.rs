@@ -8,11 +8,14 @@
 //! and creating it (`CreateLine`) when it does not exist yet;
 //! `attest` grants `Attest` and nothing else, and only it and `admin` grant
 //! `Attest`; `drafts` grants `Drafts` (the draft overlap query, D24) and
-//! nothing else, and only it and `admin` grant `Drafts`. This is the engine's minimal reading of the text form until
+//! nothing else, and only it and `admin` grant `Drafts`. A `*` repository
+//! (`repo:*:<perm>[:<arg>]`) holds on every repository. `repo:*:mirror`
+//! grants `Mirror` to the `mirror` principal kind only, and `admin` does not
+//! grant it; `repos:admin` is checked by [`holds_repos_admin`] (D41). This is the engine's minimal reading of the text form until
 //! `graft_auth::authorize` (G1.9) replaces it.
 
 use graft_model::{Change, RepoPath};
-use graft_proto::{ApiError, CallContext, Principal};
+use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
 
 /// What an operation needs.
 #[derive(Clone, Copy, Debug)]
@@ -34,6 +37,8 @@ pub(crate) enum Need<'a> {
     Drafts,
     /// Administer the repository.
     Admin,
+    /// Act as the mirror service (`repo:*:mirror`, `mirror` kind only).
+    Mirror,
 }
 
 /// Fails with `PermissionDenied` unless the caller holds `need` on `repo`.
@@ -54,6 +59,7 @@ pub(crate) fn require(cx: &CallContext, repo: &str, need: Need<'_>) -> Result<()
         Need::Attest => ("attest", None),
         Need::Drafts => ("drafts", None),
         Need::Admin => ("admin", None),
+        Need::Mirror => ("mirror", None),
     };
     Err(ApiError::PermissionDenied {
         scope: format!("repo:{repo}:{perm}"),
@@ -81,7 +87,22 @@ pub(crate) fn is_admin(cx: &CallContext, repo: &str) -> bool {
     granted(&cx.principal, repo, Need::Admin)
 }
 
+/// Whether the caller is the mirror service, holding the mirror permission
+/// set on `repo`.
+pub(crate) fn is_mirror(cx: &CallContext, repo: &str) -> bool {
+    granted(&cx.principal, repo, Need::Mirror)
+}
+
+/// Whether the caller holds `repos:admin`: create, delete and list
+/// repositories (D41).
+pub(crate) fn holds_repos_admin(cx: &CallContext) -> bool {
+    cx.principal.scopes.iter().any(|s| s == "repos:admin")
+}
+
 fn granted(principal: &Principal, repo: &str, need: Need<'_>) -> bool {
+    if matches!(need, Need::Mirror) && principal.kind != PrincipalKind::Mirror {
+        return false;
+    }
     principal.scopes.iter().any(|s| grants(s, repo, need))
 }
 
@@ -90,12 +111,14 @@ fn grants(scope: &str, repo: &str, need: Need<'_>) -> bool {
         return matches!(need, Need::Objects);
     }
     let mut parts = scope.splitn(4, ':');
-    if parts.next() != Some("repo") || parts.next() != Some(repo) {
+    if parts.next() != Some("repo") || !parts.next().is_some_and(|r| r == "*" || r == repo) {
         return false;
     }
     let perm = parts.next();
     let arg = parts.next();
     match (perm, need) {
+        (Some("mirror"), Need::Mirror) => arg.is_none(),
+        (_, Need::Mirror) => false,
         (Some("admin"), _) => true,
         (Some("read" | "land" | "write"), Need::Objects | Need::Read) => true,
         (Some("write"), Need::Workspace) => true,
@@ -229,5 +252,45 @@ mod tests {
         assert!(!grants("repo:r:write", "r", Need::Land("main")));
         assert!(!grants("repo:s:land:main", "r", Need::Land("main")));
         assert!(grants("repo:r:admin", "r", Need::Land("main")));
+    }
+
+    #[test]
+    fn a_wildcard_repository_holds_everywhere() {
+        assert!(grants("repo:*:read", "r", Need::Read));
+        assert!(grants("repo:*:land:main", "s", Need::Land("main")));
+        assert!(!grants("repo:*:read", "r", Need::Write(None)));
+    }
+
+    #[test]
+    fn only_the_mirror_kind_holds_the_mirror_set() {
+        let principal = |kind, scope: &str| Principal {
+            subject: "m".into(),
+            kind,
+            session: None,
+            work_item: None,
+            scopes: vec![scope.into()],
+        };
+        let mirror = principal(PrincipalKind::Mirror, "repo:*:mirror");
+        assert!(granted(&mirror, "r", Need::Mirror));
+        for need in [
+            Need::Read,
+            Need::Write(None),
+            Need::Admin,
+            Need::Land("main"),
+        ] {
+            assert!(!granted(&mirror, "r", need), "{need:?}");
+        }
+        // The scope on another kind, and admin on the mirror kind, are not it.
+        assert!(!granted(
+            &principal(PrincipalKind::Service, "repo:*:mirror"),
+            "r",
+            Need::Mirror
+        ));
+        assert!(!granted(
+            &principal(PrincipalKind::Mirror, "repo:r:admin"),
+            "r",
+            Need::Mirror
+        ));
+        assert!(!grants("repo:*:admin", "r", Need::Mirror));
     }
 }

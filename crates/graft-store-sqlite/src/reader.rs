@@ -54,6 +54,12 @@ pub(crate) fn check_repo(conn: &Connection, repo: RepoId) -> StoreResult<()> {
     }
 }
 
+pub(crate) fn repo_owner(conn: &Connection, repo: RepoId) -> StoreResult<Option<String>> {
+    conn.prepare_cached("SELECT owner FROM repo_owners WHERE repo = ?1")
+        .and_then(|mut s| s.query_row([i64::from(repo.0)], |r| r.get(0)).optional())
+        .map_err(sql_err)
+}
+
 pub(crate) fn repo(conn: &Connection, name: &str) -> StoreResult<Option<RepoId>> {
     let id: Option<i64> = conn
         .prepare_cached("SELECT id FROM repos WHERE name = ?1")

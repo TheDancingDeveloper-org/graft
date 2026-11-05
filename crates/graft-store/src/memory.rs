@@ -24,6 +24,8 @@ use crate::{RepoId, StoreError, StoreResult, page_limit};
 /// One repository's metadata.
 #[derive(Debug, Default)]
 struct Repo {
+    /// The subject that created it under `repos:admin` (D41).
+    owner: Option<String>,
     changesets: BTreeMap<ChangesetId, (Vec<u8>, ChangesetRecord)>,
     refs: BTreeMap<String, RefRecord>,
     workspaces: BTreeMap<String, WorkspaceRecord>,
@@ -796,23 +798,38 @@ impl ObjectStore for MemoryStore {
     }
 }
 
+fn create_repo(st: &mut State, name: &str, owner: Option<&str>) -> StoreResult<RepoId> {
+    if st.names.contains_key(name) {
+        return Err(StoreError::Exists);
+    }
+    st.next_repo += 1;
+    let id = RepoId(st.next_repo);
+    st.names.insert(name.to_owned(), id);
+    // A new repository has protection records from its first write.
+    let repo = Repo {
+        owner: owner.map(str::to_owned),
+        gc_protection: true,
+        ..Repo::default()
+    };
+    st.repos.insert(id, repo);
+    Ok(id)
+}
+
 impl MetaStore for MemoryStore {
     fn create_repo(&self, name: &str) -> impl Future<Output = StoreResult<RepoId>> + Send {
-        ready(self.with(|st| {
-            if st.names.contains_key(name) {
-                return Err(StoreError::Exists);
-            }
-            st.next_repo += 1;
-            let id = RepoId(st.next_repo);
-            st.names.insert(name.to_owned(), id);
-            // A new repository has protection records from its first write.
-            let repo = Repo {
-                gc_protection: true,
-                ..Repo::default()
-            };
-            st.repos.insert(id, repo);
-            Ok(id)
-        }))
+        ready(self.with(|st| create_repo(st, name, None)))
+    }
+
+    fn create_owned_repo(
+        &self,
+        name: &str,
+        owner: &str,
+    ) -> impl Future<Output = StoreResult<RepoId>> + Send {
+        ready(self.with(|st| create_repo(st, name, Some(owner))))
+    }
+
+    fn repo_owner(&self, repo: RepoId) -> impl Future<Output = StoreResult<Option<String>>> + Send {
+        ready(self.with(|st| Ok(st.repo(repo)?.owner.clone())))
     }
 
     fn repo(&self, name: &str) -> impl Future<Output = StoreResult<Option<RepoId>>> + Send {

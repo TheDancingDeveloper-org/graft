@@ -34,6 +34,8 @@ pub(crate) const MAX_BATCH: usize = 256;
 #[derive(Debug)]
 pub(crate) enum WriteOp {
     CreateRepo(String),
+    /// A repository and its owner row, in one transaction.
+    CreateOwnedRepo(String, String),
     Commit(RepoId, MetaTxn),
     /// A chained run: each txn in its own savepoint, stopping at the first
     /// that is not committed.
@@ -130,6 +132,13 @@ fn apply_batch(conn: &mut Connection, ops: Vec<WriteOp>) -> StoreResult<Vec<Stor
 fn apply(conn: &Connection, op: WriteOp) -> StoreResult<Written> {
     match op {
         WriteOp::CreateRepo(name) => create_repo(conn, &name).map(Written::Repo),
+        WriteOp::CreateOwnedRepo(name, owner) => {
+            let id = create_repo(conn, &name)?;
+            conn.prepare_cached("INSERT INTO repo_owners (repo, owner) VALUES (?1, ?2)")
+                .and_then(|mut s| s.execute(rusqlite::params![i64::from(id.0), owner]))
+                .map_err(sql_err)?;
+            Ok(Written::Repo(id))
+        }
         WriteOp::Commit(repo, txn) => commit(conn, repo, txn).map(Written::Txn),
         WriteOp::CommitRun(repo, txns) => commit_run(conn, repo, txns),
     }

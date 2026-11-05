@@ -1637,7 +1637,7 @@ fn author(cx: &CallContext) -> Author {
             PrincipalKind::Human => AuthorKind::Human,
             PrincipalKind::Agent => AuthorKind::Agent,
             PrincipalKind::Ci => AuthorKind::Ci,
-            PrincipalKind::Service => AuthorKind::Bot,
+            PrincipalKind::Service | PrincipalKind::Mirror => AuthorKind::Bot,
         },
     }
 }
