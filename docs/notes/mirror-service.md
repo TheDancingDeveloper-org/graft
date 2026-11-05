@@ -1,6 +1,6 @@
 # Proposal: mirrors as repository settings, one mirror service
 
-Status: revision 2 for operator sign-off, 2026-11-05. This is the design PR
+Status: **signed off by the operator, 2026-11-05, as [D41](../decisions.md#d41-mirrors-as-repository-settings-one-mirror-service)** (proposed as "D40"; D40 was already taken). Revision 2. This is the design PR
 for moving mirror definitions out of deploy files and into graft. On
 sign-off it becomes decision D40 and amends `design.md` §11. Nothing here is
 built before that.

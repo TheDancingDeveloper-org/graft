@@ -87,6 +87,10 @@ Already decided by the operator (2026-10-22):
   parked lands; checks decoupled from the forge; a read-only web UI in
   v0.3; independence from any orchestrator (generic session and
   work-item names).
+- **D41** (operator, 2026-11-05): mirrors are repository settings, served
+  by one mirror service, with operator-only upstream binding, encrypted
+  per-row credentials, a per-repository authority lease, and batching as a
+  server request. See [D41](#d41-mirrors-as-repository-settings-one-mirror-service).
 
 | # | Decision | Recommendation | Blocks |
 | --- | --- | --- | --- |
@@ -1340,3 +1344,64 @@ Rejected:
   measures.
 - Starting phase 2 for every repository at once. D35 switches one named
   repository at a time.
+
+## D41. Mirrors as repository settings, one mirror service
+
+**Decided (operator, 2026-11-05, on WI-3215): a mirror is a setting on a
+repository, stored in the server and managed through the API, CLI and MCP.
+One `graft-mirror serve` process reconciles every mirror from the server.
+Nothing per repository lives in deployment.** The full design is
+[notes/mirror-service.md](notes/mirror-service.md), revision 2 (proposed as
+"D40"; renumbered because D40 was already taken). It amends
+[design.md](design.md) §8 (§8.10) and §11 (§11.7).
+
+The six points signed:
+
+1. **Target.** Repositories and mirrors are API objects. One mirror service,
+   one volume, one narrowly scoped token, no per-repository deploy files.
+   Batching is an API call, not an exec into a container.
+2. **Scopes and grants.** Add `repos:admin`, `repo:*:<perm>`, the
+   operator-only grants `mirror:bind` (what is fetched) and `mirror:export`
+   (what is pushed), and a `mirror` token kind that can hold only the
+   `repo:*:mirror` set. Agent and session token kinds can't hold either
+   operator grant. The followed-line guard admits the `mirror` kind.
+3. **Credentials.** Per-mirror credentials are stored in the server,
+   sealed with XChaCha20-Poly1305 under a per-row data key wrapped by a
+   separate key-encryption key ring with ids, with associated data binding
+   the row. The envelope is a durable encoding with a golden vector.
+   Plaintext goes only to the `mirror` kind holding the repository's lease.
+   Migration seeds rows from today's PATs; a GitHub App follows later.
+4. **Authority lease.** A server-side lease per repository with a
+   monotonic epoch fences every mirror write (followed-line `UpdateRef`,
+   status, credential read, request claims). A stale epoch is `lease_lost`.
+   This is the only mirror state that moves into the server.
+5. **Requests.** Batch cut, settle, exclude, rewind and purge are
+   idempotent server requests (`client_request_id`), executed by the
+   service, with a CAS open-batch pointer, epoch claims, deterministic
+   `graft/batch-<n>` recovery and expiry.
+6. **Upstream allowlist.** `https` or `ssh` only, no private, loopback,
+   link-local or cluster addresses, host in `mirror.allowed_hosts`; the
+   service re-checks after DNS resolution.
+
+Boundaries kept: git stays in `graft-git` and `graft-mirror` (rule 6;
+upstreams and branch names are strings in the server). The service
+schedules mirror polls and requests only, never a build, test or check
+([D22](#d22-phase-1-is-a-git-alternative),
+[D35](#d35-the-roadmap-of-record-and-the-phase-2-trigger)).
+
+Why: thirteen per-repository containers restart-storm on every deploy,
+onboarding needs a deploy-file edit, an ops PR and a secret mapping, and
+`pr-batch` needs a `kubectl exec`. Nothing in §11 requires a process per
+repository.
+
+Rejected:
+
+- Storing secret-store references instead of encrypted credentials. It
+  ties graft to one estate's secret store, against
+  [D39](#d39-independence-from-any-orchestrator).
+- Running the mirror inside the server. The server would run git, hold a
+  forge credential and push to a forge, which §11 keeps out.
+- Keeping one process per repository and only templating it better. The
+  restart storm, the duplicate runtimes and the deploy-time onboarding stay.
+- Letting repository admins bind upstreams. Binding decides what the
+  service fetches with its credential, an exfiltration route.
