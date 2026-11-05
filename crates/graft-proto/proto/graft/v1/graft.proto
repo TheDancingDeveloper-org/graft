@@ -922,6 +922,30 @@ message SetMirrorRequest {
   optional uint64 expected_version = 7;
 }
 
+// `SetMirrorCredential` (D41 §3.4): write-only, `mirror:bind`. The server
+// seals `credential` under its active key-encryption key; an empty
+// `credential` clears it. CAS on the row's `version`, which it bumps.
+message SetMirrorCredentialRequest {
+  string repo = 1;
+  string upstream = 2;
+  bytes credential = 3;
+  uint64 expected_version = 4;
+}
+
+// `GetMirrorCredential`: only a `mirror`-kind token holding the current
+// authority lease `epoch` on `repo` is answered.
+message GetMirrorCredentialRequest {
+  string repo = 1;
+  string upstream = 2;
+  uint64 epoch = 3;
+}
+
+// The plaintext credential. Its `Debug` is redacted (`pb.rs`); never log it.
+message MirrorCredential {
+  bytes credential = 1;
+  string kek_id = 2;
+}
+
 message MirrorKey {
   string repo = 1;
   string upstream = 2;
@@ -1136,6 +1160,8 @@ service MirrorService {
   rpc AcquireLease(AcquireLeaseRequest) returns (Lease);
   rpc RenewLease(LeaseRequest) returns (Lease);
   rpc ReleaseLease(LeaseRequest) returns (Empty);
+  rpc SetMirrorCredential(SetMirrorCredentialRequest) returns (Mirror);
+  rpc GetMirrorCredential(GetMirrorCredentialRequest) returns (MirrorCredential);
 }
 
 // Review and land-check reads (v0.2, WI-2590). Not served yet.

@@ -26,6 +26,7 @@ mod backup;
 mod bootstrap;
 mod ci;
 mod config;
+mod credentials;
 mod denylist;
 mod dev;
 mod exports;
@@ -63,6 +64,11 @@ const USAGE: &str = "usage: graft-server [--config <file>] <serve|admin> [args]
   admin gc deletion <repo> on|off
                                  the repository's GC deletion switch (off
                                  until turned on)
+  admin mirror credential <repo> <upstream>
+                                 seal the credential read from stdin into
+                                 the mirror row (empty clears it)
+  admin mirror rewrap            re-wrap every mirror credential under the
+                                 active credential_kek (server running)
 
 config: --config <file>, else $GRAFT_SERVER_CONFIG, else /etc/graft/server.toml";
 

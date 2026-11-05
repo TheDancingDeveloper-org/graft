@@ -159,6 +159,8 @@ pub(crate) struct App {
     pub(crate) ci: Option<Arc<CiExchange>>,
     /// The mirror upstream allowlist and interval floor (D41).
     pub(crate) mirror: Arc<crate::mirrors::MirrorPolicy>,
+    /// The mirror credential key ring (D41 §3.4); empty seals nothing.
+    pub(crate) keks: Arc<crate::credentials::KeyRing>,
     ready: AtomicBool,
     next_request: AtomicU64,
 }
@@ -190,9 +192,16 @@ impl App {
             exports,
             ci: None,
             mirror: Arc::default(),
+            keks: Arc::default(),
             ready: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
         }
+    }
+
+    /// Sets the mirror credential key ring (`[mirror] credential_kek`).
+    pub(crate) fn with_keks(mut self, ring: crate::credentials::KeyRing) -> Self {
+        self.keks = Arc::new(ring);
+        self
     }
 
     /// Sets the mirror policy (`[mirror]`).
