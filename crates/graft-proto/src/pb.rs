@@ -31,3 +31,23 @@ impl std::fmt::Debug for RevokeTokenRequest {
             .finish()
     }
 }
+
+impl std::fmt::Debug for SetMirrorCredentialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetMirrorCredentialRequest")
+            .field("repo", &self.repo)
+            .field("upstream", &self.upstream)
+            .field("credential", &"<redacted>")
+            .field("expected_version", &self.expected_version)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for MirrorCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MirrorCredential")
+            .field("credential", &"<redacted>")
+            .field("kek_id", &self.kek_id)
+            .finish()
+    }
+}

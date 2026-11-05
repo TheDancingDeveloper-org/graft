@@ -895,6 +895,26 @@ fn revoke_token_debug_is_redacted() {
 }
 
 #[test]
+fn mirror_credential_debug_is_redacted() {
+    let r = pb::SetMirrorCredentialRequest {
+        repo: "r".into(),
+        upstream: "https://github.com/o/r.git".into(),
+        credential: b"ghp_plaintext".to_vec(),
+        expected_version: 1,
+    };
+    let c = pb::MirrorCredential {
+        credential: b"ghp_plaintext".to_vec(),
+        kek_id: "k1".into(),
+    };
+    for shown in [format!("{r:?}"), format!("{c:?}"), format!("{c:#?}")] {
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(!shown.contains("ghp_plaintext"), "{shown}");
+        // Nor the bytes as a list of numbers.
+        assert!(!shown.contains("103, 104, 112"), "{shown}");
+    }
+}
+
+#[test]
 fn conflict_types_round_trip() {
     let side =
         || prop::option::of((oid(), entry_kind()).prop_map(|(id, kind)| ConflictSide { id, kind }));

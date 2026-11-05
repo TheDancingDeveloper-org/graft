@@ -522,7 +522,11 @@ fn a_client_cannot_use_a_scope_it_does_not_hold() {
         "repo:r:drafts:x",
         "repo:r:Admin",
         "repo:r :admin",
-        "repo:*:admin",
+        // `repo:*:admin` is a real grant since D41 (every repository), so
+        // the near misses are wildcards that are not exactly `*`.
+        "repo:**:admin",
+        "repo:r*:admin",
+        "repo:*r:admin",
         "repo::admin",
         "admin",
         "repo:r:land:trunk ",

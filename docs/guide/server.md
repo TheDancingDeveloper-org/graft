@@ -83,6 +83,20 @@ policy = "direct"
 | `gc.retention_s` | integer | `604800` | Retention for abandoned and superseded drafts, in seconds. |
 | `gc.verify` | boolean | `true` | Verify the plan against the ancestry walk before each pass. |
 
+### `[mirror]` credential keys
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `mirror.credential_kek` | `{ id, file }` or none | none | The active key-encryption key for mirror credentials: an id (`[A-Za-z0-9._-]`, at most 64) and a file of exactly 32 random bytes, mode 0600, owned by the server user. Unrelated to the signing key. Unset: credentials can be neither set nor read. |
+| `mirror.retired_keks` | array of `{ id, file }` | `[]` | Keys that only open credentials sealed before a rotation. |
+
+To rotate: generate a new key file, make it `credential_kek` with a new id,
+move the old entry to `retired_keks`, restart, run
+`graft-server admin mirror rewrap` (one transaction per row), and once it
+reports no failures remove the old key. To seed a row's credential on the
+host, pipe it in: `printenv GRAFT_DEV_MIRROR_TOKEN_<REPO> | graft-server admin
+mirror credential <repo> <upstream>` (never in argv).
+
 ### `[ci]`, `[[ci.issuers]]`, and `[[ci.bindings]]`
 
 With no issuer configured, CI token exchange is disabled.

@@ -17,6 +17,8 @@ workspace = true
 
 [dependencies]
 axum = { workspace = true, features = ["json"] }
+chacha20poly1305.workspace = true
+getrandom.workspace = true
 graft-auth.workspace = true
 graft-engine.workspace = true
 graft-gc.workspace = true

@@ -12,6 +12,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "graft.v1.Token",
             "graft.v1.ExchangeCiTokenRequest",
             "graft.v1.RevokeTokenRequest",
+            "graft.v1.SetMirrorCredentialRequest",
+            "graft.v1.MirrorCredential",
         ])
         .compile_fds(fds)?;
     Ok(())

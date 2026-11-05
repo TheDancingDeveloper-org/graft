@@ -1541,6 +1541,36 @@ impl pb::mirror_service_server::MirrorService for Services {
                 .map(|()| pb::Empty {})
         })
     }
+
+    async fn set_mirror_credential(
+        &self,
+        request: Request<pb::SetMirrorCredentialRequest>,
+    ) -> Result<Response<pb::Mirror>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        let ring = self.app.keks.clone();
+        mirror_call!(
+            self,
+            request,
+            "SetMirrorCredential",
+            true,
+            |meta, p, req| mirrors::set_credential(meta, p, &ring, now_ms, req).await
+        )
+    }
+
+    async fn get_mirror_credential(
+        &self,
+        request: Request<pb::GetMirrorCredentialRequest>,
+    ) -> Result<Response<pb::MirrorCredential>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        let ring = self.app.keks.clone();
+        mirror_call!(
+            self,
+            request,
+            "GetMirrorCredential",
+            false,
+            |meta, p, req| mirrors::get_credential(meta, p, &ring, now_ms, req).await
+        )
+    }
 }
 
 #[tonic::async_trait]

@@ -32,6 +32,14 @@
 //! retention_s = 604800               # abandoned and superseded drafts kept
 //! verify = true                      # check the plan before each pass
 //!
+//! [mirror]                           # mirror settings (D41)
+//! allowed_hosts = ["github.com"]
+//! # The credential key-encryption key: 32 raw bytes, mode 0600, unrelated
+//! # to the signing key. Retired keys only open credentials; rotate with
+//! # `admin mirror rewrap`, then retire the old key.
+//! credential_kek = { id = "k2", file = "/var/lib/graft/secrets/kek-k2" }
+//! retired_keks = [{ id = "k1", file = "/var/lib/graft/secrets/kek-k1" }]
+//!
 //! [[webhooks]]                       # outbound journal delivery: see `webhooks.rs`
 //! url = "https://hooks.example/graft"
 //! kinds = ["LandAttempt"]            # empty = every kind
@@ -148,6 +156,20 @@ pub(crate) struct MirrorSection {
     /// The server's own DNS names, never accepted as an upstream host
     /// (`localhost` and the `listen` host always are refused).
     pub(crate) server_names: Vec<String>,
+    /// The active credential key-encryption key (§3.4). Unset: credentials
+    /// can be neither set nor read.
+    pub(crate) credential_kek: Option<KekFile>,
+    /// Keys that only open credentials sealed before a rotation.
+    pub(crate) retired_keks: Vec<KekFile>,
+}
+
+/// A credential key-encryption key: its id and the file holding its 32
+/// bytes.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KekFile {
+    pub(crate) id: String,
+    pub(crate) file: PathBuf,
 }
 
 impl Default for MirrorSection {
@@ -156,6 +178,8 @@ impl Default for MirrorSection {
             allowed_hosts: vec!["github.com".into()],
             min_interval_s: crate::mirrors::DEFAULT_INTERVAL_S,
             server_names: Vec::new(),
+            credential_kek: None,
+            retired_keks: Vec::new(),
         }
     }
 }
@@ -359,6 +383,26 @@ impl ServerConfig {
             })?;
         }
         Ok(())
+    }
+
+    /// Loads the credential key ring from `[mirror]`. Each key file must be
+    /// private (as the signing key) and hold exactly 32 bytes.
+    pub(crate) fn key_ring(&self) -> Result<crate::credentials::KeyRing, ConfigError> {
+        let load = |k: &KekFile| {
+            let bytes = crate::keys::load_private(&k.file)
+                .map_err(|e| ConfigError(format!("credential key {}: {e}", k.id)))?;
+            crate::credentials::Kek::new(k.id.clone(), bytes)
+                .map_err(|e| ConfigError(format!("credential key {}: {e}", k.id)))
+        };
+        let active = self.mirror.credential_kek.as_ref().map(load).transpose()?;
+        let retired = self
+            .mirror
+            .retired_keks
+            .iter()
+            .map(load)
+            .collect::<Result<_, _>>()?;
+        crate::credentials::KeyRing::new(active, retired)
+            .map_err(|e| ConfigError(format!("mirror credential keys: {e}")))
     }
 
     /// The engine configuration: the defaults with the line sections applied.
