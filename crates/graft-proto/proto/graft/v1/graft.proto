@@ -833,6 +833,139 @@ message RecordExportsRequest {
   repeated ExportedCommit exports = 2;
 }
 
+// ---- mirror settings (D41, docs/notes/mirror-service.md §3.2) -------------
+//
+// A repository bound to an upstream: one row per (repo, upstream). Branch
+// names and the upstream URL are strings; the server never fetches them.
+
+// One mirrored line. `direction` is "follow", "export" or "both".
+message MirrorLine {
+  string branch = 1;
+  string line = 2;
+  string direction = 3;
+}
+
+// A principal's export identity, "Name <email>".
+message MirrorAuthor {
+  string principal = 1;
+  string identity = 2;
+}
+
+// The export author mapping (today's `[export]`).
+message MirrorExport {
+  optional string default_author = 1;
+  repeated MirrorAuthor authors = 2;
+}
+
+// Why the last poll failed.
+enum MirrorErrorCode {
+  MIRROR_ERROR_CODE_UNSPECIFIED = 0;
+  MIRROR_ERROR_CODE_UPSTREAM_UNREACHABLE = 1;
+  MIRROR_ERROR_CODE_AUTH_FAILED = 2;
+  MIRROR_ERROR_CODE_NOT_FOUND = 3;
+  MIRROR_ERROR_CODE_DIVERGED = 4;
+  MIRROR_ERROR_CODE_FORCE_PUSHED = 5;
+  MIRROR_ERROR_CODE_RATE_LIMITED = 6;
+  MIRROR_ERROR_CODE_TIMEOUT = 7;
+  MIRROR_ERROR_CODE_URL_BLOCKED = 8;
+  MIRROR_ERROR_CODE_LEASE_LOST = 9;
+  MIRROR_ERROR_CODE_INTERNAL = 10;
+}
+
+// Written by the mirror service; not part of `version`, never journalled.
+// `error_message` is at most 200 characters and never raw git output.
+message MirrorStatus {
+  optional int64 last_poll_at_ms = 1;
+  optional int64 last_success_at_ms = 2;
+  optional string last_imported_sha = 3;
+  optional bytes last_changeset = 4;
+  uint64 lag_changesets = 5;
+  uint64 lag_seconds = 6;
+  MirrorErrorCode error_code = 7;
+  optional string error_message = 8;
+  optional int64 backoff_until_ms = 9;
+  uint64 lease_epoch = 10;
+}
+
+// A mirror row as read. Never carries credential bytes: only whether one is
+// set and the key that sealed it.
+message Mirror {
+  string repo = 1;
+  string upstream = 2;
+  repeated MirrorLine lines = 3;
+  uint32 interval_s = 4;
+  bool enabled = 5;
+  bool credential_set = 6;
+  optional string kek_id = 7;
+  MirrorExport export = 8;
+  uint64 version = 9;
+  optional MirrorStatus status = 10;
+  string created_by = 11;
+  string updated_by = 12;
+  int64 updated_at_ms = 13;
+}
+
+// Creates (`expected_version` absent) or replaces a row's settings. A
+// version mismatch is `Rejected { policy: "mirror-version" }`. Creating a
+// row needs `mirror:bind`; any export line or author mapping change needs
+// `mirror:export`; other changes need `repo:<r>:admin` or `mirror:bind`.
+message SetMirrorRequest {
+  string repo = 1;
+  string upstream = 2;
+  repeated MirrorLine lines = 3;
+  uint32 interval_s = 4;
+  bool enabled = 5;
+  MirrorExport export = 6;
+  optional uint64 expected_version = 7;
+}
+
+message MirrorKey {
+  string repo = 1;
+  string upstream = 2;
+}
+
+// `repo` empty lists every repository (needs `repo:*:read`,
+// `repo:*:mirror` or `repos:admin`). Paginated; `page_token` is opaque.
+message ListMirrorsRequest {
+  string repo = 1;
+  optional bool enabled = 2;
+  uint32 limit = 3;
+  string page_token = 4;
+}
+
+message MirrorPage {
+  repeated Mirror mirrors = 1;
+  string next_page_token = 2;
+}
+
+// Deletes a row (`mirror:bind`). With `clear_followed`, the followed-line
+// markers of its lines are deleted in the same transaction, one journal
+// entry each.
+message RemoveMirrorRequest {
+  string repo = 1;
+  string upstream = 2;
+  optional uint64 expected_version = 3;
+  bool clear_followed = 4;
+}
+
+message RemoveMirrorResult {
+  repeated string cleared = 1;
+}
+
+// Asks the mirror service to delete a removed or disabled row's data
+// (`mirror:bind`).
+message PurgeMirrorRequest {
+  string repo = 1;
+  string upstream = 2;
+}
+
+// Status from the mirror service (`repo:*:mirror`).
+message SetMirrorStatusRequest {
+  string repo = 1;
+  string upstream = 2;
+  MirrorStatus status = 3;
+}
+
 // ---- errors (docs/design.md §7.10) ----------------------------------------
 
 // Carried in the `details` of a gRPC status, so errors round-trip losslessly.
@@ -966,6 +1099,13 @@ service CiService {
 // Called by graft-mirror with an admin token. Served by graft-server only.
 service MirrorService {
   rpc RecordExports(RecordExportsRequest) returns (Empty);
+  // Mirror settings (D41). Also served only by graft-server.
+  rpc SetMirror(SetMirrorRequest) returns (Mirror);
+  rpc GetMirror(MirrorKey) returns (Mirror);
+  rpc ListMirrors(ListMirrorsRequest) returns (MirrorPage);
+  rpc RemoveMirror(RemoveMirrorRequest) returns (RemoveMirrorResult);
+  rpc PurgeMirror(PurgeMirrorRequest) returns (Empty);
+  rpc SetMirrorStatus(SetMirrorStatusRequest) returns (Empty);
 }
 
 // Review and land-check reads (v0.2, WI-2590). Not served yet.

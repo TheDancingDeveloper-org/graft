@@ -123,6 +123,146 @@ pub struct TimedRow {
     pub holder: String,
 }
 
+/// Which way a mirrored line moves (D41): imported from the upstream
+/// branch, exported to it, or both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MirrorDirection {
+    /// The upstream branch is imported into the line.
+    Follow,
+    /// The line is exported to the upstream branch.
+    Export,
+    /// Both.
+    Both,
+}
+
+impl MirrorDirection {
+    /// The text form: `follow`, `export` or `both`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Follow => "follow",
+            Self::Export => "export",
+            Self::Both => "both",
+        }
+    }
+
+    /// Parses the text form.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "follow" => Some(Self::Follow),
+            "export" => Some(Self::Export),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    /// Whether the line is pushed to the upstream (`export` or `both`).
+    pub fn exports(self) -> bool {
+        matches!(self, Self::Export | Self::Both)
+    }
+}
+
+/// One line of a mirror: an upstream branch name and a graft line, as
+/// strings (rule 6: no git types here).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MirrorLineRecord {
+    /// Upstream branch name.
+    pub branch: String,
+    /// Graft line.
+    pub line: String,
+    /// Direction.
+    pub direction: MirrorDirection,
+}
+
+/// A mirror's export author mapping (today's `[export]`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MirrorExportRecord {
+    /// `Name <email>` used when a principal has no mapping.
+    pub default_author: Option<String>,
+    /// Principal → `Name <email>`, sorted by principal.
+    pub authors: Vec<(String, String)>,
+}
+
+/// A mirror's operational status, written by the mirror service. Not part
+/// of the row's `version` and never journalled.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MirrorStatusRecord {
+    /// Last poll, ms since the epoch.
+    pub last_poll_at_ms: Option<i64>,
+    /// Last successful poll, ms since the epoch.
+    pub last_success_at_ms: Option<i64>,
+    /// Last upstream head imported (opaque text).
+    pub last_imported_sha: Option<String>,
+    /// Last changeset imported.
+    pub last_changeset: Option<ChangesetId>,
+    /// Changesets behind the upstream.
+    pub lag_changesets: u64,
+    /// Seconds behind the upstream.
+    pub lag_seconds: u64,
+    /// Typed error code (text form), when the last poll failed.
+    pub error_code: Option<String>,
+    /// Short, safe error message.
+    pub error_message: Option<String>,
+    /// No poll before this, ms since the epoch.
+    pub backoff_until_ms: Option<i64>,
+    /// The authority-lease epoch of the writer.
+    pub lease_epoch: u64,
+}
+
+/// One `repo_mirrors` row (D41): a repository bound to one upstream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MirrorRecord {
+    /// Upstream URL, validated at the boundary.
+    pub upstream: String,
+    /// Mirrored lines.
+    pub lines: Vec<MirrorLineRecord>,
+    /// Poll interval, seconds.
+    pub interval_s: u32,
+    /// Whether the mirror service runs it.
+    pub enabled: bool,
+    /// The encrypted credential, if one is set.
+    pub credential: Option<Vec<u8>>,
+    /// The key-encryption key that sealed `credential`.
+    pub kek_id: Option<String>,
+    /// Export author mapping.
+    pub export: MirrorExportRecord,
+    /// Bumped by every settings write; the CAS etag.
+    pub version: u64,
+    /// Operational status; `None` until the service first writes it.
+    /// `PutMirror` leaves the stored status as it is.
+    pub status: Option<MirrorStatusRecord>,
+    /// Who created the row.
+    pub created_by: String,
+    /// Who last changed its settings.
+    pub updated_by: String,
+    /// When its settings last changed, ms since the epoch.
+    pub updated_at_ms: i64,
+}
+
+/// A row of `list_mirrors`: the record and the repository it belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MirrorListing {
+    /// Repository id.
+    pub repo: RepoId,
+    /// Repository name.
+    pub repo_name: String,
+    /// The row.
+    pub record: MirrorRecord,
+}
+
+/// What `list_mirrors` returns: rows ordered by `(repo id, upstream)`,
+/// starting after `after`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MirrorQuery {
+    /// Only this repository.
+    pub repo: Option<RepoId>,
+    /// Only rows with this `enabled`.
+    pub enabled: Option<bool>,
+    /// Exclusive start key.
+    pub after: Option<(RepoId, String)>,
+    /// Page size; clamped by the store.
+    pub limit: u32,
+}
+
 /// A condition a transaction checks before writing. The first failing
 /// precondition aborts the transaction, and nothing is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,6 +332,14 @@ pub enum Precondition {
         key: Vec<u8>,
         /// Expected value.
         value: Option<Vec<u8>>,
+    },
+    /// The mirror row for `upstream` is at `version`, or absent for `None`.
+    /// The compare in a mirror settings CAS (D41).
+    MirrorVersionIs {
+        /// Upstream URL.
+        upstream: String,
+        /// Expected version.
+        version: Option<u64>,
     },
 }
 
@@ -441,6 +589,24 @@ pub enum Write {
         /// The reverting changeset, for `Reverted`.
         revert: Option<ChangesetId>,
     },
+    /// Insert or replace a mirror row's settings (D41). Needs a
+    /// `MirrorVersionIs` precondition on its upstream, and `version` must be
+    /// one more than the stored version (1 for a new row). The stored status
+    /// is kept.
+    PutMirror(MirrorRecord),
+    /// Delete the mirror row for this upstream, status included. Needs a
+    /// `MirrorVersionIs` precondition on it.
+    DeleteMirror(String),
+    /// Delete a ref. Needs a `RefIs` precondition on it.
+    DeleteRef(String),
+    /// Replace a mirror row's status. A row that does not exist is left
+    /// absent: status never creates a row.
+    SetMirrorStatus {
+        /// Upstream URL.
+        upstream: String,
+        /// The new status.
+        status: MirrorStatusRecord,
+    },
     /// Append a journal entry. The store assigns the next LSN of the
     /// repository (LSNs start at 1 and have no gaps).
     Journal {
@@ -492,6 +658,22 @@ pub trait MetaStore: Send + Sync {
         _repo: RepoId,
     ) -> impl Future<Output = StoreResult<Option<String>>> + Send {
         async { Ok(None) }
+    }
+    /// The mirror row of `(repo, upstream)`. One indexed read.
+    fn get_mirror(
+        &self,
+        _repo: RepoId,
+        _upstream: &str,
+    ) -> impl Future<Output = StoreResult<Option<MirrorRecord>>> + Send {
+        async { Err(unsupported("get_mirror")) }
+    }
+    /// A page of mirror rows, in `(repo id, upstream)` order. One indexed
+    /// range scan bounded by the page size.
+    fn list_mirrors(
+        &self,
+        _query: MirrorQuery,
+    ) -> impl Future<Output = StoreResult<Vec<MirrorListing>>> + Send {
+        async { Err(unsupported("list_mirrors")) }
     }
     /// Applies a transaction atomically.
     fn commit(
@@ -995,6 +1177,19 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
     }
     fn repo_owner(&self, repo: RepoId) -> impl Future<Output = StoreResult<Option<String>>> + Send {
         (**self).repo_owner(repo)
+    }
+    fn get_mirror(
+        &self,
+        repo: RepoId,
+        upstream: &str,
+    ) -> impl Future<Output = StoreResult<Option<MirrorRecord>>> + Send {
+        (**self).get_mirror(repo, upstream)
+    }
+    fn list_mirrors(
+        &self,
+        query: MirrorQuery,
+    ) -> impl Future<Output = StoreResult<Vec<MirrorListing>>> + Send {
+        (**self).list_mirrors(query)
     }
     fn commit(
         &self,

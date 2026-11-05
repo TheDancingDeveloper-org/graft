@@ -157,6 +157,8 @@ pub(crate) struct App {
     pub(crate) exports: Arc<Exports>,
     /// The CI token exchange, when the config trusts an issuer.
     pub(crate) ci: Option<Arc<CiExchange>>,
+    /// The mirror upstream allowlist and interval floor (D41).
+    pub(crate) mirror: Arc<crate::mirrors::MirrorPolicy>,
     ready: AtomicBool,
     next_request: AtomicU64,
 }
@@ -187,9 +189,16 @@ impl App {
             denylist: Arc::new(denylist),
             exports,
             ci: None,
+            mirror: Arc::default(),
             ready: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
         }
+    }
+
+    /// Sets the mirror policy (`[mirror]`).
+    pub(crate) fn with_mirror(mut self, policy: crate::mirrors::MirrorPolicy) -> Self {
+        self.mirror = Arc::new(policy);
+        self
     }
 
     /// Turns on the CI token exchange.

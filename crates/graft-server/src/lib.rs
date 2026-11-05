@@ -36,6 +36,7 @@ mod keys;
 mod lines;
 mod mcp;
 mod mint;
+mod mirrors;
 mod serve;
 mod watch;
 mod webhooks;

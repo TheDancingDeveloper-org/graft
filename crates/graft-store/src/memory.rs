@@ -15,8 +15,8 @@ use graft_model::{ChangesetId, ObjectId, RepoPath};
 
 use crate::meta::{
     AttestKind, AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandCheckState,
-    LandingRow, LineMergeRow, Lsn, MetaStore, MetaTxn, Precondition, Protection, RecordState,
-    RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
+    LandingRow, LineMergeRow, Lsn, MetaStore, MetaTxn, MirrorListing, MirrorQuery, MirrorRecord,
+    Precondition, Protection, RecordState, RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
 };
 use crate::object::{ObjectStore, StoreStats};
 use crate::{RepoId, StoreError, StoreResult, page_limit};
@@ -42,6 +42,8 @@ struct Repo {
     /// Merge points (D29), keyed as SQLite's primary key: (dst, dst_pos).
     line_merges: BTreeMap<(String, u64), LineMergeRow>,
     holders: BTreeSet<(ObjectId, String)>,
+    /// Mirror rows (D41) by upstream.
+    mirrors: BTreeMap<String, MirrorRecord>,
     /// The expiry of each timed holder row.
     row_expiry: BTreeMap<(ObjectId, String), i64>,
     /// Protection by changeset; an absent entry is the default.
@@ -129,6 +131,9 @@ impl Repo {
                 key,
                 value,
             } => self.derived.get(&(kind.clone(), *version, key.clone())) == value.as_ref(),
+            Precondition::MirrorVersionIs { upstream, version } => {
+                self.mirrors.get(upstream).map(|m| m.version) == *version
+            }
         }
     }
 
@@ -412,6 +417,49 @@ fn validate(repo: &Repo, txn: &MetaTxn) -> StoreResult<()> {
             }
             versions.insert(record.name.as_str(), record.version);
         }
+        match write {
+            Write::PutMirror(MirrorRecord { upstream, .. }) | Write::DeleteMirror(upstream) => {
+                let guarded = txn.preconditions.iter().any(
+                    |p| matches!(p, Precondition::MirrorVersionIs { upstream: u, .. } if u == upstream),
+                );
+                let twice = txn
+                    .writes
+                    .iter()
+                    .filter(|w| match w {
+                        Write::PutMirror(m) => m.upstream == *upstream,
+                        Write::DeleteMirror(u) => u == upstream,
+                        _ => false,
+                    })
+                    .count()
+                    > 1;
+                if !guarded || twice {
+                    return Err(StoreError::Invalid(format!(
+                        "mirror {upstream} is written without a MirrorVersionIs precondition, or twice"
+                    )));
+                }
+            }
+            Write::DeleteRef(name) => {
+                let guarded = txn
+                    .preconditions
+                    .iter()
+                    .any(|p| matches!(p, Precondition::RefIs { name: n, .. } if n == name));
+                if !guarded {
+                    return Err(StoreError::Invalid(format!(
+                        "ref {name} is deleted without a RefIs precondition"
+                    )));
+                }
+            }
+            _ => {}
+        }
+        if let Write::PutMirror(record) = write {
+            let current = repo.mirrors.get(&record.upstream).map_or(0, |m| m.version);
+            if record.version != current + 1 {
+                return Err(StoreError::Invalid(format!(
+                    "mirror {} version {} does not follow {current}",
+                    record.upstream, record.version
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -658,6 +706,24 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
                     row.revert = revert;
                 }
             }
+            Write::PutMirror(mut record) => {
+                record.status = repo
+                    .mirrors
+                    .get(&record.upstream)
+                    .and_then(|m| m.status.clone());
+                repo.mirrors.insert(record.upstream.clone(), record);
+            }
+            Write::DeleteMirror(upstream) => {
+                repo.mirrors.remove(&upstream);
+            }
+            Write::DeleteRef(name) => {
+                repo.refs.remove(&name);
+            }
+            Write::SetMirrorStatus { upstream, status } => {
+                if let Some(m) = repo.mirrors.get_mut(&upstream) {
+                    m.status = Some(status);
+                }
+            }
             Write::Journal { kind, body } => {
                 let lsn = repo.journal.len() as u64 + 1;
                 repo.journal.push((lsn, kind, body));
@@ -834,6 +900,53 @@ impl MetaStore for MemoryStore {
 
     fn repo(&self, name: &str) -> impl Future<Output = StoreResult<Option<RepoId>>> + Send {
         ready(self.with(|st| Ok(st.names.get(name).copied())))
+    }
+
+    fn get_mirror(
+        &self,
+        repo: RepoId,
+        upstream: &str,
+    ) -> impl Future<Output = StoreResult<Option<MirrorRecord>>> + Send {
+        ready(self.with(|st| Ok(st.repo(repo)?.mirrors.get(upstream).cloned())))
+    }
+
+    fn list_mirrors(
+        &self,
+        query: MirrorQuery,
+    ) -> impl Future<Output = StoreResult<Vec<MirrorListing>>> + Send {
+        ready(self.with(|st| {
+            let limit = page_limit(query.limit);
+            let mut out = Vec::new();
+            for (&id, repo) in &st.repos {
+                if query.repo.is_some_and(|r| r != id)
+                    || query.after.as_ref().is_some_and(|(a, _)| id < *a)
+                {
+                    continue;
+                }
+                let Some(name) = st.names.iter().find(|(_, v)| **v == id).map(|(k, _)| k) else {
+                    continue;
+                };
+                for (upstream, record) in &repo.mirrors {
+                    if query
+                        .after
+                        .as_ref()
+                        .is_some_and(|(a, u)| id == *a && upstream <= u)
+                        || query.enabled.is_some_and(|e| e != record.enabled)
+                    {
+                        continue;
+                    }
+                    if out.len() == limit {
+                        return Ok(out);
+                    }
+                    out.push(MirrorListing {
+                        repo: id,
+                        repo_name: name.clone(),
+                        record: record.clone(),
+                    });
+                }
+            }
+            Ok(out)
+        }))
     }
 
     fn commit(

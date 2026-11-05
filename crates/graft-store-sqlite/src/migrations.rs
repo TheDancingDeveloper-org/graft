@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -279,6 +279,39 @@ CREATE TABLE repo_owners (
     repo  INTEGER PRIMARY KEY REFERENCES repos(id),
     owner TEXT NOT NULL
 );
+";
+
+/// Version 10: mirror settings (D41), one row per `(repo, upstream)`.
+/// Lines and the export author map are tab-separated text; status is
+/// written by the mirror service and is not part of `version`.
+const V10: &str = "
+CREATE TABLE repo_mirrors (
+    repo                  INTEGER NOT NULL REFERENCES repos(id),
+    upstream              TEXT NOT NULL,
+    lines                 TEXT NOT NULL,
+    interval_s            INTEGER NOT NULL,
+    enabled               INTEGER NOT NULL,
+    credential            BLOB,
+    kek_id                TEXT,
+    export_default_author TEXT,
+    export_authors        TEXT NOT NULL,
+    version               INTEGER NOT NULL,
+    created_by            TEXT NOT NULL,
+    updated_by            TEXT NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    status_set            INTEGER NOT NULL DEFAULT 0,
+    status_poll_at        INTEGER,
+    status_success_at     INTEGER,
+    status_sha            TEXT,
+    status_changeset      BLOB,
+    status_lag_changesets INTEGER NOT NULL DEFAULT 0,
+    status_lag_s          INTEGER NOT NULL DEFAULT 0,
+    status_error_code     TEXT,
+    status_error_message  TEXT,
+    status_backoff_until  INTEGER,
+    status_lease_epoch    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo, upstream)
+) WITHOUT ROWID;
 ";
 
 /// The database's schema version.

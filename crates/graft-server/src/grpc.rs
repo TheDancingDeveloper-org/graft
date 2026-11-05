@@ -28,6 +28,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::app::{App, CallError, Caller, ServerEngine};
 use crate::exports;
 use crate::mint;
+use crate::mirrors;
 
 /// Frame bytes per `GetObjects` stream message. A single frame larger than
 /// this travels alone.
@@ -248,6 +249,28 @@ macro_rules! unary {
             .await
             .map_err(Status::from)?;
         Ok(Response::new($out(result)))
+    }};
+}
+
+/// One mirror-settings call (`crate::mirrors`): authenticate, then run on
+/// the metadata store inside [`App::call`]. `repo` may be empty (a
+/// cross-repository `ListMirrors`).
+macro_rules! mirror_call {
+    ($self:ident, $request:ident, $op:literal, $write:expr,
+     |$meta:ident, $p:ident, $req:ident| $body:expr) => {{
+        let cx = $self.cx(&$request, $op)?;
+        let $req = $request.into_inner();
+        let repo = $req.repo.clone();
+        let out = $self
+            .app
+            .call($op, &repo, cx, $write, move |e, cx| async move {
+                let $meta = e.stores().0;
+                let $p = &cx.principal;
+                $body
+            })
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(out))
     }};
 }
 
@@ -1356,6 +1379,64 @@ impl pb::mirror_service_server::MirrorService for Services {
             .map_err(Status::from)?;
         tracing::info!(op = OP, count, "recorded exported commits");
         Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn set_mirror(
+        &self,
+        request: Request<pb::SetMirrorRequest>,
+    ) -> Result<Response<pb::Mirror>, Status> {
+        let policy = self.app.mirror.clone();
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "SetMirror", true, |meta, p, req| {
+            mirrors::set(meta, p, &policy, now_ms, req).await
+        })
+    }
+
+    async fn get_mirror(
+        &self,
+        request: Request<pb::MirrorKey>,
+    ) -> Result<Response<pb::Mirror>, Status> {
+        mirror_call!(self, request, "GetMirror", false, |meta, p, req| {
+            mirrors::get(meta, p, req).await
+        })
+    }
+
+    async fn list_mirrors(
+        &self,
+        request: Request<pb::ListMirrorsRequest>,
+    ) -> Result<Response<pb::MirrorPage>, Status> {
+        mirror_call!(self, request, "ListMirrors", false, |meta, p, req| {
+            mirrors::list(meta, p, req).await
+        })
+    }
+
+    async fn remove_mirror(
+        &self,
+        request: Request<pb::RemoveMirrorRequest>,
+    ) -> Result<Response<pb::RemoveMirrorResult>, Status> {
+        mirror_call!(self, request, "RemoveMirror", true, |meta, p, req| {
+            mirrors::remove(meta, p, req).await
+        })
+    }
+
+    async fn purge_mirror(
+        &self,
+        request: Request<pb::PurgeMirrorRequest>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        mirror_call!(self, request, "PurgeMirror", true, |meta, p, req| {
+            mirrors::purge(meta, p, req).await.map(|()| pb::Empty {})
+        })
+    }
+
+    async fn set_mirror_status(
+        &self,
+        request: Request<pb::SetMirrorStatusRequest>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        mirror_call!(self, request, "SetMirrorStatus", true, |meta, p, req| {
+            mirrors::set_status(meta, p, req)
+                .await
+                .map(|()| pb::Empty {})
+        })
     }
 }
 
