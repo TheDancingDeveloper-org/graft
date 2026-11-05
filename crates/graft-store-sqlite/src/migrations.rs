@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -312,6 +312,17 @@ CREATE TABLE repo_mirrors (
     status_lease_epoch    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (repo, upstream)
 ) WITHOUT ROWID;
+";
+
+/// Version 11: the mirror authority lease (D41 §3.6), one row per
+/// repository. A release clears `holder` and keeps `epoch`.
+const V11: &str = "
+CREATE TABLE mirror_leases (
+    repo       INTEGER PRIMARY KEY REFERENCES repos(id),
+    holder     TEXT,
+    epoch      INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
 ";
 
 /// The database's schema version.

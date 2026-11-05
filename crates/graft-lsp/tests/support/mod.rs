@@ -153,6 +153,7 @@ impl Rig {
                     expected: tip,
                     new: created.id,
                     kind: RefKind::Line,
+                    lease_epoch: None,
                 },
             )
             .await

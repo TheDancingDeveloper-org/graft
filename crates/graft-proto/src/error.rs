@@ -163,6 +163,12 @@ pub enum ApiError {
     /// The client's base is behind the line tip. Sync, then land again.
     /// Boxed so the error stays as small as the other variants.
     StaleBase(Box<StaleBase>),
+    /// The mirror authority lease on the repository is held under another
+    /// epoch, or has lapsed (D41 §3.6). Not retryable: the caller stops.
+    LeaseLost {
+        /// The repository.
+        repo: String,
+    },
 }
 
 impl ApiError {
@@ -202,6 +208,7 @@ impl ApiError {
             | ApiError::MissingObjects { .. }
             | ApiError::Rejected { .. }
             | ApiError::LeaseExpired { .. }
+            | ApiError::LeaseLost { .. }
             | ApiError::IncompatibleProtocol { .. } => Code::FailedPrecondition,
             ApiError::RefConflict { .. }
             | ApiError::Conflict { .. }
@@ -279,6 +286,9 @@ impl fmt::Display for ApiError {
             ApiError::Unauthenticated => f.write_str("unauthenticated"),
             ApiError::IncompatibleProtocol { server } => {
                 write!(f, "incompatible protocol; server speaks {server}")
+            }
+            ApiError::LeaseLost { repo } => {
+                write!(f, "the mirror lease on {repo} is held under another epoch")
             }
             ApiError::StaleBase(e) => write!(
                 f,

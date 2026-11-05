@@ -183,6 +183,7 @@ async fn health_metrics_and_the_json_facade() {
             expected: None,
             new: tip,
             kind: RefKind::Line,
+            lease_epoch: None,
         }))
         .await
         .expect("move main");

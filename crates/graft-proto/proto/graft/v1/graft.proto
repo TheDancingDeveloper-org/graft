@@ -207,6 +207,9 @@ message UpdateRefRequest {
   optional bytes expected = 3;
   bytes new = 4;
   RefKind kind = 5;
+  // The mirror authority lease epoch (D41 §3.6). Required when the mirror
+  // service moves a followed line; ignored otherwise.
+  optional uint64 lease_epoch = 6;
 }
 
 // Forks a line: CAS from absent to `from`. Never overwrites a ref.
@@ -973,6 +976,27 @@ message SetMirrorStatusRequest {
   MirrorStatus status = 3;
 }
 
+// The per-repository mirror authority lease (D41 §3.6), `repo:*:mirror`.
+// `instance` is a random id the mirror process picks at start; it is never
+// durable in a ref or object.
+message AcquireLeaseRequest {
+  string repo = 1;
+  string instance = 2;
+}
+
+message LeaseRequest {
+  string repo = 1;
+  uint64 epoch = 2;
+}
+
+// A held lease: the epoch every fenced call carries, and when it lapses
+// unless renewed.
+message Lease {
+  string repo = 1;
+  uint64 epoch = 2;
+  int64 expires_at_ms = 3;
+}
+
 // ---- errors (docs/design.md §7.10) ----------------------------------------
 
 // Carried in the `details` of a gRPC status, so errors round-trip losslessly.
@@ -1002,6 +1026,8 @@ message ApiError {
   message Unavailable { uint64 retry_after_ms = 1; }
   message Unauthenticated {}
   message IncompatibleProtocol { string server = 1; }
+  // The mirror authority lease is held under another epoch (D41 §3.6).
+  message LeaseLost { string repo = 1; }
   // A LineMerge conflict (D29): `onto` is the target tip, `base` the merge
   // base, `source` the source changeset merged.
   message MergeConflict {
@@ -1037,6 +1063,7 @@ message ApiError {
     Unauthenticated unauthenticated = 17;
     IncompatibleProtocol incompatible_protocol = 18;
     MergeConflict merge_conflict = 19;
+    LeaseLost lease_lost = 21;
   }
   optional StaleBase stale_base = 20;
 }
@@ -1121,6 +1148,9 @@ service MirrorService {
   rpc RemoveMirror(RemoveMirrorRequest) returns (RemoveMirrorResult);
   rpc PurgeMirror(PurgeMirrorRequest) returns (Empty);
   rpc SetMirrorStatus(SetMirrorStatusRequest) returns (Empty);
+  rpc AcquireLease(AcquireLeaseRequest) returns (Lease);
+  rpc RenewLease(LeaseRequest) returns (Lease);
+  rpc ReleaseLease(LeaseRequest) returns (Empty);
 }
 
 // Review and land-check reads (v0.2, WI-2590). Not served yet.

@@ -238,6 +238,7 @@ impl Site {
                     expected: None,
                     new: tip,
                     kind: RefKind::Line,
+                    lease_epoch: None,
                 },
             )
             .await
@@ -684,6 +685,7 @@ fn a_client_cannot_use_a_scope_it_does_not_hold() {
                         expected: None,
                         new: draft,
                         kind: RefKind::Tool,
+                        lease_epoch: None,
                     },
                 ))
                 .map(drop)

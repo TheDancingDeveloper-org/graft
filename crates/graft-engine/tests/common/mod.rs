@@ -370,6 +370,7 @@ impl<'f, M: MetaStore> Repo<'f, M> {
                 expected,
                 new,
                 kind,
+                lease_epoch: None,
             },
         ))
     }

@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
-    AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandingRow, LineMergeRow, Lsn,
-    MetaStore, MetaTxn, MirrorListing, MirrorQuery, MirrorRecord, Protection, RecordState,
+    AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandingRow, LeaseRecord, LineMergeRow,
+    Lsn, MetaStore, MetaTxn, MirrorListing, MirrorQuery, MirrorRecord, Protection, RecordState,
     RefRecord, RepoId, StoreError, StoreResult, TimedRow, TxnOutcome, WorkspaceRecord,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -339,6 +339,14 @@ impl MetaStore for SqliteMetaStore {
         self.read("get_mirror", move |c| {
             reader::check_repo(c, repo)?;
             mirrors::get(c, repo, &upstream)
+        })
+        .await
+    }
+
+    async fn get_lease(&self, repo: RepoId) -> StoreResult<Option<LeaseRecord>> {
+        self.read("get_lease", move |c| {
+            reader::check_repo(c, repo)?;
+            crate::mirrors::lease(c, i64::from(repo.0))
         })
         .await
     }

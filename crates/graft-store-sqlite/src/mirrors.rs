@@ -6,7 +6,7 @@
 //! that would not read back.
 
 use graft_store::{
-    MirrorDirection, MirrorExportRecord, MirrorLineRecord, MirrorListing, MirrorQuery,
+    LeaseRecord, MirrorDirection, MirrorExportRecord, MirrorLineRecord, MirrorListing, MirrorQuery,
     MirrorRecord, MirrorStatusRecord, RepoId, StoreError, StoreResult, page_limit,
 };
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
@@ -299,6 +299,42 @@ pub(crate) fn set_status(
             epoch,
         ])
     })
+    .map_err(sql_err)?;
+    Ok(())
+}
+
+/// The repository's lease row (D41 §3.6), if it ever had one.
+pub(crate) fn lease(conn: &Connection, repo: i64) -> StoreResult<Option<LeaseRecord>> {
+    let row: Option<(Option<String>, i64, i64)> = conn
+        .prepare_cached("SELECT holder, epoch, expires_at FROM mirror_leases WHERE repo = ?1")
+        .and_then(|mut s| {
+            s.query_row(params![repo], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .optional()
+        })
+        .map_err(sql_err)?;
+    row.map(|(holder, epoch, expires_at_ms)| {
+        Ok(LeaseRecord {
+            holder,
+            epoch: uint(epoch)?,
+            expires_at_ms,
+        })
+    })
+    .transpose()
+}
+
+/// The stored epoch, 0 when the repository never had a lease.
+pub(crate) fn lease_epoch(conn: &Connection, repo: i64) -> StoreResult<u64> {
+    Ok(lease(conn, repo)?.map_or(0, |l| l.epoch))
+}
+
+pub(crate) fn put_lease(conn: &Connection, repo: i64, l: &LeaseRecord) -> StoreResult<()> {
+    let epoch = int(l.epoch)?;
+    conn.prepare_cached(
+        "INSERT INTO mirror_leases (repo, holder, epoch, expires_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (repo) DO UPDATE SET holder = excluded.holder,
+             epoch = excluded.epoch, expires_at = excluded.expires_at",
+    )
+    .and_then(|mut s| s.execute(params![repo, l.holder, epoch, l.expires_at_ms]))
     .map_err(sql_err)?;
     Ok(())
 }

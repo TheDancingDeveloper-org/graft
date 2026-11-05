@@ -13,12 +13,14 @@ use graft_engine::policy::{
     RevertRequest, Verdict,
 };
 use graft_engine::{EngineConfig, LandHooks, LineConfig, REBASED_FROM};
-use graft_model::ChangesetId;
+use graft_model::{ChangesetId, Clock as _};
 use graft_proto::error::ApiResult;
 use graft_proto::types::*;
 use graft_proto::{ApiError, CallContext, PrincipalKind, RepoApi, WorkspaceApi};
 use graft_store::memory::MemoryStore;
-use graft_store::{ChangesetRecord, MetaStore, RecordState};
+use graft_store::{
+    ChangesetRecord, LeaseRecord, MetaStore, MetaTxn, Precondition, RecordState, TxnOutcome, Write,
+};
 
 const LINES: &[&str] = &["main", "trunk", "rel", "gp"];
 
@@ -864,6 +866,7 @@ fn followed_lines_refuse_lands<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)
                 expected,
                 new,
                 kind: RefKind::Tool,
+                lease_epoch: None,
             },
         ))
     };
@@ -950,7 +953,26 @@ fn the_mirror_moves_only_followed_lines<M: MetaStore>((f, _): (Fixture<M>, Arc<R
     t.r.update_ref(&followed_ref("up"), None, first, RefKind::Tool)
         .expect("mark");
     let next = t.commit(first, &[("c", b"3")]);
-    let move_as = |cx: &CallContext, line: &str, expected| {
+    // The mirror's authority lease (D41 §3.6), epoch 1 for 60 s.
+    let meta = f.engine.stores().0;
+    let id = block_on(meta.repo("r")).expect("repo").expect("exists");
+    let lease = |expected, epoch, expires_at_ms| {
+        let txn = MetaTxn {
+            preconditions: vec![Precondition::LeaseEpochIs { epoch: expected }],
+            writes: vec![Write::PutLease(LeaseRecord {
+                holder: Some("m/i".to_owned()),
+                epoch,
+                expires_at_ms,
+            })],
+        };
+        assert!(matches!(
+            block_on(meta.commit(id, txn)),
+            Ok(TxnOutcome::Committed(_))
+        ));
+    };
+    let now = f.clock.now().ms;
+    lease(0, 1, now + 60_000);
+    let move_at = |cx: &CallContext, line: &str, expected, lease_epoch| {
         block_on(t.r.e().update_ref(
             cx,
             UpdateRef {
@@ -959,9 +981,11 @@ fn the_mirror_moves_only_followed_lines<M: MetaStore>((f, _): (Fixture<M>, Arc<R
                 expected,
                 new: next,
                 kind: RefKind::Line,
+                lease_epoch,
             },
         ))
     };
+    let move_as = |cx: &CallContext, line: &str, expected| move_at(cx, line, expected, Some(1));
     let denied = Err(ApiError::PermissionDenied {
         scope: "repo:r:admin".to_owned(),
         path: None,
@@ -980,7 +1004,24 @@ fn the_mirror_moves_only_followed_lines<M: MetaStore>((f, _): (Fixture<M>, Arc<R
         Err(ApiError::RefConflict { .. })
     ));
     assert_eq!(t.tip("up").target, first);
-    move_as(&mirror, "up", Some(first)).expect("mirror moves the followed line");
+    // Fenced: no epoch, a lapsed lease, or an epoch superseded by a
+    // reacquire is `LeaseLost`, and the line stays put.
+    let lost = |r: ApiResult<RefView>| {
+        assert_eq!(
+            r.map(drop),
+            Err(ApiError::LeaseLost {
+                repo: "r".to_owned()
+            })
+        );
+    };
+    lost(move_at(&mirror, "up", Some(first), None));
+    lost(move_at(&mirror, "up", Some(first), Some(2)));
+    f.clock.advance(60_000);
+    lost(move_as(&mirror, "up", Some(first)));
+    lease(1, 2, now + 120_000);
+    lost(move_as(&mirror, "up", Some(first)));
+    assert_eq!(t.tip("up").target, first);
+    move_at(&mirror, "up", Some(first), Some(2)).expect("mirror moves the followed line");
     assert_eq!(t.tip("up").target, next);
     // Nor can it move the marker, a tag or a tool ref.
     assert!(matches!(
@@ -992,6 +1033,7 @@ fn the_mirror_moves_only_followed_lines<M: MetaStore>((f, _): (Fixture<M>, Arc<R
                 expected: None,
                 new: first,
                 kind: RefKind::Tool,
+                lease_epoch: None,
             },
         )),
         Err(ApiError::PermissionDenied { .. })

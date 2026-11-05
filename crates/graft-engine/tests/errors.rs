@@ -510,6 +510,7 @@ fn permission_denied() {
             expected: None,
             new: a,
             kind: RefKind::Line,
+            lease_epoch: None,
         },
     ));
     assert_eq!(denied(line).0, "repo:r:admin");
@@ -521,6 +522,7 @@ fn permission_denied() {
             expected: None,
             new: a,
             kind: RefKind::Tool,
+            lease_epoch: None,
         },
     ))
     .expect("a writer moves a tool ref");

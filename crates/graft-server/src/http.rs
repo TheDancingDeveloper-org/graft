@@ -1226,6 +1226,7 @@ pub(crate) mod tests {
                     expected: None,
                     new: tip,
                     kind: RefKind::Tool,
+                    lease_epoch: None,
                 },
             )
             .await
