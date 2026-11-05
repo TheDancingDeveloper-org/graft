@@ -141,6 +141,7 @@ impl EngineRepo {
                     expected: None,
                     new: root,
                     kind: RefKind::Line,
+                    lease_epoch: None,
                 },
             )
             .await

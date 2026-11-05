@@ -130,6 +130,7 @@ impl Rig {
                     expected: None,
                     new: root.id,
                     kind: RefKind::Line,
+                    lease_epoch: None,
                 },
             )
             .await
@@ -966,6 +967,7 @@ async fn advance_readme(rig: &Rig, content: &str) -> ChangesetId {
                 expected: Some(tip),
                 new: id,
                 kind: RefKind::Line,
+                lease_epoch: None,
             },
         )
         .await
@@ -1197,6 +1199,7 @@ async fn a_model_review_pass_empties_the_real_review_queue() {
                 expected: None,
                 new: root,
                 kind: RefKind::Line,
+                lease_epoch: None,
             },
         )
         .await

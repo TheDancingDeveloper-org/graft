@@ -880,6 +880,7 @@ impl<M: MetaStore + 'static> World<M> {
                 expected,
                 new,
                 kind: RefKind::Line,
+                lease_epoch: None,
             },
         ))
     }

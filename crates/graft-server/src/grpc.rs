@@ -1432,8 +1432,41 @@ impl pb::mirror_service_server::MirrorService for Services {
         &self,
         request: Request<pb::SetMirrorStatusRequest>,
     ) -> Result<Response<pb::Empty>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
         mirror_call!(self, request, "SetMirrorStatus", true, |meta, p, req| {
-            mirrors::set_status(meta, p, req)
+            mirrors::set_status(meta, p, now_ms, req)
+                .await
+                .map(|()| pb::Empty {})
+        })
+    }
+
+    async fn acquire_lease(
+        &self,
+        request: Request<pb::AcquireLeaseRequest>,
+    ) -> Result<Response<pb::Lease>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "AcquireLease", true, |meta, p, req| {
+            mirrors::acquire_lease(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn renew_lease(
+        &self,
+        request: Request<pb::LeaseRequest>,
+    ) -> Result<Response<pb::Lease>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "RenewLease", true, |meta, p, req| {
+            mirrors::renew_lease(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn release_lease(
+        &self,
+        request: Request<pb::LeaseRequest>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "ReleaseLease", true, |meta, p, req| {
+            mirrors::release_lease(meta, p, now_ms, req)
                 .await
                 .map(|()| pb::Empty {})
         })

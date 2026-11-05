@@ -44,6 +44,7 @@ pub(crate) fn run(g: &Global, args: &TagArgs) -> Result<(), Failure> {
                             expected: None,
                             new: at,
                             kind: RefKind::Tag,
+                            lease_epoch: None,
                         },
                     )
                     .await?;

@@ -159,6 +159,7 @@ async fn mcp_takes_the_bearer_token_and_the_engine_scopes() {
             expected: None,
             new: root.id,
             kind: RefKind::Line,
+            lease_epoch: None,
         }))
         .await
         .expect("main");
@@ -382,6 +383,7 @@ async fn mcp_refuses_writes_by_a_revoked_token_and_still_serves_its_reads() {
             expected: None,
             new: root.id,
             kind: RefKind::Line,
+            lease_epoch: None,
         }))
         .await
         .expect("main");

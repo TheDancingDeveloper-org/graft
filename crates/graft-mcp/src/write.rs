@@ -779,6 +779,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
                     expected: None,
                     new: at,
                     kind: RefKind::Tag,
+                    lease_epoch: None,
                 },
             )
             .await

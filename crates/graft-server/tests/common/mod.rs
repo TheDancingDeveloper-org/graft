@@ -389,6 +389,7 @@ impl Clients {
                 expected: None,
                 new: tip,
                 kind: graft_proto::types::RefKind::Line,
+                lease_epoch: None,
             }))
             .await
             .map(|_| ())

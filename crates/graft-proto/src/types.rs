@@ -203,6 +203,9 @@ pub struct UpdateRef {
     pub new: ChangesetId,
     /// Kind, when creating.
     pub kind: RefKind,
+    /// The mirror authority lease epoch (D41 §3.6). The mirror service sets
+    /// it when it moves a followed line; other callers leave it `None`.
+    pub lease_epoch: Option<u64>,
 }
 
 /// The prefix of a followed-line marker: the tool ref

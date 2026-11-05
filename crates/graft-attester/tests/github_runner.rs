@@ -1205,6 +1205,7 @@ async fn repo(retries: u32) -> Arc<Eng> {
                 expected: None,
                 new: root,
                 kind: RefKind::Line,
+                lease_epoch: None,
             },
         )
         .await

@@ -277,6 +277,7 @@ pub async fn move_ref<A: RepoApi>(
             expected,
             new,
             kind,
+            lease_epoch: None,
         },
     )
     .await

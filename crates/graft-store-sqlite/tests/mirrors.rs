@@ -8,9 +8,9 @@ use common::{TempDir, block_on};
 use graft_model::{ChangesetId, ObjectId};
 use graft_store::memory::MemoryStore;
 use graft_store::{
-    MetaStore, MetaTxn, MirrorDirection, MirrorExportRecord, MirrorLineRecord, MirrorQuery,
-    MirrorRecord, MirrorStatusRecord, Precondition, RefKind, RefRecord, RepoId, StoreError,
-    TxnOutcome, Write,
+    LeaseRecord, MetaStore, MetaTxn, MirrorDirection, MirrorExportRecord, MirrorLineRecord,
+    MirrorQuery, MirrorRecord, MirrorStatusRecord, Precondition, RefKind, RefRecord, RepoId,
+    StoreError, TxnOutcome, Write,
 };
 use graft_store_sqlite::migrations;
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
@@ -65,6 +65,7 @@ trait Store {
     fn list(&self, q: MirrorQuery) -> Vec<(String, String)>;
     fn get_ref(&self, repo: RepoId, name: &str) -> Option<RefRecord>;
     fn journal_len(&self, repo: RepoId) -> usize;
+    fn lease(&self, repo: RepoId) -> Option<LeaseRecord>;
 }
 
 /// The directory lives as long as the store.
@@ -111,6 +112,10 @@ macro_rules! store_impl {
                 block_on($e.journal_tip(repo))
                     .expect("journal")
                     .map_or(0, |l| l as usize)
+            }
+            fn lease(&self, repo: RepoId) -> Option<LeaseRecord> {
+                let $s = self;
+                block_on($e.get_lease(repo)).expect("lease")
             }
         }
     };
@@ -365,5 +370,86 @@ fn a_version_9_database_migrates_and_keeps_its_data() {
         Some(row(UP, 1))
     );
     let conn = Connection::open(dir.db()).expect("inspect");
-    assert_eq!(migrations::version(&conn).expect("version"), 10);
+    assert_eq!(
+        migrations::version(&conn).expect("version"),
+        migrations::SCHEMA_VERSION
+    );
+}
+
+fn put_lease(expected: u64, holder: Option<&str>, epoch: u64, expires_at_ms: i64) -> MetaTxn {
+    MetaTxn {
+        preconditions: vec![Precondition::LeaseEpochIs { epoch: expected }],
+        writes: vec![Write::PutLease(LeaseRecord {
+            holder: holder.map(str::to_owned),
+            epoch,
+            expires_at_ms,
+        })],
+    }
+}
+
+/// D41 §3.6: the lease row is written by CAS on its epoch, the epoch moves
+/// by at most one and survives a release, and `LeaseHeld` fences on epoch,
+/// holder and expiry.
+#[test]
+fn the_lease_is_compare_and_swap_on_its_epoch_and_fences_writes() {
+    with_both(|make| {
+        let s = make();
+        let repo = s.create("r");
+        assert_eq!(s.lease(repo), None);
+
+        // Two acquirers read epoch 0; the first CAS wins, the second fails.
+        assert_eq!(
+            s.commit(repo, put_lease(0, Some("a"), 1, 60_000))
+                .expect("a"),
+            TxnOutcome::Committed(vec![])
+        );
+        assert_eq!(
+            s.commit(repo, put_lease(0, Some("b"), 1, 60_000))
+                .expect("b"),
+            TxnOutcome::PreconditionFailed(0)
+        );
+        assert_eq!(s.lease(repo).and_then(|l| l.holder).as_deref(), Some("a"));
+
+        // An epoch that skips, or has no guard, is refused outright.
+        assert!(matches!(
+            s.commit(repo, put_lease(1, Some("a"), 3, 60_000)),
+            Err(StoreError::Invalid(_))
+        ));
+        let unguarded = MetaTxn {
+            preconditions: vec![],
+            writes: vec![Write::PutLease(LeaseRecord {
+                holder: None,
+                epoch: 1,
+                expires_at_ms: 0,
+            })],
+        };
+        assert!(matches!(
+            s.commit(repo, unguarded),
+            Err(StoreError::Invalid(_))
+        ));
+
+        let fenced = |epoch, now_ms| MetaTxn {
+            preconditions: vec![Precondition::LeaseHeld { epoch, now_ms }],
+            writes: vec![],
+        };
+        let ok = TxnOutcome::Committed(vec![]);
+        let lost = TxnOutcome::PreconditionFailed(0);
+        assert_eq!(s.commit(repo, fenced(1, 59_999)).expect("held"), ok);
+        assert_eq!(s.commit(repo, fenced(1, 60_000)).expect("lapsed"), lost);
+        assert_eq!(s.commit(repo, fenced(2, 0)).expect("wrong epoch"), lost);
+
+        // A release keeps the epoch, and the lease no longer fences in.
+        assert_eq!(
+            s.commit(repo, put_lease(1, None, 1, 0)).expect("release"),
+            ok
+        );
+        assert_eq!(s.lease(repo).map(|l| (l.holder, l.epoch)), Some((None, 1)));
+        assert_eq!(s.commit(repo, fenced(1, 0)).expect("released"), lost);
+        assert_eq!(
+            s.commit(repo, put_lease(1, Some("b"), 2, 9))
+                .expect("again"),
+            ok
+        );
+        assert_eq!(s.lease(repo).map(|l| l.epoch), Some(2));
+    });
 }

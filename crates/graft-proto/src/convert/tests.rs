@@ -243,6 +243,7 @@ fn api_error() -> impl Strategy<Value = ApiError> {
         (text(), text()).prop_map(|(policy, detail)| ApiError::Rejected { policy, detail }),
         (text(), otext()).prop_map(|(scope, path)| ApiError::PermissionDenied { scope, path }),
         text().prop_map(|workspace| ApiError::LeaseExpired { workspace }),
+        text().prop_map(|repo| ApiError::LeaseLost { repo }),
         (text(), any::<u64>()).prop_map(|(limit, max)| ApiError::LimitExceeded { limit, max }),
         oid().prop_map(|id| ApiError::CorruptObject { id }),
         oid().prop_map(|id| ApiError::Obliterated { id: BlobId(id) }),
@@ -394,15 +395,22 @@ fn ref_types_round_trip() {
     );
     check::<UpdateRef, pb::UpdateRefRequest, _>(
         "UpdateRef",
-        (text(), text(), ocid(), cid(), ref_kind()).prop_map(
-            |(repo, name, expected, new, kind)| UpdateRef {
+        (
+            text(),
+            text(),
+            ocid(),
+            cid(),
+            ref_kind(),
+            proptest::option::of(any::<u64>()),
+        )
+            .prop_map(|(repo, name, expected, new, kind, lease_epoch)| UpdateRef {
                 repo,
                 name,
                 expected,
                 new,
+                lease_epoch,
                 kind,
-            },
-        ),
+            }),
     );
     check::<CreateLine, pb::CreateLineRequest, _>(
         "CreateLine",
