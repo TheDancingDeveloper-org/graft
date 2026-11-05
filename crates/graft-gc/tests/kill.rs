@@ -130,6 +130,7 @@ fn build(dir: &Path) -> (ChangesetId, Vec<ObjectId>) {
             expected: None,
             new: root,
             kind: RefKind::Line,
+            lease_epoch: None,
         },
     ))
     .expect("line");

@@ -89,6 +89,7 @@ async fn import_kill9_restart_fetch_fsck() {
             expected: None,
             new: tip,
             kind: RefKind::Line,
+            lease_epoch: None,
         }))
         .await
         .expect("move main");

@@ -144,8 +144,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let kind = current.as_ref().map_or(to_stored(req.kind), |r| r.kind);
         // A followed-line marker is admin-only: it decides who may land.
         let marker = req.name.starts_with(FOLLOWED_REF_PREFIX);
+        let followed =
+            kind == StoredKind::Line && mirror && self.is_followed(repo, &req.name).await?;
         let need = match kind {
-            StoredKind::Line if mirror && self.is_followed(repo, &req.name).await? => None,
+            StoredKind::Line if followed => None,
             StoredKind::Line => Some(Need::Admin),
             StoredKind::Tool if marker => Some(Need::Admin),
             StoredKind::Tag | StoredKind::Tool => Some(Need::Write(None)),
@@ -175,7 +177,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
         // The target exists here (and is not collected).
         self.changeset(repo, req.new).await?;
-        self.move_ref(cx, repo, req.name, current, kind, req.new)
+        // The mirror moves a followed line only under its authority lease,
+        // checked in the move's own transaction (D41 §3.6).
+        let lease = if followed {
+            let Some(epoch) = req.lease_epoch else {
+                return Err(ApiError::LeaseLost { repo: req.repo });
+            };
+            Some((epoch, req.repo))
+        } else {
+            None
+        };
+        self.move_ref(cx, repo, req.name, current, kind, req.new, lease)
             .await
     }
 
@@ -208,12 +220,15 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             });
         }
         self.changeset(repo, req.from).await?;
-        self.move_ref(cx, repo, req.name, None, StoredKind::Line, req.from)
+        self.move_ref(cx, repo, req.name, None, StoredKind::Line, req.from, None)
             .await
     }
 
     /// Moves ref `name` from `current` to `new` by CAS, with its journal
     /// entry (and, for a line, its index rows) in the same transaction.
+    /// `lease` is the mirror's `(epoch, repository name)`: the move commits
+    /// only while that lease is held.
+    #[allow(clippy::too_many_arguments)]
     async fn move_ref(
         &self,
         cx: &CallContext,
@@ -222,6 +237,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         current: Option<RefRecord>,
         kind: StoredKind,
         new: ChangesetId,
+        lease: Option<(u64, String)>,
     ) -> Result<RefView, ApiError> {
         let actual = current.as_ref().map(|r| r.target);
         let version = current.as_ref().map_or(1, |r| r.version + 1);
@@ -233,6 +249,12 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 name: name.clone(),
                 expected: current.as_ref().map(|r| (r.target, r.version)),
             }];
+            if let Some((epoch, _)) = &lease {
+                preconditions.push(Precondition::LeaseHeld {
+                    epoch: *epoch,
+                    now_ms: self.clock.now().ms,
+                });
+            }
             let mut writes = Vec::new();
             if kind == StoredKind::Line && actual != Some(new) {
                 writes = self
@@ -275,6 +297,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                         name,
                         actual: now.map(|r| r.target),
                     });
+                }
+                TxnOutcome::PreconditionFailed(1) if lease.is_some() => {
+                    let (_, repo) = lease.expect("checked");
+                    return Err(ApiError::LeaseLost { repo });
                 }
                 TxnOutcome::PreconditionFailed(_) => {}
             }

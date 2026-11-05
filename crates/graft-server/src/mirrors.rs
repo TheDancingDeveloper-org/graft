@@ -16,16 +16,24 @@
 //! `RemoveMirror --clear-followed` deletes each line's followed marker in
 //! the removal's transaction, with one `RefDeleted` journal entry per
 //! marker: `{"name":"graft.followed/main","old":"c…","version":3,"actor":"…"}`.
+//!
+//! The authority lease (§3.6): one `mirror_leases` row per repository.
+//! `AcquireLease` takes it by CAS when it is free or lapsed and bumps the
+//! epoch; `RenewLease` and `ReleaseLease` name the epoch they hold. Every
+//! mirror write carries that epoch and commits under a `LeaseHeld`
+//! precondition, so a fenced-off process gets a typed `LeaseLost` and its
+//! write is not applied.
 
 use std::net::{IpAddr, Ipv4Addr};
 
 use graft_auth::Scope;
 use graft_model::{ChangesetId, ObjectId};
 use graft_proto::types::followed_ref;
-use graft_proto::{ApiError, Principal, pb};
+use graft_proto::{ApiError, Principal, PrincipalKind, pb};
 use graft_store::{
-    MetaStore, MetaTxn, MirrorDirection, MirrorExportRecord, MirrorLineRecord, MirrorQuery,
-    MirrorRecord, MirrorStatusRecord, Precondition, RepoId, StoreError, TxnOutcome, Write,
+    LeaseRecord, MetaStore, MetaTxn, MirrorDirection, MirrorExportRecord, MirrorLineRecord,
+    MirrorQuery, MirrorRecord, MirrorStatusRecord, Precondition, RepoId, StoreError, TxnOutcome,
+    Write,
 };
 
 /// The poll interval a row gets when it names none (D9).
@@ -46,6 +54,13 @@ pub(crate) const MAX_STATUS_MESSAGE: usize = 200;
 
 /// The most rows one `ListMirrors` page returns.
 pub(crate) const MAX_PAGE: u32 = 200;
+
+/// How long a lease lives unless renewed (§3.6). The service renews it every
+/// 20 seconds.
+pub(crate) const LEASE_TTL_MS: i64 = 60_000;
+
+/// The longest lease instance id accepted.
+const MAX_INSTANCE: usize = 64;
 
 /// The journal kind of a deleted followed marker.
 pub(crate) const REF_DELETED: &str = "RefDeleted";
@@ -709,6 +724,7 @@ fn error_code(code: i32) -> Result<Option<String>, ApiError> {
 pub(crate) async fn set_status<M: MetaStore>(
     meta: &M,
     p: &Principal,
+    now_ms: i64,
     req: pb::SetMirrorStatusRequest,
 ) -> Result<(), ApiError> {
     any_of(
@@ -767,13 +783,152 @@ pub(crate) async fn set_status<M: MetaStore>(
         return Err(not_found(&req.repo));
     }
     let txn = MetaTxn {
-        preconditions: vec![],
+        preconditions: vec![Precondition::LeaseHeld {
+            epoch: status.lease_epoch,
+            now_ms,
+        }],
         writes: vec![Write::SetMirrorStatus {
             upstream: req.upstream,
             status,
         }],
     };
-    meta.commit(id, txn).await.map_err(store)?;
+    match meta.commit(id, txn).await.map_err(store)? {
+        TxnOutcome::Committed(_) => Ok(()),
+        TxnOutcome::PreconditionFailed(_) => Err(lease_lost(&req.repo)),
+    }
+}
+
+fn lease_lost(repo: &str) -> ApiError {
+    ApiError::LeaseLost {
+        repo: repo.to_owned(),
+    }
+}
+
+/// Lease calls are the mirror permission set on a mirror-kind token only.
+fn lease_caller(p: &Principal, repo: &str) -> Result<(), ApiError> {
+    any_of(
+        p,
+        &[Scope::Mirror {
+            repo: repo.to_owned(),
+        }],
+    )?;
+    if p.kind != PrincipalKind::Mirror {
+        return Err(ApiError::PermissionDenied {
+            scope: format!("repo:{repo}:mirror"),
+            path: None,
+        });
+    }
+    Ok(())
+}
+
+fn lease_view(repo: &str, l: &LeaseRecord) -> pb::Lease {
+    pb::Lease {
+        repo: repo.to_owned(),
+        epoch: l.epoch,
+        expires_at_ms: l.expires_at_ms,
+    }
+}
+
+/// Writes `next` under a CAS on the stored epoch `expected`.
+async fn put_lease<M: MetaStore>(
+    meta: &M,
+    id: RepoId,
+    repo: &str,
+    expected: u64,
+    next: LeaseRecord,
+) -> Result<LeaseRecord, ApiError> {
+    let txn = MetaTxn {
+        preconditions: vec![Precondition::LeaseEpochIs { epoch: expected }],
+        writes: vec![Write::PutLease(next.clone())],
+    };
+    match meta.commit(id, txn).await.map_err(store)? {
+        TxnOutcome::Committed(_) => Ok(next),
+        TxnOutcome::PreconditionFailed(_) => Err(lease_lost(repo)),
+    }
+}
+
+/// `AcquireLease` (§3.6): takes the lease when it is free or lapsed, under
+/// the next epoch. A lease another holder still holds is `LeaseLost`, as is
+/// losing the race to a concurrent acquirer.
+pub(crate) async fn acquire_lease<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    now_ms: i64,
+    req: pb::AcquireLeaseRequest,
+) -> Result<pb::Lease, ApiError> {
+    lease_caller(p, &req.repo)?;
+    if req.instance.is_empty()
+        || req.instance.len() > MAX_INSTANCE
+        || req
+            .instance
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err(refused(
+            "mirror-field",
+            format!("instance is 1 to {MAX_INSTANCE} bytes with no whitespace"),
+        ));
+    }
+    let id = repo_id(meta, &req.repo).await?;
+    let current = meta.get_lease(id).await.map_err(store)?;
+    let epoch = current.as_ref().map_or(0, |l| l.epoch);
+    if current
+        .as_ref()
+        .is_some_and(|l| l.holder.is_some() && now_ms < l.expires_at_ms)
+    {
+        return Err(lease_lost(&req.repo));
+    }
+    let next = LeaseRecord {
+        holder: Some(format!("{}/{}", p.subject, req.instance)),
+        epoch: epoch + 1,
+        expires_at_ms: now_ms.saturating_add(LEASE_TTL_MS),
+    };
+    let l = put_lease(meta, id, &req.repo, epoch, next).await?;
+    Ok(lease_view(&req.repo, &l))
+}
+
+/// `RenewLease`: extends a lease still held under `epoch` by the TTL.
+pub(crate) async fn renew_lease<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    now_ms: i64,
+    req: pb::LeaseRequest,
+) -> Result<pb::Lease, ApiError> {
+    lease_caller(p, &req.repo)?;
+    let id = repo_id(meta, &req.repo).await?;
+    let current = meta.get_lease(id).await.map_err(store)?;
+    let Some(l) = current.filter(|l| l.held(req.epoch, now_ms)) else {
+        return Err(lease_lost(&req.repo));
+    };
+    let next = LeaseRecord {
+        expires_at_ms: now_ms.saturating_add(LEASE_TTL_MS),
+        ..l
+    };
+    let l = put_lease(meta, id, &req.repo, req.epoch, next).await?;
+    Ok(lease_view(&req.repo, &l))
+}
+
+/// `ReleaseLease`: frees a lease held under `epoch`, keeping the epoch so
+/// the next acquire moves past it. Releasing a lease already lost is
+/// `LeaseLost`.
+pub(crate) async fn release_lease<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    now_ms: i64,
+    req: pb::LeaseRequest,
+) -> Result<(), ApiError> {
+    lease_caller(p, &req.repo)?;
+    let id = repo_id(meta, &req.repo).await?;
+    let current = meta.get_lease(id).await.map_err(store)?;
+    if !current.is_some_and(|l| l.held(req.epoch, now_ms)) {
+        return Err(lease_lost(&req.repo));
+    }
+    let next = LeaseRecord {
+        holder: None,
+        epoch: req.epoch,
+        expires_at_ms: now_ms,
+    };
+    put_lease(meta, id, &req.repo, req.epoch, next).await?;
     Ok(())
 }
 
@@ -825,6 +980,44 @@ mod tests {
             enabled: true,
             export: None,
             expected_version: expected,
+        }
+    }
+
+    /// A mirror-kind token holding the mirror permission set.
+    fn mirror_token(subject: &str) -> Principal {
+        Principal {
+            subject: subject.into(),
+            kind: PrincipalKind::Mirror,
+            ..who(&["repo:*:mirror"])
+        }
+    }
+
+    /// Takes the lease on `r` at `now_ms`, returning its epoch.
+    async fn take(s: &impl MetaStore, p: &Principal, now_ms: i64) -> Result<u64, ApiError> {
+        acquire_lease(
+            s,
+            p,
+            now_ms,
+            pb::AcquireLeaseRequest {
+                repo: "r".into(),
+                instance: "i1".into(),
+            },
+        )
+        .await
+        .map(|l| l.epoch)
+    }
+
+    fn lost<T: std::fmt::Debug>(r: Result<T, ApiError>) {
+        assert!(
+            matches!(r, Err(ApiError::LeaseLost { ref repo }) if repo == "r"),
+            "{r:?}"
+        );
+    }
+
+    fn held(epoch: u64) -> pb::LeaseRequest {
+        pb::LeaseRequest {
+            repo: "r".into(),
+            epoch,
         }
     }
 
@@ -1031,7 +1224,7 @@ mod tests {
         let reader = who(&["repo:r:read"]);
         let bind = who(&["mirror:bind"]);
         let operator = who(&["mirror:bind", "mirror:export", "repo:r:admin"]);
-        let mirror = who(&["repo:*:mirror"]);
+        let mirror = mirror_token("m");
         let follow = vec![line("main", "follow")];
 
         // Creating a row (binding an upstream) needs mirror:bind: a repo
@@ -1128,17 +1321,24 @@ mod tests {
         let status = pb::SetMirrorStatusRequest {
             repo: "r".into(),
             upstream: UP.into(),
-            status: Some(pb::MirrorStatus::default()),
+            status: Some(pb::MirrorStatus {
+                lease_epoch: 1,
+                ..pb::MirrorStatus::default()
+            }),
         };
         denied(
-            set_status(&s, &admin, status.clone()).await,
+            set_status(&s, &admin, 0, status.clone()).await,
             "repo:r:mirror",
         );
         denied(
-            set_status(&s, &operator, status.clone()).await,
+            set_status(&s, &operator, 0, status.clone()).await,
             "repo:r:mirror",
         );
-        set_status(&s, &mirror, status)
+        // A lease is not the operator's to take; the mirror's lease fences
+        // its status write.
+        denied(take(&s, &operator, 0).await, "repo:r:mirror");
+        assert_eq!(take(&s, &mirror, 0).await, Ok(1));
+        set_status(&s, &mirror, 0, status)
             .await
             .expect("mirror writes status");
 
@@ -1466,18 +1666,20 @@ mod tests {
     #[tokio::test]
     async fn status_is_bounded_typed_and_never_creates_a_row() {
         let s = store().await;
-        let mirror = who(&["repo:*:mirror"]);
+        let mirror = mirror_token("m");
         let status = |message: String| pb::SetMirrorStatusRequest {
             repo: "r".into(),
             upstream: UP.into(),
             status: Some(pb::MirrorStatus {
                 error_code: pb::MirrorErrorCode::Timeout as i32,
                 error_message: Some(message),
+                lease_epoch: 1,
                 ..pb::MirrorStatus::default()
             }),
         };
+        assert_eq!(take(&s, &mirror, 0).await, Ok(1));
         assert!(matches!(
-            set_status(&s, &mirror, status("x".into())).await,
+            set_status(&s, &mirror, 0, status("x".into())).await,
             Err(ApiError::NotFound { .. })
         ));
         set(
@@ -1490,10 +1692,10 @@ mod tests {
         .await
         .expect("create");
         rejected(
-            set_status(&s, &mirror, status("x".repeat(201))).await,
+            set_status(&s, &mirror, 0, status("x".repeat(201))).await,
             "mirror-field",
         );
-        set_status(&s, &mirror, status("é".repeat(200)))
+        set_status(&s, &mirror, 0, status("é".repeat(200)))
             .await
             .expect("200 characters");
         let id = s.repo("r").await.expect("repo").expect("exists");
@@ -1516,6 +1718,161 @@ mod tests {
         assert_eq!(
             got.status.expect("status").error_code,
             pb::MirrorErrorCode::Timeout as i32
+        );
+    }
+
+    /// §3.6: acquire bumps the epoch, renew extends by the TTL, a lapsed
+    /// lease is taken again under a higher epoch, and release keeps the
+    /// epoch. The clock is the `now_ms` argument: no sleeps.
+    #[tokio::test]
+    async fn the_lease_is_acquired_renewed_and_expires() {
+        let s = store().await;
+        let (a, b) = (mirror_token("a"), mirror_token("b"));
+
+        assert_eq!(take(&s, &a, 0).await, Ok(1));
+        lost(take(&s, &b, LEASE_TTL_MS - 1).await);
+        let renewed = renew_lease(&s, &a, 50_000, held(1)).await.expect("renew");
+        assert_eq!(
+            (renewed.epoch, renewed.expires_at_ms),
+            (1, 50_000 + LEASE_TTL_MS)
+        );
+        // Renewed, so still held past the first expiry.
+        lost(take(&s, &b, LEASE_TTL_MS).await);
+        // Lapsed: renewal is refused and a new holder gets a higher epoch.
+        lost(renew_lease(&s, &a, 50_000 + LEASE_TTL_MS, held(1)).await);
+        assert_eq!(take(&s, &b, 50_000 + LEASE_TTL_MS).await, Ok(2));
+        let id = s.repo("r").await.expect("repo").expect("exists");
+        let row = s.get_lease(id).await.expect("lease").expect("row");
+        assert_eq!(row.holder.as_deref(), Some("b/i1"));
+
+        // A release frees it at once; the epoch moves on, never back.
+        lost(release_lease(&s, &a, 120_000, held(1)).await);
+        release_lease(&s, &b, 120_000, held(2))
+            .await
+            .expect("release");
+        lost(renew_lease(&s, &b, 120_000, held(2)).await);
+        assert_eq!(take(&s, &a, 120_000).await, Ok(3));
+
+        // Only a mirror-kind token with the mirror set may hold a lease, and
+        // the instance id is bounded.
+        let human = who(&["repo:*:mirror"]);
+        denied(take(&s, &human, 0).await, "repo:r:mirror");
+        rejected(
+            acquire_lease(
+                &s,
+                &b,
+                0,
+                pb::AcquireLeaseRequest {
+                    repo: "r".into(),
+                    instance: " ".into(),
+                },
+            )
+            .await,
+            "mirror-field",
+        );
+    }
+
+    /// §3.6: once a lease is reacquired, every fenced call made under the
+    /// old epoch is `LeaseLost` and writes nothing.
+    #[tokio::test]
+    async fn a_stale_epoch_writer_is_fenced_off() {
+        let s = store().await;
+        set(
+            &s,
+            &who(&["mirror:bind"]),
+            &policy(),
+            0,
+            req(UP, None, vec![line("main", "follow")]),
+        )
+        .await
+        .expect("create");
+        let (old, new) = (mirror_token("old"), mirror_token("new"));
+        let status = |epoch: u64, sha: &str| pb::SetMirrorStatusRequest {
+            repo: "r".into(),
+            upstream: UP.into(),
+            status: Some(pb::MirrorStatus {
+                last_imported_sha: Some(sha.into()),
+                lease_epoch: epoch,
+                ..pb::MirrorStatus::default()
+            }),
+        };
+        let id = s.repo("r").await.expect("repo").expect("exists");
+        let sha = |s: MemoryStore| async move {
+            s.get_mirror(id, UP)
+                .await
+                .expect("get")
+                .and_then(|m| m.status)
+                .and_then(|st| st.last_imported_sha)
+        };
+
+        // No lease at all: even epoch 0 is fenced.
+        assert!(matches!(
+            set_status(&s, &old, 0, status(0, "zero")).await,
+            Err(ApiError::LeaseLost { .. })
+        ));
+        assert_eq!(take(&s, &old, 0).await, Ok(1));
+        set_status(&s, &old, 1_000, status(1, "first"))
+            .await
+            .expect("holder writes");
+        // Past the TTL the old holder is fenced even before anyone else
+        // takes over.
+        assert!(matches!(
+            set_status(&s, &old, LEASE_TTL_MS, status(1, "late")).await,
+            Err(ApiError::LeaseLost { .. })
+        ));
+        assert_eq!(take(&s, &new, LEASE_TTL_MS).await, Ok(2));
+        let now = LEASE_TTL_MS + 1;
+        assert!(matches!(
+            set_status(&s, &old, now, status(1, "stale")).await,
+            Err(ApiError::LeaseLost { .. })
+        ));
+        assert!(matches!(
+            renew_lease(&s, &old, now, held(1)).await,
+            Err(ApiError::LeaseLost { .. })
+        ));
+        assert!(matches!(
+            release_lease(&s, &old, now, held(1)).await,
+            Err(ApiError::LeaseLost { .. })
+        ));
+        assert_eq!(sha(s.clone()).await.as_deref(), Some("first"));
+        // The old holder's release did not free the new holder's lease.
+        set_status(&s, &new, now, status(2, "second"))
+            .await
+            .expect("new holder writes");
+        assert_eq!(sha(s.clone()).await.as_deref(), Some("second"));
+    }
+
+    /// §3.6: contenders racing `AcquireLease` on one SQLite store, across
+    /// threads. Whatever the interleaving, exactly one wins, at epoch 1.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_acquirers_have_exactly_one_winner() {
+        use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("dir");
+        let s = Arc::new(
+            SqliteMetaStore::open(SqliteConfig::new(dir.path().join("meta.db"))).expect("open"),
+        );
+        s.create_repo("r").await.expect("repo");
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let s = s.clone();
+                tokio::spawn(async move { take(&*s, &mirror_token(&format!("m{i}")), 0).await })
+            })
+            .collect();
+        let mut won = Vec::new();
+        for t in tasks {
+            match t.await.expect("task") {
+                Ok(epoch) => won.push(epoch),
+                Err(ApiError::LeaseLost { .. }) => {}
+                Err(other) => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(won, vec![1]);
+        let id = s.repo("r").await.expect("repo").expect("exists");
+        assert_eq!(
+            s.get_lease(id).await.expect("lease").map(|l| l.epoch),
+            Some(1)
         );
     }
 }

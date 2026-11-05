@@ -15,8 +15,9 @@ use graft_model::{ChangesetId, ObjectId, RepoPath};
 
 use crate::meta::{
     AttestKind, AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandCheckState,
-    LandingRow, LineMergeRow, Lsn, MetaStore, MetaTxn, MirrorListing, MirrorQuery, MirrorRecord,
-    Precondition, Protection, RecordState, RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
+    LandingRow, LeaseRecord, LineMergeRow, Lsn, MetaStore, MetaTxn, MirrorListing, MirrorQuery,
+    MirrorRecord, Precondition, Protection, RecordState, RefRecord, TimedRow, TxnOutcome,
+    WorkspaceRecord, Write,
 };
 use crate::object::{ObjectStore, StoreStats};
 use crate::{RepoId, StoreError, StoreResult, page_limit};
@@ -44,6 +45,8 @@ struct Repo {
     holders: BTreeSet<(ObjectId, String)>,
     /// Mirror rows (D41) by upstream.
     mirrors: BTreeMap<String, MirrorRecord>,
+    /// The mirror authority lease (D41 §3.6).
+    lease: Option<LeaseRecord>,
     /// The expiry of each timed holder row.
     row_expiry: BTreeMap<(ObjectId, String), i64>,
     /// Protection by changeset; an absent entry is the default.
@@ -133,6 +136,12 @@ impl Repo {
             } => self.derived.get(&(kind.clone(), *version, key.clone())) == value.as_ref(),
             Precondition::MirrorVersionIs { upstream, version } => {
                 self.mirrors.get(upstream).map(|m| m.version) == *version
+            }
+            Precondition::LeaseEpochIs { epoch } => {
+                self.lease.as_ref().map_or(0, |l| l.epoch) == *epoch
+            }
+            Precondition::LeaseHeld { epoch, now_ms } => {
+                self.lease.as_ref().is_some_and(|l| l.held(*epoch, *now_ms))
             }
         }
     }
@@ -451,6 +460,20 @@ fn validate(repo: &Repo, txn: &MetaTxn) -> StoreResult<()> {
             }
             _ => {}
         }
+        if let Write::PutLease(lease) = write {
+            let guard = txn.preconditions.iter().find_map(|p| match p {
+                Precondition::LeaseEpochIs { epoch } => Some(*epoch),
+                _ => None,
+            });
+            match guard {
+                Some(e) if lease.epoch == e || lease.epoch == e + 1 => {}
+                _ => {
+                    return Err(StoreError::Invalid(
+                        "a lease is written without a LeaseEpochIs precondition it follows".into(),
+                    ));
+                }
+            }
+        }
         if let Write::PutMirror(record) = write {
             let current = repo.mirrors.get(&record.upstream).map_or(0, |m| m.version);
             if record.version != current + 1 {
@@ -724,6 +747,9 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
                     m.status = Some(status);
                 }
             }
+            Write::PutLease(lease) => {
+                repo.lease = Some(lease);
+            }
             Write::Journal { kind, body } => {
                 let lsn = repo.journal.len() as u64 + 1;
                 repo.journal.push((lsn, kind, body));
@@ -908,6 +934,13 @@ impl MetaStore for MemoryStore {
         upstream: &str,
     ) -> impl Future<Output = StoreResult<Option<MirrorRecord>>> + Send {
         ready(self.with(|st| Ok(st.repo(repo)?.mirrors.get(upstream).cloned())))
+    }
+
+    fn get_lease(
+        &self,
+        repo: RepoId,
+    ) -> impl Future<Output = StoreResult<Option<LeaseRecord>>> + Send {
+        ready(self.with(|st| Ok(st.repo(repo)?.lease.clone())))
     }
 
     fn list_mirrors(

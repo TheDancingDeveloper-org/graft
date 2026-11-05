@@ -255,6 +255,12 @@ fn holds(conn: &Connection, repo_id: RepoId, pre: &Precondition) -> StoreResult<
         Precondition::MirrorVersionIs { upstream, version } => {
             Ok(crate::mirrors::version(conn, repo, upstream)? == *version)
         }
+        Precondition::LeaseEpochIs { epoch } => {
+            Ok(crate::mirrors::lease_epoch(conn, repo)? == *epoch)
+        }
+        Precondition::LeaseHeld { epoch, now_ms } => {
+            Ok(crate::mirrors::lease(conn, repo)?.is_some_and(|l| l.held(*epoch, *now_ms)))
+        }
     }
 }
 
@@ -807,6 +813,22 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
             }
             Write::SetMirrorStatus { upstream, status } => {
                 crate::mirrors::set_status(conn, repo, &upstream, &status)?;
+            }
+            Write::PutLease(lease) => {
+                let guard = txn.preconditions.iter().find_map(|p| match p {
+                    Precondition::LeaseEpochIs { epoch } => Some(*epoch),
+                    _ => None,
+                });
+                match guard {
+                    Some(e) if lease.epoch == e || lease.epoch == e + 1 => {}
+                    _ => {
+                        return Err(StoreError::Invalid(
+                            "a lease is written without a LeaseEpochIs precondition it follows"
+                                .into(),
+                        ));
+                    }
+                }
+                crate::mirrors::put_lease(conn, repo, &lease)?;
             }
             Write::Journal { kind, body } => {
                 let lsn = int(next_lsn)?;

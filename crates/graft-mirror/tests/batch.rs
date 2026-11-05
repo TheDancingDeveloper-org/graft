@@ -515,6 +515,7 @@ impl World {
                     expected: tip,
                     new: id,
                     kind: RefKind::Line,
+                    lease_epoch: None,
                 },
             )
             .await
@@ -584,6 +585,7 @@ impl World {
                     expected: tip,
                     new: id,
                     kind: RefKind::Line,
+                    lease_epoch: None,
                 },
             )
             .await

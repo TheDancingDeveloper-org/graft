@@ -106,6 +106,7 @@ async fn review_pass_removes_the_land_from_the_real_queue() {
                 expected: None,
                 new: root.id,
                 kind: graft_proto::types::RefKind::Line,
+                lease_epoch: None,
             },
         )
         .await

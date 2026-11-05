@@ -688,6 +688,7 @@ impl From<UpdateRef> for pb::UpdateRefRequest {
             expected: r.expected.map(cb),
             new: cb(r.new),
             kind: ref_kind(r.kind),
+            lease_epoch: r.lease_epoch,
         }
     }
 }
@@ -701,6 +702,7 @@ impl TryFrom<pb::UpdateRefRequest> for UpdateRef {
             expected: opt_cid(r.expected, "expected")?,
             new: cid(r.new, "new")?,
             kind: ref_kind_from(r.kind)?,
+            lease_epoch: r.lease_epoch,
         })
     }
 }
@@ -2135,6 +2137,7 @@ impl From<ApiError> for pb::ApiError {
                 ApiError::LeaseExpired { workspace } => {
                     E::LeaseExpired(w::LeaseExpired { workspace })
                 }
+                ApiError::LeaseLost { repo } => E::LeaseLost(w::LeaseLost { repo }),
                 ApiError::LimitExceeded { limit, max } => {
                     E::LimitExceeded(w::LimitExceeded { limit, max })
                 }
@@ -2223,6 +2226,7 @@ impl TryFrom<pb::ApiError> for ApiError {
             E::LeaseExpired(e) => ApiError::LeaseExpired {
                 workspace: e.workspace,
             },
+            E::LeaseLost(e) => ApiError::LeaseLost { repo: e.repo },
             E::LimitExceeded(e) => ApiError::LimitExceeded {
                 limit: e.limit,
                 max: e.max,

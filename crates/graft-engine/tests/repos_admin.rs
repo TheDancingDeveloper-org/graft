@@ -31,6 +31,7 @@ fn admin_call<M: MetaStore>(f: &Fixture<M>, cx: &CallContext, repo: &str) -> Res
             expected: None,
             new: graft_model::ChangesetId(blob_id(b"x")),
             kind: RefKind::Line,
+            lease_epoch: None,
         },
     ))
     .map(drop)

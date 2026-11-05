@@ -238,6 +238,26 @@ pub struct MirrorRecord {
     pub updated_at_ms: i64,
 }
 
+/// The per-repository mirror authority lease (D41 §3.6), one
+/// `mirror_leases` row. The epoch outlives a release, so it stays monotonic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaseRecord {
+    /// The token principal and the process instance id, or `None` once
+    /// released. Never durable in a ref or object.
+    pub holder: Option<String>,
+    /// Monotonic per repository; bumped by every acquire.
+    pub epoch: u64,
+    /// When the lease lapses unless renewed, ms since the epoch.
+    pub expires_at_ms: i64,
+}
+
+impl LeaseRecord {
+    /// Whether the lease is held under `epoch` at `now_ms`.
+    pub fn held(&self, epoch: u64, now_ms: i64) -> bool {
+        self.holder.is_some() && self.epoch == epoch && now_ms < self.expires_at_ms
+    }
+}
+
 /// A row of `list_mirrors`: the record and the repository it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MirrorListing {
@@ -340,6 +360,20 @@ pub enum Precondition {
         upstream: String,
         /// Expected version.
         version: Option<u64>,
+    },
+    /// The repository's stored lease epoch is `epoch` (0 when it has never
+    /// had a lease). The compare in a lease acquire, renew or release.
+    LeaseEpochIs {
+        /// Expected epoch.
+        epoch: u64,
+    },
+    /// The lease is held under `epoch` and has not lapsed at `now_ms`
+    /// ([`LeaseRecord::held`]). Fences a mirror write (D41 §3.6).
+    LeaseHeld {
+        /// The writer's epoch.
+        epoch: u64,
+        /// The server's time, ms since the epoch.
+        now_ms: i64,
     },
 }
 
@@ -607,6 +641,9 @@ pub enum Write {
         /// The new status.
         status: MirrorStatusRecord,
     },
+    /// Replace the repository's lease row. Needs a `LeaseEpochIs`
+    /// precondition, and `epoch` must equal it or be one more.
+    PutLease(LeaseRecord),
     /// Append a journal entry. The store assigns the next LSN of the
     /// repository (LSNs start at 1 and have no gaps).
     Journal {
@@ -674,6 +711,14 @@ pub trait MetaStore: Send + Sync {
         _query: MirrorQuery,
     ) -> impl Future<Output = StoreResult<Vec<MirrorListing>>> + Send {
         async { Err(unsupported("list_mirrors")) }
+    }
+    /// The repository's mirror lease row, if it ever had one. One indexed
+    /// read.
+    fn get_lease(
+        &self,
+        _repo: RepoId,
+    ) -> impl Future<Output = StoreResult<Option<LeaseRecord>>> + Send {
+        async { Err(unsupported("get_lease")) }
     }
     /// Applies a transaction atomically.
     fn commit(
@@ -1190,6 +1235,12 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         query: MirrorQuery,
     ) -> impl Future<Output = StoreResult<Vec<MirrorListing>>> + Send {
         (**self).list_mirrors(query)
+    }
+    fn get_lease(
+        &self,
+        repo: RepoId,
+    ) -> impl Future<Output = StoreResult<Option<LeaseRecord>>> + Send {
+        (**self).get_lease(repo)
     }
     fn commit(
         &self,

@@ -326,6 +326,7 @@ async fn repo_with(mut config: EngineConfig) -> (Arc<Eng>, ChangesetId) {
                     expected: None,
                     new: root,
                     kind: RefKind::Line,
+                    lease_epoch: None,
                 },
             )
             .await

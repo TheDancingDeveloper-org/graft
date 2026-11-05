@@ -74,6 +74,7 @@ impl Fixture {
                 expected: Some(root.id),
                 new: tip.id,
                 kind: RefKind::Line,
+                lease_epoch: None,
             }))
             .await
             .expect("main moves");

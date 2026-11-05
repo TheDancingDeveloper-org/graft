@@ -187,6 +187,7 @@ pub(crate) async fn move_line<A: RepoApi>(
             expected,
             new,
             kind: RefKind::Line,
+            lease_epoch: None,
         },
     )
     .await
@@ -287,6 +288,7 @@ impl<A: RepoApi + ObjectApi> Lander for FakeLand<'_, A> {
                     expected: Some(tip),
                     new: landed,
                     kind: RefKind::Line,
+                    lease_epoch: None,
                 },
             )
             .await?;

@@ -191,6 +191,7 @@ impl Rpc {
                 expected,
                 new,
                 kind: RefKind::Line,
+                lease_epoch: None,
             }))
             .await
             .map(drop)
