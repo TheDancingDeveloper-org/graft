@@ -26,6 +26,12 @@ pub(crate) fn load_or_create(path: &Path) -> io::Result<SigningKey> {
 }
 
 fn load(path: &Path) -> io::Result<SigningKey> {
+    Ok(SigningKey::from_seed(&load_private(path)?))
+}
+
+/// Reads exactly 32 bytes from a private key file (as for the signing
+/// key). The credential key-encryption keys use it too.
+pub(crate) fn load_private(path: &Path) -> io::Result<[u8; SEED_LEN]> {
     let mut file = fs::File::open(path)?;
     check_private(path, &file.metadata()?)?;
     let mut seed = [0u8; SEED_LEN];
@@ -34,7 +40,7 @@ fn load(path: &Path) -> io::Result<SigningKey> {
     if file.read(&mut [0u8; 1])? != 0 {
         return Err(invalid(path, "must hold exactly 32 bytes"));
     }
-    Ok(SigningKey::from_seed(&seed))
+    Ok(seed)
 }
 
 fn create(path: &Path) -> io::Result<SigningKey> {
@@ -101,7 +107,7 @@ fn check_private(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
 fn insecure(path: &Path, why: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
-        format!("refusing signing key file {}: it {why}", path.display()),
+        format!("refusing key file {}: it {why}", path.display()),
     )
 }
 

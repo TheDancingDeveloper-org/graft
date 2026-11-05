@@ -52,6 +52,8 @@ pub(crate) fn run(config: &ServerConfig, args: &[String]) -> Result<(), Failure>
         ["repo", "create", name] => repo_create(config, name),
         ["fsck", repo] => fsck(config, repo),
         ["backup", dir, rest @ ..] => backup(config, dir, rest),
+        ["mirror", "rewrap"] => mirror_rewrap(config),
+        ["mirror", "credential", repo, upstream] => mirror_credential(config, repo, upstream),
         ["gc", "deletion", repo, switch] => gc_deletion(config, repo, switch),
         ["gc", repo, rest @ ..] => gc(config, repo, rest),
         _ => Err(Failure::usage(crate::USAGE)),
@@ -302,6 +304,110 @@ fn gc_deletion(config: &ServerConfig, repo: &str, switch: &str) -> Result<(), Fa
         .map_err(|e| Failure::failed(format!("{e:?}")))?;
     println!("gc deletion for {repo} is {switch}");
     Ok(())
+}
+
+fn open_meta(config: &ServerConfig) -> Result<SqliteMetaStore, Failure> {
+    if !config.meta_db.exists() {
+        return Err(Failure::failed(format!(
+            "{} does not exist; start the server once first",
+            config.meta_db.display()
+        )));
+    }
+    SqliteMetaStore::open(SqliteConfig::new(&config.meta_db))
+        .map_err(|e| Failure::failed(format!("open {}: {e:?}", config.meta_db.display())))
+}
+
+/// `mirror credential <repo> <upstream>` (D41 §3.4, §6): seals the
+/// credential read from stdin (never argv) into an existing mirror row, as
+/// `SetMirrorCredential` under `mirror:bind` would. The interim per-row
+/// PATs are seeded this way, e.g.
+/// `printenv GRAFT_DEV_MIRROR_TOKEN_GRAFT | graft-server admin mirror credential graft <url>`.
+/// Empty input clears the credential.
+fn mirror_credential(config: &ServerConfig, repo: &str, upstream: &str) -> Result<(), Failure> {
+    let ring = config
+        .key_ring()
+        .map_err(|e| Failure::failed(e.to_string()))?;
+    let mut raw = Vec::new();
+    std::io::stdin()
+        .take(crate::credentials::MAX_CREDENTIAL as u64 + 2)
+        .read_to_end(&mut raw)
+        .map_err(|e| Failure::failed(format!("read stdin: {e}")))?;
+    // One trailing newline (from `echo` or `printenv`) is not part of it.
+    if raw.last() == Some(&b'\n') {
+        raw.pop();
+    }
+    let credential = crate::credentials::Secret::new(raw);
+    let meta = open_meta(config)?;
+    let rt = runtime()?;
+    let id = rt
+        .block_on(graft_store::MetaStore::repo(&meta, repo))
+        .map_err(|e| Failure::failed(format!("{e:?}")))?
+        .ok_or_else(|| Failure::failed(format!("no repository {repo}")))?;
+    let row = rt
+        .block_on(graft_store::MetaStore::get_mirror(&meta, id, upstream))
+        .map_err(|e| Failure::failed(format!("{e:?}")))?
+        .ok_or_else(|| Failure::failed(format!("no mirror of {repo} on that upstream")))?;
+    let operator = Principal {
+        subject: "operator".into(),
+        kind: PrincipalKind::Human,
+        session: None,
+        work_item: None,
+        scopes: vec!["mirror:bind".into()],
+    };
+    let req = graft_proto::pb::SetMirrorCredentialRequest {
+        repo: repo.to_owned(),
+        upstream: upstream.to_owned(),
+        credential: credential.expose().to_vec(),
+        expected_version: row.version,
+    };
+    let m = rt
+        .block_on(crate::mirrors::set_credential(
+            &meta,
+            &operator,
+            &ring,
+            now_s().saturating_mul(1000),
+            req,
+        ))
+        .map_err(|e| Failure::failed(e.to_string()))?;
+    match m.kek_id {
+        Some(k) => println!(
+            "credential of {repo} sealed under {k}; row version {}",
+            m.version
+        ),
+        None => println!("credential of {repo} cleared; row version {}", m.version),
+    }
+    Ok(())
+}
+
+/// `mirror rewrap` (D41 §3.4): re-wraps every mirror credential under the
+/// active `credential_kek`, one transaction per row. Runs while the server
+/// runs; once it reports no failures the old key can be retired.
+fn mirror_rewrap(config: &ServerConfig) -> Result<(), Failure> {
+    let ring = config
+        .key_ring()
+        .map_err(|e| Failure::failed(e.to_string()))?;
+    let meta = open_meta(config)?;
+    let rt = runtime()?;
+    let now_ms = now_s().saturating_mul(1000);
+    let report = rt
+        .block_on(crate::mirrors::rewrap_all(&meta, &ring, now_ms))
+        .map_err(|e| Failure::failed(e.to_string()))?;
+    println!(
+        "rewrapped {} credential(s) under {}; {} unchanged",
+        report.rewrapped,
+        ring.active_id().unwrap_or("-"),
+        report.unchanged
+    );
+    if report.failed.is_empty() {
+        return Ok(());
+    }
+    for (repo, upstream) in &report.failed {
+        eprintln!("did not rewrap {repo} {upstream}");
+    }
+    Err(Failure::failed(format!(
+        "{} credential(s) did not rewrap; keep the old key",
+        report.failed.len()
+    )))
 }
 
 fn backup(config: &ServerConfig, dir: &str, args: &[&str]) -> Result<(), Failure> {

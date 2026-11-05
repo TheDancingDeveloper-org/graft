@@ -26,6 +26,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
+use crate::credentials::{CredentialError, KeyRing, MAX_CREDENTIAL, Secret};
 use graft_auth::Scope;
 use graft_model::{ChangesetId, ObjectId};
 use graft_proto::types::followed_ref;
@@ -929,6 +930,234 @@ pub(crate) async fn release_lease<M: MetaStore>(
         expires_at_ms: now_ms,
     };
     put_lease(meta, id, &req.repo, req.epoch, next).await?;
+    Ok(())
+}
+
+fn credential_refused(e: CredentialError) -> ApiError {
+    refused("mirror-credential", e.to_string())
+}
+
+/// `SetMirrorCredential` (§3.4): write-only, `mirror:bind`. Seals the
+/// credential under the active KEK (an empty one clears it) and bumps the
+/// row's version, by CAS on `expected_version`.
+pub(crate) async fn set_credential<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    ring: &KeyRing,
+    now_ms: i64,
+    req: pb::SetMirrorCredentialRequest,
+) -> Result<pb::Mirror, ApiError> {
+    any_of(p, &[Scope::MirrorBind])?;
+    if req.credential.len() > MAX_CREDENTIAL {
+        return Err(refused(
+            "mirror-field",
+            format!("credential is at most {MAX_CREDENTIAL} bytes"),
+        ));
+    }
+    let id = repo_id(meta, &req.repo).await?;
+    let Some(old) = meta.get_mirror(id, &req.upstream).await.map_err(store)? else {
+        return Err(not_found(&req.repo));
+    };
+    if req.expected_version != old.version {
+        return Err(version_conflict(
+            Some(req.expected_version),
+            Some(old.version),
+        ));
+    }
+    let sealed = if req.credential.is_empty() {
+        None
+    } else {
+        let plain = Secret::new(req.credential);
+        Some(
+            ring.seal(&req.repo, &req.upstream, plain.expose())
+                .map_err(credential_refused)?,
+        )
+    };
+    let record = MirrorRecord {
+        kek_id: sealed.as_ref().map(|s| s.kek_id.clone()),
+        credential: sealed.map(|s| s.envelope),
+        version: old.version + 1,
+        updated_by: p.subject.clone(),
+        updated_at_ms: now_ms,
+        ..old
+    };
+    let txn = MetaTxn {
+        preconditions: vec![Precondition::MirrorVersionIs {
+            upstream: req.upstream.clone(),
+            version: Some(req.expected_version),
+        }],
+        writes: vec![Write::PutMirror(record.clone())],
+    };
+    match meta.commit(id, txn).await.map_err(store)? {
+        TxnOutcome::Committed(_) => Ok(view(&req.repo, record)),
+        TxnOutcome::PreconditionFailed(_) => {
+            let now = meta.get_mirror(id, &req.upstream).await.map_err(store)?;
+            Err(version_conflict(
+                Some(req.expected_version),
+                now.map(|r| r.version),
+            ))
+        }
+    }
+}
+
+/// `GetMirrorCredential` (§3.4): the plaintext, only to a `mirror`-kind
+/// token whose subject holds the current lease `epoch` on the repository.
+/// A token of another kind or without the grant is `PermissionDenied`; a
+/// stale or foreign epoch is `LeaseLost`.
+pub(crate) async fn get_credential<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    ring: &KeyRing,
+    now_ms: i64,
+    req: pb::GetMirrorCredentialRequest,
+) -> Result<pb::MirrorCredential, ApiError> {
+    lease_caller(p, &req.repo)?;
+    let id = repo_id(meta, &req.repo).await?;
+    let lease = meta.get_lease(id).await.map_err(store)?;
+    let holder = format!("{}/", p.subject);
+    if !lease.is_some_and(|l| {
+        l.held(req.epoch, now_ms) && l.holder.is_some_and(|h| h.starts_with(&holder))
+    }) {
+        return Err(lease_lost(&req.repo));
+    }
+    let row = meta
+        .get_mirror(id, &req.upstream)
+        .await
+        .map_err(store)?
+        .ok_or_else(|| not_found(&req.repo))?;
+    let (Some(envelope), Some(kek_id)) = (row.credential, row.kek_id) else {
+        return Err(ApiError::NotFound {
+            what: format!("credential of mirror of repository {}", req.repo),
+        });
+    };
+    let plain = ring
+        .open(&req.repo, &req.upstream, &kek_id, &envelope)
+        .map_err(|e| {
+            tracing::error!(repo = %req.repo, kek_id = %kek_id, error = %e, "mirror credential did not open");
+            credential_refused(e)
+        })?;
+    Ok(pb::MirrorCredential {
+        credential: plain.expose().to_vec(),
+        kek_id,
+    })
+}
+
+/// What `admin mirror rewrap` did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct RewrapReport {
+    /// Rows re-wrapped under the active key.
+    pub(crate) rewrapped: u64,
+    /// Rows already under it, or with no credential.
+    pub(crate) unchanged: u64,
+    /// Rows that did not open (unknown key or tampered), left as they are.
+    pub(crate) failed: Vec<(String, String)>,
+}
+
+/// How many times one row's rewrap retries a lost CAS before reporting it.
+const REWRAP_TRIES: usize = 8;
+
+/// `admin mirror rewrap` (§3.4): re-wraps every row's data key under the
+/// active KEK, one transaction per row, by CAS on its version. Pages
+/// through the rows; a row changed concurrently is re-read and retried.
+pub(crate) async fn rewrap_all<M: MetaStore>(
+    meta: &M,
+    ring: &KeyRing,
+    now_ms: i64,
+) -> Result<RewrapReport, ApiError> {
+    if ring.active_id().is_none() {
+        return Err(credential_refused(CredentialError::NoActiveKey));
+    }
+    let mut report = RewrapReport::default();
+    let mut after = None;
+    loop {
+        let rows = meta
+            .list_mirrors(MirrorQuery {
+                repo: None,
+                enabled: None,
+                after: after.clone(),
+                limit: MAX_PAGE,
+            })
+            .await
+            .map_err(store)?;
+        let Some(last) = rows.last() else { break };
+        after = Some((last.repo, last.record.upstream.clone()));
+        let full = rows.len() == MAX_PAGE as usize;
+        for l in rows {
+            rewrap_row(
+                meta,
+                ring,
+                now_ms,
+                l.repo,
+                &l.repo_name,
+                l.record,
+                &mut report,
+            )
+            .await?;
+        }
+        if !full {
+            break;
+        }
+    }
+    Ok(report)
+}
+
+async fn rewrap_row<M: MetaStore>(
+    meta: &M,
+    ring: &KeyRing,
+    now_ms: i64,
+    id: RepoId,
+    repo: &str,
+    mut row: MirrorRecord,
+    report: &mut RewrapReport,
+) -> Result<(), ApiError> {
+    for _ in 0..REWRAP_TRIES {
+        let (Some(envelope), Some(kek_id)) = (&row.credential, &row.kek_id) else {
+            report.unchanged += 1;
+            return Ok(());
+        };
+        let sealed = match ring.rewrap(repo, &row.upstream, kek_id, envelope) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                report.unchanged += 1;
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::error!(repo, kek_id = %kek_id, error = %e, "mirror credential did not rewrap");
+                report.failed.push((repo.to_owned(), row.upstream.clone()));
+                return Ok(());
+            }
+        };
+        let upstream = row.upstream.clone();
+        let version = row.version;
+        let record = MirrorRecord {
+            credential: Some(sealed.envelope),
+            kek_id: Some(sealed.kek_id),
+            version: version + 1,
+            updated_by: "operator".to_owned(),
+            updated_at_ms: now_ms,
+            ..row
+        };
+        let txn = MetaTxn {
+            preconditions: vec![Precondition::MirrorVersionIs {
+                upstream: upstream.clone(),
+                version: Some(version),
+            }],
+            writes: vec![Write::PutMirror(record)],
+        };
+        match meta.commit(id, txn).await.map_err(store)? {
+            TxnOutcome::Committed(_) => {
+                report.rewrapped += 1;
+                return Ok(());
+            }
+            TxnOutcome::PreconditionFailed(_) => {
+                match meta.get_mirror(id, &upstream).await.map_err(store)? {
+                    Some(r) => row = r,
+                    None => return Ok(()),
+                }
+            }
+        }
+    }
+    report.failed.push((repo.to_owned(), row.upstream));
     Ok(())
 }
 
@@ -1874,5 +2103,285 @@ mod tests {
             s.get_lease(id).await.expect("lease").map(|l| l.epoch),
             Some(1)
         );
+    }
+
+    const PAT: &[u8] = b"ghp_interim_row_pat";
+
+    fn ring(active: Option<(&str, u8)>, retired: &[(&str, u8)]) -> KeyRing {
+        use crate::credentials::Kek;
+        let k = |(id, b): (&str, u8)| Kek::new(id, [b; 32]).expect("kek");
+        KeyRing::new(active.map(k), retired.iter().copied().map(k).collect()).expect("ring")
+    }
+
+    fn cred(upstream: &str, value: &[u8], version: u64) -> pb::SetMirrorCredentialRequest {
+        pb::SetMirrorCredentialRequest {
+            repo: "r".into(),
+            upstream: upstream.into(),
+            credential: value.to_vec(),
+            expected_version: version,
+        }
+    }
+
+    fn fetch(upstream: &str, epoch: u64) -> pb::GetMirrorCredentialRequest {
+        pb::GetMirrorCredentialRequest {
+            repo: "r".into(),
+            upstream: upstream.into(),
+            epoch,
+        }
+    }
+
+    /// A store with one row at version 1 on `UP`.
+    async fn with_row() -> MemoryStore {
+        let s = store().await;
+        set(
+            &s,
+            &who(&["mirror:bind"]),
+            &policy(),
+            1,
+            req(UP, None, vec![line("main", "follow")]),
+        )
+        .await
+        .expect("row");
+        s
+    }
+
+    #[tokio::test]
+    async fn setting_a_credential_is_write_only_bound_and_bumps_the_version() {
+        let s = with_row().await;
+        let keys = ring(Some(("k1", 1)), &[]);
+        for p in [
+            who(&["repo:r:admin"]),
+            who(&["repos:admin"]),
+            mirror_token("m"),
+        ] {
+            denied(
+                set_credential(&s, &p, &keys, 2, cred(UP, PAT, 1)).await,
+                "mirror:bind",
+            );
+        }
+        let bind = who(&["mirror:bind"]);
+        rejected(
+            set_credential(&s, &bind, &keys, 2, cred(UP, PAT, 7)).await,
+            "mirror-version",
+        );
+        rejected(
+            set_credential(
+                &s,
+                &bind,
+                &keys,
+                2,
+                cred(UP, &[b'x'; MAX_CREDENTIAL + 1], 1),
+            )
+            .await,
+            "mirror-field",
+        );
+        rejected(
+            set_credential(&s, &bind, &ring(None, &[("k1", 1)]), 2, cred(UP, PAT, 1)).await,
+            "mirror-credential",
+        );
+        let m = set_credential(&s, &bind, &keys, 2, cred(UP, PAT, 1))
+            .await
+            .expect("set");
+        assert_eq!((m.version, m.credential_set), (2, true));
+        assert_eq!(m.kek_id.as_deref(), Some("k1"));
+        // What is stored is the envelope, never the plaintext.
+        let id = s.repo("r").await.expect("repo").expect("r");
+        let row = s.get_mirror(id, UP).await.expect("get").expect("row");
+        let stored = row.credential.expect("sealed");
+        assert!(!stored.windows(PAT.len()).any(|w| w == PAT));
+        // Every read answer says only that one is set.
+        let read = get(
+            &s,
+            &who(&["repo:r:read"]),
+            pb::MirrorKey {
+                repo: "r".into(),
+                upstream: UP.into(),
+            },
+        )
+        .await
+        .expect("read");
+        assert!(read.credential_set);
+        assert!(!format!("{read:?}").contains("ghp_"));
+        // An empty credential clears it, and bumps the version again.
+        let cleared = set_credential(&s, &bind, &keys, 3, cred(UP, b"", 2))
+            .await
+            .expect("clear");
+        assert_eq!((cleared.version, cleared.credential_set), (3, false));
+        assert_eq!(cleared.kek_id, None);
+        let absent = set_credential(
+            &s,
+            &bind,
+            &keys,
+            3,
+            cred("https://github.com/o/x.git", PAT, 1),
+        )
+        .await;
+        assert!(
+            matches!(absent, Err(ApiError::NotFound { .. })),
+            "{absent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_lease_holding_mirror_token_reads_the_plaintext() {
+        let s = with_row().await;
+        let keys = ring(Some(("k1", 1)), &[]);
+        set_credential(&s, &who(&["mirror:bind"]), &keys, 2, cred(UP, PAT, 1))
+            .await
+            .expect("set");
+        let m = mirror_token("m");
+        let epoch = take(&s, &m, 1_000).await.expect("lease");
+        let got = get_credential(&s, &m, &keys, 2_000, fetch(UP, epoch))
+            .await
+            .expect("holder reads");
+        assert_eq!(got.credential, PAT);
+        assert_eq!(got.kek_id, "k1");
+        // The response's Debug carries no plaintext.
+        for shown in [format!("{got:?}"), format!("{got:#?}")] {
+            assert!(
+                shown.contains("<redacted>") && !shown.contains("ghp_"),
+                "{shown}"
+            );
+        }
+
+        // Not the mirror kind, whatever the scopes: refused by permission.
+        let human_with_set = Principal {
+            kind: PrincipalKind::Human,
+            ..mirror_token("m")
+        };
+        let service = Principal {
+            kind: PrincipalKind::Service,
+            ..mirror_token("m")
+        };
+        for p in [
+            human_with_set,
+            service,
+            who(&[
+                "mirror:bind",
+                "mirror:export",
+                "repos:admin",
+                "repo:r:admin",
+            ]),
+        ] {
+            denied(
+                get_credential(&s, &p, &keys, 2_000, fetch(UP, epoch)).await,
+                "repo:r:mirror",
+            );
+        }
+        // A mirror token not holding the current epoch: fenced.
+        lost(get_credential(&s, &m, &keys, 2_000, fetch(UP, epoch - 1)).await);
+        lost(get_credential(&s, &m, &keys, 2_000, fetch(UP, epoch + 1)).await);
+        lost(get_credential(&s, &mirror_token("other"), &keys, 2_000, fetch(UP, epoch)).await);
+        // The lease lapsed: fenced too.
+        lost(get_credential(&s, &m, &keys, 1_000 + LEASE_TTL_MS, fetch(UP, epoch)).await);
+        // A newer holder's epoch fences the old one out.
+        let next = take(&s, &m, 1_000 + LEASE_TTL_MS).await.expect("re-take");
+        lost(get_credential(&s, &m, &keys, 2_000 + LEASE_TTL_MS, fetch(UP, epoch)).await);
+        assert!(
+            get_credential(&s, &m, &keys, 2_000 + LEASE_TTL_MS, fetch(UP, next))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ciphertext_copied_into_another_row_does_not_open() {
+        let s = with_row().await;
+        let other = "https://github.com/o/other.git";
+        let bind = who(&["mirror:bind"]);
+        set(
+            &s,
+            &bind,
+            &policy(),
+            1,
+            req(other, None, vec![line("main", "follow")]),
+        )
+        .await
+        .expect("second row");
+        let keys = ring(Some(("k1", 1)), &[]);
+        set_credential(&s, &bind, &keys, 2, cred(UP, PAT, 1))
+            .await
+            .expect("set");
+        // A database writer copies the sealed bytes and key id across.
+        let id = s.repo("r").await.expect("repo").expect("r");
+        let source = s.get_mirror(id, UP).await.expect("get").expect("row");
+        let target = s.get_mirror(id, other).await.expect("get").expect("row");
+        let moved = MirrorRecord {
+            credential: source.credential.clone(),
+            kek_id: source.kek_id.clone(),
+            version: target.version + 1,
+            ..target.clone()
+        };
+        let txn = MetaTxn {
+            preconditions: vec![Precondition::MirrorVersionIs {
+                upstream: other.into(),
+                version: Some(target.version),
+            }],
+            writes: vec![Write::PutMirror(moved)],
+        };
+        assert!(matches!(
+            s.commit(id, txn).await.expect("commit"),
+            TxnOutcome::Committed(_)
+        ));
+        let m = mirror_token("m");
+        let epoch = take(&s, &m, 1_000).await.expect("lease");
+        let r = get_credential(&s, &m, &keys, 2_000, fetch(other, epoch)).await;
+        rejected(r, "mirror-credential");
+        assert_eq!(
+            get_credential(&s, &m, &keys, 2_000, fetch(UP, epoch))
+                .await
+                .expect("source still opens")
+                .credential,
+            PAT
+        );
+    }
+
+    #[tokio::test]
+    async fn rewrap_moves_every_row_to_the_active_key_so_the_old_one_can_retire() {
+        let s = with_row().await;
+        let bind = who(&["mirror:bind"]);
+        let bare = "https://github.com/o/bare.git";
+        set(
+            &s,
+            &bind,
+            &policy(),
+            1,
+            req(bare, None, vec![line("main", "follow")]),
+        )
+        .await
+        .expect("row without a credential");
+        let v1 = ring(Some(("k1", 1)), &[]);
+        set_credential(&s, &bind, &v1, 2, cred(UP, PAT, 1))
+            .await
+            .expect("set");
+        // Rewrap needs an active key.
+        assert!(rewrap_all(&s, &ring(None, &[("k1", 1)]), 3).await.is_err());
+        let v2 = ring(Some(("k2", 2)), &[("k1", 1)]);
+        let report = rewrap_all(&s, &v2, 3).await.expect("rewrap");
+        assert_eq!((report.rewrapped, report.unchanged), (1, 1));
+        assert!(report.failed.is_empty());
+        let id = s.repo("r").await.expect("repo").expect("r");
+        let row = s.get_mirror(id, UP).await.expect("get").expect("row");
+        assert_eq!((row.kek_id.as_deref(), row.version), (Some("k2"), 3));
+        // Again: nothing left to do.
+        let again = rewrap_all(&s, &v2, 4).await.expect("rewrap");
+        assert_eq!((again.rewrapped, again.unchanged), (0, 2));
+        // Retire k1 entirely: the row still opens under k2 alone.
+        let v3 = ring(Some(("k2", 2)), &[]);
+        let m = mirror_token("m");
+        let epoch = take(&s, &m, 1_000).await.expect("lease");
+        assert_eq!(
+            get_credential(&s, &m, &v3, 2_000, fetch(UP, epoch))
+                .await
+                .expect("opens")
+                .credential,
+            PAT
+        );
+        // A row whose key is gone is reported, not dropped.
+        let v4 = ring(Some(("k3", 3)), &[]);
+        let lost_key = rewrap_all(&s, &v4, 5).await.expect("rewrap");
+        assert_eq!(lost_key.failed, vec![("r".to_owned(), UP.to_owned())]);
+        let row = s.get_mirror(id, UP).await.expect("get").expect("row");
+        assert_eq!(row.kek_id.as_deref(), Some("k2"));
     }
 }

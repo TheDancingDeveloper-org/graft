@@ -139,6 +139,9 @@ async fn run(
     );
     let started = Instant::now();
     let (meta, objects) = open_stores(&config, Some(telemetry.clone()))?;
+    let keks = config
+        .key_ring()
+        .map_err(|e| format!("mirror credential keys: {e}"))?;
     let signing =
         keys::load_or_create(&config.key_path()).map_err(|e| format!("signing key: {e}"))?;
     if let Some(path) = &config.bootstrap_admin_token_file
@@ -208,7 +211,8 @@ async fn run(
             exports,
         )
         .with_ci(ci)
-        .with_mirror(config.mirror_policy()),
+        .with_mirror(config.mirror_policy())
+        .with_keks(keks),
     );
 
     if std::env::var_os(HOLD_START_UP_ENV).is_some() {
