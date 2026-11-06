@@ -115,6 +115,9 @@ pub struct TaskCtx<C> {
     pub dir: PathBuf,
     /// The service's handle.
     pub ctl: Arc<TaskCtl>,
+    /// The service's metrics, when it exports them. A task writes its
+    /// repository's series; the service drops them when the task stops.
+    pub metrics: Option<super::ServiceMetrics>,
     pub(crate) exits: mpsc::UnboundedSender<TaskExit>,
 }
 
@@ -225,6 +228,13 @@ impl<C: Control> TaskCtx<C> {
             };
             let backoff_until = (wait > interval).then(|| now + wait.as_millis() as i64);
             next = tokio::time::Instant::now() + wait;
+            if let Some(m) = &self.metrics {
+                m.poll_finished(
+                    repo,
+                    last_success.map(|ms| ms as f64 / 1000.0),
+                    failure.as_ref().map(|f| f.code),
+                );
+            }
             let st = pb::MirrorStatus {
                 last_poll_at_ms: Some(started),
                 last_success_at_ms: last_success,
@@ -255,7 +265,14 @@ impl<C: Control> TaskCtx<C> {
             }
             if self.config.claim_requests && !self.ctl.stopping() {
                 match requests::run_turn(&*self.control, desk, runner, repo, self.epoch).await {
-                    Ok(_) => {}
+                    Ok(turn) => {
+                        if let Some(m) = &self.metrics {
+                            m.request_turn(
+                                repo,
+                                turn.retry || turn.finished >= requests::REQUESTS_PER_TURN,
+                            );
+                        }
+                    }
                     Err(e) if requests::is_lease_lost(&e) => {
                         self.ctl.lose();
                         break;

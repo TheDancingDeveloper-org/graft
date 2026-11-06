@@ -376,7 +376,10 @@ async fn an_out_of_band_push_stops_export_alerts_and_never_forces() {
         }
     );
     assert_eq!(
-        metrics.mirror_divergence.with_label_values(&["main"]).get(),
+        metrics
+            .mirror_divergence
+            .with_label_values(&[REPO, "main"])
+            .get(),
         1
     );
     assert_eq!(

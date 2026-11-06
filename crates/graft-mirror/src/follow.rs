@@ -681,7 +681,7 @@ where
     fn set_lag_changesets(&self, line: &str, n: u64) {
         if let Some(m) = &self.metrics {
             m.mirror_lag_changesets
-                .with_label_values(&[line])
+                .with_label_values(&[&self.config.repo, line])
                 .set(n as i64);
         }
     }
@@ -691,7 +691,9 @@ where
     /// mistaken for a measured lag of zero.
     fn note_fetch_error(&self, line: &str) {
         if let Some(m) = &self.metrics {
-            m.mirror_lag_changesets.with_label_values(&[line]).set(-1);
+            m.mirror_lag_changesets
+                .with_label_values(&[&self.config.repo, line])
+                .set(-1);
         }
     }
 
@@ -707,11 +709,12 @@ where
         let lag_ms = state
             .behind_since_ms
             .map_or(0, |since| ((self.clock)() - since).max(0));
+        let repo = self.config.repo.as_str();
         m.mirror_lag_seconds
-            .with_label_values(&[line])
+            .with_label_values(&[repo, line])
             .set(lag_ms as f64 / 1000.0);
         m.mirror_divergence
-            .with_label_values(&[line])
+            .with_label_values(&[repo, line])
             .set(i64::from(state.diverged.is_some()));
     }
 }

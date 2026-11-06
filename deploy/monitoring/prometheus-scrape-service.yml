@@ -1,0 +1,10 @@
+# Scrape config for the graft-mirror service (D41, WI-3211), to merge into
+# personal/grafanaloki/prometheus/prometheus.yml in the ops repo in place of
+# the per-repository graft-mirror targets in prometheus-scrape.yml. One
+# target serves every repository; the series carry a `repo` label.
+  - job_name: graft-mirror
+    static_configs:
+      - targets: ['100.99.200.95:17890']
+        labels:
+          host: graft-dev
+          service: graft-mirror
