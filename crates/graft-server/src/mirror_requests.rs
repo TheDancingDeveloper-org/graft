@@ -291,6 +291,10 @@ struct Draft {
     base: Option<ChangesetId>,
     excludes: Vec<ChangesetId>,
     upstream: Option<String>,
+    /// The mirror row's version the caller checked, for a purge: the
+    /// commit is fenced on it, so a re-enable between the check and the
+    /// commit refuses the purge instead of leaving it live.
+    row: Option<Option<u64>>,
 }
 
 /// Records `draft`, or returns the request its key already names. A cut or
@@ -355,6 +359,12 @@ async fn create<M: MetaStore>(
             id: rid,
             version: None,
         });
+        if let (Some(version), Some(upstream)) = (draft.row, &draft.upstream) {
+            pre.push(Precondition::MirrorVersionIs {
+                upstream: upstream.clone(),
+                version,
+            });
+        }
         let record = MirrorRequestRecord {
             id: rid,
             line: draft.line.clone(),
@@ -379,9 +389,19 @@ async fn create<M: MetaStore>(
             preconditions: pre,
             writes,
         };
-        // A lost race re-reads: the key, a slot or the id moved.
+        // A lost race re-reads: the key, a slot or the id moved. A moved
+        // mirror row is the caller's check gone stale, so it refuses.
         if let TxnOutcome::Committed(_) = meta.commit(id, txn).await.map_err(store)? {
             return Ok(view(repo, record));
+        }
+        if let (Some(version), Some(upstream)) = (draft.row, &draft.upstream) {
+            let now = meta.get_mirror(id, upstream).await.map_err(store)?;
+            if now.map(|r| r.version) != version {
+                return Err(refused(
+                    "mirror-version",
+                    "the mirror changed while the purge was recorded; read it again and retry",
+                ));
+            }
         }
     }
     Err(busy())
@@ -471,6 +491,7 @@ pub(crate) async fn cut_batch<M: MetaStore>(
             .transpose()?,
         excludes: change_ids("excludes", &req.excludes, MAX_EXCLUDES)?,
         upstream: None,
+        row: None,
     };
     create(meta, p, &req.repo, now_ms, draft).await
 }
@@ -505,18 +526,21 @@ pub(crate) async fn rewind_followed<M: MetaStore>(
         base: None,
         excludes: Vec::new(),
         upstream: None,
+        row: None,
     };
     create(meta, p, &req.repo, now_ms, draft).await
 }
 
 /// `PurgeMirror` (§3.2): records a purge of an upstream's data. The caller
-/// has checked the grant and that the row is removed or disabled.
+/// has checked the grant and that the row is removed or disabled, at
+/// `row_version` (`None`: no row); the commit is fenced on it.
 pub(crate) async fn record_purge<M: MetaStore>(
     meta: &M,
     p: &Principal,
     now_ms: i64,
     repo: &str,
     upstream: String,
+    row_version: Option<u64>,
     client_request_id: &str,
 ) -> Result<pb::MirrorRequest, ApiError> {
     let draft = Draft {
@@ -526,6 +550,7 @@ pub(crate) async fn record_purge<M: MetaStore>(
         base: None,
         excludes: Vec::new(),
         upstream: Some(upstream),
+        row: Some(row_version),
     };
     create(meta, p, repo, now_ms, draft).await
 }

@@ -708,20 +708,21 @@ pub(crate) async fn purge<M: MetaStore>(
     any_of(p, &[Scope::MirrorBind])?;
     let upstream = name("upstream", &req.upstream)?;
     let id = repo_id(meta, &req.repo).await?;
-    if let Some(row) = meta.get_mirror(id, &req.upstream).await.map_err(store)?
-        && row.enabled
-    {
+    let row = meta.get_mirror(id, &req.upstream).await.map_err(store)?;
+    if row.as_ref().is_some_and(|r| r.enabled) {
         return Err(refused(
             "mirror-enabled",
             "disable or remove the mirror before purging its data",
         ));
     }
+    // The purge commits only if the row is still the one checked here.
     crate::mirror_requests::record_purge(
         meta,
         p,
         now_ms,
         &req.repo,
         upstream,
+        row.map(|r| r.version),
         &req.client_request_id,
     )
     .await
@@ -1770,6 +1771,238 @@ mod tests {
         let again = purge(&s, &bind, 3, fresh).await.expect("fresh purge");
         assert_ne!(again.id, purge_req.id);
         assert_eq!(again.state, pb::MirrorRequestState::Pending as i32);
+    }
+
+    use graft_store::StoreResult;
+
+    /// A memory store that re-enables the mirror right after the next
+    /// `get_mirror` read: a `SetMirror` landing between `PurgeMirror`'s
+    /// check of the row and its commit.
+    struct ReEnableAfterRead {
+        inner: MemoryStore,
+        armed: std::sync::atomic::AtomicBool,
+    }
+
+    impl MetaStore for ReEnableAfterRead {
+        async fn create_repo(&self, name: &str) -> StoreResult<RepoId> {
+            self.inner.create_repo(name).await
+        }
+        async fn repo(&self, name: &str) -> StoreResult<Option<RepoId>> {
+            self.inner.repo(name).await
+        }
+        async fn get_mirror(
+            &self,
+            repo: RepoId,
+            upstream: &str,
+        ) -> StoreResult<Option<graft_store::MirrorRecord>> {
+            let row = self.inner.get_mirror(repo, upstream).await?;
+            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                let v = row.as_ref().map(|r| r.version);
+                set(
+                    &self.inner,
+                    &who(&["mirror:bind"]),
+                    &policy(),
+                    1,
+                    req(upstream, v, vec![line("main", "follow")]),
+                )
+                .await
+                .expect("re-enable between the read and the commit");
+            }
+            Ok(row)
+        }
+        async fn get_mirror_request(
+            &self,
+            repo: RepoId,
+            id: u64,
+        ) -> StoreResult<Option<graft_store::MirrorRequestRecord>> {
+            self.inner.get_mirror_request(repo, id).await
+        }
+        async fn find_mirror_request(
+            &self,
+            repo: RepoId,
+            kind: MirrorRequestKind,
+            client_request_id: &str,
+        ) -> StoreResult<Option<graft_store::MirrorRequestRecord>> {
+            self.inner
+                .find_mirror_request(repo, kind, client_request_id)
+                .await
+        }
+        async fn line_slot(
+            &self,
+            repo: RepoId,
+            line: &str,
+            slot: graft_store::LineSlot,
+        ) -> StoreResult<Option<u64>> {
+            self.inner.line_slot(repo, line, slot).await
+        }
+        async fn list_mirror_requests(
+            &self,
+            repo: RepoId,
+            query: MirrorRequestQuery,
+        ) -> StoreResult<Vec<graft_store::MirrorRequestRecord>> {
+            self.inner.list_mirror_requests(repo, query).await
+        }
+        async fn last_mirror_request_id(&self, repo: RepoId) -> StoreResult<u64> {
+            self.inner.last_mirror_request_id(repo).await
+        }
+        async fn commit(&self, repo: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcome> {
+            self.inner.commit(repo, txn).await
+        }
+        async fn changeset(
+            &self,
+            repo: RepoId,
+            id: ChangesetId,
+        ) -> StoreResult<Option<(Vec<u8>, graft_store::ChangesetRecord)>> {
+            self.inner.changeset(repo, id).await
+        }
+        async fn get_ref(&self, repo: RepoId, name: &str) -> StoreResult<Option<RefRecord>> {
+            self.inner.get_ref(repo, name).await
+        }
+        async fn list_refs(
+            &self,
+            repo: RepoId,
+            prefix: &str,
+            limit: u32,
+        ) -> StoreResult<Vec<RefRecord>> {
+            self.inner.list_refs(repo, prefix, limit).await
+        }
+        async fn workspace(
+            &self,
+            repo: RepoId,
+            name: &str,
+        ) -> StoreResult<Option<graft_store::WorkspaceRecord>> {
+            self.inner.workspace(repo, name).await
+        }
+        async fn expired_workspaces(
+            &self,
+            repo: RepoId,
+            before_ms: i64,
+            limit: u32,
+        ) -> StoreResult<Vec<graft_store::WorkspaceRecord>> {
+            self.inner.expired_workspaces(repo, before_ms, limit).await
+        }
+        async fn list_workspaces(
+            &self,
+            repo: RepoId,
+            owner: &str,
+            after: &str,
+            limit: u32,
+        ) -> StoreResult<Vec<graft_store::WorkspaceRecord>> {
+            self.inner.list_workspaces(repo, owner, after, limit).await
+        }
+        async fn count_records(
+            &self,
+            repo: RepoId,
+            state: graft_store::RecordState,
+        ) -> StoreResult<u64> {
+            self.inner.count_records(repo, state).await
+        }
+        async fn count_workspaces(&self, repo: RepoId, before_ms: Option<i64>) -> StoreResult<u64> {
+            self.inner.count_workspaces(repo, before_ms).await
+        }
+        async fn derived(
+            &self,
+            repo: RepoId,
+            kind: &str,
+            version: u32,
+            key: &[u8],
+        ) -> StoreResult<Option<Vec<u8>>> {
+            self.inner.derived(repo, kind, version, key).await
+        }
+        async fn line_pos(
+            &self,
+            repo: RepoId,
+            line: &str,
+            id: ChangesetId,
+        ) -> StoreResult<Option<u64>> {
+            self.inner.line_pos(repo, line, id).await
+        }
+        async fn scan_line_path(
+            &self,
+            repo: RepoId,
+            line: &str,
+            path: &graft_model::RepoPath,
+            before: u64,
+            limit: u32,
+        ) -> StoreResult<Vec<(u64, ChangesetId)>> {
+            self.inner
+                .scan_line_path(repo, line, path, before, limit)
+                .await
+        }
+        async fn holders(&self, repo: RepoId, object: ObjectId) -> StoreResult<u32> {
+            self.inner.holders(repo, object).await
+        }
+        async fn land(
+            &self,
+            repo: RepoId,
+            draft: ChangesetId,
+            line: &str,
+        ) -> StoreResult<Option<ChangesetId>> {
+            self.inner.land(repo, draft, line).await
+        }
+        async fn journal(
+            &self,
+            repo: RepoId,
+            from: graft_store::Lsn,
+            limit: u32,
+        ) -> StoreResult<Vec<(graft_store::Lsn, String, Vec<u8>)>> {
+            self.inner.journal(repo, from, limit).await
+        }
+        async fn journal_tip(&self, repo: RepoId) -> StoreResult<Option<graft_store::Lsn>> {
+            self.inner.journal_tip(repo).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_re_enable_between_the_check_and_the_commit_refuses_the_purge() {
+        let s = ReEnableAfterRead {
+            inner: store().await,
+            armed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let bind = who(&["mirror:bind"]);
+        let mut off = req(UP, None, vec![line("main", "follow")]);
+        off.enabled = false;
+        set(&s.inner, &bind, &policy(), 0, off)
+            .await
+            .expect("create disabled");
+        s.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let key = pb::PurgeMirrorRequest {
+            repo: "r".into(),
+            upstream: UP.into(),
+            client_request_id: "purge-1".into(),
+        };
+        let r = purge(&s, &bind, 2, key).await;
+        assert!(
+            matches!(&r, Err(ApiError::Rejected { policy, .. }) if policy == "mirror-version"),
+            "{r:?}"
+        );
+        let id = s.inner.repo("r").await.expect("repo").expect("exists");
+        assert!(
+            s.inner
+                .get_mirror(id, UP)
+                .await
+                .expect("read")
+                .expect("row")
+                .enabled,
+            "the re-enable landed"
+        );
+        let live = s
+            .inner
+            .list_mirror_requests(
+                id,
+                MirrorRequestQuery {
+                    kind: Some(MirrorRequestKind::Purge),
+                    states: vec![MirrorRequestState::Pending, MirrorRequestState::Claimed],
+                    limit: 10,
+                    ..MirrorRequestQuery::default()
+                },
+            )
+            .await
+            .expect("list");
+        assert!(
+            live.is_empty(),
+            "no purge is live against the enabled row: {live:?}"
+        );
     }
 
     async fn marker(s: &MemoryStore, line: &str) {
