@@ -17,6 +17,15 @@ json_logs = true
 max_token_ttl_s = 2592000
 shutdown_grace_s = 20
 
+# Mirror settings (D41). The mirror service's upstream credentials are sealed
+# in each mirror row under this key. Host file /etc/graft/kek-k1, mounted
+# read-only (32 random bytes, mode 0600, uid 10001), provisioned by hand
+# (mirror-service-cutover.md step 1) and backed up in Infisical; up.sh refuses
+# to deploy without it. It is never in git.
+[mirror]
+allowed_hosts = ["github.com"]
+credential_kek = { id = "k1", file = "/run/secrets/kek-k1" }
+
 # GitHub Actions identity exchange for the graft repository. The exchanged
 # token is short-lived, pinned to one exported changeset, and can only attest.
 [ci]

@@ -1,4 +1,4 @@
-# Mirror service cutover (D41 §6 steps 2–4)
+# Mirror service cutover and retirement (D41 §6 steps 2–5)
 
 Moves graft-dev's thirteen per-repository `graft-mirror follow` containers
 onto one `graft-mirror serve`. Design: `docs/notes/mirror-service.md` §6.
@@ -6,9 +6,20 @@ Run it on the graft-dev VM, from `/opt/graft`, as an operator. Nothing here
 prints a secret: every token and credential goes from its store into a
 `0600` file and is read from that file, never from argv.
 
-Rollback is possible until step 7 (the old containers are only scaled to
-zero, and the per-repository data layout is unchanged apart from the two
-renames). See "Rollback" below.
+Steps 1–6 prepare the server and move the data while the old containers are
+stopped; step 7 deploys the service; step 8 retires the old files and secrets
+and is the point of no return. Rollback is possible until step 8 (the old
+containers are only stopped, and the per-repository data layout is unchanged
+apart from the two renames). See "Rollback" below.
+
+**Two checkouts.** The retirement change removes `mirrors.tsv`,
+`mirror-*.toml`, `compose.onboarded.yml` and the per-repository services from
+`deploy/`. Steps 1–6 need those files, so run them from the checkout *before*
+the retirement commit (`RETIRE` is its sha; keep the old tree with
+`git worktree add /opt/graft-old $RETIRE^`, and use `/opt/graft-old` where
+these steps say `deploy/`). Step 1's server and compose edits are already in
+the retirement commit; in the old tree, make them by hand. Step 7 runs
+`deploy/up.sh` from the new tree.
 
 ## 1. Provision `credential_kek`
 
@@ -18,7 +29,9 @@ renames). See "Rollback" below.
 sudo sh -c 'umask 077; head -c 32 /dev/urandom > /etc/graft/kek-k1'
 ```
 
-Mount it into graft-server and name it in `server.toml`:
+In the old tree, mount it into graft-server (a read-only bind of
+`/etc/graft/kek-k1` at `/run/secrets/kek-k1`, as `signing.key` is) and name it
+in `server.toml` (the retirement commit carries both):
 
 ```toml
 [mirror]
@@ -30,7 +43,11 @@ Store a copy in Infisical (`secret set GRAFT_DEV_CREDENTIAL_KEK --from-file
 /etc/graft/kek-k1`): without it, sealed credentials cannot be opened after
 a VM rebuild. Redeploy the server through `deploy/up.sh`.
 
-## 2. Mint one `mirror`-kind token
+## 2. Mint one `mirror`-kind token (optional now)
+
+Step 7's `up.sh` mints `/etc/graft/mirror-service-token` itself when it is
+missing. Mint it here by hand only to have the token before step 7; `up.sh`
+then leaves it until it is 20 days old. Same command either way:
 
 ```sh
 docker compose --env-file deploy/image.env -f deploy/compose.yml exec -T graft-server \
@@ -43,7 +60,8 @@ docker compose --env-file deploy/image.env -f deploy/compose.yml exec -T graft-s
 
 One file per repository, named after the graft repository, holding that
 repository's upstream PAT (today's `GRAFT_DEV_MIRROR_TOKEN_*` deploy secret,
-or the shared `/etc/graft/github-token` where the repository used it):
+or the shared `/etc/graft/github-token` where the repository used it). These
+secrets stay where they are until step 8:
 
 ```sh
 sudo install -d -m 0700 /run/graft-cutover/creds
@@ -60,6 +78,7 @@ Stop every per-repository `graft-mirror*` service (the names are column 1 of
 `mirrors.tsv`) and confirm none is running:
 
 ```sh
+cd /opt/graft-old
 cut -d'|' -f1 deploy/mirrors.tsv | grep -v '^#' \
   | xargs docker compose --env-file deploy/image.env \
       -f deploy/compose.yml -f deploy/compose.onboarded.yml stop
@@ -71,16 +90,22 @@ new service can start (§6 step 7).
 
 ## 5. Move (not copy) the per-repository directories
 
-Each old volume holds `<repo>.git` and `<repo>.sqlite`. Move each volume's
-contents into `<data>/<repo>/` of the new service's volume, on the same
-filesystem so it is a rename. Use `mv`, never `cp`: a copy left behind is a
+Each old volume holds `<repo>.git` and `<repo>.sqlite`. The service's volume
+is the compose volume `graft-dev-mirror`, which is also `rusttorrent`'s old
+volume: move that one's contents down into `<data>/rusttorrent/` in place, and
+every other volume's into `<data>/<repo>/` (the volumes are on one
+filesystem, so each is a rename). Use `mv`, never `cp`: a copy left behind is a
 second directory that a restored old container would run.
 
 ```sh
-DATA=/var/lib/docker/volumes/graft-mirror-service/_data
+DATA=/var/lib/docker/volumes/graft-dev-mirror/_data
+# rusttorrent: its files are already in $DATA; move them into a subdirectory
+sudo mkdir "$DATA/rusttorrent"
+sudo sh -c 'mv "$1"/rusttorrent.git "$1"/rusttorrent.sqlite* "$1"/rusttorrent/' _ "$DATA"
+# every other repository: its old volume's files into $DATA/<repo>/
 sudo mkdir -p "$DATA/vogt"
-sudo mv /var/lib/docker/volumes/<vogt-volume>/_data/* "$DATA/vogt/"
-# ... one per repository
+sudo mv /var/lib/docker/volumes/graft-dev-mirror-vogt/_data/* "$DATA/vogt/"
+# ... one per repository (volume names: docker volume ls | grep graft-dev-mirror)
 ```
 
 ## 6. Run `import-config`
@@ -90,7 +115,7 @@ the server and prints the plan, changing nothing:
 
 ```sh
 export GRAFT_ENDPOINT=http://127.0.0.1:7878
-graft-mirror import-config deploy/mirror.toml deploy/mirror-*.toml \
+graft-mirror import-config /opt/graft-old/deploy/mirror.toml /opt/graft-old/deploy/mirror-*.toml \
   --data-dir "$DATA" --credential-dir /run/graft-cutover/creds \
   --token-file /etc/graft/sprooty.token --dry-run
 ```
@@ -116,27 +141,65 @@ Then remove the staged credentials: `sudo rm -rf /run/graft-cutover`.
 
 ## 7. Deploy one `graft-mirror serve`
 
-One container, the token from step 2, the data volume from step 5:
+From the new tree (the retirement commit), as for any deploy:
 
-```toml
-# /etc/graft/mirror-service.toml
-server = "http://graft-server:7878"
-token_file = "/run/secrets/graft-mirror-token"
-data_dir = "/var/lib/graft/mirror"
-metrics_addr = "0.0.0.0:9465"
-json_logs = true
+```sh
+cd /opt/graft && git checkout $RETIRE   # or the branch that carries it
+deploy/up.sh
 ```
 
-`serve` adopts only marked directories whose marker names that repository.
-If a directory is copied to a second service anyway, the repository's lease
-lets only one of them run it (§3.6). Check `graft repo mirror status` shows
-every row polling, then continue with §6 step 5 (removing the old services)
-as its own change.
+`up.sh` checks that `kek-k1` exists, pre-flights `server.toml` and
+`mirror-service.toml`, mints `mirror-service-token` if missing, and starts the
+single `graft-mirror` service (`graft-mirror serve --config
+/etc/graft/deploy/mirror-service.toml`) with `--wait`. `--remove-orphans`
+removes the stopped per-repository containers. `serve` adopts only marked
+directories whose marker names that repository; if a directory is copied to a
+second service anyway, the repository's lease lets only one of them run it
+(§3.6).
 
-## Rollback (before §6 step 5)
+Check that `graft repo mirror status` shows every row polling and
+`curl -s localhost:17890/metrics | grep '^graft_mirror_lag'` has a series for
+each of the thirteen repositories. Accept: one serve container follows all
+thirteen, and no per-repository mirror container is running
+(`docker ps --format '{{.Names}}' | grep graft-dev-mirror` prints only
+`graft-dev-mirror`).
 
-1. Scale `graft-mirror serve` to zero first.
+## 8. Retire the per-repository files and secrets (point of no return)
+
+Only after step 7 has run clean for a while (at least a day of polls with no
+`GraftMirrorStalled`, `GraftMirrorCredentialError` or `GraftMirrorLeaseLost`
+alert). This step makes the old layout unrecoverable:
+
+1. Remove the old volumes, now empty: `docker volume rm` for each
+   `graft-dev-mirror-<repo>` (not `graft-dev-mirror`).
+2. Remove the host files `/etc/graft/mirror-token`, `mirror-token-*` and
+   `mirror-configs/`, and `/opt/graft-old`.
+3. Delete the `GRAFT_DEV_MIRROR_TOKEN_*` secrets from Infisical, and the ops
+   repo's mirror rendering (`gen.py`) in its own PR. `/etc/graft/github-token`
+   goes with the last consumer of it.
+4. Scrape and alert config: apply `deploy/monitoring/prometheus-scrape.yml`
+   (job `graft-mirror`, one target) in the ops repo's Prometheus.
+
+From here, onboarding is `graft repo mirror add` (deploy/README.md).
+
+## Rollback (before step 8 only)
+
+Order matters: the old processes do not read the lease, so the service must be
+gone before they start (§6 step 7).
+
+1. Scale `graft-mirror serve` to zero first:
+   `docker compose --env-file deploy/image.env -f deploy/compose.yml stop graft-mirror`
+   (and `rm` it). Confirm `docker ps | grep graft-dev-mirror` prints nothing.
 2. Move each `<data>/<repo>/mirror.git` and `mirror.sqlite` back to the old
-   volume as `<repo>.git` and `<repo>.sqlite`.
-3. Start the old services from the previous manifest. The rows, leases and
-   requests are additive and the old processes ignore them.
+   volume as `<repo>.git` and `<repo>.sqlite`, and `rusttorrent`'s back up to
+   the root of `graft-dev-mirror`.
+3. Restore the old deployment and token secrets: check out `$RETIRE^` (the
+   old tree), whose `deploy/` still has the per-repository services, and run
+   its `deploy/up.sh`. The `mirror-token*` files and the
+   `GRAFT_DEV_MIRROR_TOKEN_*` secrets are still in place because step 8 has
+   not run. The old tree keeps the `[mirror]` table and the `kek-k1` mount from
+   step 1, so sealed credentials stay readable.
+
+The rows, leases and requests are additive and the old processes ignore
+them. After step 8, rolling back means re-creating the volumes, tokens and
+configs from history and Infisical; do not plan on it.
