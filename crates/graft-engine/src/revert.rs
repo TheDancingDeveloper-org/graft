@@ -76,7 +76,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
         let repo = self.repo_id(&req.repo).await?;
         let (c, _) = self.changeset(repo, req.changeset).await?;
-        require_changes(cx, &req.repo, &c.changes)?;
+        self.or_cut(cx, &req.repo, require_changes(cx, &req.repo, &c.changes))
+            .await?;
         let parent = c
             .first_parent()
             .ok_or_else(|| errors::invalid(None, "revert-root"))?;

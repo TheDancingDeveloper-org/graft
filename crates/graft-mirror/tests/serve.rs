@@ -155,6 +155,86 @@ impl Fake {
         ));
     }
 
+    /// Mirrors a cut's claim (`epoch`) or its end (`None`) into the
+    /// engine's store, as the server's request row and line slot record it.
+    async fn put_store_cut(&self, req: &pb::MirrorRequest, epoch: Option<u64>) {
+        use graft_store::{
+            BatchState, LineSlot, MirrorRequestKind as Kind, MirrorRequestRecord,
+            MirrorRequestState,
+        };
+        let Some(store) = &self.store else {
+            return;
+        };
+        if req.kind != MirrorRequestKind::CutBatch as i32 {
+            return;
+        }
+        let id = store.repo(&req.repo).await.unwrap().unwrap();
+        let prior = store.get_mirror_request(id, req.id).await.unwrap();
+        let slot = store
+            .line_slot(id, &req.line, LineSlot::Batch)
+            .await
+            .unwrap();
+        let record = MirrorRequestRecord {
+            id: req.id,
+            line: req.line.clone(),
+            kind: Kind::CutBatch,
+            client_request_id: format!("cut-{}", req.id),
+            base: None,
+            excludes: Vec::new(),
+            upstream: None,
+            state: if epoch.is_some() {
+                MirrorRequestState::Claimed
+            } else {
+                MirrorRequestState::Done
+            },
+            batch: Some(if epoch.is_some() {
+                BatchState::Requested
+            } else {
+                BatchState::Settled
+            }),
+            claimed_by_epoch: epoch,
+            claimed_at_ms: epoch.map(|_| ENGINE_NOW),
+            deadline_ms: ENGINE_NOW + 3_600_000,
+            result: Default::default(),
+            requested_by: "op".to_owned(),
+            created_at_ms: ENGINE_NOW,
+            updated_at_ms: ENGINE_NOW,
+            version: prior.as_ref().map_or(1, |r| r.version + 1),
+        };
+        let txn = MetaTxn {
+            preconditions: vec![
+                Precondition::MirrorRequestVersionIs {
+                    id: req.id,
+                    version: prior.map(|r| r.version),
+                },
+                Precondition::LineSlotIs {
+                    line: req.line.clone(),
+                    slot: LineSlot::Batch,
+                    request: slot,
+                },
+            ],
+            writes: vec![
+                Write::PutMirrorRequest(record),
+                Write::SetLineSlot {
+                    line: req.line.clone(),
+                    slot: LineSlot::Batch,
+                    request: epoch.map(|_| req.id),
+                },
+            ],
+        };
+        assert!(matches!(
+            store.commit(id, txn).await,
+            Ok(TxnOutcome::Committed(_))
+        ));
+    }
+
+    /// Drops claimed request `id`, returning it.
+    fn end_claim(&self, id: u64) -> Option<pb::MirrorRequest> {
+        let mut st = self.st();
+        let pos = st.claimed.iter().position(|r| r.id == id)?;
+        Some(st.claimed.remove(pos))
+    }
+
     fn held(&self, repo: &str, epoch: u64) -> ApiResult<()> {
         match self.st().leases.get(repo) {
             Some(l) if l.holder.is_some() && l.epoch == epoch => Ok(()),
@@ -286,21 +366,25 @@ impl Control for Fake {
     async fn claim_request(&self, repo: &str, epoch: u64) -> ApiResult<Option<pb::MirrorRequest>> {
         self.up()?;
         self.held(repo, epoch)?;
-        let mut st = self.st();
-        // A request claimed under an older epoch returns to pending.
-        let stale: Vec<_> = st
-            .claimed
-            .iter()
-            .filter(|r| r.claimed_by_epoch != Some(epoch))
-            .cloned()
-            .collect();
-        st.claimed.retain(|r| r.claimed_by_epoch == Some(epoch));
-        st.pending.extend(stale);
-        let Some(mut req) = st.pending.pop_front() else {
-            return Ok(None);
+        let req = {
+            let mut st = self.st();
+            // A request claimed under an older epoch returns to pending.
+            let stale: Vec<_> = st
+                .claimed
+                .iter()
+                .filter(|r| r.claimed_by_epoch != Some(epoch))
+                .cloned()
+                .collect();
+            st.claimed.retain(|r| r.claimed_by_epoch == Some(epoch));
+            st.pending.extend(stale);
+            let Some(mut req) = st.pending.pop_front() else {
+                return Ok(None);
+            };
+            req.claimed_by_epoch = Some(epoch);
+            st.claimed.push(req.clone());
+            req
         };
-        req.claimed_by_epoch = Some(epoch);
-        st.claimed.push(req.clone());
+        self.put_store_cut(&req, Some(epoch)).await;
         Ok(Some(req))
     }
 
@@ -317,17 +401,21 @@ impl Control for Fake {
             return Err(ApiError::Unavailable { retry_after_ms: 0 });
         }
         self.held(repo, epoch)?;
-        let mut st = self.st();
-        st.claimed.retain(|r| r.id != id);
-        st.completed.push((id, result));
+        let ended = self.end_claim(id);
+        self.st().completed.push((id, result));
+        if let Some(req) = ended {
+            self.put_store_cut(&req, None).await;
+        }
         Ok(())
     }
 
     async fn fail_request(&self, repo: &str, id: u64, epoch: u64, code: &str) -> ApiResult<()> {
         self.held(repo, epoch)?;
-        let mut st = self.st();
-        st.claimed.retain(|r| r.id != id);
-        st.failed.push((id, code.to_owned()));
+        let ended = self.end_claim(id);
+        self.st().failed.push((id, code.to_owned()));
+        if let Some(req) = ended {
+            self.put_store_cut(&req, None).await;
+        }
         Ok(())
     }
 }
@@ -1825,6 +1913,167 @@ async fn a_claimed_cut_request_runs_through_the_spawned_task_and_opens_its_pr() 
     let pulls = book.pulls.lock().unwrap();
     assert_eq!(pulls.len(), 1);
     assert_eq!(pulls[0].head_ref, "graft/batch-1");
+}
+
+/// The mirror's call context with the mirror set only (`repo:*:mirror`),
+/// as a minted mirror token gives it after the migration.
+fn mirror_only_cx(repo: &str) -> CallContext {
+    let mut cx = mirror_cx(repo);
+    cx.principal.scopes = vec!["repo:*:mirror".to_owned()];
+    cx
+}
+
+/// WI-3426: a claimed cut runs with the mirror set only. The base moved
+/// upstream after the land, so the cut creates the sync merge and moves
+/// the batch's line, which the mirror kind may do only for the line its
+/// claimed cut names. Fails on an engine without that grant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mirror_token_cuts_a_batch_that_syncs_its_line() {
+    use graft_model::{
+        Author, AuthorKind, Change, EntryKind, Metadata, ObjectKind, RepoPath, Timestamp,
+    };
+    use graft_proto::Frame;
+    use graft_proto::types::CreateChangeset;
+
+    const LINE: &str = "integration";
+    let tmp = tempfile::tempdir().unwrap();
+    let (bare, work) = upstream(tmp.path());
+    let c1 = commit(&work, "a");
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    bind(&store, REPO, bare.to_str().unwrap()).await;
+    let fake = Arc::new(Fake::with_store(store));
+    fake.set_row(row(REPO, bare.to_str().unwrap(), 0));
+    let data = tmp.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+
+    // The migration sets the followed line and its marker up (admin).
+    let mut setup = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(mirror_cx),
+        local_config(&data, "a"),
+    );
+    setup.reconcile().await.unwrap();
+    eventually(|| {
+        fake.statuses()
+            .iter()
+            .any(|s| s.last_imported_sha.as_deref() == Some(c1.as_str()))
+    })
+    .await;
+    let main = current_ref(&*api, &mirror_cx(REPO), REPO, "main")
+        .await
+        .unwrap()
+        .expect("followed");
+
+    // One land on the integration line, cut from main's tip.
+    let body = b"b1\n";
+    let land = api
+        .create_changeset(
+            &mirror_cx(REPO),
+            CreateChangeset {
+                repo: REPO.to_owned(),
+                parents: vec![main],
+                changes: vec![Change::Put {
+                    path: RepoPath::new("b.txt").unwrap(),
+                    kind: EntryKind::File,
+                    id: graft_model::ObjectId::hash(ObjectKind::Blob, body),
+                }],
+                author: Author {
+                    name: "Tess".to_owned(),
+                    email: "tess@example.com".to_owned(),
+                    kind: AuthorKind::Agent,
+                },
+                authored_at: Timestamp {
+                    ms: 1_700_000_000_000,
+                    offset_min: 0,
+                },
+                message: "add b".to_owned(),
+                metadata: Metadata::new(),
+                inline_blobs: vec![Frame::encode(ObjectKind::Blob, body)],
+                workspace: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    api.update_ref(
+        &mirror_cx(REPO),
+        UpdateRef {
+            repo: REPO.to_owned(),
+            name: LINE.to_owned(),
+            expected: None,
+            new: land,
+            kind: RefKind::Line,
+            lease_epoch: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // A restart with the mirror set only and claims on; main moves upstream.
+    let book = Arc::new(PrBook::default());
+    let mut config = local_config(&data, "b");
+    config.claim_requests = true;
+    let mut service = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone())
+            .with_cx(mirror_only_cx)
+            .with_forges(LocalForges(book.clone())),
+        config,
+    );
+    fake.lapse(REPO);
+    service.reconcile().await.unwrap();
+    drop(setup);
+    let c2 = commit(&work, "c");
+    eventually(|| {
+        fake.statuses()
+            .iter()
+            .any(|s| s.last_imported_sha.as_deref() == Some(c2.as_str()))
+    })
+    .await;
+
+    let mut req = request(7, MirrorRequestKind::CutBatch);
+    req.line = LINE.to_owned();
+    fake.st().pending.push_back(req);
+    eventually(|| {
+        let st = fake.st();
+        !st.completed.is_empty() || !st.failed.is_empty()
+    })
+    .await;
+    {
+        let st = fake.st();
+        assert!(st.failed.is_empty(), "the cut failed: {:?}", st.failed);
+        let (id, outcome) = &st.completed[0];
+        assert_eq!(*id, 7);
+        assert_eq!(outcome.pr_number, Some(1));
+    }
+    // The cut synced the line onto the moved base: its tip is a merge
+    // whose parents are the land and main's new tip.
+    let new_main = current_ref(&*api, &mirror_cx(REPO), REPO, "main")
+        .await
+        .unwrap()
+        .expect("followed");
+    assert_ne!(new_main, main);
+    let tip = current_ref(&*api, &mirror_cx(REPO), REPO, LINE)
+        .await
+        .unwrap()
+        .expect("line");
+    let cs = api
+        .get_changesets(
+            &mirror_cx(REPO),
+            graft_proto::types::GetChangesets {
+                repo: REPO.to_owned(),
+                ids: vec![tip],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(cs.found[0].changeset.parents, vec![land, new_main]);
+    // The batch branch holds the land's one commit on main's new tip.
+    let head = git(&bare, &["rev-parse", "graft/batch-1"]);
+    assert_eq!(git(&bare, &["rev-parse", &format!("{head}~1")]), c2);
 }
 
 /// Whether [`minted_cx`] still carries the admin scope of the migration.

@@ -21,7 +21,7 @@ use crate::git::{Mirror, PushOutcome};
 use crate::github::{Forge, Pull};
 use crate::import_pr::{PrSpec, close_comment, commit_message, source_prs};
 use crate::text::{clean_message, clean_text};
-use crate::{ExportLog, MAX_RECORD_EXPORTS, MirrorError, current_ref, move_ref};
+use crate::{ExportLog, MAX_RECORD_EXPORTS, MirrorError, current_ref, move_ref_fenced};
 
 use super::render::{
     BatchHeader, FORCED_LINE, defer_cut, keep_with_reverts, land_commit, parse_commit, render,
@@ -125,7 +125,8 @@ where
         self
     }
 
-    /// Fences the base follow's ref moves by the service's lease `epoch`.
+    /// Fences the base follow's ref moves, and the line moves a cut makes,
+    /// by the service's lease `epoch`.
     pub fn with_lease_epoch(mut self, epoch: u64) -> Self {
         self.lease_epoch = Some(epoch);
         self
@@ -600,7 +601,18 @@ where
             let cx = self.call("update-ref");
             let repo = self.config.repo.clone();
             let line = self.config.line.clone();
-            match move_ref(self.api, &cx, &repo, &line, Some(tip), merge, RefKind::Line).await {
+            match move_ref_fenced(
+                self.api,
+                &cx,
+                &repo,
+                &line,
+                Some(tip),
+                merge,
+                RefKind::Line,
+                self.lease_epoch,
+            )
+            .await
+            {
                 Ok(()) => {}
                 Err(ApiError::RefConflict { .. }) => {
                     return Err(config_err(format!(
@@ -1144,7 +1156,7 @@ where
             // by the retry's revert.
             self.db.put_batch_drop(&line, land, revert, &reason)?;
             let cx = self.call("update-ref");
-            match move_ref(
+            match move_ref_fenced(
                 self.api,
                 &cx,
                 &repo,
@@ -1152,6 +1164,7 @@ where
                 Some(tip),
                 revert,
                 RefKind::Line,
+                self.lease_epoch,
             )
             .await
             {

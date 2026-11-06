@@ -150,8 +150,15 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let followed =
             kind == StoredKind::Line && mirror && self.is_followed(repo, &req.name).await?;
         let mirror_marker = marker && mirror && current.is_some();
+        // A batch cut the mirror service has claimed moves the line it cuts,
+        // under the claimer's epoch, and no other (D41 §3.5, WI-3426).
+        let cut = if kind == StoredKind::Line && mirror && !followed {
+            self.cut_lease(cx, &req.repo, &req.name).await?
+        } else {
+            None
+        };
         let need = match kind {
-            StoredKind::Line if followed => None,
+            StoredKind::Line if followed || cut.is_some() => None,
             StoredKind::Line => Some(Need::Admin),
             StoredKind::Tool if mirror_marker => None,
             StoredKind::Tool if marker => Some(Need::Admin),
@@ -184,10 +191,13 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         self.changeset(repo, req.new).await?;
         // The mirror moves a followed line only under its authority lease,
         // checked in the move's own transaction (D41 §3.6).
-        let lease = if followed || mirror_marker {
+        let lease = if followed || mirror_marker || cut.is_some() {
             let Some(epoch) = req.lease_epoch else {
                 return Err(ApiError::LeaseLost { repo: req.repo });
             };
+            if cut.is_some_and(|claimed| claimed != epoch) {
+                return Err(ApiError::LeaseLost { repo: req.repo });
+            }
             Some((epoch, req.repo))
         } else {
             None
