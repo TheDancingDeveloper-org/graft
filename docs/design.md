@@ -792,7 +792,7 @@ tested by `kill -9` during load, from the first phase.**
 | `Diff` | `from, to, paths?, patch?: { context, max_bytes }` → file changes, plus optional unified patches for text files |
 | `Blame` | `at, path, lines?` → line ranges with origin changeset, author and authored time |
 | `Rebase` | `changeset, onto, merge?: file \| line` → `{ id }` or `Conflict` |
-| `Revert` | `changeset, onto, workspace?` → `{ id }` or `Conflict` |
+| `Revert` | `changeset, onto, workspace?, land?` → `{ id }` or `Conflict`; with `land = <line>` the server also lands the revert on that line in the same call (`Landed` or a land outcome), needing `read` and `land:<line>` instead of `write` ([D42](decisions.md#d42-a-lines-land-scope-may-land-a-server-built-revert-of-a-change-already-on-that-line)) |
 | `Land` | `head, line, policy?, deadline` → `Landed`, `Conflict`, `Contended`, or `Rejected` ([§8](#8-landing-semantics)) |
 | `Watch` | `from_lsn, filter` → stream of journal entries |
 
@@ -1959,6 +1959,13 @@ caller's subject, kind and `jti` and the target's `jti`, never a token value.
 - **Server:** every RPC checks its scope. Writes (`CreateChangeset`, `Rebase`,
   `Land`, `Revert`) check `write` against every changed path and fail with
   `PermissionDenied { path }`. Lines check `land:<line>`.
+- **Revert-and-land (D42):** `Revert` with `land = <line>` checks `read` and
+  a named-repository `land:<line>` (or `admin`) instead of `write`. A
+  wildcard `repo:*:land:<line>` does not satisfy it. The reverted changeset
+  must be the line's tip or reachable from it (`is_ancestor`, no walk), else
+  `Invalid("revert-not-on-line")`. Only the changeset the server builds in
+  that call skips the per-path `write` check; `graft.reverts` metadata never
+  grants anything.
 - **Node:** it verifies the caller's token locally (it has the server's public
   key) before serving cached objects for a repository. It forwards the token
   on repository RPCs. Unix-socket peer credentials (`SO_PEERCRED`) are logged
