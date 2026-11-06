@@ -7,13 +7,11 @@ no Forgejo. The same VM is graft's quiet CI and benchmark host.
 
 | File | What it is |
 |---|---|
-| `compose.yml` | `graft-server` and `graft-mirror`, hardened (uid 10001, read-only root, `cap_drop: ALL`) |
+| `compose.yml` | `graft-server` and the one `graft-mirror` service, hardened (uid 10001, read-only root, `cap_drop: ALL`) |
 | `image.env` | `GRAFT_IMAGE`, the image pinned by `@sha256` digest |
 | `server.toml` | graft-server config (`max_token_ttl_s = 2592000`, 30 days) |
-| `mirror.toml` | graft-mirror follows rustTorrent `main` into repo `rusttorrent` |
-| `mirror-fluent2.toml`, `mirror-vogt.toml` | graft-mirror-fluent2 and graft-mirror-vogt follow fluent2-egui `main` and vogt `main` and `rust-core` into repos `fluent2-egui` and `vogt` (trial 3) |
-| `mirrors.tsv`, `compose.onboarded.yml` | followed-repository registry and generated Compose services |
-| `onboard-repo.sh` | one-step, idempotent repository onboarding; `--dry-run` prints the plan |
+| `mirror-service.toml` | `graft-mirror serve`: server, token file, data directory, metrics. No repositories: each is a mirror row (D41) |
+| `mirror-service-cutover.md` | the one-time move from per-repository mirrors to the service, with the retire steps and rollback |
 | `up.sh` | idempotent deploy: bootstrap secrets, pull, config pre-flight, `up -d --wait`, readiness gate with rollback, health check |
 | `backup/` | backup script, systemd timer, `install.sh`, `restore-rehearsal.sh` (WI-2307) |
 | `monitoring/` | Prometheus alert rules and scrape config for the ops repo (WI-2307) |
@@ -43,9 +41,7 @@ exists but is unreadable, `up.sh` stops rather than falling back to loopback.
 
 - `17888` graft-server: gRPC, the `/v1` JSON facade, `/healthz`, `/readyz`, `/metrics`
 - `17889` graft-server metrics listener: `/metrics`, `/healthz`, `/readyz`
-- `17890` graft-mirror `/metrics`
-- `17891` graft-mirror-fluent2 `/metrics`
-- `17892` graft-mirror-vogt `/metrics`
+- `17890` graft-mirror `/metrics`: every followed repository, series labelled `repo`
 
 ## Secrets
 
@@ -56,8 +52,8 @@ by uid 10001, mounted read-only:
 | File | Mounted at | Created by |
 |---|---|---|
 | `/etc/graft/signing.key` | `/run/secrets/signing.key` | `up.sh`, first run (32 random bytes) |
-| `/etc/graft/mirror-token` | `/run/secrets/graft-mirror-token` | `up.sh`, minted by the running server |
-| `/etc/graft/mirror-token-fluent2`, `/etc/graft/mirror-token-vogt` | `/run/secrets/graft-mirror-token` in their own mirror | `up.sh`, the same way, each scoped `repo:<its repo>:admin` |
+| `/etc/graft/kek-k1` | `/run/secrets/kek-k1` in `graft-server` | by hand, once (32 random bytes; [cutover](mirror-service-cutover.md) step 1); `up.sh` stops without it and only fixes its mode and owner |
+| `/etc/graft/mirror-service-token` | `/run/secrets/graft-mirror-token` in `graft-mirror` | `up.sh`, minted by the running server: kind `mirror`, scope `repo:*:mirror` |
 | `/etc/graft/attester-token` | `/run/secrets/graft-attester-token` | `up.sh` with `GRAFT_ATTESTER=1`; owned by root, not uid 10001 (see below) |
 | `/etc/graft/github-checker-token` | `/run/secrets/github-checker-token` in `graft-post-land` only | `up.sh` with `GRAFT_POST_LAND=1`, from Infisical, or placed by hand (see below) |
 | `/etc/graft/post-land-token` | `/run/secrets/graft-post-land-token` in `graft-post-land` | `up.sh` with `GRAFT_POST_LAND=1`; scopes `read`, `attest`, `write` on `graft` and `land` on the checked line (see below) |
@@ -66,123 +62,68 @@ by uid 10001, mounted read-only:
 the runner user needs only the docker group, not sudo. A missing file stops
 the container from starting rather than being created as a directory.
 
-The mirror token has the stack's maximum TTL (30 days, scope
-`repo:rusttorrent:admin`). `up.sh` re-mints it when it is older than 20 days
-(`GRAFT_TOKEN_RENEW_DAYS`), or on `GRAFT_REMINT=1`, and restarts the mirror.
+The mirror service token has the stack's maximum TTL (30 days). `up.sh`
+re-mints it when it is older than 20 days (`GRAFT_TOKEN_RENEW_DAYS`), or on
+`GRAFT_REMINT=1`, and restarts the service. There is no per-repository token
+or upstream-credential file: each row's upstream credential is sealed in the
+server under `kek-k1`, set with `graft repo mirror credential`.
 
-## Followed repositories (trial 3)
+## Followed repositories (D41)
 
-graft-mirror follows one repository per process, so each followed GitHub
-repository is its own service, with its own config, token, volume and metrics
-port:
-
-| Service | Upstream branch → graft line | graft repo | Config | Token | Volume | Port |
-|---|---|---|---|---|---|---|
-| `graft-mirror` | rustTorrent `main` → `main` | `rusttorrent` | `mirror.toml` | `mirror-token` | `graft-dev-mirror` | 17890 |
-| `graft-mirror-fluent2` | fluent2-egui `main` → `main` | `fluent2-egui` | `mirror-fluent2.toml` | `mirror-token-fluent2` | `graft-dev-mirror-fluent2` | 17891 |
-| `graft-mirror-vogt` | vogt `main` → `main`, `rust-core` → `rust-core` | `vogt` | `mirror-vogt.toml` | `mirror-token-vogt` | `graft-dev-mirror-vogt` | 17892 |
-
-vogt follows two branches. `main` → line `main` is the base of the
-integration line `backlog-1`, which Vogt lands through like the other repos:
-`graft-mirror pr-batch backlog-1 --base main` opens the batch PR into `main`.
-`rust-core` → line `rust-core` is trial 3's Rust port (crate `engine/core`,
-operator decision); its batch PRs use `pr-batch <line> --base rust-core`. The
-two branches have diverged upstream, so the lines are independent; a trial
-line forks from whichever base it names (`GRAFT_TRIAL_BASE`).
-
-There is no separate import step. `up.sh` creates every repository
-(`admin repo create`, idempotent) and mints each mirror's token before it
-starts the mirrors, and a mirror's first `follow` against an empty repository
-is the initial import, as it was for `rusttorrent`. So the first deploy after
-a repository is added imports it, and a re-run changes nothing. `up.sh`
-pre-flights every mirror config, and waits up to `GRAFT_REFS_WAIT` seconds
-for each repository's first ref. A repository that still has no ref when `GRAFT_REFS_WAIT` expires fails
-the deploy with "no ref after import". That is distinct from the "importing"
-log printed while the wait is still running, and from an error returned by
-the refs endpoint.
+One `graft-mirror serve` container follows every repository that has a
+mirror row, thirteen today. A row holds the upstream, the branch → line map,
+the poll interval and the sealed credential; the service lists the rows and
+runs one follow task per enabled row. Its state is one volume,
+`graft-dev-mirror`, holding `<repo>/mirror.git`, `<repo>/mirror.sqlite` and a
+migration marker per repository. `graft repo mirror status` shows each row;
+`/metrics` on 17890 carries every repository, with a bounded `repo` label.
 
 ### Onboard another repository
 
-Run this from the graft checkout on the graft-dev VM, in a plain operator
-terminal on the graft-dev checkout:
+The operator runs `graft repo mirror add`, with no change to this directory
+and no deploy:
 
 ```sh
-deploy/onboard-repo.sh OWNER/REPO BASE [LINE]
+graft repo mirror add NAME https://github.com/OWNER/REPO.git --follow main=main
+graft repo mirror credential NAME https://github.com/OWNER/REPO.git --from-file FILE   # private upstream only
+graft repo mirror status
 ```
 
-`LINE` defaults to `trial-1`. Use `--dry-run` first to print every planned
-file and operational action without changing the checkout, deploying, or
-minting credentials. The command adds one row to `mirrors.tsv`, writes the
-language-agnostic mirror config, regenerates `compose.onboarded.yml`, and
-runs `deploy/up.sh`. The normal deploy path creates the graft repository,
-mints its mirror token, starts the service, and waits for that repository's
-first imported ref before the command creates the integration line.
+The service picks the row up on its next reconcile (15 s) and the first poll
+is the initial import. Create the graft repository first if it does not exist
+(`graft-server admin repo create NAME`). A private upstream needs the
+`credential` step (read from a file, never an argument); a public one needs
+none. Hosts outside
+`[mirror] allowed_hosts` in `server.toml` are refused.
 
-A private upstream (one anonymous `git ls-remote` cannot read) gets a
-`[github] token_file` pointing at `/run/secrets/github-token`, mounted from
-`/etc/graft/github-token` on the host. graft-mirror reads that file itself
-and sends it as git's `http.extraHeader`, in the environment of each git
-command it runs against upstream (ls-remote, fetch and push), so `follow` and
-a separately exec'd `pr-batch` authenticate the same way (WI-2571). The
-mirror's entrypoint, `deploy/private-follow.sh`, only warns when the file is
-empty. The token is not written into the config, printed, or placed in argv. With an empty token file a private mirror still starts, but its
-polls fail and retry until the file is placed. Every mirror, public and private,
-also uses that file as its `[github] token_file` so `pr-batch` can push
-`graft/batch-*` and open a pull request. The graft-dev runner does not talk
-to Infisical. Someone with access places the token once on the VM, outside
-the deploy (the value is never put on argv):
-
-```sh
-secret get HOMELAB_VOGT_GITHUB_TOKEN --project apps | install -m 0600 /dev/stdin /etc/graft/github-token
-```
-
-`up.sh` never reads that file as the runner user. Its root helper
-(`as_root`, a throwaway root container) sets it to mode 0600, owned by uid
-10001, like the other secrets, so the mirrors can read it. If it is missing
-or empty, the deploy still succeeds: it logs one warning, leaves an empty
-0600 file for the mount, and starts every mirror without `[github]` (private
-mirrors poll without credentials and retry). `pr-batch` then fails with
-`pr-batch opens PRs: configure [github]` until the file is placed and the
-deploy re-run. The configs the mirrors mount are written by the same helper
-to `/etc/graft/mirror-configs`, and the last good deploy records those
-mounted copies. The value is never printed or set as a
-compose environment value. Place the host file before onboarding a private
-repository if you deploy without `up.sh`. Generated mirror configs are mode
-0644 so that user can read them.
+The per-repository files this replaced (`mirrors.tsv`, `mirror-*.toml`,
+`compose.onboarded.yml`, `onboard-repo.sh`, `render-onboarded-compose.sh`,
+`private-follow.sh`, the `mirror-token-*` files and the
+`GRAFT_DEV_MIRROR_TOKEN_*` deploy secrets) are gone. Session tokens are
+minted with `trial/mint-agent-tokens.sh` (D10): one `--kind agent` token per
+session, scopes `read`, `write`, `drafts` and `land:<line>`.
 
 ### Open a batch pull request
 
-From the graft-dev VM, after the line has landed changes to export:
+`pr-batch` still takes a per-repository config (`--config`); the service does
+not run batches yet (`claim_requests` is off until the batcher does, D41
+§3.5). Until then, write the config for the repository with
+`graft-mirror init-config` (the retired `mirror-<repo>.toml` files are in git
+history before the retirement commit and show the shape) and run it from a
+one-off container or a checkout, with a GitHub token file of your own:
 
 ```sh
-docker exec graft-dev-mirror-<svc> graft-mirror pr-batch <line> --base <branch> --config /etc/graft/deploy/mirror.toml
+graft-mirror pr-batch <line> --base <branch> --config <file>
 ```
 
-`<svc>` is the service name without the `graft-` prefix (`mirror` for
-rustTorrent, `mirror-fluent2`, `mirror-vogt`, `mirror-rustnzb`,
-`mirror-myaiagent`). The command uses `/run/secrets/github-token`, which is
-`HOMELAB_VOGT_GITHUB_TOKEN`. It does not take a token on the command line.
+This is a known gap of the retirement, not a design choice; it ends when
+batches become server requests.
 
-Session credentials follow D10 and `trial/mint-agent-tokens.sh`: one
-`--kind agent` token per session, minted with `--session`, scopes `read`,
-`write`, `drafts` and `land:<line>`. Mint it when the session starts:
+Check that the service has caught up (lag 0 for every repository):
 
 ```sh
-deploy/onboard-repo.sh --mint-session OWNER/REPO ses_… [--work-item WI-N]
-```
-
-The token is written to a mode-0600 file and is never printed, passed in
-argv, or stored for another session to share. A rerun with the same base
-leaves the mirror and line unchanged. A rerun that names a different base
-fails instead of silently keeping the registered one. The command prints the
-D28 ruleset checklist that must be applied to the GitHub repository before
-its first batch is landed.
-
-Check that a mirror has caught up (lag 0) on the VM:
-
-```sh
-for p in 17890 17891 17892; do curl -s "http://$(tailscale ip -4):$p/metrics" | grep '^graft_mirror_lag'; done
-docker logs --tail 20 graft-dev-mirror-vogt
+curl -s "http://$(tailscale ip -4):17890/metrics" | grep '^graft_mirror_lag'
+docker logs --tail 20 graft-dev-mirror
 ```
 
 ## Trial attester (WI-2276)
@@ -335,20 +276,20 @@ graft-server refused an unknown `[[lines]]` field and crash-looped). `up.sh`
 guards both sides of the swap:
 
 - **Pre-flight.** After pulling the pinned image and before touching the
-  running stack, it checks `server.toml` and every mirror config with that image's
+  running stack, it checks `server.toml` and `mirror-service.toml` with that image's
   own binaries, in throwaway containers with no network and no secrets.
   graft-server loads its config before dispatching, so
   `graft-server --config server.toml admin` exits 78 on a bad config and 64
-  (usage) on a good one. graft-mirror has no check command; `follow` with no
+  (usage) on a good one. graft-mirror has no check command; `serve` with no
   token mounted gets as far as reading the token file only if its config
   parsed. A failure stops the deploy; the running stack is unchanged.
 - **Readiness gate and rollback.** After `compose up --wait` it waits up to
   `GRAFT_READY_WAIT` seconds (default 120) for `/readyz`. If the server or
   the stack doesn't come up, it copies the last good `image.env`,
-  `server.toml` and `mirror.toml` back into the checkout, brings that stack
+  `server.toml` and `mirror-service.toml` back into the checkout, brings that stack
   up, and exits non-zero either way.
 - **Last good.** A deploy that passes `/healthz` and `/readyz` records its
-  `image.env`, `server.toml` and `mirror.toml` under
+  `image.env`, `server.toml` and `mirror-service.toml` under
   `/etc/graft/last-good/` (root-owned, 0644; no secrets). The first deploy
   with this script has none to roll back to, and says so.
 
@@ -360,15 +301,13 @@ When `up.sh` exits non-zero, an `::error::` annotation names the cause.
 deploy/up.sh
 ```
 
-On a fresh VM this bootstraps everything: the signing key, the server, the
-repositories `rusttorrent`, `graft-dev`, `fluent2-egui` and `vogt`, the mirror
-tokens and the mirrors. It then checks `/healthz` and
-`GET /v1/repos/<repo>/refs` for each followed repository (authenticated with
-that mirror's token, which goes to curl on stdin and is never printed),
-waiting up to `GRAFT_REFS_WAIT` seconds (default 600) for the first imports.
+On a fresh VM this bootstraps everything but the credential key `kek-k1`
+(provision it first; `up.sh` stops without it): the signing key, the server,
+the repository `graft-dev`, the mirror service token and the mirror service.
+It then checks `/healthz`. The mirror service is part of `compose up --wait`
+(its `/metrics` health check). Mirrored repositories come with their rows
+(`graft repo mirror add`), not from `up.sh`.
 
-The mirror maps git branch `main` to the graft line `main`, so the refs answer
-lists `{"kind":"line","name":"main",...}` (graft names, not `refs/heads/main`).
 `/etc/graft` keeps its own mode (0750 root:runner on the VM); `up.sh` only
 writes files inside it. The runner user needs the docker group, not sudo.
 

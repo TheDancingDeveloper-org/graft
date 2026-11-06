@@ -1,0 +1,13 @@
+# graft-mirror serve for the graft-dev VM (D41). One service follows every
+# repository that has a mirror row; per-repository settings (upstream, lines,
+# interval, credential) live in the rows, set with `graft repo mirror add` and
+# `graft repo mirror set`, not here. Parsed by graft_mirror::service::ServeFile.
+# Nothing here is secret: the token is /run/secrets/graft-mirror-token,
+# mounted read-only from /etc/graft/mirror-service-token, which up.sh mints.
+server = "http://graft-server:7878"
+token_file = "/run/secrets/graft-mirror-token"
+# <data_dir>/<repo>/ holds each repository's mirror.git, mirror.sqlite and
+# migration marker.
+data_dir = "/var/lib/graft/mirror"
+metrics_addr = "0.0.0.0:9465"
+json_logs = true

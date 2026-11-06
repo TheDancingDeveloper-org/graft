@@ -23,8 +23,10 @@ and checks only track each land after it has landed.
 | --- | --- | --- |
 | `[[lines]] exit-rehearsal` | `deploy/server.toml` | `checks = "post-land"`, `required = ["ci/fmt", "ci/clippy", "ci/test"]`, `retries = 1`. Each land gets a `pending` land-checks row. |
 | `[ci]` binding | `deploy/server.toml` | admits `graft-post-land-check.yml@refs/heads/main` to the CI token exchange, so its attest job can post passes |
-| `[[check_refs]]` | `deploy/mirror-graft.toml` | `graft-mirror-graft` exports every land on the line, records the export, and pushes `refs/heads/graft/check/exit-rehearsal/<changeset>` |
+| `[[check_refs]]` | `deploy/mirror-graft.toml` (removed by the D41 retirement; see the note below) | `graft-mirror-graft` exports every land on the line, records the export, and pushes `refs/heads/graft/check/exit-rehearsal/<changeset>` |
 | `graft-post-land` | `deploy/compose.yml`, profile `post-land` | the checker (`graft-attester --mode post-land --runner github`). It dispatches `graft-post-land.yml` on each check ref, reads the jobs, posts failures, bisects and lands reverts. |
+
+> **D41 retirement gap.** `[[check_refs]]` is read only by `graft-mirror follow --config`. The mirror service (`serve`) and `import-config` do not carry it, so after the per-repository mirrors are retired nothing pushes the `graft/check/<line>/` refs the post-land checker dispatches on. Either the service gains check refs before the retirement is deployed, or the post-land checker stays off until it does.
 | `post-land-token` | `/etc/graft`, minted by `up.sh` | the checker's graft token: `read`, `attest`, `write` on `graft`, `land` on the line. 0600, uid 10001. |
 | `github-checker-token` | `/etc/graft`, placed by `up.sh` from Infisical | the checker's own GitHub token: fine-grained, graft repository only, Actions read/write and Metadata read. 0600, uid 10001. Only the checker mounts it. The mirrors keep their own `github-token`. |
 | `bench/postland/` | a host with the graft CLI and Python 3 | recorder, planter and report (see `bench/README.md`) |
@@ -268,7 +270,7 @@ the measured settle time fits the bound), switch in a separate deploy PR:
 
 1. `deploy/server.toml`: give `backlog-1` the same `checks`, `required` and
    `retries` as `exit-rehearsal`.
-2. `deploy/mirror-graft.toml`: add `[[check_refs]] line = "backlog-1"` with
+2. `[[check_refs]]` (the retired `deploy/mirror-graft.toml`; see the note under the table): add `[[check_refs]] line = "backlog-1"` with
    prefix `graft/check/backlog-1/`. Remove the `exit-rehearsal` entry, or
    keep it if that line stays checked. The prefixes must not overlap.
 3. Before that PR's deploy, set `GRAFT_POST_LAND_LINE=backlog-1` in

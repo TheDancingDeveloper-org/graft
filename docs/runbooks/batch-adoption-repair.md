@@ -100,6 +100,9 @@ record held:
    `start` equals batch 2's `start`.
 5. Start the mirror (`docker start graft-dev-mirror-graft`) and run the batch
    with the fixed image:
+   (This transcript predates the D41 mirror service: the per-repository
+   `graft-dev-mirror-graft` container and its `mirror.toml` are retired; see
+   `deploy/README.md`, "Open a batch pull request".)
    ```sh
    docker exec graft-dev-mirror-graft graft-mirror pr-batch backlog-1 \
      --base main --config /etc/graft/deploy/mirror.toml

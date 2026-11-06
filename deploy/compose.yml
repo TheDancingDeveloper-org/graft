@@ -4,10 +4,9 @@
 # deploy-dev workflow is retired). Read README.md first.
 #
 #   graft-server  gRPC, the /v1 JSON facade, /healthz, /readyz, /metrics
-#   graft-mirror  follows github.com/TheDancingDeveloper-org/rustTorrent main
-#                 into the graft repository `rusttorrent`
-#   graft-mirror-fluent2, graft-mirror-vogt  follow fluent2-egui and vogt
-#                 main into the repositories `fluent2-egui` and `vogt`
+#   graft-mirror  the mirror service (`graft-mirror serve`, D41): follows
+#                 every repository that has a mirror row, all thirteen
+#                 today, onboarded with `graft repo mirror add`
 #   graft-attester  (profile `attester`, off by default) checks new drafts on
 #                 the trial line `trial-1` of `rusttorrent` and posts Attest
 #                 for ci/fmt, ci/clippy and ci/test (WI-2276, decision D21);
@@ -26,17 +25,19 @@
 # own namespace.
 #   17888  graft-server: gRPC, /v1, /healthz, /readyz, /metrics
 #   17889  graft-server metrics listener: /metrics, /healthz, /readyz
-#   17890  graft-mirror /metrics
-#   17891  graft-mirror-fluent2 /metrics
-#   17892  graft-mirror-vogt /metrics
+#   17890  graft-mirror /metrics (every repository, a bounded `repo` label)
 #
 # Secrets: none in this file, the repo or the environment. Host files under
 # /etc/graft, mounted read-only; a missing file fails the start instead of
 # being created as a directory.
 #   /etc/graft/signing.key   server token signing key (0600, uid 10001)
-#   /etc/graft/mirror-token  graft-mirror's service token (0600, uid 10001)
-#   /etc/graft/mirror-token-fluent2, mirror-token-vogt  the same for the
-#                            fluent2 and vogt mirrors
+#   /etc/graft/mirror-service-token  graft-mirror's one `mirror`-kind token
+#                            (0600, uid 10001), minted by up.sh. The
+#                            upstream credentials are not files: each is
+#                            sealed in its mirror row in the server.
+#   /etc/graft/kek-k1        the credential key-encryption key, mounted into
+#                            graft-server (0600, uid 10001; see
+#                            mirror-service-cutover.md)
 #   /etc/graft/attester-token  graft-attester's token (0600, uid 0: only the
 #                            attester reads it, never the checks it runs)
 #   /etc/graft/post-land-token  the post-land checker's token (0600, uid
@@ -89,6 +90,12 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/kek-k1
+        target: /run/secrets/kek-k1
+        read_only: true
+        bind:
+          create_host_path: false
       - graft-dev-objects:/var/lib/graft/objects
       - graft-dev-meta:/var/lib/graft/meta
     # The image has no curl or wget; bash's /dev/tcp asks the metrics listener
@@ -107,6 +114,11 @@ services:
       retries: 3
       start_period: 20s
 
+  # The mirror service (D41): one `graft-mirror serve` follows every
+  # repository that has a mirror row (`graft repo mirror add`). It holds one
+  # `mirror`-kind token and each row's sealed credential in the server; there
+  # is no per-repository config, token file, volume or port. Onboarding a
+  # repository is `graft repo mirror add`, with no change here.
   graft-mirror:
     <<: *graft
     container_name: graft-dev-mirror
@@ -116,25 +128,19 @@ services:
         condition: service_healthy
     environment:
       GRAFT_DEPLOY_CONFIG_HASH: ${GRAFT_CONFIG_HASH:-}
-    command: ["graft-mirror", "follow", "--config", "/etc/graft/deploy/mirror.toml"]
+    command: ["graft-mirror", "serve", "--config", "/etc/graft/deploy/mirror-service.toml"]
     ports:
       - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_METRICS_PORT:-17890}:9465"
     volumes:
-      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror.toml:/etc/graft/deploy/mirror.toml:ro
+      - ./mirror-service.toml:/etc/graft/deploy/mirror-service.toml:ro
       - type: bind
-        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token
+        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-service-token
         target: /run/secrets/graft-mirror-token
         read_only: true
         bind:
           create_host_path: false
-      - type: bind
-        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
-        target: /run/secrets/github-token
-        read_only: true
-        bind:
-          create_host_path: false
       - graft-dev-mirror:/var/lib/graft/mirror
-    healthcheck: &mirror-health
+    healthcheck:
       test:
         - CMD
         - bash
@@ -147,70 +153,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-
-  # Trial 3 (WI-2297): one graft-mirror per followed repository, since the
-  # mirror config takes one `repo`. Same hardening and health check as
-  # graft-mirror; its own config, token file, volume and metrics port.
-  graft-mirror-fluent2:
-    <<: *graft
-    container_name: graft-dev-mirror-fluent2
-    hostname: graft-dev-mirror-fluent2
-    depends_on:
-      graft-server:
-        condition: service_healthy
-    environment:
-      GRAFT_DEPLOY_CONFIG_HASH: ${GRAFT_CONFIG_HASH:-}
-    command: ["graft-mirror", "follow", "--config", "/etc/graft/deploy/mirror.toml"]
-    ports:
-      - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_FLUENT2_METRICS_PORT:-17891}:9465"
-    volumes:
-      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-fluent2.toml:/etc/graft/deploy/mirror.toml:ro
-      - type: bind
-        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-fluent2
-        target: /run/secrets/graft-mirror-token
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
-        target: /run/secrets/github-token
-        read_only: true
-        bind:
-          create_host_path: false
-      - graft-dev-mirror-fluent2:/var/lib/graft/mirror
-    healthcheck: *mirror-health
-
-  # Trial 3 (WI-2297): one graft-mirror per followed repository, since the
-  # mirror config takes one `repo`. Same hardening and health check as
-  # graft-mirror; its own config, token file, volume and metrics port.
-  graft-mirror-vogt:
-    <<: *graft
-    container_name: graft-dev-mirror-vogt
-    hostname: graft-dev-mirror-vogt
-    depends_on:
-      graft-server:
-        condition: service_healthy
-    environment:
-      GRAFT_DEPLOY_CONFIG_HASH: ${GRAFT_CONFIG_HASH:-}
-    command: ["graft-mirror", "follow", "--config", "/etc/graft/deploy/mirror.toml"]
-    ports:
-      - "${GRAFT_BIND_IP:-127.0.0.1}:${GRAFT_MIRROR_VOGT_METRICS_PORT:-17892}:9465"
-    volumes:
-      - ${GRAFT_MIRROR_CONFIG_DIR:-.}/mirror-vogt.toml:/etc/graft/deploy/mirror.toml:ro
-      - type: bind
-        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/mirror-token-vogt
-        target: /run/secrets/graft-mirror-token
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${GRAFT_SECRETS_DIR:-/etc/graft}/github-token
-        target: /run/secrets/github-token
-        read_only: true
-        bind:
-          create_host_path: false
-      - graft-dev-mirror-vogt:/var/lib/graft/mirror
-    healthcheck: *mirror-health
 
   # The trial attester (WI-2276). Off unless the `attester` profile is on
   # (GRAFT_ATTESTER=1 for up.sh). It runs as root with four capabilities
@@ -276,7 +218,7 @@ services:
   # unless the `post-land` profile is on (GRAFT_POST_LAND=1 for up.sh). It
   # follows the lands on GRAFT_POST_LAND_LINE of `graft`, dispatches
   # graft-post-land.yml on each land's check ref (pushed by
-  # graft-mirror-graft's [[check_refs]]), reads the jobs, posts failures,
+  # the graft mirror row's check refs), reads the jobs, posts failures,
   # bisects and lands reverts. It runs no checks itself: the image is the
   # attester binary with no toolchain. Both token files are its own, opened
   # read-only and never in argv: github-checker-token (a fine-grained token,
@@ -341,10 +283,6 @@ volumes:
     name: graft-dev-meta
   graft-dev-mirror:
     name: graft-dev-mirror
-  graft-dev-mirror-fluent2:
-    name: graft-dev-mirror-fluent2
-  graft-dev-mirror-vogt:
-    name: graft-dev-mirror-vogt
   graft-dev-attester:
     name: graft-dev-attester
   graft-dev-attester-cache:
