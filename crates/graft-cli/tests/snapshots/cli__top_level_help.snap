@@ -1,6 +1,5 @@
 ---
 source: crates/graft-cli/tests/cli.rs
-assertion_line: 160
 expression: text(out.get_output())
 ---
 The graft command-line client.
@@ -27,7 +26,7 @@ Commands:
   workspace    Show, list, open, renew or close workspaces
   line         Create or list lines
   tag          Create or list immutable tags
-  repo         Create repositories
+  repo         Create repositories and manage their git mirrors and batch PRs
   stack        List, squash, reorder, split or drop the drafts between the base and the head
   sync         Move the base to the line tip (the server rebases a stack; conflicts are written into the files)
   land         Land the stack on the line

@@ -5,6 +5,7 @@
 //! server's `/mcp` endpoint (streamable HTTP, in-process engine).
 
 mod drafts;
+mod mirrors;
 pub mod preflight;
 mod render;
 mod repos;
@@ -15,6 +16,12 @@ mod workcopy;
 mod write;
 
 pub use drafts::DraftOverlapArgs;
+pub use mirrors::{
+    BatchCutArgs, BatchListArgs, BatchStatusArgs, MirrorAddArgs, MirrorAdmin, MirrorFuture,
+    MirrorKeyArgs, MirrorLineArg, MirrorListArgs, MirrorPurgeArgs, MirrorRemoveArgs, MirrorSetArgs,
+    changeset_bytes, join_lines, mirror_json, new_client_request_id, parse_lines, request_json,
+    with_retry,
+};
 pub use render::{MAX_RESULT_BYTES, PATCH_MAX_BYTES};
 pub use repos::{RepoAdmin, RepoAdminFuture, RepoCreateArgs};
 pub use review::{
@@ -191,6 +198,60 @@ pub const TOOLS: &[ToolSpec] = &[
         name: "graft_merge",
         description: "Merge one line into another, recording a merge point.",
         read_only: false,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_batch_cut",
+        description: "Request a batch PR of a line; retry-safe by request id.",
+        read_only: false,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_batch_list",
+        description: "A repository's batch history, paginated.",
+        read_only: true,
+        bound: ToolBound::Paginated,
+    },
+    ToolSpec {
+        name: "graft_batch_status",
+        description: "The open batch of a line.",
+        read_only: true,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_mirror_add",
+        description: "Bind a repository to an upstream; needs mirror:bind.",
+        read_only: false,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_mirror_list",
+        description: "List mirrors, paginated; never a credential.",
+        read_only: true,
+        bound: ToolBound::Paginated,
+    },
+    ToolSpec {
+        name: "graft_mirror_purge",
+        description: "Request purge of a mirror's data; needs mirror:bind.",
+        read_only: false,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_mirror_remove",
+        description: "Remove a mirror; needs mirror:bind.",
+        read_only: false,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_mirror_set",
+        description: "Enable, disable or retune a mirror.",
+        read_only: false,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_mirror_status",
+        description: "One mirror's settings and status; never a credential.",
+        read_only: true,
         bound: ToolBound::Capped,
     },
     ToolSpec {
