@@ -68,6 +68,9 @@ struct Fake {
     store: Option<Arc<MemoryStore>>,
     server_down: AtomicBool,
     fail_next_complete: AtomicBool,
+    /// Refuses this many more lease acquisitions, as if another holder had
+    /// it for a moment.
+    refuse_acquires: AtomicUsize,
 }
 
 impl Fake {
@@ -192,6 +195,13 @@ impl Control for Fake {
 
     async fn acquire_lease(&self, repo: &str, instance: &str) -> ApiResult<pb::Lease> {
         self.up()?;
+        let refuse = self.refuse_acquires.load(Ordering::SeqCst);
+        if refuse > 0 {
+            self.refuse_acquires.store(refuse - 1, Ordering::SeqCst);
+            return Err(ApiError::LeaseLost {
+                repo: repo.to_owned(),
+            });
+        }
         let (prev, l) = {
             let mut st = self.st();
             let now = 1;
@@ -1435,4 +1445,175 @@ async fn a_forced_auth_failure_leaves_no_credential_in_logs_or_status() {
     assert!(log.contains("mirror"), "logs were captured");
     assert!(!log.contains(secret));
     assert!(!log.contains(&basic));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lease_lost_at_the_engine_mid_poll_fences_the_followed_move_and_stops_the_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (bare, work) = upstream(tmp.path());
+    let c1 = commit(&work, "a");
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    let fake = Arc::new(Fake::with_store(store.clone()));
+    fake.set_row(row(REPO, bare.to_str().unwrap(), 0));
+    let data = tmp.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let mut a = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(mirror_cx),
+        local_config(&data, "a"),
+    );
+    a.reconcile().await.unwrap();
+    eventually(|| {
+        fake.statuses()
+            .iter()
+            .any(|s| s.last_imported_sha.as_deref() == Some(c1.as_str()))
+    })
+    .await;
+    let tip1 = current_ref(&*api, &mirror_cx(REPO), REPO, "main")
+        .await
+        .unwrap()
+        .expect("followed");
+
+    // The engine's lease row moves on (another holder, epoch 2) while the
+    // control plane still answers A as the holder: only the engine's fence
+    // on the ref move can refuse A now.
+    let id = store.repo(REPO).await.unwrap().unwrap();
+    let txn = MetaTxn {
+        preconditions: vec![Precondition::LeaseEpochIs { epoch: 1 }],
+        writes: vec![Write::PutLease(LeaseRecord {
+            holder: Some("other".to_owned()),
+            epoch: 2,
+            expires_at_ms: ENGINE_NOW + 3_600_000,
+        })],
+    };
+    assert!(matches!(
+        store.commit(id, txn).await,
+        Ok(TxnOutcome::Committed(_))
+    ));
+    let written = fake.statuses().len();
+    commit(&work, "b");
+
+    // A's next poll imports the new commit and tries to move the line: the
+    // engine refuses it, and the task stops on that. The bound only
+    // catches a hang.
+    let exit = tokio::time::timeout(Duration::from_secs(60), a.next_exit())
+        .await
+        .expect("the task stops")
+        .unwrap();
+    assert_eq!(exit.reason, ExitReason::LeaseLost);
+    assert!(a.running().is_empty());
+    let tip = current_ref(&*api, &mirror_cx(REPO), REPO, "main")
+        .await
+        .unwrap();
+    assert_eq!(tip, Some(tip1), "the fenced move did not land");
+    assert_eq!(
+        fake.statuses().len(),
+        written,
+        "no status after the fenced move"
+    );
+}
+
+/// §3.2: a purge applies only to a disabled or removed row. A purge
+/// recorded while the row was off, then the row turned back on before the
+/// purge ran, deletes nothing: the sweep skips a repository with a row,
+/// and a running task refuses the purge, typed.
+#[tokio::test(start_paused = true)]
+async fn a_purge_recorded_before_a_re_enable_deletes_nothing() {
+    for claim_requests in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = Arc::new(Fake::default());
+        let script = Arc::new(Script::default());
+        let mut c = config(tmp.path());
+        c.claim_requests = claim_requests;
+        let mut service =
+            Service::with_resolver(fake.clone(), FakeSpawner(script.clone()), c, public());
+        fake.set_row(row(REPO, GH, 15));
+        service.reconcile().await.unwrap();
+        settle().await;
+        // Disabled: the task stops and the purge is recorded.
+        let mut off = row(REPO, GH, 15);
+        off.enabled = false;
+        off.version = 2;
+        fake.set_row(off);
+        service.reconcile().await.unwrap();
+        assert_eq!(
+            service.next_exit().await.unwrap().reason,
+            ExitReason::Stopped
+        );
+        fake.st()
+            .pending
+            .push_back(request(11, MirrorRequestKind::Purge));
+        // Re-enabled before any sweep ran the purge.
+        let mut on = row(REPO, GH, 15);
+        on.version = 3;
+        fake.set_row(on);
+        // Past several sweeps (every fourth reconcile) and task turns.
+        for _ in 0..8 {
+            service.reconcile().await.unwrap();
+            settle().await;
+            tokio::time::sleep(Duration::from_secs(16)).await;
+            settle().await;
+        }
+        let dir = tmp.path().join(REPO);
+        assert!(
+            dir.join(MIGRATION_MARKER).is_file(),
+            "the re-enabled row's data is kept (claims {claim_requests})"
+        );
+        assert_eq!(service.running(), vec![(REPO.to_owned(), 3, 2)]);
+        let st = fake.st();
+        assert!(st.completed.is_empty(), "the purge never completed");
+        if claim_requests {
+            assert_eq!(st.failed, [(11, "bad_request".to_owned())]);
+        } else {
+            assert!(st.failed.is_empty());
+            assert_eq!(st.pending.len(), 1, "left for a later disable");
+        }
+    }
+}
+
+/// The same race, where the re-enabled row's task has not started yet (its
+/// lease was briefly taken) when the sweep runs: the row alone keeps the
+/// sweep from purging it.
+#[tokio::test(start_paused = true)]
+async fn a_sweep_never_purges_a_re_enabled_row_whose_task_has_not_started() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap(); // 1: started
+    let mut off = row(REPO, GH, 15);
+    off.enabled = false;
+    off.version = 2;
+    fake.set_row(off);
+    service.reconcile().await.unwrap(); // 2: stopped
+    assert_eq!(
+        service.next_exit().await.unwrap().reason,
+        ExitReason::Stopped
+    );
+    fake.st()
+        .pending
+        .push_back(request(12, MirrorRequestKind::Purge));
+    let mut on = row(REPO, GH, 15);
+    on.version = 3;
+    fake.set_row(on);
+    // Reconciles 3 and 4 cannot start the task; 4 runs the sweep, whose own
+    // lease acquisition succeeds.
+    fake.refuse_acquires.store(2, Ordering::SeqCst);
+    service.reconcile().await.unwrap();
+    service.reconcile().await.unwrap();
+    assert!(service.running().is_empty(), "the task had not started");
+    assert_eq!(fake.refuse_acquires.load(Ordering::SeqCst), 0);
+    assert!(tmp.path().join(REPO).join(MIGRATION_MARKER).is_file());
+    {
+        let st = fake.st();
+        assert!(st.completed.is_empty() && st.failed.is_empty());
+        assert_eq!(st.pending.len(), 1);
+    }
+    // The next reconcile starts it, over the kept data.
+    service.reconcile().await.unwrap();
+    assert_eq!(service.running(), vec![(REPO.to_owned(), 3, 2)]);
 }
