@@ -287,7 +287,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: ImportChangesets,
     ) -> Result<Vec<Created>, ApiError> {
-        require(cx, &req.repo, Need::Admin)?;
+        self.require_or_bound_mirror(cx, &req.repo, Need::Admin)
+            .await?;
         let repo = self.repo_id(&req.repo).await?;
         if req.changesets.len() > self.config.max_import as usize {
             return Err(errors::limit("import", self.config.max_import.into()));

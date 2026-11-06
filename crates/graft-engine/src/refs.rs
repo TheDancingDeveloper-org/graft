@@ -143,13 +143,17 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             .await
             .map_err(errors::store)?;
         let kind = current.as_ref().map_or(to_stored(req.kind), |r| r.kind);
-        // A followed-line marker is admin-only: it decides who may land.
+        // A followed-line marker decides who may land: only admin sets one.
+        // The mirror moves an existing marker (the head it imported), under
+        // its lease, and never creates or removes one (D41).
         let marker = req.name.starts_with(FOLLOWED_REF_PREFIX);
         let followed =
             kind == StoredKind::Line && mirror && self.is_followed(repo, &req.name).await?;
+        let mirror_marker = marker && mirror && current.is_some();
         let need = match kind {
             StoredKind::Line if followed => None,
             StoredKind::Line => Some(Need::Admin),
+            StoredKind::Tool if mirror_marker => None,
             StoredKind::Tool if marker => Some(Need::Admin),
             StoredKind::Tag | StoredKind::Tool => Some(Need::Write(None)),
         };
@@ -180,7 +184,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         self.changeset(repo, req.new).await?;
         // The mirror moves a followed line only under its authority lease,
         // checked in the move's own transaction (D41 §3.6).
-        let lease = if followed {
+        let lease = if followed || mirror_marker {
             let Some(epoch) = req.lease_epoch else {
                 return Err(ApiError::LeaseLost { repo: req.repo });
             };

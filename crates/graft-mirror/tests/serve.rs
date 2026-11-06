@@ -1826,3 +1826,133 @@ async fn a_claimed_cut_request_runs_through_the_spawned_task_and_opens_its_pr() 
     assert_eq!(pulls.len(), 1);
     assert_eq!(pulls[0].head_ref, "graft/batch-1");
 }
+
+/// Whether [`minted_cx`] still carries the admin scope of the migration.
+static MIGRATING: AtomicBool = AtomicBool::new(true);
+
+/// The mirror's call context as a minted mirror token gives it: the
+/// `mirror` kind with only `repo:*:mirror`. While [`MIGRATING`], also
+/// admin, as the followers that set the line and its marker up held.
+fn minted_cx(repo: &str) -> CallContext {
+    let mut cx = mirror_cx(repo);
+    cx.principal.scopes = vec!["repo:*:mirror".to_owned()];
+    if MIGRATING.load(Ordering::SeqCst) {
+        cx.principal.scopes.push(format!("repo:{repo}:admin"));
+    }
+    cx
+}
+
+/// Binds `repo` to a mirror of `upstream` in the engine's store, as the
+/// server's mirror row does (D41).
+async fn bind(store: &MemoryStore, repo: &str, upstream: &str) {
+    use graft_store::{MirrorDirection, MirrorExportRecord, MirrorLineRecord, MirrorRecord};
+    let id = store.repo(repo).await.unwrap().expect("repo");
+    let txn = MetaTxn {
+        preconditions: vec![Precondition::MirrorVersionIs {
+            upstream: upstream.to_owned(),
+            version: None,
+        }],
+        writes: vec![Write::PutMirror(MirrorRecord {
+            upstream: upstream.to_owned(),
+            lines: vec![MirrorLineRecord {
+                branch: "main".into(),
+                line: "main".into(),
+                direction: MirrorDirection::Follow,
+            }],
+            interval_s: 0,
+            enabled: true,
+            credential: None,
+            kek_id: None,
+            export: MirrorExportRecord {
+                default_author: None,
+                authors: Vec::new(),
+            },
+            version: 1,
+            status: None,
+            created_by: "op".into(),
+            updated_by: "op".into(),
+            updated_at_ms: 0,
+        })],
+    };
+    assert!(matches!(
+        store.commit(id, txn).await,
+        Ok(TxnOutcome::Committed(_))
+    ));
+}
+
+/// WI-3426: once a batch merges upstream, the next poll imports its
+/// commits and moves the line and its followed marker. The mirror token
+/// (only `repo:*:mirror`) must do all of that on a bound repository: it was
+/// refused `repo:<r>:admin`, stopping the line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_minted_mirror_token_follows_a_merged_batch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (bare, work) = upstream(tmp.path());
+    let c1 = commit(&work, "a");
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    bind(&store, REPO, bare.to_str().unwrap()).await;
+    let fake = Arc::new(Fake::with_store(store));
+    fake.set_row(row(REPO, bare.to_str().unwrap(), 0));
+    let data = tmp.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let mut service = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(minted_cx),
+        local_config(&data, "a"),
+    );
+    service.reconcile().await.unwrap();
+    eventually(|| {
+        fake.statuses()
+            .iter()
+            .any(|s| s.last_imported_sha.as_deref() == Some(c1.as_str()))
+    })
+    .await;
+
+    // The migration is over: a new task (a restart) calls with the mirror
+    // set only. A batch of two lands then merges upstream.
+    MIGRATING.store(false, Ordering::SeqCst);
+    let mut restarted = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(minted_cx),
+        local_config(&data, "b"),
+    );
+    fake.lapse(REPO);
+    restarted.reconcile().await.unwrap();
+    assert_eq!(restarted.running(), vec![(REPO.to_owned(), 1, 2)]);
+    drop(service);
+    commit(&work, "b");
+    let c3 = commit(&work, "c");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    eprintln!(
+        "DBG {:?}",
+        fake.statuses().iter().rev().take(3).collect::<Vec<_>>()
+    );
+    eventually(|| {
+        fake.statuses()
+            .iter()
+            .any(|s| s.last_imported_sha.as_deref() == Some(c3.as_str()))
+    })
+    .await;
+    let last = fake.statuses().last().cloned().expect("status");
+    assert_eq!(
+        last.error_code,
+        MirrorErrorCode::Unspecified as i32,
+        "{last:?}"
+    );
+    let tip = current_ref(&*api, &minted_cx(REPO), REPO, "main")
+        .await
+        .unwrap()
+        .expect("line");
+    let marker = current_ref(
+        &*api,
+        &minted_cx(REPO),
+        REPO,
+        &graft_proto::types::followed_ref("main"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(marker, Some(tip));
+}
