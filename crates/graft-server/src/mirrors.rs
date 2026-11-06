@@ -510,20 +510,35 @@ pub(crate) async fn set<M: MetaStore>(
         updated_by: p.subject.clone(),
         updated_at_ms: now_ms,
     };
-    let txn = MetaTxn {
-        preconditions: vec![Precondition::MirrorVersionIs {
-            upstream: req.upstream.clone(),
-            version: current,
-        }],
-        writes: vec![Write::PutMirror(record.clone())],
-    };
-    match meta.commit(id, txn).await.map_err(store)? {
-        TxnOutcome::Committed(_) => Ok(view(&req.repo, record)),
-        TxnOutcome::PreconditionFailed(_) => {
-            let now = meta.get_mirror(id, &req.upstream).await.map_err(store)?;
-            Err(version_conflict(current, now.map(|r| r.version)))
+    // A re-enable cancels any live purge in the same transaction. A purge
+    // that moves under us is a race to retry; the row's version is not.
+    let re_enables = req.enabled && old.as_ref().is_some_and(|o| !o.enabled);
+    for _ in 0..crate::mirror_requests::MAX_TRIES {
+        let mut txn = MetaTxn {
+            preconditions: vec![Precondition::MirrorVersionIs {
+                upstream: req.upstream.clone(),
+                version: current,
+            }],
+            writes: vec![Write::PutMirror(record.clone())],
+        };
+        if re_enables {
+            let cancel =
+                crate::mirror_requests::cancel_purges(meta, id, &req.upstream, now_ms).await?;
+            txn.preconditions.extend(cancel.preconditions);
+            txn.writes.extend(cancel.writes);
+        }
+        match meta.commit(id, txn).await.map_err(store)? {
+            TxnOutcome::Committed(_) => return Ok(view(&req.repo, record)),
+            TxnOutcome::PreconditionFailed(_) => {
+                let now = meta.get_mirror(id, &req.upstream).await.map_err(store)?;
+                let now = now.map(|r| r.version);
+                if now != current {
+                    return Err(version_conflict(current, now));
+                }
+            }
         }
     }
+    Err(crate::mirror_requests::busy())
 }
 
 /// The read grant on one repository's rows.
@@ -1205,7 +1220,9 @@ mod tests {
     use super::*;
     use graft_proto::PrincipalKind;
     use graft_store::memory::MemoryStore;
-    use graft_store::{RefKind, RefRecord};
+    use graft_store::{
+        MirrorRequestKind, MirrorRequestQuery, MirrorRequestState, RefKind, RefRecord,
+    };
 
     const UP: &str = "https://github.com/o/r.git";
 
@@ -1691,6 +1708,68 @@ mod tests {
         assert_eq!(first.upstream.as_deref(), Some(UP));
         let again = purge(&s, &bind, 5, key).await.expect("retry");
         assert_eq!(again.id, first.id);
+    }
+
+    #[tokio::test]
+    async fn a_re_enable_cancels_a_pending_purge() {
+        let s = store().await;
+        let bind = who(&["mirror:bind"]);
+        let mut off = req(UP, None, vec![line("main", "follow")]);
+        off.enabled = false;
+        set(&s, &bind, &policy(), 0, off)
+            .await
+            .expect("create disabled");
+        let key = pb::PurgeMirrorRequest {
+            repo: "r".into(),
+            upstream: UP.into(),
+            client_request_id: "purge-1".into(),
+        };
+        let purge_req = purge(&s, &bind, 0, key.clone()).await.expect("purge");
+        assert_eq!(purge_req.state, pb::MirrorRequestState::Pending as i32);
+        set(
+            &s,
+            &bind,
+            &policy(),
+            1,
+            req(UP, Some(1), vec![line("main", "follow")]),
+        )
+        .await
+        .expect("re-enable");
+        let id = s.repo("r").await.expect("repo").expect("exists");
+        let after = s
+            .get_mirror_request(id, purge_req.id)
+            .await
+            .expect("read")
+            .expect("kept");
+        assert_eq!(after.state, MirrorRequestState::Failed);
+        assert_eq!(
+            after.result.error_code.as_deref(),
+            Some(crate::mirror_requests::CANCELLED)
+        );
+        // A later disable runs no purge until a fresh one is asked for.
+        let mut off = req(UP, Some(2), vec![line("main", "follow")]);
+        off.enabled = false;
+        set(&s, &bind, &policy(), 2, off).await.expect("disable");
+        let live = s
+            .list_mirror_requests(
+                id,
+                MirrorRequestQuery {
+                    kind: Some(MirrorRequestKind::Purge),
+                    states: vec![MirrorRequestState::Pending, MirrorRequestState::Claimed],
+                    limit: 10,
+                    ..MirrorRequestQuery::default()
+                },
+            )
+            .await
+            .expect("list");
+        assert!(live.is_empty(), "no purge survives the re-enable: {live:?}");
+        let fresh = pb::PurgeMirrorRequest {
+            client_request_id: "purge-2".into(),
+            ..key
+        };
+        let again = purge(&s, &bind, 3, fresh).await.expect("fresh purge");
+        assert_ne!(again.id, purge_req.id);
+        assert_eq!(again.state, pb::MirrorRequestState::Pending as i32);
     }
 
     async fn marker(s: &MemoryStore, line: &str) {

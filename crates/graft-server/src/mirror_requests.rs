@@ -53,7 +53,7 @@ const MAX_CODE: usize = 64;
 const CLAIM_SCAN: u32 = 64;
 
 /// How often a write retries after losing a race it can retry.
-const MAX_TRIES: usize = 8;
+pub(crate) const MAX_TRIES: usize = 8;
 
 /// The deterministic branch of a batch: the service looks for a PR on it
 /// before creating one.
@@ -61,7 +61,7 @@ pub(crate) fn batch_branch(id: u64) -> String {
     format!("graft/batch-{id}")
 }
 
-fn busy() -> ApiError {
+pub(crate) fn busy() -> ApiError {
     ApiError::Unavailable {
         retry_after_ms: 100,
     }
@@ -528,6 +528,57 @@ pub(crate) async fn record_purge<M: MetaStore>(
         upstream: Some(upstream),
     };
     create(meta, p, repo, now_ms, draft).await
+}
+
+/// The writes that cancel every live purge of `upstream`, for the
+/// transaction that re-enables its row: a purge recorded before a
+/// re-enable never runs after it, so a later disable needs a fresh purge.
+/// Each write is fenced by CAS on the request's version.
+pub(crate) async fn cancel_purges<M: MetaStore>(
+    meta: &M,
+    id: RepoId,
+    upstream: &str,
+    now_ms: i64,
+) -> Result<MetaTxn, ApiError> {
+    let mut txn = MetaTxn {
+        preconditions: Vec::new(),
+        writes: Vec::new(),
+    };
+    let mut after = None;
+    loop {
+        let rows = meta
+            .list_mirror_requests(
+                id,
+                MirrorRequestQuery {
+                    kind: Some(MirrorRequestKind::Purge),
+                    line: None,
+                    states: vec![MirrorRequestState::Pending, MirrorRequestState::Claimed],
+                    after,
+                    oldest_first: true,
+                    limit: MAX_PAGE,
+                },
+            )
+            .await
+            .map_err(store)?;
+        let full = rows.len() == MAX_PAGE as usize;
+        after = rows.last().map(|r| r.id);
+        for r in rows {
+            if r.upstream.as_deref() != Some(upstream) || !r.state.is_live() {
+                continue;
+            }
+            let mut next = r.clone();
+            next.state = MirrorRequestState::Failed;
+            next.result.error_code = Some(CANCELLED.to_owned());
+            next.version = r.version + 1;
+            next.updated_at_ms = now_ms;
+            let part = rewrite(meta, id, &r, next, None).await?;
+            txn.preconditions.extend(part.preconditions);
+            txn.writes.extend(part.writes);
+        }
+        if !full {
+            return Ok(txn);
+        }
+    }
 }
 
 /// `GetBatch`: the line's open batch, if any.
