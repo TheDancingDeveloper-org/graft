@@ -102,6 +102,11 @@ Rules: `deploy/monitoring/graft-dev-alerts.yml`. Scrape config:
 (`personal/grafanaloki/prometheus/`) and deployed with the `grafanaloki`
 Komodo stack, as in the host-monitoring skill.
 
+The mirror service (`graft-mirror serve`, D41) has one rule set on one job
+with a `repo` label: `deploy/monitoring/graft-mirror-alerts.yml`, with its
+scrape job in `prometheus-scrape-service.yml` and rule tests in
+`deploy/monitoring/tests/` (`promtool check rules`, `promtool test rules`).
+
 | Alert | Fires when |
 |---|---|
 | `GraftDevServerDown` | blackbox `/readyz` probe fails for 5 m |

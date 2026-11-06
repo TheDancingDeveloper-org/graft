@@ -91,8 +91,11 @@ where
                 tags: None,
             };
             let mirror = Mirror::new(task.dir.join(GIT_DIR), task.row.upstream.clone());
-            let follower = Follower::new(&*api, cx(&task.row.repo), &db, mirror, config)
+            let mut follower = Follower::new(&*api, cx(&task.row.repo), &db, mirror, config)
                 .with_lease_epoch(task.epoch);
+            if let Some(m) = &task.metrics {
+                follower = follower.with_metrics(m.base().clone());
+            }
             let mut step = FollowStep {
                 follower,
                 db: &db,

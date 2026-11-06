@@ -27,6 +27,7 @@
 
 pub mod control;
 pub mod limits;
+pub mod metrics;
 pub mod netguard;
 pub mod requests;
 pub mod status;
@@ -46,6 +47,7 @@ use tokio::sync::mpsc;
 
 pub use control::Control;
 use limits::{Backoff, FetchSlots, RateBudget};
+pub use metrics::ServiceMetrics;
 pub use task::{ExitReason, PollReport, PollStep, TaskCtl, TaskCtx, TaskExit};
 
 use crate::MirrorError;
@@ -163,6 +165,8 @@ struct Running {
     epoch: u64,
     expires_at_ms: i64,
     ctl: Arc<TaskCtl>,
+    /// The lines the row had: the series to drop when the task stops.
+    lines: Vec<String>,
 }
 
 /// A repository name usable as one directory name.
@@ -186,6 +190,7 @@ pub struct Service<C: Control, S: Spawner<C>> {
     exits_rx: mpsc::UnboundedReceiver<TaskExit>,
     server: Backoff,
     reconciles: u64,
+    metrics: Option<ServiceMetrics>,
 }
 
 impl<C: Control, S: Spawner<C>> Service<C, S> {
@@ -224,7 +229,15 @@ impl<C: Control, S: Spawner<C>> Service<C, S> {
             exits_rx,
             server,
             reconciles: 0,
+            metrics: None,
         }
+    }
+
+    /// Exports metrics to `metrics`, dropping a repository's series when
+    /// its task stops.
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// The running tasks: repository, row version and lease epoch.
@@ -345,8 +358,10 @@ impl<C: Control, S: Spawner<C>> Service<C, S> {
                 epoch: lease.epoch,
                 expires_at_ms: lease.expires_at_ms,
                 ctl: ctl.clone(),
+                lines: row.lines.iter().map(|l| l.line.clone()).collect(),
             },
         );
+        self.note_tasks();
         tracing::info!(repo = %repo, version = row.version, epoch = lease.epoch, "mirror task starting");
         self.spawner.spawn(TaskCtx {
             control: self.control.clone(),
@@ -356,8 +371,15 @@ impl<C: Control, S: Spawner<C>> Service<C, S> {
             epoch: lease.epoch,
             dir,
             ctl,
+            metrics: self.metrics.clone(),
             exits: self.exits_tx.clone(),
         });
+    }
+
+    fn note_tasks(&self) {
+        if let Some(m) = &self.metrics {
+            m.set_tasks(self.tasks.len());
+        }
     }
 
     /// Handles exits already sent.
@@ -384,7 +406,15 @@ impl<C: Control, S: Spawner<C>> Service<C, S> {
         if !ours {
             return;
         }
-        self.tasks.remove(&exit.repo);
+        if let Some(t) = self.tasks.remove(&exit.repo)
+            && let Some(m) = &self.metrics
+        {
+            m.drop_repo(&exit.repo, &t.lines);
+            if exit.reason == ExitReason::LeaseLost {
+                m.lease_lost();
+            }
+        }
+        self.note_tasks();
         if exit.reason != ExitReason::LeaseLost
             && let Err(e) = self.control.release_lease(&exit.repo, exit.epoch).await
         {

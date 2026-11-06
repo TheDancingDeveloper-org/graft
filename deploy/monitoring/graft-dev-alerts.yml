@@ -43,10 +43,12 @@ groups:
           summary: "graft-dev: {{ $labels.volume }} volume below 8% free; writes stop at 5%"
 
       # graft_mirror_lag_seconds: how long the line has been behind upstream.
+      # The series carry `repo` (D41); the service's own alerts are in
+      # graft-mirror-alerts.yml.
       - alert: GraftDevMirrorLag
-        expr: max by (line) (graft_mirror_lag_seconds{job="graft-dev"}) > 1800
+        expr: max by (repo, line) (graft_mirror_lag_seconds{job="graft-dev"}) > 1800
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "graft-dev: mirror line {{ $labels.line }} is {{ $value | humanizeDuration }} behind GitHub"
+          summary: "graft-dev: mirror {{ $labels.repo }} line {{ $labels.line }} is {{ $value | humanizeDuration }} behind GitHub"

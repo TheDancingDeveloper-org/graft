@@ -214,15 +214,19 @@ fn metrics() -> Metrics {
 }
 
 fn divergence(m: &Metrics) -> i64 {
-    m.mirror_divergence.with_label_values(&["main"]).get()
+    m.mirror_divergence.with_label_values(&[REPO, "main"]).get()
 }
 
 fn lag_seconds(m: &Metrics) -> f64 {
-    m.mirror_lag_seconds.with_label_values(&["main"]).get()
+    m.mirror_lag_seconds
+        .with_label_values(&[REPO, "main"])
+        .get()
 }
 
 fn lag_changesets(m: &Metrics) -> i64 {
-    m.mirror_lag_changesets.with_label_values(&["main"]).get()
+    m.mirror_lag_changesets
+        .with_label_values(&[REPO, "main"])
+        .get()
 }
 
 async fn poll(f: &mut Follower<'_, Api>) -> LineOutcome {
@@ -643,7 +647,10 @@ async fn unreachable_configured_upstream_is_a_typed_error() {
         assert!(matches!(poll(&mut ok).await, LineOutcome::Imported { .. }));
     }
     assert_eq!(lag_changesets(&m), 0);
-    assert_eq!(m.mirror_divergence.with_label_values(&["main"]).get(), 0);
+    assert_eq!(
+        m.mirror_divergence.with_label_values(&[REPO, "main"]).get(),
+        0
+    );
     w.commit();
     w.push();
 

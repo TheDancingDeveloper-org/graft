@@ -603,7 +603,7 @@ where
     fn set_divergence(&self, line: &str, on: bool) {
         if let Some(m) = &self.metrics {
             m.mirror_divergence
-                .with_label_values(&[line])
+                .with_label_values(&[&self.config.repo, line])
                 .set(i64::from(on));
         }
     }
@@ -611,8 +611,13 @@ where
     /// Export has read the journal to its end: no line move is waiting.
     fn set_caught_up(&self, line: &str) {
         if let Some(m) = &self.metrics {
-            m.mirror_lag_changesets.with_label_values(&[line]).set(0);
-            m.mirror_lag_seconds.with_label_values(&[line]).set(0.0);
+            let repo = self.config.repo.as_str();
+            m.mirror_lag_changesets
+                .with_label_values(&[repo, line])
+                .set(0);
+            m.mirror_lag_seconds
+                .with_label_values(&[repo, line])
+                .set(0.0);
         }
     }
 }
