@@ -202,6 +202,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: |
           curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
+      - name: build graft
+        run: cargo build -p graft-cli
+        env:
+          CARGO_BUILD_JOBS: "4"
       - name: measure restart
         shell: bash
         run: |

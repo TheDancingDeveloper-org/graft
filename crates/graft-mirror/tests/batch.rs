@@ -3472,6 +3472,30 @@ async fn a_line_that_merged_main_and_edits_next_to_it_batches_without_conflict()
 }
 
 #[tokio::test]
+async fn a_batch_squashes_through_a_line_merge_resolution() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    w.land(&[("shared.txt", "one\ntwo\nthree\nD42\n")], "D42", 2)
+        .await;
+    w.github.squash_merge(first.pr_number.unwrap());
+    git(&w.work, &["fetch", "-q", "origin"]);
+    git(&w.work, &["reset", "-q", "--hard", "origin/main"]);
+    w.push_main(&[("shared.txt", "one\ntwo\nthree\nD41\n")], "D41");
+    w.follow_main().await;
+    w.land_merge_of_main(&[("shared.txt", "one\ntwo\nthree\nD41\nD42\n")], &[], 3)
+        .await;
+
+    let run = w.batcher().run().await.unwrap();
+    let rec = opened(run.outcome);
+    assert_eq!(
+        w.show(&rec.squash_sha.to_hex(), "shared.txt"),
+        "one\ntwo\nthree\nD41\nD42"
+    );
+}
+
+#[tokio::test]
 async fn a_revert_landed_after_merging_main_is_kept_not_dropped() {
     let w = World::new().await;
     w.start().await;

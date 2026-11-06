@@ -494,17 +494,33 @@ where
     ) -> Result<Result<Option<ChangesetId>, BatchOutcome>, MirrorError> {
         // The line's own change, as one changeset on the snapshot it holds
         // of the base, rebased onto the base tip.
-        let from = match state.sync_batch {
+        // `landed` is the newest landed changeset the sync point already
+        // holds: the sync point itself, or, for a merged batch rebuilt by
+        // `merged_on_synced` (unlanded, so no ancestor of anything), the
+        // batch's merge on the base.
+        let (from, landed) = match state.sync_batch {
             Some(number) => {
                 let rec = self
                     .db
                     .batch(number)?
                     .ok_or_else(|| config_err(format!("batch {number} is not recorded")))?;
-                self.merged_on_synced(&rec, state).await?
+                let from = self.merged_on_synced(&rec, state).await?;
+                let landed = rec.merged.filter(|_| from != state.sync_from);
+                (from, landed.unwrap_or(from))
             }
-            None => state.sync_from,
+            // The sync point is the tip of the last batch, merged on the
+            // base: the base holds that batch, so a merge of the base into
+            // the line past it carries the line's sync point forward.
+            None => {
+                let landed = self
+                    .db
+                    .last_batch(&self.config.line)?
+                    .filter(|rec| rec.state == BatchState::Merged && rec.tip == state.sync_from)
+                    .and_then(|rec| rec.merged);
+                (state.sync_from, landed.unwrap_or(state.sync_from))
+            }
         };
-        let from = self.newest_base(from, tip, base_tip).await?;
+        let from = self.newest_base(from, landed, tip, base_tip).await?;
         let net = self.diff(from, tip).await?;
         let target = if net.is_empty() {
             base_tip
@@ -585,10 +601,12 @@ where
     /// newest common ancestor of `tip` and `base_tip` when a land merged
     /// the base past `from`. Diffing from an older point would count the
     /// base's own edits as the line's, which reports false conflicts and
-    /// drops a revert of base content as nothing the base lacks.
+    /// drops a revert of base content as nothing the base lacks. `landed` is
+    /// the landed changeset `from` stands for, when `from` is itself unlanded.
     async fn newest_base(
         &mut self,
         from: ChangesetId,
+        landed: ChangesetId,
         tip: ChangesetId,
         base_tip: ChangesetId,
     ) -> Result<ChangesetId, MirrorError> {
@@ -608,8 +626,8 @@ where
         else {
             return Ok(from);
         };
-        if common == from {
-            return Ok(from);
+        if common == from || common == landed {
+            return Ok(common);
         }
         let cx = self.call("is-ancestor");
         let newer = self
@@ -618,7 +636,7 @@ where
                 &cx,
                 Pair {
                     repo,
-                    a: from,
+                    a: landed,
                     b: common,
                 },
             )
