@@ -38,12 +38,13 @@ use graft_proto::types::{
     CreateChangeset, Diff, GetChangesets, HasObjects, Page, PutObjects, SetHead, WorkspaceRef,
 };
 use graft_proto::{ApiError, CallContext, Frame};
+use graft_store::ObjectStore;
 
 use super::{
     DIFF_PAGE, FileStatus, GRAFT_DIR, IndexEntry, RealDirs, Stat, WorkingCopy, check_reserved,
     kind_from_name, kind_name, write_atomic,
 };
-use crate::fetch::{MAX_BATCH, over_budget};
+use crate::fetch::{CACHE_REPO, MAX_BATCH, over_budget};
 use crate::sparse::{escape, unescape};
 use crate::{Error, Result};
 
@@ -295,6 +296,7 @@ impl WorkingCopy {
             }
         };
         self.apply_pending(&pending, id)?;
+        self.cache_committed(&sources, limits).await;
         Ok(Committed {
             id,
             parent: parents[0],
@@ -497,6 +499,30 @@ impl WorkingCopy {
             .collect();
         self.put_blobs(api, cx, &send, limits, &mut stats).await?;
         Ok(stats)
+    }
+
+    /// Puts the committed blobs in the local cache, so `diff` and later
+    /// moves can read the index's base for these files: `sync` and `land`
+    /// fetch only paths that changed between snapshots, so nothing else
+    /// would. Best effort: the commit is already made, and a file that
+    /// changed since is left uncached (WI-2713).
+    async fn cache_committed(&self, sources: &BTreeMap<BlobId, RepoPath>, limits: &CommitLimits) {
+        if sources.is_empty() {
+            return;
+        }
+        let Ok(cache) = self.open_cache(super::DEFAULT_CACHE_BYTES) else {
+            return;
+        };
+        for (id, path) in sources {
+            if matches!(cache.get(CACHE_REPO, id.0).await, Ok(Some(_))) {
+                continue;
+            }
+            let Ok(data) = read_blob(&self.root, path, *id, limits) else {
+                continue;
+            };
+            let frame = Frame::encode(ObjectKind::Blob, &data);
+            let _ = cache.put(CACHE_REPO, id.0, frame.to_bytes()).await;
+        }
     }
 
     /// Sends the blobs, each re-read from its file, in batches.
