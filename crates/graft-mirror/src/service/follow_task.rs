@@ -141,6 +141,10 @@ impl<A> PollStep for FollowStep<'_, A>
 where
     A: AdminApi + ObjectApi + RepoApi + Send + Sync,
 {
+    fn pin(&mut self, host: &str, port: u16, addr: Option<std::net::IpAddr>) {
+        self.follower.set_resolve_pin(host, port, addr);
+    }
+
     async fn poll(&mut self, credential: Option<SecretToken>) -> Result<PollReport, PollFailure> {
         let pipe = match credential {
             Some(c) => Some(Arc::new(

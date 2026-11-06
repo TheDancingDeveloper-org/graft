@@ -327,16 +327,18 @@ fn two_configs_for_one_repository_are_refused() {
 
 #[test]
 fn every_deploy_config_plans() {
-    // The thirteen real configs parse and plan, one row per repository.
+    // Every per-repository follow config left in deploy/ parses and plans,
+    // one row per repository. mirror-service.toml is the serve config, not
+    // a follow config, so it is not one of them.
     let deploy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy");
     let mut configs: Vec<PathBuf> = std::fs::read_dir(&deploy)
         .unwrap()
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("mirror") && n.ends_with(".toml"))
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.starts_with("mirror") && n.ends_with(".toml") && n != "mirror-service.toml"
+            })
         })
         .collect();
     configs.sort();

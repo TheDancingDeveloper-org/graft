@@ -449,19 +449,16 @@ async fn a_recorded_pr_is_adopted_after_a_crash() {
 }
 
 async fn expiry_without_pr(s: &impl MetaStore) {
+    // A cut no service ever claimed cannot have opened a PR: it expires,
+    // and the line is free.
     let r = cut_batch(s, &admin(), 0, cut("main", "k1"))
         .await
         .expect("cut");
-    let epoch = take(s, "i1", 0).await;
-    claim(s, &service(), 0, claim_req(epoch))
-        .await
-        .expect("claim");
     let late = REQUEST_TIMEOUT_MS;
     let seen = get_request(s, &admin(), late, key(r.id))
         .await
         .expect("get");
     assert_eq!(state(&seen), pb::MirrorRequestState::Expired);
-    // No PR was recorded, so the pointer is released and the line is free.
     assert!(
         get_batch(s, &admin(), late, batch_key("main"))
             .await
@@ -472,6 +469,40 @@ async fn expiry_without_pr(s: &impl MetaStore) {
     cut_batch(s, &admin(), late, cut("main", "k2"))
         .await
         .expect("next cut");
+}
+
+async fn crash_after_create(s: &impl MetaStore) {
+    // A service claims the cut, opens its PR on batch-<id>, and crashes
+    // before recording it. Nothing claims it again before the deadline.
+    let r = cut_batch(s, &admin(), 0, cut("main", "k1"))
+        .await
+        .expect("cut");
+    let epoch = take(s, "i1", 0).await;
+    claim(s, &service(), 0, claim_req(epoch))
+        .await
+        .expect("claim");
+    let late = REQUEST_TIMEOUT_MS * 4;
+    let seen = get_request(s, &admin(), late, key(r.id))
+        .await
+        .expect("get");
+    // It does not expire: the PR may exist, so the line stays held and no
+    // second cut (on another branch) can open a second batch PR.
+    assert_eq!(state(&seen), pb::MirrorRequestState::Pending);
+    held_by(cut_batch(s, &admin(), late, cut("main", "k2")).await, r.id);
+    // The restarted service claims the same request again, so it looks on
+    // the same branch and adopts the PR it opened.
+    let new = take(s, "i2", late).await;
+    let again = claim(s, &service(), late, claim_req(new))
+        .await
+        .expect("claim")
+        .request
+        .expect("the orphaned cut is claimable");
+    assert_eq!(again.id, r.id);
+    let done = complete(s, &service(), late, with_pr(r.id, new, true))
+        .await
+        .expect("record the adopted PR");
+    assert_eq!(batch(&done), pb::BatchState::Open);
+    assert_eq!(done.result.and_then(|o| o.branch), Some(batch_branch(r.id)));
 }
 
 async fn expiry_with_pr(s: &impl MetaStore) {
@@ -527,6 +558,11 @@ async fn expiry_with_pr(s: &impl MetaStore) {
 async fn an_expired_cut_releases_the_line_only_without_a_pr() {
     both!(expiry_without_pr);
     both!(expiry_with_pr);
+}
+
+#[tokio::test]
+async fn a_claimed_cut_without_a_pr_never_expires_and_is_retried_on_its_branch() {
+    both!(crash_after_create);
 }
 
 async fn rewind_rules(s: &impl MetaStore) {
@@ -643,4 +679,50 @@ async fn grants_and_fields_are_checked_at_the_boundary() {
         get_request(&s, &reader, 0, key(r.id + 1)).await,
         Err(ApiError::NotFound { .. })
     ));
+}
+
+fn mirror_as(subject: &str) -> Principal {
+    Principal {
+        kind: PrincipalKind::Mirror,
+        ..who(subject, &["repo:*:mirror"])
+    }
+}
+
+async fn foreign_holder(s: &impl MetaStore) {
+    use crate::mirrors::{release_lease, renew_lease};
+    // The holder is "mirror/i1"; "mirr" and "other" are other subjects, and
+    // "mirror/i1" itself is a subject whose prefix-match would pass.
+    let epoch = take(s, "i1", 0).await;
+    let req = || pb::LeaseRequest {
+        repo: "r".into(),
+        epoch,
+    };
+    for subject in ["other", "mirr", "mirror/i1"] {
+        let p = mirror_as(subject);
+        assert!(
+            matches!(
+                renew_lease(s, &p, 1, req()).await,
+                Err(ApiError::LeaseLost { .. })
+            ),
+            "{subject} renewed"
+        );
+        assert!(
+            matches!(
+                release_lease(s, &p, 1, req()).await,
+                Err(ApiError::LeaseLost { .. })
+            ),
+            "{subject} released"
+        );
+    }
+    renew_lease(s, &service(), 1, req())
+        .await
+        .expect("the holder renews");
+    release_lease(s, &service(), 1, req())
+        .await
+        .expect("the holder releases");
+}
+
+#[tokio::test]
+async fn only_the_exact_holder_renews_or_releases_a_lease() {
+    both!(foreign_holder);
 }

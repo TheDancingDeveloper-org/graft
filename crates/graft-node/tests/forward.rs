@@ -14,6 +14,13 @@ use tonic::codegen::http::uri::PathAndQuery;
 use tonic::metadata::MetadataValue;
 
 /// Every RPC in the proto, as `/graft.v1.<Service>/<Method>`.
+/// Served by the node itself (`GetObjects`) or only by the server
+/// (`GetMirrorCredential`, which returns a decrypted upstream credential).
+const NOT_FORWARDED: &[&str] = &[
+    "/graft.v1.ObjectService/GetObjects",
+    "/graft.v1.MirrorService/GetMirrorCredential",
+];
+
 fn proto_methods() -> Vec<String> {
     let text = include_str!("../../graft-proto/proto/graft/v1/graft.proto");
     let mut service = "";
@@ -55,14 +62,15 @@ async fn raw(node: &NodeRun, path: &str, token: Option<&str>) -> tonic::Status {
 }
 
 #[tokio::test]
-async fn every_rpc_but_get_objects_is_forwarded_with_the_callers_token_every_time() {
+async fn every_rpc_but_get_objects_and_get_mirror_credential_is_forwarded_with_the_callers_token_every_time()
+ {
     let up = Upstream::start().await;
     let dir = tempfile::tempdir().unwrap();
     let node = NodeRun::start(config(dir.path(), &up.url())).await;
     let tok = token(&["repo:r:read"]);
     let methods: Vec<String> = proto_methods()
         .into_iter()
-        .filter(|m| m != "/graft.v1.ObjectService/GetObjects")
+        .filter(|m| !NOT_FORWARDED.contains(&m.as_str()))
         .collect();
     let listed: Vec<&str> = graft_node::forward::FORWARDED
         .iter()
@@ -102,6 +110,8 @@ async fn other_paths_are_not_forwarded() {
         "/graft.v2.RepoService/ResolveRef",
         "/v1/repos/r/refs",
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+        // Only the server hands out a decrypted mirror credential.
+        "/graft.v1.MirrorService/GetMirrorCredential",
     ] {
         let status = raw(&node, path, Some(&tok)).await;
         assert_eq!(status.code(), tonic::Code::Unimplemented, "{path}");

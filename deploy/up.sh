@@ -300,8 +300,58 @@ wait_ready() {
   done
 }
 
+# meta_root runs a root shell with the metadata volume at /m (and nothing
+# else), for the database backup.
+meta_root() {
+  docker run --rm -i --user 0:0 --network none --entrypoint sh \
+    -v graft-dev-meta:/m "$GRAFT_IMAGE" -c "$1"
+}
+
+# A server image other than the running one may migrate the metadata
+# database, and an older build refuses a newer schema, so a rollback must
+# restore the database as well as the old image. Before a new image opens
+# it, stop the running server and copy meta.db and its WAL files to
+# /m/pre-deploy (with the image that wrote them); rollback() puts that copy
+# back. A fresh host, or a redeploy of the running image, takes no backup.
+meta_backed_up=0
+backup_meta() {
+  local running
+  running=$(docker inspect -f '{{.Config.Image}}' graft-dev-server 2>/dev/null) || return 0
+  [ -n "$running" ] && [ "$running" != "$GRAFT_IMAGE" ] || return 0
+  log "backing up the metadata database (written by $running) before $GRAFT_IMAGE opens it"
+  compose stop graft-server || die "could not stop graft-server for the database backup"
+  meta_root "set -e
+    cd /m
+    rm -rf .pre-deploy.tmp
+    mkdir -m 0700 .pre-deploy.tmp
+    for f in meta.db meta.db-wal meta.db-shm; do
+      if [ -e \"\$f\" ]; then cp -p \"\$f\" .pre-deploy.tmp/; fi
+    done
+    printf '%s\\n' '$running' > .pre-deploy.tmp/image
+    rm -rf pre-deploy
+    mv .pre-deploy.tmp pre-deploy" \
+    || die "the metadata database backup failed; the old server is stopped, nothing was migrated"
+  meta_backed_up=1
+}
+
+# Puts the pre-deploy copy back with graft-server stopped: the database the
+# old image wrote, before the new one migrated it.
+restore_meta() {
+  [ "$meta_backed_up" = 1 ] || return 0
+  log "restoring the metadata database from before this deploy"
+  compose stop graft-server || return 1
+  meta_root "set -e
+    cd /m
+    test -s pre-deploy/meta.db
+    rm -f meta.db meta.db-wal meta.db-shm
+    for f in meta.db meta.db-wal meta.db-shm; do
+      if [ -e \"pre-deploy/\$f\" ]; then cp -p \"pre-deploy/\$f\" .; fi
+    done"
+}
+
 # The new stack did not come up: put back the last good pin and configs in
-# this checkout, bring that stack up, and fail the deploy either way.
+# this checkout, restore the database from before this deploy, bring that
+# stack up, and fail the deploy either way.
 rollback() {
   local why=$1
   log "error: $why"
@@ -320,6 +370,7 @@ rollback() {
   . "$here/image.env"
   set +a
   config_hash
+  restore_meta || die "$why; restoring the metadata database failed, so the old image was not started (backup: graft-dev-meta:/pre-deploy)"
   if compose up -d --wait --remove-orphans graft-server graft-mirror && wait_ready; then
     die "$why; rolled back to $GRAFT_IMAGE, which is up"
   fi
@@ -332,6 +383,8 @@ if [ ! -e "$secrets/signing.key" ]; then
 fi
 
 config_hash
+
+backup_meta
 
 log "starting graft-server"
 compose up -d --wait graft-server \

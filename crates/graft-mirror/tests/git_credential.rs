@@ -68,7 +68,7 @@ fn every_network_command_carries_the_token_file_in_env_only() {
     std::fs::write(
         &git,
         format!(
-            "#!/bin/sh\nprintf 'call argv=%s header=%s\\n' \"$*\" \"${{GIT_CONFIG_VALUE_0:-none}}\" >>'{}'\n",
+            "#!/bin/sh\nh=none; i=0; while [ \"$i\" -lt \"${{GIT_CONFIG_COUNT:-0}}\" ]; do eval k=\\\"\\$GIT_CONFIG_KEY_$i\\\"; eval v=\\\"\\$GIT_CONFIG_VALUE_$i\\\"; [ \"$k\" = http.extraHeader ] && h=$v; i=$((i+1)); done; printf 'call argv=%s header=%s\\n' \"$*\" \"$h\" >>'{}'\n",
             log.display()
         ),
     )

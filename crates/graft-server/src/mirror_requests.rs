@@ -165,9 +165,22 @@ fn batch_after(r: &MirrorRequestRecord) -> Option<BatchState> {
     }
 }
 
-/// What `r` becomes when read at `now_ms`: expired past its deadline, or
-/// back to `pending` when its claim's epoch is no longer held. `None` when
-/// nothing changes.
+/// Whether `r` is a cut a service has claimed that recorded no PR: the
+/// service may have opened the PR on `batch_branch(r.id)` and crashed
+/// before recording it. Such a cut never expires; it stays claimable until
+/// a service runs it again, finds the PR on its branch and records it (or
+/// opens it, or fails it). Expiring it would free the line's slot, and the
+/// next cut, on another branch, would open a second batch PR.
+fn may_have_opened_a_pr(r: &MirrorRequestRecord) -> bool {
+    r.kind == MirrorRequestKind::CutBatch
+        && r.claimed_at_ms.is_some()
+        && r.result.pr_number.is_none()
+}
+
+/// What `r` becomes when read at `now_ms`: expired past its deadline
+/// (unless [`may_have_opened_a_pr`]), or back to `pending` when its claim's
+/// epoch is no longer held.
+/// `None` when nothing changes.
 fn lazily(
     r: &MirrorRequestRecord,
     lease: Option<&LeaseRecord>,
@@ -177,17 +190,16 @@ fn lazily(
         return None;
     }
     let mut next = r.clone();
-    if now_ms >= r.deadline_ms {
+    let claim_held = r
+        .claimed_by_epoch
+        .is_some_and(|e| lease.is_some_and(|l| l.held(e, now_ms)));
+    if now_ms >= r.deadline_ms && !may_have_opened_a_pr(r) {
         next.state = MirrorRequestState::Expired;
         next.batch = batch_after(&next);
-    } else if r.state == MirrorRequestState::Claimed
-        && !r
-            .claimed_by_epoch
-            .is_some_and(|e| lease.is_some_and(|l| l.held(e, now_ms)))
-    {
+    } else if r.state == MirrorRequestState::Claimed && !claim_held {
+        // `claimed_at_ms` stays: it records that a service ran the request.
         next.state = MirrorRequestState::Pending;
         next.claimed_by_epoch = None;
-        next.claimed_at_ms = None;
     } else {
         return None;
     }

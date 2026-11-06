@@ -1,11 +1,12 @@
-//! Forwarding (`docs/design.md` §5.1): every call but `GetObjects` goes to
-//! the server unchanged, byte for byte, with the caller's headers (its
+//! Forwarding (`docs/design.md` §5.1): every call but `GetObjects` and
+//! `GetMirrorCredential` goes to the server unchanged, byte for byte, with the caller's headers (its
 //! token, protocol version, request id and deadline). Answers stream back
 //! the same way. Nothing forwarded is cached, so a mutable answer is never
 //! served stale.
 //!
 //! Only the `graft.v1` methods in [`FORWARDED`] are forwarded; anything else
-//! is `Unimplemented` here, so the socket is not a general proxy. A call
+//! is `Unimplemented` here. `GetMirrorCredential` hands out a decrypted
+//! upstream credential, so only the server serves it, never a node, so the socket is not a general proxy. A call
 //! takes an upstream slot until its answer's headers arrive, so the calls
 //! in flight upstream are bounded, and when upstream can't be reached the
 //! call gets `Unavailable` at once (see [`crate::upstream`]). Streams that
@@ -78,6 +79,28 @@ pub const FORWARDED: &[(&str, &str)] = &[
     ("/graft.v1.AdminService/MintToken", "MintToken"),
     ("/graft.v1.CiService/ExchangeCiToken", "ExchangeCiToken"),
     ("/graft.v1.MirrorService/RecordExports", "RecordExports"),
+    ("/graft.v1.MirrorService/SetMirror", "SetMirror"),
+    ("/graft.v1.MirrorService/GetMirror", "GetMirror"),
+    ("/graft.v1.MirrorService/ListMirrors", "ListMirrors"),
+    ("/graft.v1.MirrorService/RemoveMirror", "RemoveMirror"),
+    ("/graft.v1.MirrorService/PurgeMirror", "PurgeMirror"),
+    ("/graft.v1.MirrorService/SetMirrorStatus", "SetMirrorStatus"),
+    ("/graft.v1.MirrorService/AcquireLease", "AcquireLease"),
+    ("/graft.v1.MirrorService/RenewLease", "RenewLease"),
+    ("/graft.v1.MirrorService/ReleaseLease", "ReleaseLease"),
+    ("/graft.v1.MirrorService/CutBatch", "CutBatch"),
+    ("/graft.v1.MirrorService/GetBatch", "GetBatch"),
+    ("/graft.v1.MirrorService/ListBatches", "ListBatches"),
+    ("/graft.v1.MirrorService/RewindFollowed", "RewindFollowed"),
+    ("/graft.v1.MirrorService/GetRequest", "GetRequest"),
+    ("/graft.v1.MirrorService/ClaimRequest", "ClaimRequest"),
+    ("/graft.v1.MirrorService/CompleteRequest", "CompleteRequest"),
+    ("/graft.v1.MirrorService/FailRequest", "FailRequest"),
+    ("/graft.v1.MirrorService/SetBatchState", "SetBatchState"),
+    (
+        "/graft.v1.MirrorService/SetMirrorCredential",
+        "SetMirrorCredential",
+    ),
     ("/graft.v1.ReviewService/GetAttestations", "GetAttestations"),
     ("/graft.v1.ReviewService/GetLandChecks", "GetLandChecks"),
     ("/graft.v1.ReviewService/ReviewQueue", "ReviewQueue"),

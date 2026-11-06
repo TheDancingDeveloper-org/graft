@@ -112,6 +112,10 @@ pub struct Mirror {
     /// A credential helper on a pipe (`graft-mirror serve`, D41 §3.4): used
     /// instead of `credential` when set.
     pipe: Option<std::sync::Arc<CredentialPipe>>,
+    /// An `http.curloptResolve` entry (`host:port:addr`) pinning the
+    /// upstream host to the address the service vetted, so git cannot
+    /// resolve it again to another (DNS rebinding).
+    resolve_pin: Option<String>,
     /// Whether git ignores the user's and the system's config here (the
     /// import-pr scratch repository, WI-2716). See [`Mirror::scratch`].
     isolated: bool,
@@ -299,6 +303,7 @@ impl Mirror {
             upstream: upstream.into(),
             credential: None,
             pipe: None,
+            resolve_pin: None,
             isolated: false,
         }
     }
@@ -346,6 +351,54 @@ impl Mirror {
     /// wins.
     pub fn set_credential_pipe(&mut self, pipe: Option<std::sync::Arc<CredentialPipe>>) {
         self.pipe = pipe;
+    }
+
+    /// Pins the upstream's host to `addr`, the address the caller vetted,
+    /// on every network command to an HTTP(S) upstream; `None` stops.
+    pub fn set_resolve_pin(&mut self, host: &str, port: u16, addr: Option<std::net::IpAddr>) {
+        self.resolve_pin = addr.map(|a| match a {
+            std::net::IpAddr::V4(v4) => format!("{host}:{port}:{v4}"),
+            std::net::IpAddr::V6(v6) => format!("{host}:{port}:[{v6}]"),
+        });
+    }
+
+    /// The upstream's URL scheme as git's `protocol.<name>.allow` names it:
+    /// `https`, `http`, `ssh` (also for `user@host:path`) or `file` (a path).
+    fn scheme(&self) -> &'static str {
+        let u = self.upstream.as_str();
+        // `<transport>::<address>` (ext::, fd::) is a remote helper.
+        let helper = u
+            .split_once("::")
+            .is_some_and(|(t, _)| !t.is_empty() && t.bytes().all(|b| b.is_ascii_alphanumeric()));
+        if helper {
+            "none"
+        } else if u.starts_with("https://") {
+            "https"
+        } else if u.starts_with("http://") {
+            "http"
+        } else if u.starts_with("ssh://")
+            || (!u.contains("://") && u.contains('@') && u.contains(':'))
+        {
+            "ssh"
+        } else if u.starts_with("file://") || !u.contains("://") {
+            "file"
+        } else {
+            // Anything else (ext::, git://, ...) is allowed no transport.
+            "none"
+        }
+    }
+
+    /// The host git names in a credential request for an HTTP(S)
+    /// upstream: the URL's authority without userinfo (with its port if
+    /// one is given), as git sends it in `host=`.
+    fn credential_host(&self) -> Option<&str> {
+        let rest = self
+            .upstream
+            .strip_prefix("https://")
+            .or_else(|| self.upstream.strip_prefix("http://"))?;
+        let authority = rest.split(['/', '?', '#']).next()?;
+        let host = authority.rsplit('@').next()?;
+        (!host.is_empty()).then_some(host)
     }
 
     /// Whether the upstream is reached over HTTPS (where a token is needed).
@@ -776,42 +829,58 @@ impl Mirror {
         GitEnv::set(env)
     }
 
-    /// The `http.extraHeader` for an HTTPS upstream: `bearer` if given,
-    /// else the mirror's own credential. Every network command builds its
-    /// credential here, so follow, export and pr-batch agree (WI-2571).
+    /// The config of every network command, carried in the environment
+    /// (`GIT_CONFIG_COUNT`): redirects are never followed, only the
+    /// upstream's own transport is allowed, the host is pinned to its vetted
+    /// address when one is set, and the credential: `bearer` if given, else
+    /// the pipe's helper, else the mirror's own `http.extraHeader`. Every
+    /// network command builds its credential here, so follow, export and
+    /// pr-batch agree (WI-2571). A redirect would otherwise take the
+    /// credential, and the request, to a host nobody vetted.
     fn credential_env(&self, bearer: Option<&str>) -> Vec<(String, String)> {
-        let mut env = Vec::new();
+        let scheme = self.scheme();
+        let mut config: Vec<(&str, String)> = vec![
+            ("http.followRedirects", "false".to_owned()),
+            ("protocol.allow", "never".to_owned()),
+        ];
+        if scheme != "none" {
+            config.push((
+                match scheme {
+                    "https" => "protocol.https.allow",
+                    "http" => "protocol.http.allow",
+                    "ssh" => "protocol.ssh.allow",
+                    _ => "protocol.file.allow",
+                },
+                "always".to_owned(),
+            ));
+        }
+        let http = scheme == "https" || scheme == "http";
+        if http && let Some(pin) = &self.resolve_pin {
+            config.push(("http.curloptResolve", pin.clone()));
+        }
         // The service refuses any upstream but https and ssh before a
         // poll; plain http reaches here only in tests.
         if bearer.is_none()
             && let Some(pipe) = &self.pipe
-            && (self.is_https() || self.upstream.starts_with("http://"))
+            && http
         {
-            // The first, empty, helper clears any configured elsewhere.
-            env.push(("GIT_CONFIG_COUNT".to_owned(), "2".to_owned()));
-            env.push((
-                "GIT_CONFIG_KEY_0".to_owned(),
-                "credential.helper".to_owned(),
-            ));
-            env.push(("GIT_CONFIG_VALUE_0".to_owned(), String::new()));
-            env.push((
-                "GIT_CONFIG_KEY_1".to_owned(),
-                "credential.helper".to_owned(),
-            ));
-            env.push(("GIT_CONFIG_VALUE_1".to_owned(), pipe.helper()));
-            return env;
-        }
-        if let Some(token) = bearer.or(self.credential.as_ref().map(SecretToken::expose))
+            // The first, empty, helper clears any configured elsewhere. The
+            // pipe's helper answers only for the upstream's own host.
+            config.push(("credential.helper", String::new()));
+            if let Some(helper) = self.credential_host().and_then(|h| pipe.helper(h)) {
+                config.push(("credential.helper", helper));
+            }
+        } else if let Some(token) = bearer.or(self.credential.as_ref().map(SecretToken::expose))
             && self.is_https()
         {
             let basic =
                 base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
-            env.push(("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()));
-            env.push(("GIT_CONFIG_KEY_0".to_owned(), "http.extraHeader".to_owned()));
-            env.push((
-                "GIT_CONFIG_VALUE_0".to_owned(),
-                format!("Authorization: Basic {basic}"),
-            ));
+            config.push(("http.extraHeader", format!("Authorization: Basic {basic}")));
+        }
+        let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), config.len().to_string())];
+        for (i, (key, value)) in config.into_iter().enumerate() {
+            env.push((format!("GIT_CONFIG_KEY_{i}"), key.to_owned()));
+            env.push((format!("GIT_CONFIG_VALUE_{i}"), value));
         }
         env
     }
@@ -891,5 +960,58 @@ impl Mirror {
             .trim()
             .parse()
             .map_err(|_| GitCliError("git rev-list: unexpected output".to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    fn config(env: &[(String, String)]) -> Vec<(String, String)> {
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let n: usize = get("GIT_CONFIG_COUNT").unwrap().parse().unwrap();
+        (0..n)
+            .map(|i| {
+                (
+                    get(&format!("GIT_CONFIG_KEY_{i}")).unwrap(),
+                    get(&format!("GIT_CONFIG_VALUE_{i}")).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn network_commands_pin_the_vetted_address_and_allow_only_the_upstream_transport() {
+        let mut m = Mirror::new("/x", "https://github.com/o/r.git");
+        m.set_resolve_pin("github.com", 443, Some(IpAddr::from([140, 82, 112, 3])));
+        let c = config(&m.credential_env(None));
+        for want in [
+            ("http.followRedirects", "false"),
+            ("protocol.allow", "never"),
+            ("protocol.https.allow", "always"),
+            ("http.curloptResolve", "github.com:443:140.82.112.3"),
+        ] {
+            assert!(
+                c.iter().any(|(k, v)| k == want.0 && v == want.1),
+                "{want:?} in {c:?}"
+            );
+        }
+        m.set_resolve_pin("github.com", 443, Some("2606:4700::1".parse().unwrap()));
+        let c = config(&m.credential_env(None));
+        assert!(c.contains(&(
+            "http.curloptResolve".to_owned(),
+            "github.com:443:[2606:4700::1]".to_owned()
+        )));
+        m.set_resolve_pin("github.com", 443, None);
+        let c = config(&m.credential_env(None));
+        assert!(!c.iter().any(|(k, _)| k == "http.curloptResolve"));
+        // An ext:: upstream gets no transport at all.
+        let ext = Mirror::new("/x", "ext::sh -c id");
+        let c = config(&ext.credential_env(None));
+        assert!(
+            !c.iter()
+                .any(|(k, v)| k.starts_with("protocol.") && k != "protocol.allow" && v == "always")
+        );
     }
 }
