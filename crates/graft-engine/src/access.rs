@@ -20,11 +20,16 @@
 use graft_model::{Change, RepoPath};
 use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
 use graft_store::{
-    LineSlot, MetaStore, MirrorQuery, MirrorRequestKind, MirrorRequestQuery, MirrorRequestState,
-    ObjectStore,
+    LineSlot, MetaStore, MirrorQuery, MirrorRequestKind, MirrorRequestQuery, MirrorRequestRecord,
+    MirrorRequestState, ObjectStore,
 };
 
 use crate::{Engine, errors};
+
+/// Claimed cuts read when a changeset write looks for one held under the
+/// lease. Claims outlived by their lease are settled back to pending as
+/// they are read, so few stay claimed at once.
+const CLAIMED_CUTS_PAGE: u32 = 32;
 
 /// What an operation needs.
 #[derive(Clone, Copy, Debug)]
@@ -163,10 +168,11 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     /// `checked`, a write check, unless it denied the mirror service running
-    /// a batch cut on `repo`: `repo` is bound to a mirror and holds a claimed
-    /// cut (D41 §3.5, WI-3426). A cut creates and rebases unlanded
-    /// changesets only; the line it then moves is checked by
-    /// [`Engine::cut_lease`]. Reads the store only after a denial.
+    /// a batch cut on `repo`: `repo` is bound to a mirror and holds a cut
+    /// claimed under the live lease's epoch (D41 §3.5, WI-3426). A cut
+    /// creates and rebases unlanded changesets only, which name no line; the
+    /// line it then moves is checked by [`Engine::cut_lease`]. Reads the
+    /// store only after a denial.
     pub(crate) async fn or_cut(
         &self,
         cx: &CallContext,
@@ -197,7 +203,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     /// The claimer's epoch of a claimed cut on `repo` (of `line`, when
-    /// given), for the mirror service on a bound repository. Indexed reads.
+    /// given), for the mirror service on a bound repository, while the
+    /// lease is held under that epoch: a claim outlived by its lease grants
+    /// nothing, even before it is settled back to pending. Indexed reads.
     async fn cut_claimed(
         &self,
         cx: &CallContext,
@@ -210,7 +218,23 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let Some(id) = self.meta.repo(repo).await.map_err(errors::store)? else {
             return Ok(None);
         };
-        let request = match line {
+        let now_ms = self.clock.now().ms;
+        let Some(lease) = self
+            .meta
+            .get_lease(id)
+            .await
+            .map_err(errors::store)?
+            .filter(|l| l.held(l.epoch, now_ms))
+        else {
+            return Ok(None);
+        };
+        let claims = |r: &MirrorRequestRecord| {
+            r.kind == MirrorRequestKind::CutBatch
+                && r.state == MirrorRequestState::Claimed
+                && r.claimed_by_epoch == Some(lease.epoch)
+                && line.is_none_or(|l| r.line == l)
+        };
+        let claimed = match line {
             Some(line) => {
                 let Some(rid) = self
                     .meta
@@ -224,7 +248,9 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     .get_mirror_request(id, rid)
                     .await
                     .map_err(errors::store)?
+                    .is_some_and(|r| claims(&r))
             }
+            // A stale claim may sort first, so read a page, not one row.
             None => self
                 .meta
                 .list_mirror_requests(
@@ -232,22 +258,16 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                     MirrorRequestQuery {
                         kind: Some(MirrorRequestKind::CutBatch),
                         states: vec![MirrorRequestState::Claimed],
-                        limit: 1,
+                        limit: CLAIMED_CUTS_PAGE,
                         ..MirrorRequestQuery::default()
                     },
                 )
                 .await
                 .map_err(errors::store)?
-                .into_iter()
-                .next(),
+                .iter()
+                .any(claims),
         };
-        Ok(request.and_then(|r| {
-            (r.kind == MirrorRequestKind::CutBatch
-                && r.state == MirrorRequestState::Claimed
-                && line.is_none_or(|l| r.line == l))
-            .then_some(r.claimed_by_epoch)
-            .flatten()
-        }))
+        Ok(claimed.then_some(lease.epoch))
     }
 
     /// Whether the caller is the mirror service and `repo` is bound to a

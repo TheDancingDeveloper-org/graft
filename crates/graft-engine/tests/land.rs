@@ -1323,6 +1323,24 @@ fn the_mirror_cuts_only_a_claimed_batch_line<M: MetaStore>((f, _): (Fixture<M>, 
     move_at("backlog", Some(1)).expect("the cut moves its line");
     assert_eq!(t.tip("backlog").target, next);
 
+    // The lease lapses while the cut is still claimed under its epoch: the
+    // claim grants nothing, so create and rebase are refused.
+    let create = || {
+        block_on(
+            t.r.e()
+                .create_changeset(&mirror, commit_req("r", vec![first], vec![put("x", b"2")])),
+        )
+        .map(drop)
+    };
+    create().expect("the cut creates under a live lease");
+    f.clock.advance(60_000);
+    let claim = block_on(meta.get_mirror_request(id, 7))
+        .expect("read")
+        .expect("exists");
+    assert_eq!(claim.state, MirrorRequestState::Claimed);
+    denied(create());
+    denied(rebase());
+
     // The cut is over: its line, and changeset writes, are refused again.
     cut(2, true);
     let after = t.commit(next, &[("e", b"5")]);
