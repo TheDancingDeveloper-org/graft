@@ -776,6 +776,15 @@ pub(crate) enum BatchAction {
         #[arg(long, default_value = "main")]
         line: String,
     },
+    /// Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (operator only)
+    Cancel {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The request's id, as `batch status` or `batch list` show it
+        #[arg(value_name = "ID")]
+        id: u64,
+    },
     /// List a repository's batches
     List {
         /// The graft repository

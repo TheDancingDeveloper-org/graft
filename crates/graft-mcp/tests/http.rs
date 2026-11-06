@@ -95,6 +95,7 @@ async fn the_service_serves_tools_over_loopback_http() {
         names,
         [
             "graft_attest",
+            "graft_batch_cancel",
             "graft_batch_cut",
             "graft_batch_list",
             "graft_batch_status",
@@ -134,6 +135,7 @@ async fn the_service_serves_tools_over_loopback_http() {
         let name = tool["name"].as_str().unwrap();
         let writes = [
             "graft_attest",
+            "graft_batch_cancel",
             "graft_batch_cut",
             "graft_commit",
             "graft_land",

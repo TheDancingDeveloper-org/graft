@@ -213,6 +213,27 @@ impl MirrorAdmin for Service {
             })
         })
     }
+    fn cancel_request<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::CancelRequestRequest,
+    ) -> MirrorFuture<'a, pb::MirrorRequest> {
+        Box::pin(async move {
+            if !holds(cx, "mirror:bind") {
+                return Err(denied("mirror:bind"));
+            }
+            let mut cuts = self.cuts.lock().unwrap();
+            let r = cuts
+                .iter_mut()
+                .find(|r| r.id == req.id)
+                .ok_or(ApiError::NotFound {
+                    what: format!("mirror request {}", req.id),
+                })?;
+            r.state = pb::MirrorRequestState::Failed as i32;
+            r.batch_state = pb::BatchState::Settled as i32;
+            Ok(r.clone())
+        })
+    }
 }
 
 async fn serve(
@@ -318,6 +339,35 @@ async fn a_cut_retried_after_unavailable_reuses_its_request_id() {
         request["id"]
     );
     assert_eq!(service.cuts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn only_an_operator_cancels_a_stuck_batch() {
+    let service = Arc::new(Service::default());
+    let agent = serve(&["repo:r:admin"], Some(service.clone())).await;
+    let cut = call(
+        &agent,
+        "graft_batch_cut",
+        json!({"repo": "r", "line": "main"}),
+    )
+    .await;
+    let id = cut.structured_content.as_ref().unwrap()["request"]["id"].clone();
+    let refused = call(&agent, "graft_batch_cancel", json!({"repo": "r", "id": id})).await;
+    assert_eq!(refused.is_error, Some(true));
+    let value = refused.structured_content.as_ref().expect("structured");
+    assert_eq!(value["kind"], "permission_denied", "{value}");
+
+    let operator = serve(&["mirror:bind"], Some(service.clone())).await;
+    let done = call(
+        &operator,
+        "graft_batch_cancel",
+        json!({"repo": "r", "id": id}),
+    )
+    .await;
+    assert_ne!(done.is_error, Some(true), "{done:?}");
+    let request = &done.structured_content.as_ref().unwrap()["request"];
+    assert_eq!(request["state"], "failed");
+    assert_eq!(request["batch_state"], "settled");
 }
 
 #[tokio::test]

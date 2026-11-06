@@ -52,6 +52,7 @@ Generated from `graft --help`. Hidden commands are left out.
 - [`graft repo batch`](#repo-batch)
 - [`graft repo batch cut`](#repo-batch-cut)
 - [`graft repo batch status`](#repo-batch-status)
+- [`graft repo batch cancel`](#repo-batch-cancel)
 - [`graft repo batch list`](#repo-batch-list)
 - [`graft stack`](#stack)
 - [`graft stack list`](#stack-list)
@@ -1095,6 +1096,7 @@ Usage: graft repo batch [OPTIONS] <COMMAND>
 Commands:
   cut     Request a batch PR of a line's lands; needs the repository's admin. A retry with the same --request-id returns the same request
   status  Show a line's open batch
+  cancel  Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (operator only)
   list    List a repository's batches
   help    Print this message or the help of the given subcommand(s)
 
@@ -1145,6 +1147,27 @@ Arguments:
 Options:
       --json               Print stable JSON; its schema is published with the release
       --line <LINE>        The line [default: main]
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo batch cancel`
+
+```text
+Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (operator only)
+
+Usage: graft repo batch cancel [OPTIONS] <REPO> <ID>
+
+Arguments:
+  <REPO>  The graft repository
+  <ID>    The request's id, as `batch status` or `batch list` show it
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
       --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument

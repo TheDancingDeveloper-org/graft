@@ -1151,6 +1151,14 @@ message FailRequestRequest {
   string error_code = 4;
 }
 
+// An operator's cancel (`mirror:bind`): fails a live request with the code
+// `cancelled`, settles a cut's batch, and frees the line it holds. For a
+// request stuck with no service to finish it, or a batch PR closed by hand.
+message CancelRequestRequest {
+  string repo = 1;
+  uint64 id = 2;
+}
+
 // Moves a batch `open → sealed → settled`; settling clears the pointer.
 message SetBatchStateRequest {
   string repo = 1;
@@ -1330,6 +1338,7 @@ service MirrorService {
   rpc CompleteRequest(CompleteRequestRequest) returns (MirrorRequest);
   rpc FailRequest(FailRequestRequest) returns (MirrorRequest);
   rpc SetBatchState(SetBatchStateRequest) returns (MirrorRequest);
+  rpc CancelRequest(CancelRequestRequest) returns (MirrorRequest);
   rpc SetMirrorCredential(SetMirrorCredentialRequest) returns (Mirror);
   rpc GetMirrorCredential(GetMirrorCredentialRequest) returns (MirrorCredential);
 }

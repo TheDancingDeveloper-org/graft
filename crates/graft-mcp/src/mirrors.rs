@@ -98,6 +98,13 @@ pub trait MirrorAdmin: Send + Sync + 'static {
         cx: &'a CallContext,
         req: pb::ListBatchesRequest,
     ) -> MirrorFuture<'a, pb::BatchPage>;
+    /// `CancelRequest`: the operator fails a stuck request and frees its
+    /// line. Needs `mirror:bind`.
+    fn cancel_request<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::CancelRequestRequest,
+    ) -> MirrorFuture<'a, pb::MirrorRequest>;
 }
 
 /// Attempts a request gets when the server is unavailable, the first
@@ -455,6 +462,16 @@ pub struct BatchStatusArgs {
     pub line: String,
 }
 
+/// Arguments of `graft_batch_cancel`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BatchCancelArgs {
+    /// The graft repository.
+    pub repo: String,
+    /// The request's id, as `graft_batch_status` or `graft_batch_list` show it.
+    pub id: u64,
+}
+
 /// Arguments of `graft_batch_list`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -688,6 +705,24 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         bounded(json!({ "batch": view.batch.as_ref().map(request_json) }))
     }
 
+    async fn batch_cancel(
+        &self,
+        cx: &CallContext,
+        a: BatchCancelArgs,
+    ) -> Result<CallToolResult, ToolError> {
+        text_arg("repo", &a.repo)?;
+        let admin = self.mirrors("graft_batch_cancel")?;
+        let req = pb::CancelRequestRequest {
+            repo: a.repo,
+            id: a.id,
+        };
+        let r = admin
+            .cancel_request(cx, req)
+            .await
+            .map_err(ToolError::Api)?;
+        bounded(json!({ "request": request_json(&r) }))
+    }
+
     async fn batch_list(
         &self,
         cx: &CallContext,
@@ -918,6 +953,29 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         Ok(respond(async {
             let cx = self.call_context(&ctx)?;
             self.batch_status(&cx, args).await
+        })
+        .await)
+    }
+
+    #[tool(
+        name = "graft_batch_cancel",
+        description = "Cancel a stuck batch or other mirror request and free its line, when no mirror service will finish it or its PR was closed by hand. Needs mirror:bind, which only an operator holds.",
+        annotations(
+            title = "Cancel batch",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn graft_batch_cancel(
+        &self,
+        Parameters(args): Parameters<BatchCancelArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(respond(async {
+            let cx = self.call_context(&ctx)?;
+            self.batch_cancel(&cx, args).await
         })
         .await)
     }

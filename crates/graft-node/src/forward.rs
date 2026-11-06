@@ -98,6 +98,7 @@ pub const FORWARDED: &[(&str, &str)] = &[
     ("/graft.v1.MirrorService/CompleteRequest", "CompleteRequest"),
     ("/graft.v1.MirrorService/FailRequest", "FailRequest"),
     ("/graft.v1.MirrorService/SetBatchState", "SetBatchState"),
+    ("/graft.v1.MirrorService/CancelRequest", "CancelRequest"),
     (
         "/graft.v1.MirrorService/SetMirrorCredential",
         "SetMirrorCredential",
