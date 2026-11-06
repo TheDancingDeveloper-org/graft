@@ -294,7 +294,12 @@ guards both sides of the swap:
   image other than the running one starts, `up.sh` stops graft-server and
   copies `meta.db` and its WAL files to `pre-deploy/` on the
   `graft-dev-meta` volume; a rollback restores it before the old image
-  starts. Tested by `deploy/tests/meta-backup.sh`.
+  starts. Tested by `deploy/tests/meta-backup.sh`. That copy covers only
+  the deploy that took it: the next image change replaces it, and a later
+  deploy of the old image backs up the already-migrated database, which the
+  old image refuses. To roll back after an upgrade deploy succeeded, keep
+  the upgrade's `pre-deploy/` off the volume (the cutover's step 8a does)
+  and restore it by hand.
 - **Last good.** A deploy that passes `/healthz` and `/readyz` records its
   `image.env`, `server.toml` and `mirror-service.toml` under
   `/etc/graft/last-good/` (root-owned, 0644; no secrets). The first deploy
