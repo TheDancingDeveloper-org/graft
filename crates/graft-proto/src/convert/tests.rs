@@ -244,6 +244,11 @@ fn api_error() -> impl Strategy<Value = ApiError> {
         (text(), otext()).prop_map(|(scope, path)| ApiError::PermissionDenied { scope, path }),
         text().prop_map(|workspace| ApiError::LeaseExpired { workspace }),
         text().prop_map(|repo| ApiError::LeaseLost { repo }),
+        (text(), text(), any::<u64>()).prop_map(|(repo, line, request)| ApiError::BatchOpen {
+            repo,
+            line,
+            request
+        }),
         (text(), any::<u64>()).prop_map(|(limit, max)| ApiError::LimitExceeded { limit, max }),
         oid().prop_map(|id| ApiError::CorruptObject { id }),
         oid().prop_map(|id| ApiError::Obliterated { id: BlobId(id) }),

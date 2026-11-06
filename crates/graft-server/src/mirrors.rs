@@ -11,7 +11,8 @@
 //! Grants (§3.1): creating a row needs `mirror:bind`; turning on export or
 //! changing the export author map needs `mirror:export`; a repository admin
 //! (or a `mirror:bind` holder) may change the rest of an existing row.
-//! Removal and purge need `mirror:bind`; status needs `repo:*:mirror`.
+//! Removal and purge need `mirror:bind`; status needs `repo:*:mirror`. A
+//! purge is recorded as a mirror request (`mirror_requests`).
 //!
 //! `RemoveMirror --clear-followed` deletes each line's followed marker in
 //! the removal's transaction, with one `RefDeleted` journal entry per
@@ -87,7 +88,7 @@ impl Default for MirrorPolicy {
     }
 }
 
-fn refused(policy: &str, detail: impl Into<String>) -> ApiError {
+pub(crate) fn refused(policy: &str, detail: impl Into<String>) -> ApiError {
     ApiError::Rejected {
         policy: policy.to_owned(),
         detail: detail.into(),
@@ -258,7 +259,7 @@ fn public_v4(v4: Ipv4Addr) -> bool {
 
 /// A branch, line, principal or identity: non-empty, bounded, no control
 /// characters.
-fn name(field: &str, s: &str) -> Result<String, ApiError> {
+pub(crate) fn name(field: &str, s: &str) -> Result<String, ApiError> {
     if s.is_empty() || s.len() > MAX_NAME || s.chars().any(char::is_control) {
         return Err(refused(
             "mirror-field",
@@ -322,7 +323,7 @@ fn export(wire: Option<pb::MirrorExport>) -> Result<MirrorExportRecord, ApiError
 }
 
 /// Holds any of `scopes`; the refusal names the first.
-fn any_of(p: &Principal, scopes: &[Scope]) -> Result<(), ApiError> {
+pub(crate) fn any_of(p: &Principal, scopes: &[Scope]) -> Result<(), ApiError> {
     if scopes
         .iter()
         .any(|s| graft_auth::authorize(p, s, None).is_ok())
@@ -354,14 +355,14 @@ fn changes_export(
     new_export || map_changed
 }
 
-fn store(e: StoreError) -> ApiError {
+pub(crate) fn store(e: StoreError) -> ApiError {
     tracing::error!(error = ?e, "mirror store call failed");
     ApiError::Unavailable {
         retry_after_ms: 1_000,
     }
 }
 
-async fn repo_id<M: MetaStore>(meta: &M, repo: &str) -> Result<RepoId, ApiError> {
+pub(crate) async fn repo_id<M: MetaStore>(meta: &M, repo: &str) -> Result<RepoId, ApiError> {
     meta.repo(repo)
         .await
         .map_err(store)?
@@ -526,7 +527,7 @@ pub(crate) async fn set<M: MetaStore>(
 }
 
 /// The read grant on one repository's rows.
-fn may_read(p: &Principal, repo: &str) -> Result<(), ApiError> {
+pub(crate) fn may_read(p: &Principal, repo: &str) -> Result<(), ApiError> {
     any_of(
         p,
         &[
@@ -680,15 +681,17 @@ pub(crate) async fn remove<M: MetaStore>(
     }
 }
 
-/// `PurgeMirror`: only for a removed or disabled row. Recording the purge
-/// request arrives with the request table (WI-3310); until then the call
-/// checks its grant and the row's state, then answers `unimplemented`.
+/// `PurgeMirror`: only for a removed or disabled row. Records a purge
+/// request (§3.5); the mirror service deletes the data and releases the
+/// lease.
 pub(crate) async fn purge<M: MetaStore>(
     meta: &M,
     p: &Principal,
+    now_ms: i64,
     req: pb::PurgeMirrorRequest,
-) -> Result<(), ApiError> {
+) -> Result<pb::MirrorRequest, ApiError> {
     any_of(p, &[Scope::MirrorBind])?;
+    let upstream = name("upstream", &req.upstream)?;
     let id = repo_id(meta, &req.repo).await?;
     if let Some(row) = meta.get_mirror(id, &req.upstream).await.map_err(store)?
         && row.enabled
@@ -698,7 +701,15 @@ pub(crate) async fn purge<M: MetaStore>(
             "disable or remove the mirror before purging its data",
         ));
     }
-    Err(ApiError::unimplemented("PurgeMirror"))
+    crate::mirror_requests::record_purge(
+        meta,
+        p,
+        now_ms,
+        &req.repo,
+        upstream,
+        &req.client_request_id,
+    )
+    .await
 }
 
 /// The wire prefix of every `MirrorErrorCode` name.
@@ -799,14 +810,14 @@ pub(crate) async fn set_status<M: MetaStore>(
     }
 }
 
-fn lease_lost(repo: &str) -> ApiError {
+pub(crate) fn lease_lost(repo: &str) -> ApiError {
     ApiError::LeaseLost {
         repo: repo.to_owned(),
     }
 }
 
 /// Lease calls are the mirror permission set on a mirror-kind token only.
-fn lease_caller(p: &Principal, repo: &str) -> Result<(), ApiError> {
+pub(crate) fn lease_caller(p: &Principal, repo: &str) -> Result<(), ApiError> {
     any_of(
         p,
         &[Scope::Mirror {
@@ -1584,9 +1595,11 @@ mod tests {
                 purge(
                     &s,
                     p,
+                    0,
                     pb::PurgeMirrorRequest {
                         repo: "r".into(),
                         upstream: UP.into(),
+                        client_request_id: "k".into(),
                     },
                 )
                 .await,
@@ -1637,13 +1650,19 @@ mod tests {
         let key = pb::PurgeMirrorRequest {
             repo: "r".into(),
             upstream: UP.into(),
+            client_request_id: "purge-1".into(),
         };
-        rejected(purge(&s, &bind, key.clone()).await, "mirror-enabled");
+        rejected(purge(&s, &bind, 0, key.clone()).await, "mirror-enabled");
         let mut off = req(UP, Some(1), vec![line("main", "follow")]);
         off.enabled = false;
         set(&s, &bind, &policy(), 0, off).await.expect("disable");
-        // Recording the request arrives with WI-3310.
-        rejected(purge(&s, &bind, key).await, "unimplemented");
+        // A disabled row's purge is recorded once; a retry returns it.
+        let first = purge(&s, &bind, 0, key.clone()).await.expect("purge");
+        assert_eq!(first.kind, pb::MirrorRequestKind::Purge as i32);
+        assert_eq!(first.state, pb::MirrorRequestState::Pending as i32);
+        assert_eq!(first.upstream.as_deref(), Some(UP));
+        let again = purge(&s, &bind, 5, key).await.expect("retry");
+        assert_eq!(again.id, first.id);
     }
 
     async fn marker(s: &MemoryStore, line: &str) {

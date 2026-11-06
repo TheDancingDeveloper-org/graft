@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -323,6 +323,47 @@ CREATE TABLE mirror_leases (
     epoch      INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
 );
+";
+
+/// Version 12: mirror requests and the per-line request slots (D41 §3.5).
+/// A `(repo, kind, client_request_id)` names one request; a slot points at
+/// a line's open batch or its rewind in flight.
+const V12: &str = "
+CREATE TABLE mirror_requests (
+    repo              INTEGER NOT NULL REFERENCES repos(id),
+    id                INTEGER NOT NULL,
+    line              TEXT NOT NULL,
+    kind              TEXT NOT NULL,
+    client_request_id TEXT NOT NULL,
+    base              BLOB,
+    excludes          BLOB NOT NULL,
+    upstream          TEXT,
+    state             TEXT NOT NULL,
+    batch_state       TEXT,
+    claimed_by_epoch  INTEGER,
+    claimed_at        INTEGER,
+    deadline          INTEGER NOT NULL,
+    pr_number         INTEGER,
+    pr_url            TEXT,
+    branch            TEXT,
+    lands             BLOB NOT NULL,
+    error_code        TEXT,
+    requested_by      TEXT NOT NULL,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    version           INTEGER NOT NULL,
+    PRIMARY KEY (repo, id),
+    UNIQUE (repo, kind, client_request_id)
+) WITHOUT ROWID;
+CREATE INDEX mirror_requests_by_kind ON mirror_requests (repo, kind, line, id);
+CREATE INDEX mirror_requests_by_state ON mirror_requests (repo, state, id);
+CREATE TABLE mirror_line_slots (
+    repo    INTEGER NOT NULL REFERENCES repos(id),
+    line    TEXT NOT NULL,
+    slot    TEXT NOT NULL,
+    request INTEGER NOT NULL,
+    PRIMARY KEY (repo, line, slot)
+) WITHOUT ROWID;
 ";
 
 /// The database's schema version.

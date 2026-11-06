@@ -261,6 +261,19 @@ fn holds(conn: &Connection, repo_id: RepoId, pre: &Precondition) -> StoreResult<
         Precondition::LeaseHeld { epoch, now_ms } => {
             Ok(crate::mirrors::lease(conn, repo)?.is_some_and(|l| l.held(*epoch, *now_ms)))
         }
+        Precondition::MirrorRequestVersionIs { id, version } => {
+            Ok(crate::requests::version(conn, repo, *id)? == *version)
+        }
+        Precondition::MirrorRequestKeyIs {
+            kind,
+            client_request_id,
+            id,
+        } => Ok(crate::requests::key(conn, repo, *kind, client_request_id)? == *id),
+        Precondition::LineSlotIs {
+            line,
+            slot,
+            request,
+        } => Ok(crate::requests::slot(conn, repo, line, *slot)? == *request),
     }
 }
 
@@ -813,6 +826,39 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
             }
             Write::SetMirrorStatus { upstream, status } => {
                 crate::mirrors::set_status(conn, repo, &upstream, &status)?;
+            }
+            Write::PutMirrorRequest(r) => {
+                let guarded = txn.preconditions.iter().any(
+                    |p| matches!(p, Precondition::MirrorRequestVersionIs { id, .. } if *id == r.id),
+                );
+                let old = crate::requests::get(conn, repo, r.id)?;
+                let current = old.as_ref().map_or(0, |o| o.version);
+                let rekeyed = old.is_some_and(|o| {
+                    o.kind != r.kind || o.client_request_id != r.client_request_id
+                });
+                if !guarded || r.version != current + 1 || rekeyed {
+                    return Err(StoreError::Invalid(format!(
+                        "mirror request {} is written without its MirrorRequestVersionIs precondition, out of version order, or rekeyed",
+                        r.id
+                    )));
+                }
+                crate::requests::put(conn, repo, &r)?;
+            }
+            Write::SetLineSlot {
+                line,
+                slot,
+                request,
+            } => {
+                let guarded = txn.preconditions.iter().any(|p| {
+                    matches!(p, Precondition::LineSlotIs { line: l, slot: s, .. } if *l == line && *s == slot)
+                });
+                if !guarded {
+                    return Err(StoreError::Invalid(format!(
+                        "slot {} of line {line} is set without a LineSlotIs precondition",
+                        slot.as_str()
+                    )));
+                }
+                crate::requests::set_slot(conn, repo, &line, slot, request)?;
             }
             Write::PutLease(lease) => {
                 let guard = txn.preconditions.iter().find_map(|p| match p {

@@ -169,6 +169,16 @@ pub enum ApiError {
         /// The repository.
         repo: String,
     },
+    /// A batch is already requested, open or sealed on the line, or a
+    /// rewind waits on it (D41 §3.5). Settle that batch first.
+    BatchOpen {
+        /// The repository.
+        repo: String,
+        /// The line.
+        line: String,
+        /// The request holding the line.
+        request: u64,
+    },
 }
 
 impl ApiError {
@@ -214,7 +224,8 @@ impl ApiError {
             | ApiError::Conflict { .. }
             | ApiError::MergeConflict(_)
             | ApiError::Contended { .. }
-            | ApiError::StaleBase(_) => Code::Aborted,
+            | ApiError::StaleBase(_)
+            | ApiError::BatchOpen { .. } => Code::Aborted,
             ApiError::PermissionDenied { .. } => Code::PermissionDenied,
             ApiError::LimitExceeded { .. } => Code::ResourceExhausted,
             ApiError::CorruptObject { .. } => Code::DataLoss,
@@ -290,6 +301,14 @@ impl fmt::Display for ApiError {
             ApiError::LeaseLost { repo } => {
                 write!(f, "the mirror lease on {repo} is held under another epoch")
             }
+            ApiError::BatchOpen {
+                repo,
+                line,
+                request,
+            } => write!(
+                f,
+                "request {request} holds line {line} of {repo}; settle it first"
+            ),
             ApiError::StaleBase(e) => write!(
                 f,
                 "base is behind line tip {}; sync, then land again",
