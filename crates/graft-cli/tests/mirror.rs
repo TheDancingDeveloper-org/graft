@@ -301,6 +301,35 @@ fn mirror_and_batch_commands_against_a_real_server() {
     assert!(status.status.success(), "{}", printed(&status));
     outputs.push(status);
 
+    // No mirror service runs here, so the cut holds the line. Only the
+    // operator cancels it, and then the line takes a new cut.
+    let id = first_json["request"]["id"].to_string();
+    let blocked = cut("cut-2");
+    assert!(!blocked.status.success(), "{}", printed(&blocked));
+    outputs.push(blocked);
+    let refused = site.run(&agent, &["repo", "batch", "cancel", "r", &id], None);
+    assert!(!refused.status.success());
+    assert!(
+        printed(&refused).contains("permission denied"),
+        "{}",
+        printed(&refused)
+    );
+    let cancelled = site.run(
+        &operator,
+        &["--json", "repo", "batch", "cancel", "r", &id],
+        None,
+    );
+    let cancelled_json = json(&cancelled);
+    assert_eq!(cancelled_json["request"]["state"], "failed");
+    assert_eq!(cancelled_json["request"]["batch_state"], "settled");
+    assert_eq!(
+        cancelled_json["request"]["result"]["error_code"],
+        "cancelled"
+    );
+    let next = cut("cut-2");
+    assert_ne!(json(&next)["request"]["id"], first_json["request"]["id"]);
+    outputs.extend([refused, cancelled, next]);
+
     // An agent can't remove or purge.
     for args in [
         &["repo", "mirror", "remove", "r", UP][..],

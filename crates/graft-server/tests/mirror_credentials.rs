@@ -202,6 +202,10 @@ async fn credentials_seal_open_only_for_the_lease_holder_and_survive_rotation() 
     }
 }
 
+/// Fails without `held_by` in `caller_lease`: "svc" then renews the lease.
+/// The server here is the unified `graft` binary, which `cargo nextest -p
+/// graft-server` does not rebuild; build graft-cli first, or this runs an
+/// older server.
 #[tokio::test]
 async fn only_the_exact_lease_holder_renews_releases_reports_or_reads() {
     let site = Site::new("mirror-holder", "");

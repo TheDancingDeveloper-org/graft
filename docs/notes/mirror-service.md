@@ -348,10 +348,14 @@ tables). The control moves to the server as a request table,
 | `ListBatches(repo)` | paginated history |
 | `RewindFollowed(repo, line, client_request_id)` | records a `rewind` request (WI-3142) |
 | `GetRequest(id)` | one request's state and result |
+| `CancelRequest(repo, id)` | the operator's cancel: fails a live request (`cancelled`), settles a cut's batch, frees its line |
 
-CLI `graft repo batch cut|status|list`, MCP `batch_cut`, `batch_status`,
-`batch_list`. A batch is requested under `repo:<name>:admin`, and a rewind
-under `mirror:bind` because it discards history. `land-pr` is unchanged,
+CLI `graft repo batch cut|status|list|cancel`, MCP `batch_cut`,
+`batch_status`, `batch_list`, `batch_cancel`. A batch is requested under
+`repo:<name>:admin`, and a rewind under `mirror:bind` because it discards
+history. A cancel is also under `mirror:bind`: it is the operator's way to
+free a line held by a cut no service will finish (a claimed cut with no PR
+never expires) or by a batch whose PR was closed by hand. `land-pr` is unchanged,
 since the PR itself is what it merges.
 
 **Rules, enforced by the server:**

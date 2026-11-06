@@ -376,6 +376,19 @@ async fn batch(g: &Global, client: &MirrorClient, action: &BatchAction) -> Resul
             }
             Ok(())
         }
+        BatchAction::Cancel { name, id } => {
+            let r = client
+                .cancel_request(
+                    &cx,
+                    pb::CancelRequestRequest {
+                        repo: name.clone(),
+                        id: *id,
+                    },
+                )
+                .await
+                .map_err(refused)?;
+            print_request(g, "request cancelled", &r)
+        }
         BatchAction::List {
             name,
             line,

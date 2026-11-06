@@ -565,6 +565,93 @@ async fn a_claimed_cut_without_a_pr_never_expires_and_is_retried_on_its_branch()
     both!(crash_after_create);
 }
 
+fn cancel_req(id: u64) -> pb::CancelRequestRequest {
+    pb::CancelRequestRequest {
+        repo: "r".into(),
+        id,
+    }
+}
+
+async fn operator_cancel(s: &impl MetaStore) {
+    // A claimed cut with no PR holds its line forever (crash_after_create);
+    // its service is gone for good.
+    let stuck = cut_batch(s, &admin(), 0, cut("main", "k1"))
+        .await
+        .expect("cut");
+    let epoch = take(s, "i1", 0).await;
+    claim(s, &service(), 0, claim_req(epoch))
+        .await
+        .expect("claim");
+    let late = REQUEST_TIMEOUT_MS * 4;
+    held_by(
+        cut_batch(s, &admin(), late, cut("main", "k2")).await,
+        stuck.id,
+    );
+    // Only the operator grant cancels: not the repo admin, not the service.
+    for p in [admin(), service()] {
+        assert!(matches!(
+            cancel(s, &p, late, cancel_req(stuck.id)).await,
+            Err(ApiError::PermissionDenied { .. })
+        ));
+    }
+    let gone = cancel(s, &bind(), late, cancel_req(stuck.id))
+        .await
+        .expect("cancel");
+    assert_eq!(state(&gone), pb::MirrorRequestState::Failed);
+    assert_eq!(batch(&gone), pb::BatchState::Settled);
+    assert_eq!(
+        gone.result.and_then(|o| o.error_code).as_deref(),
+        Some(CANCELLED)
+    );
+    // The line is free, and a late service write is refused.
+    assert!(
+        get_batch(s, &admin(), late, batch_key("main"))
+            .await
+            .expect("get")
+            .batch
+            .is_none()
+    );
+    let new = take(s, "i2", late).await;
+    rejected(
+        complete(s, &service(), late, with_pr(stuck.id, new, true)).await,
+        "mirror-request-state",
+    );
+    let next = cut_batch(s, &admin(), late, cut("main", "k2"))
+        .await
+        .expect("the next cut");
+    // A batch whose PR was closed by hand: done, open, never settled.
+    let epoch = new;
+    claim(s, &service(), late, claim_req(epoch))
+        .await
+        .expect("claim");
+    let open = complete(s, &service(), late, with_pr(next.id, epoch, true))
+        .await
+        .expect("record");
+    assert_eq!(batch(&open), pb::BatchState::Open);
+    let settled = cancel(s, &bind(), late, cancel_req(next.id))
+        .await
+        .expect("cancel an open batch");
+    assert_eq!(state(&settled), pb::MirrorRequestState::Done);
+    assert_eq!(batch(&settled), pb::BatchState::Settled);
+    cut_batch(s, &admin(), late, cut("main", "k3"))
+        .await
+        .expect("the line is free again");
+    // A request that holds nothing is not cancelled twice.
+    rejected(
+        cancel(s, &bind(), late, cancel_req(next.id)).await,
+        "mirror-request-state",
+    );
+    assert!(matches!(
+        cancel(s, &bind(), late, cancel_req(999)).await,
+        Err(ApiError::NotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn the_operator_cancels_a_stuck_cut_and_frees_its_line() {
+    both!(operator_cancel);
+}
+
 async fn rewind_rules(s: &impl MetaStore) {
     // Only on a followed line, and only under mirror:bind.
     rejected(

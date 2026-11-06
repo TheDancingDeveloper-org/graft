@@ -500,6 +500,7 @@ async fn every_registered_tool_result_fits_and_an_oversized_status_is_typed() {
             "graft_mirror_purge",
             json!({"repo": "r", "upstream": "https://github.com/o/r.git"}),
         ),
+        ("graft_batch_cancel", json!({"repo": "r", "id": 1})),
         ("graft_batch_cut", json!({"repo": "r", "line": "main"})),
         ("graft_batch_status", json!({"repo": "r", "line": "main"})),
         ("graft_batch_list", json!({"repo": "r"})),

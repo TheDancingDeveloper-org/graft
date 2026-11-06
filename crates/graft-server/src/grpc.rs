@@ -1520,6 +1520,16 @@ impl pb::mirror_service_server::MirrorService for Services {
         })
     }
 
+    async fn cancel_request(
+        &self,
+        request: Request<pb::CancelRequestRequest>,
+    ) -> Result<Response<pb::MirrorRequest>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "CancelRequest", true, |meta, p, req| {
+            mirror_requests::cancel(meta, p, now_ms, req).await
+        })
+    }
+
     async fn set_mirror_status(
         &self,
         request: Request<pb::SetMirrorStatusRequest>,
