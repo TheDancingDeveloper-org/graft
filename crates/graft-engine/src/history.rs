@@ -14,7 +14,7 @@ use graft_proto::types::{Blame, BlameRange, BlameResult, ChangesetSummary, Histo
 use graft_proto::{ApiError, CallContext};
 use graft_store::{MetaStore, ObjectStore, RepoId, StoreError};
 
-use crate::access::{Need, require};
+use crate::access::Need;
 use crate::{Engine, errors};
 
 /// The first line of a message.
@@ -43,7 +43,7 @@ fn index_error(e: StoreError, what: impl FnOnce() -> String) -> ApiError {
 
 impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     pub(crate) async fn do_log(&self, cx: &CallContext, req: Log) -> Result<History, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         let from = match &req.page.token {
             Some(t) => ChangesetId::parse(t).map_err(|_| errors::invalid(None, "page-token"))?,
@@ -104,7 +104,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 
     /// Checks the scope and that both changesets are stored.
     async fn pair(&self, cx: &CallContext, req: &Pair) -> Result<RepoId, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         self.changeset(repo, req.a).await?;
         self.changeset(repo, req.b).await?;
@@ -116,7 +116,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: Blame,
     ) -> Result<BlameResult, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         self.changeset(repo, req.at).await?;
         let runs = self

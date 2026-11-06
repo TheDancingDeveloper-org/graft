@@ -122,7 +122,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: HasObjects,
     ) -> Result<Vec<ObjectId>, ApiError> {
-        require(cx, &req.repo, Need::Objects)?;
+        self.require_read(cx, &req.repo, Need::Objects).await?;
         let repo = self.repo_id(&req.repo).await?;
         if req.ids.len() > self.config.max_ids as usize {
             return Err(errors::limit("ids", self.config.max_ids.into()));
@@ -148,7 +148,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: GetObjects,
     ) -> Result<Objects, ApiError> {
-        require(cx, &req.repo, Need::Objects)?;
+        self.require_read(cx, &req.repo, Need::Objects).await?;
         let repo = self.repo_id(&req.repo).await?;
         let mut seen = HashSet::new();
         let mut ids = req.ids.into_iter().filter(|id| seen.insert(*id));

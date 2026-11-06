@@ -625,7 +625,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: Rebase,
     ) -> Result<ChangesetId, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         // The target exists and is not collected.
         self.changeset(repo, req.onto).await?;

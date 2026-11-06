@@ -477,7 +477,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: GetAttestations,
     ) -> Result<AttestationPage, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let kinds = req
             .kinds
             .iter()
@@ -559,7 +559,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: GetLandChecks,
     ) -> Result<LandCheckPage, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         check_ref_name(&req.line)?;
         let limit = self.review_page(req.page.limit);
         let from = match &req.page.token {

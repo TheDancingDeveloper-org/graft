@@ -81,7 +81,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: ResolveRef,
     ) -> Result<RefView, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         self.meta
             .get_ref(repo, &req.name)
@@ -100,7 +100,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: ListRefs,
     ) -> Result<Vec<RefView>, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         let limit = self.page_size(req.page.limit) as usize;
         let prefix = req.prefix.unwrap_or_default();
@@ -129,7 +129,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     ) -> Result<RefView, ApiError> {
         check_ref_name(&req.name)?;
         // The mirror service moves a followed line, by CAS, and nothing
-        // else; its set reads but never writes elsewhere (D41, WI-3140).
+        // else; its set reads only bound repositories and writes nothing else
+        // (D41, WI-3140, WI-3411).
         let mirror = is_mirror(cx, &req.repo);
         let repo = if mirror {
             self.repo_id(&req.repo).await?
@@ -201,7 +202,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: CreateLine,
     ) -> Result<RefView, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         require(cx, &req.repo, Need::Land(&req.name))?;
         check_ref_name(&req.name)?;
@@ -321,7 +322,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     }
 
     async fn repo_id_for_ref(&self, cx: &CallContext, req: &UpdateRef) -> Result<RepoId, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         self.repo_id(&req.repo).await
     }
 

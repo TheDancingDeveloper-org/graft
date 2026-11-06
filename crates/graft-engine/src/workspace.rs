@@ -459,7 +459,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: WorkspaceRef,
     ) -> Result<WorkspaceView, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         check_name(&req.name)?;
         let repo = self.repo_id(&req.repo).await?;
         self.load_workspace(repo, &req.name).await.map(view)
@@ -473,7 +473,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         repo_name: String,
         page: Page,
     ) -> Result<Vec<WorkspaceView>, ApiError> {
-        require(cx, &repo_name, Need::Read)?;
+        self.require_read(cx, &repo_name, Need::Read).await?;
         let repo = self.repo_id(&repo_name).await?;
         let after = page.token.unwrap_or_default();
         let rows = self

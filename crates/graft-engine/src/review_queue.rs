@@ -28,7 +28,7 @@ use graft_proto::{ApiError, CallContext, Frame};
 use graft_store::{LandingRow, MetaStore, MetaTxn, ObjectStore, RepoId, Write};
 use imara_diff::{Algorithm, InternedInput};
 
-use crate::access::{Need, require};
+use crate::access::Need;
 use crate::diff::textual;
 use crate::journal::{LAND_ATTEMPT, REF_MOVED, ref_moved_old};
 use crate::land::{KIND_VERSION, key};
@@ -359,7 +359,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: ReviewQueue,
     ) -> Result<ReviewQueuePage, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         check_ref_name(&req.line)?;
         if req.page.token.is_some() {
             // The queue resumes from `next_lsn`, passed as `since_lsn`.

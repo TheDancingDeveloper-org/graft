@@ -16,10 +16,11 @@ use graft_engine::{EngineConfig, LandHooks, LineConfig, REBASED_FROM};
 use graft_model::{ChangesetId, Clock as _};
 use graft_proto::error::ApiResult;
 use graft_proto::types::*;
-use graft_proto::{ApiError, CallContext, PrincipalKind, RepoApi, WorkspaceApi};
+use graft_proto::{ApiError, CallContext, ObjectApi, PrincipalKind, RepoApi, WorkspaceApi};
 use graft_store::memory::MemoryStore;
 use graft_store::{
-    ChangesetRecord, LeaseRecord, MetaStore, MetaTxn, Precondition, RecordState, TxnOutcome, Write,
+    ChangesetRecord, LeaseRecord, MetaStore, MetaTxn, MirrorDirection, MirrorExportRecord,
+    MirrorLineRecord, MirrorRecord, Precondition, RecordState, TxnOutcome, Write,
 };
 
 const LINES: &[&str] = &["main", "trunk", "rel", "gp"];
@@ -1040,6 +1041,98 @@ fn the_mirror_moves_only_followed_lines<M: MetaStore>((f, _): (Fixture<M>, Arc<R
     ));
 }
 
+/// D41, WI-3411: the mirror token (the `mirror` kind, holding only
+/// `repo:*:mirror`, as mint issues it) reads a repository, refs and objects
+/// alike, only while it is bound to a mirror. An unbound or unknown
+/// repository is refused, and the set on another kind reads nothing.
+fn the_mirror_reads_only_bound_repositories<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+    let t = T::new(&f, &[("a", b"1")]);
+    let mut mirror = cx(&["repo:*:mirror"]);
+    mirror.principal.kind = PrincipalKind::Mirror;
+    let mut service = cx(&["repo:*:mirror"]);
+    service.principal.kind = PrincipalKind::Service;
+    let refs = |cx: &CallContext, repo: &str| {
+        block_on(t.r.e().list_refs(
+            cx,
+            ListRefs {
+                repo: repo.to_owned(),
+                prefix: None,
+                page: Page::default(),
+            },
+        ))
+        .map(drop)
+    };
+    let objects = |cx: &CallContext| {
+        block_on(t.r.e().has_objects(
+            cx,
+            HasObjects {
+                repo: "r".to_owned(),
+                ids: vec![t.root.0],
+            },
+        ))
+        .map(drop)
+    };
+    let denied = |scope: &str| {
+        Err(ApiError::PermissionDenied {
+            scope: scope.to_owned(),
+            path: None,
+        })
+    };
+    // Unbound: refused, as an unknown repository is.
+    assert_eq!(refs(&mirror, "r"), denied("repo:r:read"));
+    assert_eq!(objects(&mirror), denied("repo:r:read"));
+    assert_eq!(refs(&mirror, "nope"), denied("repo:nope:read"));
+    // Bound to a mirror: it reads.
+    let meta = f.engine.stores().0;
+    let id = block_on(meta.repo("r")).expect("repo").expect("exists");
+    const UP: &str = "https://github.com/o/r.git";
+    let bind = |expected, write| {
+        let txn = MetaTxn {
+            preconditions: vec![Precondition::MirrorVersionIs {
+                upstream: UP.to_owned(),
+                version: expected,
+            }],
+            writes: vec![write],
+        };
+        assert!(matches!(
+            block_on(meta.commit(id, txn)),
+            Ok(TxnOutcome::Committed(_))
+        ));
+    };
+    bind(
+        None,
+        Write::PutMirror(MirrorRecord {
+            upstream: UP.to_owned(),
+            lines: vec![MirrorLineRecord {
+                branch: "main".into(),
+                line: "main".into(),
+                direction: MirrorDirection::Follow,
+            }],
+            interval_s: 60,
+            enabled: true,
+            credential: None,
+            kek_id: None,
+            export: MirrorExportRecord {
+                default_author: None,
+                authors: Vec::new(),
+            },
+            version: 1,
+            status: None,
+            created_by: "op".into(),
+            updated_by: "op".into(),
+            updated_at_ms: 0,
+        }),
+    );
+    assert_eq!(refs(&mirror, "r"), Ok(()));
+    assert_eq!(objects(&mirror), Ok(()));
+    // Another kind holding the same set reads nothing, bound or not.
+    assert_eq!(refs(&service, "r"), denied("repo:r:read"));
+    assert_eq!(objects(&service), denied("repo:r:read"));
+    // Unbound again: refused again.
+    bind(Some(1), Write::DeleteMirror(UP.to_owned()));
+    assert_eq!(refs(&mirror, "r"), denied("repo:r:read"));
+}
+
 fn refused_lands<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
     let t = T::new(&f, &[("a", b"1")]);
     let draft = t.commit(t.root, &[("b", b"2")]);
@@ -1104,6 +1197,7 @@ on_both![
     refused_lands,
     followed_lines_refuse_lands,
     the_mirror_moves_only_followed_lines,
+    the_mirror_reads_only_bound_repositories,
 ];
 
 /// Decision D22: with the default config every line, `main` included, is
