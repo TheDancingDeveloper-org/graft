@@ -294,6 +294,95 @@ Creates a repository.
   unavailable where the launcher provides no repository administration.
   With `repos:admin`, the creator then administers the repository.
 
+### `graft_mirror_add`
+
+Binds a repository to an upstream git URL and its branches.
+
+- Arguments: required `repo`, `upstream` (on the server's allowlist) and
+  `lines` (`branch`, `line`, optional `direction`: `follow`, `export` or
+  `both`); optional `interval_s` and `disabled`.
+- Result: the mirror row. It says whether a credential is set, never the
+  credential.
+- Errors: needs `mirror:bind`, which only an operator holds; any other
+  caller, an agent included, gets `permission_denied`.
+
+### `graft_mirror_set`
+
+Enables or disables a mirror, or changes its lines or poll interval.
+
+- Arguments: required `repo` and `upstream`; optional `enabled`, `lines`
+  and `interval_s`. Unnamed fields keep their value.
+- Result: the updated row. The tool reads the row's version and writes
+  with it, so a concurrent change is a typed conflict.
+- Errors: needs the repository's admin; changing an export line needs
+  `mirror:export`.
+
+### `graft_mirror_status`
+
+One mirror's settings and the mirror service's last poll status (typed
+`error_code`, lag, backoff).
+
+- Arguments: required `repo` and `upstream`.
+- Result: the row; never a credential.
+
+### `graft_mirror_list`
+
+Lists mirrors of a repository, or of every repository the caller can read.
+
+- Arguments: required `repo` (`*` for every repository the caller can
+  read); optional `enabled`, `limit` (1 to 100, default 20) and
+  `page_token`.
+- Result: `mirrors` and `next_page_token`; never a credential.
+
+### `graft_mirror_remove`
+
+Removes a mirror. Its lines stay closed to lands unless `clear_followed`
+is set.
+
+- Arguments: required `repo` and `upstream`; optional `clear_followed`.
+- Result: the lines whose markers were cleared.
+- Errors: needs `mirror:bind` (operator only), else `permission_denied`.
+
+### `graft_mirror_purge`
+
+Requests deletion of a removed or disabled mirror's local data. The graft
+repository, its lines and history are untouched.
+
+- Arguments: required `repo` and `upstream`; optional `client_request_id`.
+- Result: the purge request.
+- Errors: needs `mirror:bind` (operator only), else `permission_denied`.
+
+### `graft_batch_cut`
+
+Requests a batch PR of a line's lands.
+
+- Arguments: required `repo` and `line`; optional `base`, `excludes` (full
+  changeset ids) and `client_request_id`.
+- Result: the request. The tool makes one `client_request_id` per call
+  and reuses it when it retries an unavailable server, so a retry returns
+  the request the first attempt recorded. If the server stays unavailable
+  the error names the key; pass it back to retry the same request.
+- Errors: needs the repository's admin; a batch already open on the line
+  is `batch_open`.
+
+### `graft_batch_status`
+
+The open batch of a line: its request, PR and state.
+
+- Arguments: required `repo` and `line`.
+- Result: `batch`, or null when none is open.
+
+### `graft_batch_list`
+
+A repository's batch history.
+
+- Arguments: required `repo`; optional `line`, `limit` (1 to 100, default
+  20) and `page_token`.
+- Result: `batches` and `next_page_token`.
+
+The mirror and batch tools are unavailable where the launcher provides no
+mirror service (a local repository, or the server's own HTTP mount).
+
 ### `graft_tag`
 
 Creates an immutable tag at a changeset.

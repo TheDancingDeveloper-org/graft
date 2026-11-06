@@ -15,6 +15,7 @@ mod config;
 mod conn;
 mod error;
 mod identity;
+mod mirror_client;
 mod render;
 
 use std::process::ExitCode;

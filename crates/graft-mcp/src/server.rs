@@ -40,6 +40,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::mirrors::MirrorAdmin;
 use crate::render::{
     FIELD_MAX_BYTES, MESSAGE_MAX_BYTES, PATCH_MAX_BYTES, ToolError, bounded, clip, fit,
     parse_resource_uri,
@@ -239,6 +240,8 @@ pub struct McpServer<A> {
     pub(crate) endpoint: Option<String>,
     /// Serves `graft_repo_create`, when the launcher provides it.
     pub(crate) repo_admin: Option<Arc<dyn RepoAdmin>>,
+    /// Serves the mirror and batch tools, when the launcher provides them.
+    pub(crate) mirror_admin: Option<Arc<dyn MirrorAdmin>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -250,6 +253,7 @@ impl<A> Clone for McpServer<A> {
             working_copy: self.working_copy.clone(),
             endpoint: self.endpoint.clone(),
             repo_admin: self.repo_admin.clone(),
+            mirror_admin: self.mirror_admin.clone(),
             tool_router: self.tool_router.clone(),
         }
     }
@@ -275,7 +279,8 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             + Self::upstream_tool_router()
             + Self::drafts_tool_router()
             + Self::review_tool_router()
-            + Self::repos_tool_router();
+            + Self::repos_tool_router()
+            + Self::mirrors_tool_router();
         // Tests only. The tool returns a payload larger than the cap and
         // does not bound itself, so only `call_tool` can refuse it.
         #[cfg(test)]
@@ -286,6 +291,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             working_copy: None,
             endpoint: None,
             repo_admin: None,
+            mirror_admin: None,
             tool_router,
         }
     }
