@@ -504,6 +504,7 @@ where
             }
             None => state.sync_from,
         };
+        let from = self.newest_base(from, tip, base_tip).await?;
         let net = self.diff(from, tip).await?;
         let target = if net.is_empty() {
             base_tip
@@ -578,6 +579,51 @@ where
             moved = ?moved, "mirror batch: line synced onto the base"
         );
         Ok(Ok(moved))
+    }
+
+    /// The base snapshot the line's own change sits on: `from`, or the
+    /// newest common ancestor of `tip` and `base_tip` when a land merged
+    /// the base past `from`. Diffing from an older point would count the
+    /// base's own edits as the line's, which reports false conflicts and
+    /// drops a revert of base content as nothing the base lacks.
+    async fn newest_base(
+        &mut self,
+        from: ChangesetId,
+        tip: ChangesetId,
+        base_tip: ChangesetId,
+    ) -> Result<ChangesetId, MirrorError> {
+        let repo = self.config.repo.clone();
+        let cx = self.call("merge-base");
+        let Some(common) = self
+            .api
+            .merge_base(
+                &cx,
+                Pair {
+                    repo: repo.clone(),
+                    a: tip,
+                    b: base_tip,
+                },
+            )
+            .await?
+        else {
+            return Ok(from);
+        };
+        if common == from {
+            return Ok(from);
+        }
+        let cx = self.call("is-ancestor");
+        let newer = self
+            .api
+            .is_ancestor(
+                &cx,
+                Pair {
+                    repo,
+                    a: from,
+                    b: common,
+                },
+            )
+            .await?;
+        Ok(if newer { common } else { from })
     }
 
     /// The lands on the integration line after `start`, newest first, at
