@@ -2,7 +2,7 @@
 # docs/notes/mirror-service.md §3.3). One service serves every repository on
 # one /metrics endpoint, so these rules select one job and carry the `repo`
 # label instead of one rule set per mirror process. Scrape config:
-# deploy/monitoring/prometheus-scrape-service.yml.
+# deploy/monitoring/prometheus-scrape.yml (job graft-mirror).
 #
 # A repository's series exist only while the service has a task for an
 # enabled row (the service drops them when the task stops), so a disabled or
