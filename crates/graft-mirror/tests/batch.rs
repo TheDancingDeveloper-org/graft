@@ -3318,3 +3318,201 @@ async fn min_age_counts_from_githubs_merge_time_not_when_it_was_seen() {
     assert_eq!(rec.lands, 1);
     assert!(!rec.body.contains("(forced)"));
 }
+
+impl World {
+    /// Imports GitHub's `main` into graft's `main`, as the follow service
+    /// does between batcher runs.
+    async fn follow_main(&self) -> ChangesetId {
+        let follow = FollowConfig {
+            repo: REPO.to_owned(),
+            lines: vec![FollowLine {
+                branch: "main".to_owned(),
+                line: "main".to_owned(),
+            }],
+            allow_lossy: Vec::new(),
+            batch: 256,
+            interval: POLL_INTERVAL,
+            tags: None,
+        };
+        graft_mirror::follow::Follower::new(
+            &self.api,
+            cx(),
+            &self.db,
+            Mirror::new(&self.mirror_dir, self.upstream.to_str().unwrap()),
+            follow,
+        )
+        .with_clock(clock)
+        .poll_once()
+        .await
+        .unwrap();
+        self.tip("main").await.unwrap()
+    }
+
+    /// A worker lands a merge of graft's `main` into the line: parents the
+    /// line tip and `main`, writing `puts` and removing `deletes` against
+    /// the line tip.
+    async fn land_merge_of_main(
+        &self,
+        puts: &[(&str, &str)],
+        deletes: &[&str],
+        n: i64,
+    ) -> ChangesetId {
+        let tip = self.tip(LINE).await.unwrap();
+        let main = self.tip("main").await.unwrap();
+        let mut changes = Vec::new();
+        let mut inline = Vec::new();
+        for (path, body) in puts {
+            changes.push(Change::Put {
+                path: RepoPath::new(path).unwrap(),
+                kind: EntryKind::File,
+                id: graft_model::ObjectId::hash(ObjectKind::Blob, body.as_bytes()),
+            });
+            inline.push(Frame::encode(ObjectKind::Blob, body.as_bytes()));
+        }
+        for path in deletes {
+            changes.push(Change::Delete {
+                path: RepoPath::new(path).unwrap(),
+            });
+        }
+        let id = self
+            .api
+            .create_changeset(
+                &cx(),
+                CreateChangeset {
+                    repo: REPO.to_owned(),
+                    parents: vec![tip, main],
+                    changes,
+                    author: Author {
+                        name: "Tess".to_owned(),
+                        email: "tess@example.com".to_owned(),
+                        kind: AuthorKind::Agent,
+                    },
+                    authored_at: Timestamp {
+                        ms: 1_700_000_000_000 + n * 1000,
+                        offset_min: 0,
+                    },
+                    message: "merge main".to_owned(),
+                    metadata: Metadata::new(),
+                    inline_blobs: inline,
+                    workspace: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        move_line(&self.api, LINE, Some(tip), id).await;
+        id
+    }
+
+    /// Lands one changeset removing `path` on the line.
+    async fn land_delete(&self, path: &str, n: i64) -> ChangesetId {
+        let tip = self.tip(LINE).await.unwrap();
+        let id = self
+            .api
+            .create_changeset(
+                &cx(),
+                CreateChangeset {
+                    repo: REPO.to_owned(),
+                    parents: vec![tip],
+                    changes: vec![Change::Delete {
+                        path: RepoPath::new(path).unwrap(),
+                    }],
+                    author: Author {
+                        name: "Tess".to_owned(),
+                        email: "tess@example.com".to_owned(),
+                        kind: AuthorKind::Agent,
+                    },
+                    authored_at: Timestamp {
+                        ms: 1_700_000_000_000 + n * 1000,
+                        offset_min: 0,
+                    },
+                    message: format!("revert {path}"),
+                    metadata: Metadata::new(),
+                    inline_blobs: Vec::new(),
+                    workspace: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        move_line(&self.api, LINE, Some(tip), id).await;
+        id
+    }
+}
+
+const LOCK: &str = "a\nb\nc\nd\ne\nf\ng\nh\n";
+
+#[tokio::test]
+async fn a_line_that_merged_main_and_edits_next_to_it_batches_without_conflict() {
+    let w = World::new().await;
+    w.start().await;
+    w.push_main(&[("Cargo.lock", LOCK)], "add lock");
+    // The batcher records the line's sync point on the old main.
+    w.follow_main().await;
+    assert!(w.batcher().run().await.unwrap().synced.is_some());
+    // Main edits the lockfile; a worker merges it and adds its own hunk on
+    // the next line.
+    let up = w.push_main(&[("Cargo.lock", "a\nb\nc\nd\nE (main)\nf\ng\nh\n")], "bump");
+    w.follow_main().await;
+    let merged = "a\nb\nc\nd\nE (main)\nF (line)\ng\nh\n";
+    w.land_merge_of_main(&[("Cargo.lock", merged)], &[], 1)
+        .await;
+
+    let run = w.batcher().run().await.unwrap();
+    let rec = match run.outcome {
+        BatchOutcome::Opened(rec) => rec,
+        other => panic!("expected a batch, got {other:?}"),
+    };
+    assert_eq!(rec.base_sha.to_hex(), up);
+    let squash = rec.squash_sha.to_hex();
+    assert_eq!(w.show(&squash, "Cargo.lock"), merged.trim_end());
+    assert_eq!(w.changed(&up, &squash), ["Cargo.lock"]);
+}
+
+#[tokio::test]
+async fn a_revert_landed_after_merging_main_is_kept_not_dropped() {
+    let w = World::new().await;
+    w.start().await;
+    w.follow_main().await;
+    w.batcher().run().await.unwrap();
+    // Main adds a file; a worker merges main, then reverts the file on the
+    // line on purpose.
+    let up = w.push_main(&[("c.txt", "c1\n")], "add c");
+    w.follow_main().await;
+    w.land_merge_of_main(&[("c.txt", "c1\n")], &[], 1).await;
+    w.land_delete("c.txt", 2).await;
+
+    let run = w.batcher().run().await.unwrap();
+    let rec = match run.outcome {
+        BatchOutcome::Opened(rec) => rec,
+        other => panic!("expected the revert in a batch, got {other:?}"),
+    };
+    assert_eq!(rec.base_sha.to_hex(), up);
+    let squash = rec.squash_sha.to_hex();
+    assert_eq!(w.changed(&up, &squash), ["c.txt"]);
+    assert!(!w.files_at(&squash).contains(&"c.txt".to_owned()));
+    let line = w.tip(LINE).await.unwrap();
+    let main = w.tip("main").await.unwrap();
+    assert!(
+        !w.api
+            .diff(
+                &cx(),
+                Diff {
+                    repo: REPO.to_owned(),
+                    from: main,
+                    to: line,
+                    paths: Vec::new(),
+                    patch: None,
+                    page: Page {
+                        limit: 10,
+                        token: None
+                    },
+                },
+            )
+            .await
+            .unwrap()
+            .files
+            .is_empty(),
+        "the line still lacks c.txt"
+    );
+}
