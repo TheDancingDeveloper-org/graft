@@ -37,6 +37,7 @@ mod keys;
 mod lines;
 mod mcp;
 mod mint;
+mod mirror_requests;
 mod mirrors;
 mod revoke;
 mod serve;

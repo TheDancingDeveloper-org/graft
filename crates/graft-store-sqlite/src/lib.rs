@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 use graft_model::{ChangesetId, ObjectId, RepoPath};
 use graft_store::{
     AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandingRow, LeaseRecord, LineMergeRow,
-    Lsn, MetaStore, MetaTxn, MirrorListing, MirrorQuery, MirrorRecord, Protection, RecordState,
-    RefRecord, RepoId, StoreError, StoreResult, TimedRow, TxnOutcome, WorkspaceRecord,
+    LineSlot, Lsn, MetaStore, MetaTxn, MirrorListing, MirrorQuery, MirrorRecord, MirrorRequestKind,
+    MirrorRequestQuery, MirrorRequestRecord, Protection, RecordState, RefRecord, RepoId,
+    StoreError, StoreResult, TimedRow, TxnOutcome, WorkspaceRecord,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -28,6 +29,7 @@ pub mod migrations;
 mod mirrors;
 mod oneshot;
 mod reader;
+mod requests;
 mod writer;
 
 use codec::sql_err;
@@ -347,6 +349,66 @@ impl MetaStore for SqliteMetaStore {
         self.read("get_lease", move |c| {
             reader::check_repo(c, repo)?;
             crate::mirrors::lease(c, i64::from(repo.0))
+        })
+        .await
+    }
+
+    async fn get_mirror_request(
+        &self,
+        repo: RepoId,
+        id: u64,
+    ) -> StoreResult<Option<MirrorRequestRecord>> {
+        self.read("get_mirror_request", move |c| {
+            reader::check_repo(c, repo)?;
+            requests::get(c, i64::from(repo.0), id)
+        })
+        .await
+    }
+
+    async fn find_mirror_request(
+        &self,
+        repo: RepoId,
+        kind: MirrorRequestKind,
+        client_request_id: &str,
+    ) -> StoreResult<Option<MirrorRequestRecord>> {
+        let key = client_request_id.to_owned();
+        self.read("find_mirror_request", move |c| {
+            reader::check_repo(c, repo)?;
+            requests::find(c, i64::from(repo.0), kind, &key)
+        })
+        .await
+    }
+
+    async fn line_slot(
+        &self,
+        repo: RepoId,
+        line: &str,
+        slot: LineSlot,
+    ) -> StoreResult<Option<u64>> {
+        let line = line.to_owned();
+        self.read("line_slot", move |c| {
+            reader::check_repo(c, repo)?;
+            requests::slot(c, i64::from(repo.0), &line, slot)
+        })
+        .await
+    }
+
+    async fn list_mirror_requests(
+        &self,
+        repo: RepoId,
+        query: MirrorRequestQuery,
+    ) -> StoreResult<Vec<MirrorRequestRecord>> {
+        self.read("list_mirror_requests", move |c| {
+            reader::check_repo(c, repo)?;
+            requests::list(c, i64::from(repo.0), &query)
+        })
+        .await
+    }
+
+    async fn last_mirror_request_id(&self, repo: RepoId) -> StoreResult<u64> {
+        self.read("last_mirror_request_id", move |c| {
+            reader::check_repo(c, repo)?;
+            requests::last_id(c, i64::from(repo.0))
         })
         .await
     }

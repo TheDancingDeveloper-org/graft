@@ -15,9 +15,9 @@ use graft_model::{ChangesetId, ObjectId, RepoPath};
 
 use crate::meta::{
     AttestKind, AttestationRow, ChangesetRecord, DoomMark, LandCheckRow, LandCheckState,
-    LandingRow, LeaseRecord, LineMergeRow, Lsn, MetaStore, MetaTxn, MirrorListing, MirrorQuery,
-    MirrorRecord, Precondition, Protection, RecordState, RefRecord, TimedRow, TxnOutcome,
-    WorkspaceRecord, Write,
+    LandingRow, LeaseRecord, LineMergeRow, LineSlot, Lsn, MetaStore, MetaTxn, MirrorListing,
+    MirrorQuery, MirrorRecord, MirrorRequestKind, MirrorRequestQuery, MirrorRequestRecord,
+    Precondition, Protection, RecordState, RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
 };
 use crate::object::{ObjectStore, StoreStats};
 use crate::{RepoId, StoreError, StoreResult, page_limit};
@@ -47,6 +47,12 @@ struct Repo {
     mirrors: BTreeMap<String, MirrorRecord>,
     /// The mirror authority lease (D41 §3.6).
     lease: Option<LeaseRecord>,
+    /// Mirror requests (D41 §3.5) by id.
+    requests: BTreeMap<u64, MirrorRequestRecord>,
+    /// The idempotency key index: (kind, client id) → request id.
+    request_keys: BTreeMap<(MirrorRequestKind, String), u64>,
+    /// Per-line request pointers.
+    slots: BTreeMap<(String, LineSlot), u64>,
     /// The expiry of each timed holder row.
     row_expiry: BTreeMap<(ObjectId, String), i64>,
     /// Protection by changeset; an absent entry is the default.
@@ -143,6 +149,24 @@ impl Repo {
             Precondition::LeaseHeld { epoch, now_ms } => {
                 self.lease.as_ref().is_some_and(|l| l.held(*epoch, *now_ms))
             }
+            Precondition::MirrorRequestVersionIs { id, version } => {
+                self.requests.get(id).map(|r| r.version) == *version
+            }
+            Precondition::MirrorRequestKeyIs {
+                kind,
+                client_request_id,
+                id,
+            } => {
+                self.request_keys
+                    .get(&(*kind, client_request_id.clone()))
+                    .copied()
+                    == *id
+            }
+            Precondition::LineSlotIs {
+                line,
+                slot,
+                request,
+            } => self.slots.get(&(line.clone(), *slot)).copied() == *request,
         }
     }
 
@@ -474,6 +498,33 @@ fn validate(repo: &Repo, txn: &MetaTxn) -> StoreResult<()> {
                 }
             }
         }
+        if let Write::PutMirrorRequest(r) = write {
+            let guarded = txn.preconditions.iter().any(
+                |p| matches!(p, Precondition::MirrorRequestVersionIs { id, .. } if *id == r.id),
+            );
+            let current = repo.requests.get(&r.id).map_or(0, |o| o.version);
+            let rekeyed = repo
+                .requests
+                .get(&r.id)
+                .is_some_and(|o| o.kind != r.kind || o.client_request_id != r.client_request_id);
+            if !guarded || r.version != current + 1 || rekeyed {
+                return Err(StoreError::Invalid(format!(
+                    "mirror request {} is written without its MirrorRequestVersionIs precondition, out of version order, or rekeyed",
+                    r.id
+                )));
+            }
+        }
+        if let Write::SetLineSlot { line, slot, .. } = write {
+            let guarded = txn.preconditions.iter().any(|p| {
+                matches!(p, Precondition::LineSlotIs { line: l, slot: s, .. } if l == line && s == slot)
+            });
+            if !guarded {
+                return Err(StoreError::Invalid(format!(
+                    "slot {} of line {line} is set without a LineSlotIs precondition",
+                    slot.as_str()
+                )));
+            }
+        }
         if let Write::PutMirror(record) = write {
             let current = repo.mirrors.get(&record.upstream).map_or(0, |m| m.version);
             if record.version != current + 1 {
@@ -750,6 +801,23 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
             Write::PutLease(lease) => {
                 repo.lease = Some(lease);
             }
+            Write::PutMirrorRequest(r) => {
+                repo.request_keys
+                    .insert((r.kind, r.client_request_id.clone()), r.id);
+                repo.requests.insert(r.id, r);
+            }
+            Write::SetLineSlot {
+                line,
+                slot,
+                request,
+            } => match request {
+                Some(id) => {
+                    repo.slots.insert((line, slot), id);
+                }
+                None => {
+                    repo.slots.remove(&(line, slot));
+                }
+            },
             Write::Journal { kind, body } => {
                 let lsn = repo.journal.len() as u64 + 1;
                 repo.journal.push((lsn, kind, body));
@@ -941,6 +1009,90 @@ impl MetaStore for MemoryStore {
         repo: RepoId,
     ) -> impl Future<Output = StoreResult<Option<LeaseRecord>>> + Send {
         ready(self.with(|st| Ok(st.repo(repo)?.lease.clone())))
+    }
+
+    fn get_mirror_request(
+        &self,
+        repo: RepoId,
+        id: u64,
+    ) -> impl Future<Output = StoreResult<Option<MirrorRequestRecord>>> + Send {
+        ready(self.with(|st| Ok(st.repo(repo)?.requests.get(&id).cloned())))
+    }
+
+    fn find_mirror_request(
+        &self,
+        repo: RepoId,
+        kind: MirrorRequestKind,
+        client_request_id: &str,
+    ) -> impl Future<Output = StoreResult<Option<MirrorRequestRecord>>> + Send {
+        ready(self.with(|st| {
+            let r = st.repo(repo)?;
+            Ok(r.request_keys
+                .get(&(kind, client_request_id.to_owned()))
+                .and_then(|id| r.requests.get(id))
+                .cloned())
+        }))
+    }
+
+    fn line_slot(
+        &self,
+        repo: RepoId,
+        line: &str,
+        slot: LineSlot,
+    ) -> impl Future<Output = StoreResult<Option<u64>>> + Send {
+        ready(self.with(|st| Ok(st.repo(repo)?.slots.get(&(line.to_owned(), slot)).copied())))
+    }
+
+    fn list_mirror_requests(
+        &self,
+        repo: RepoId,
+        query: MirrorRequestQuery,
+    ) -> impl Future<Output = StoreResult<Vec<MirrorRequestRecord>>> + Send {
+        ready(self.with(|st| {
+            let limit = page_limit(query.limit);
+            let r = st.repo(repo)?;
+            let keep = |rec: &&MirrorRequestRecord| {
+                query.kind.is_none_or(|k| k == rec.kind)
+                    && query.line.as_ref().is_none_or(|l| *l == rec.line)
+                    && (query.states.is_empty() || query.states.contains(&rec.state))
+            };
+            let out: Vec<_> = if query.oldest_first {
+                let from = query.after.map_or(0, |a| a.saturating_add(1));
+                r.requests
+                    .range(from..)
+                    .map(|(_, v)| v)
+                    .filter(keep)
+                    .take(limit)
+                    .cloned()
+                    .collect()
+            } else {
+                let to = query.after.unwrap_or(u64::MAX);
+                r.requests
+                    .range(..to)
+                    .rev()
+                    .map(|(_, v)| v)
+                    .filter(keep)
+                    .take(limit)
+                    .cloned()
+                    .collect()
+            };
+            Ok(out)
+        }))
+    }
+
+    fn last_mirror_request_id(
+        &self,
+        repo: RepoId,
+    ) -> impl Future<Output = StoreResult<u64>> + Send {
+        ready(self.with(|st| {
+            Ok(st
+                .repo(repo)?
+                .requests
+                .keys()
+                .next_back()
+                .copied()
+                .unwrap_or(0))
+        }))
     }
 
     fn list_mirrors(

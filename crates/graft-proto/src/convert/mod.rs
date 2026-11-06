@@ -2138,6 +2138,15 @@ impl From<ApiError> for pb::ApiError {
                     E::LeaseExpired(w::LeaseExpired { workspace })
                 }
                 ApiError::LeaseLost { repo } => E::LeaseLost(w::LeaseLost { repo }),
+                ApiError::BatchOpen {
+                    repo,
+                    line,
+                    request,
+                } => E::BatchOpen(w::BatchOpen {
+                    repo,
+                    line,
+                    request,
+                }),
                 ApiError::LimitExceeded { limit, max } => {
                     E::LimitExceeded(w::LimitExceeded { limit, max })
                 }
@@ -2227,6 +2236,11 @@ impl TryFrom<pb::ApiError> for ApiError {
                 workspace: e.workspace,
             },
             E::LeaseLost(e) => ApiError::LeaseLost { repo: e.repo },
+            E::BatchOpen(e) => ApiError::BatchOpen {
+                repo: e.repo,
+                line: e.line,
+                request: e.request,
+            },
             E::LimitExceeded(e) => ApiError::LimitExceeded {
                 limit: e.limit,
                 max: e.max,

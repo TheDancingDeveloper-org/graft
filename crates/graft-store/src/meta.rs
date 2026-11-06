@@ -258,6 +258,220 @@ impl LeaseRecord {
     }
 }
 
+/// What a mirror request asks the mirror service to do (D41 §3.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MirrorRequestKind {
+    /// Cut a batch PR from a line.
+    CutBatch,
+    /// Settle a batch (its PR merged or closed).
+    SettleBatch,
+    /// Exclude lands from the next batch.
+    Exclude,
+    /// Rewind a followed line to its upstream (WI-3142).
+    Rewind,
+    /// Delete a removed mirror's data and release its lease.
+    Purge,
+}
+
+impl MirrorRequestKind {
+    /// The stored text form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CutBatch => "cut_batch",
+            Self::SettleBatch => "settle_batch",
+            Self::Exclude => "exclude",
+            Self::Rewind => "rewind",
+            Self::Purge => "purge",
+        }
+    }
+
+    /// Parses [`Self::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "cut_batch" => Self::CutBatch,
+            "settle_batch" => Self::SettleBatch,
+            "exclude" => Self::Exclude,
+            "rewind" => Self::Rewind,
+            "purge" => Self::Purge,
+            _ => return None,
+        })
+    }
+}
+
+/// Where a mirror request is: `pending` → `claimed` → `done`, `failed` or
+/// `expired`. A claim under a lost epoch returns to `pending`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MirrorRequestState {
+    /// Waiting for the service.
+    Pending,
+    /// Claimed under a lease epoch.
+    Claimed,
+    /// Finished.
+    Done,
+    /// Finished with a typed error.
+    Failed,
+    /// Passed its deadline unfinished.
+    Expired,
+}
+
+impl MirrorRequestState {
+    /// The stored text form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Claimed => "claimed",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Expired => "expired",
+        }
+    }
+
+    /// Parses [`Self::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "pending" => Self::Pending,
+            "claimed" => Self::Claimed,
+            "done" => Self::Done,
+            "failed" => Self::Failed,
+            "expired" => Self::Expired,
+            _ => return None,
+        })
+    }
+
+    /// Whether the request can still change state.
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Pending | Self::Claimed)
+    }
+}
+
+/// A batch's life: `requested` → `open` → `sealed` → `settled`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BatchState {
+    /// Cut requested; no PR yet.
+    Requested,
+    /// The PR is open.
+    Open,
+    /// Auto-merge is on; nothing more joins it.
+    Sealed,
+    /// Merged or closed; the line's pointer is clear.
+    Settled,
+}
+
+impl BatchState {
+    /// The stored text form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Open => "open",
+            Self::Sealed => "sealed",
+            Self::Settled => "settled",
+        }
+    }
+
+    /// Parses [`Self::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "requested" => Self::Requested,
+            "open" => Self::Open,
+            "sealed" => Self::Sealed,
+            "settled" => Self::Settled,
+            _ => return None,
+        })
+    }
+}
+
+/// A per-line pointer holding at most one live request of its kind
+/// (D41 §3.5): the open batch, or the rewind in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LineSlot {
+    /// The line's `open_batch` pointer.
+    Batch,
+    /// The line's rewind in flight.
+    Rewind,
+}
+
+impl LineSlot {
+    /// The stored text form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Batch => "batch",
+            Self::Rewind => "rewind",
+        }
+    }
+}
+
+/// What the service recorded for a request: the PR, its branch and lands,
+/// or a typed error code.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MirrorRequestResult {
+    /// The PR number, once a PR exists.
+    pub pr_number: Option<u64>,
+    /// The PR's URL.
+    pub pr_url: Option<String>,
+    /// The pushed branch (`graft/batch-<n>`).
+    pub branch: Option<String>,
+    /// The lands the batch carries.
+    pub lands: Vec<ChangesetId>,
+    /// A typed failure code.
+    pub error_code: Option<String>,
+}
+
+/// One `mirror_requests` row (D41 §3.5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MirrorRequestRecord {
+    /// Server-assigned, monotonic per repository.
+    pub id: u64,
+    /// The line; empty for a purge.
+    pub line: String,
+    /// What is asked.
+    pub kind: MirrorRequestKind,
+    /// The caller's idempotency key, unique per `(repo, kind)`.
+    pub client_request_id: String,
+    /// The batch base, if the caller named one.
+    pub base: Option<ChangesetId>,
+    /// Lands left out of the batch.
+    pub excludes: Vec<ChangesetId>,
+    /// The upstream a purge names.
+    pub upstream: Option<String>,
+    /// The request's state.
+    pub state: MirrorRequestState,
+    /// The batch's state, for a cut.
+    pub batch: Option<BatchState>,
+    /// The lease epoch of the claimer.
+    pub claimed_by_epoch: Option<u64>,
+    /// When it was claimed, ms since the epoch.
+    pub claimed_at_ms: Option<i64>,
+    /// When a live request expires, ms since the epoch.
+    pub deadline_ms: i64,
+    /// What the service recorded.
+    pub result: MirrorRequestResult,
+    /// The principal that asked.
+    pub requested_by: String,
+    /// When it was asked, ms since the epoch.
+    pub created_at_ms: i64,
+    /// When it last changed, ms since the epoch.
+    pub updated_at_ms: i64,
+    /// Bumped by every write; the CAS on the row.
+    pub version: u64,
+}
+
+/// A page of a repository's mirror requests, by id.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MirrorRequestQuery {
+    /// Only this kind.
+    pub kind: Option<MirrorRequestKind>,
+    /// Only this line.
+    pub line: Option<String>,
+    /// Only these states; empty for any.
+    pub states: Vec<MirrorRequestState>,
+    /// Exclusive start id.
+    pub after: Option<u64>,
+    /// Oldest first; newest first otherwise.
+    pub oldest_first: bool,
+    /// Page size; clamped by the store.
+    pub limit: u32,
+}
+
 /// A row of `list_mirrors`: the record and the repository it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MirrorListing {
@@ -366,6 +580,32 @@ pub enum Precondition {
     LeaseEpochIs {
         /// Expected epoch.
         epoch: u64,
+    },
+    /// The mirror request `id` is at `version`, or absent for `None`.
+    MirrorRequestVersionIs {
+        /// Request id.
+        id: u64,
+        /// Expected version.
+        version: Option<u64>,
+    },
+    /// The `(kind, client_request_id)` key names request `id`, or no
+    /// request for `None`.
+    MirrorRequestKeyIs {
+        /// Request kind.
+        kind: MirrorRequestKind,
+        /// The caller's idempotency key.
+        client_request_id: String,
+        /// Expected request.
+        id: Option<u64>,
+    },
+    /// The line's `slot` points at `request`, or is clear for `None`.
+    LineSlotIs {
+        /// Line.
+        line: String,
+        /// Slot.
+        slot: LineSlot,
+        /// Expected request.
+        request: Option<u64>,
     },
     /// The lease is held under `epoch` and has not lapsed at `now_ms`
     /// ([`LeaseRecord::held`]). Fences a mirror write (D41 §3.6).
@@ -641,6 +881,19 @@ pub enum Write {
         /// The new status.
         status: MirrorStatusRecord,
     },
+    /// Insert or replace a mirror request. Needs a `MirrorRequestVersionIs`
+    /// precondition on its id, and `version` must be one more than stored.
+    PutMirrorRequest(MirrorRequestRecord),
+    /// Point a line's slot at a request, or clear it. Needs a `LineSlotIs`
+    /// precondition on the same slot.
+    SetLineSlot {
+        /// Line.
+        line: String,
+        /// Slot.
+        slot: LineSlot,
+        /// The request, or `None` to clear.
+        request: Option<u64>,
+    },
     /// Replace the repository's lease row. Needs a `LeaseEpochIs`
     /// precondition, and `epoch` must equal it or be one more.
     PutLease(LeaseRecord),
@@ -719,6 +972,47 @@ pub trait MetaStore: Send + Sync {
         _repo: RepoId,
     ) -> impl Future<Output = StoreResult<Option<LeaseRecord>>> + Send {
         async { Err(unsupported("get_lease")) }
+    }
+    /// One mirror request by id. One indexed read.
+    fn get_mirror_request(
+        &self,
+        _repo: RepoId,
+        _id: u64,
+    ) -> impl Future<Output = StoreResult<Option<MirrorRequestRecord>>> + Send {
+        async { Err(unsupported("get_mirror_request")) }
+    }
+    /// The mirror request with this idempotency key. One indexed read.
+    fn find_mirror_request(
+        &self,
+        _repo: RepoId,
+        _kind: MirrorRequestKind,
+        _client_request_id: &str,
+    ) -> impl Future<Output = StoreResult<Option<MirrorRequestRecord>>> + Send {
+        async { Err(unsupported("find_mirror_request")) }
+    }
+    /// The request a line's slot points at. One indexed read.
+    fn line_slot(
+        &self,
+        _repo: RepoId,
+        _line: &str,
+        _slot: LineSlot,
+    ) -> impl Future<Output = StoreResult<Option<u64>>> + Send {
+        async { Err(unsupported("line_slot")) }
+    }
+    /// One page of a repository's mirror requests, by id.
+    fn list_mirror_requests(
+        &self,
+        _repo: RepoId,
+        _query: MirrorRequestQuery,
+    ) -> impl Future<Output = StoreResult<Vec<MirrorRequestRecord>>> + Send {
+        async { Err(unsupported("list_mirror_requests")) }
+    }
+    /// The highest mirror request id in the repository, 0 when none.
+    fn last_mirror_request_id(
+        &self,
+        _repo: RepoId,
+    ) -> impl Future<Output = StoreResult<u64>> + Send {
+        async { Err(unsupported("last_mirror_request_id")) }
     }
     /// Applies a transaction atomically.
     fn commit(
@@ -1241,6 +1535,42 @@ impl<T: MetaStore> MetaStore for std::sync::Arc<T> {
         repo: RepoId,
     ) -> impl Future<Output = StoreResult<Option<LeaseRecord>>> + Send {
         (**self).get_lease(repo)
+    }
+    fn get_mirror_request(
+        &self,
+        repo: RepoId,
+        id: u64,
+    ) -> impl Future<Output = StoreResult<Option<MirrorRequestRecord>>> + Send {
+        (**self).get_mirror_request(repo, id)
+    }
+    fn find_mirror_request(
+        &self,
+        repo: RepoId,
+        kind: MirrorRequestKind,
+        client_request_id: &str,
+    ) -> impl Future<Output = StoreResult<Option<MirrorRequestRecord>>> + Send {
+        (**self).find_mirror_request(repo, kind, client_request_id)
+    }
+    fn line_slot(
+        &self,
+        repo: RepoId,
+        line: &str,
+        slot: LineSlot,
+    ) -> impl Future<Output = StoreResult<Option<u64>>> + Send {
+        (**self).line_slot(repo, line, slot)
+    }
+    fn list_mirror_requests(
+        &self,
+        repo: RepoId,
+        query: MirrorRequestQuery,
+    ) -> impl Future<Output = StoreResult<Vec<MirrorRequestRecord>>> + Send {
+        (**self).list_mirror_requests(repo, query)
+    }
+    fn last_mirror_request_id(
+        &self,
+        repo: RepoId,
+    ) -> impl Future<Output = StoreResult<u64>> + Send {
+        (**self).last_mirror_request_id(repo)
     }
     fn commit(
         &self,

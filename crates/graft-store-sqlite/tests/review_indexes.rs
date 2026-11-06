@@ -482,7 +482,7 @@ fn a_version_7_database_upgrades_with_its_rows_intact() {
     {
         let conn = Connection::open(dir.db()).expect("inspect");
         assert_eq!(migrations::version(&conn).expect("version"), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(SCHEMA_VERSION, 12);
         assert_eq!(dump(&conn, OLD), before, "every old row is unchanged");
     }
     // The new indexes work on the upgraded repository.

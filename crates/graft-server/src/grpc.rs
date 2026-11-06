@@ -28,6 +28,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::app::{App, CallError, Caller, ServerEngine, error_name};
 use crate::exports;
 use crate::mint;
+use crate::mirror_requests;
 use crate::mirrors;
 use crate::revoke;
 
@@ -1492,9 +1493,100 @@ impl pb::mirror_service_server::MirrorService for Services {
     async fn purge_mirror(
         &self,
         request: Request<pb::PurgeMirrorRequest>,
-    ) -> Result<Response<pb::Empty>, Status> {
+    ) -> Result<Response<pb::MirrorRequest>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
         mirror_call!(self, request, "PurgeMirror", true, |meta, p, req| {
-            mirrors::purge(meta, p, req).await.map(|()| pb::Empty {})
+            mirrors::purge(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn cut_batch(
+        &self,
+        request: Request<pb::CutBatchRequest>,
+    ) -> Result<Response<pb::MirrorRequest>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "CutBatch", true, |meta, p, req| {
+            mirror_requests::cut_batch(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn get_batch(
+        &self,
+        request: Request<pb::BatchKey>,
+    ) -> Result<Response<pb::BatchView>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "GetBatch", true, |meta, p, req| {
+            mirror_requests::get_batch(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn list_batches(
+        &self,
+        request: Request<pb::ListBatchesRequest>,
+    ) -> Result<Response<pb::BatchPage>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "ListBatches", true, |meta, p, req| {
+            mirror_requests::list_batches(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn rewind_followed(
+        &self,
+        request: Request<pb::RewindFollowedRequest>,
+    ) -> Result<Response<pb::MirrorRequest>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "RewindFollowed", true, |meta, p, req| {
+            mirror_requests::rewind_followed(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn get_request(
+        &self,
+        request: Request<pb::MirrorRequestKey>,
+    ) -> Result<Response<pb::MirrorRequest>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "GetRequest", true, |meta, p, req| {
+            mirror_requests::get_request(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn claim_request(
+        &self,
+        request: Request<pb::ClaimRequestRequest>,
+    ) -> Result<Response<pb::ClaimRequestResult>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "ClaimRequest", true, |meta, p, req| {
+            mirror_requests::claim(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn complete_request(
+        &self,
+        request: Request<pb::CompleteRequestRequest>,
+    ) -> Result<Response<pb::MirrorRequest>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "CompleteRequest", true, |meta, p, req| {
+            mirror_requests::complete(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn fail_request(
+        &self,
+        request: Request<pb::FailRequestRequest>,
+    ) -> Result<Response<pb::MirrorRequest>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "FailRequest", true, |meta, p, req| {
+            mirror_requests::fail(meta, p, now_ms, req).await
+        })
+    }
+
+    async fn set_batch_state(
+        &self,
+        request: Request<pb::SetBatchStateRequest>,
+    ) -> Result<Response<pb::MirrorRequest>, Status> {
+        let now_ms = self.app.now_s().saturating_mul(1000);
+        mirror_call!(self, request, "SetBatchState", true, |meta, p, req| {
+            mirror_requests::set_batch_state(meta, p, now_ms, req).await
         })
     }
 
