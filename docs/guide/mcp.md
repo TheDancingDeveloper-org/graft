@@ -34,7 +34,7 @@ workspace operations, while working-copy-only behavior is available only from
   `truncated: true` when clipped; binary changes have a null patch.
 - Errors are structured and include `kind` and `message`. API errors also
   report `retryable`. Common kinds include `invalid_argument`, `not_found`,
-  `unauthenticated`, `forbidden`, `stale_base`, `conflict`, `contended`,
+  `unauthenticated`, `permission_denied`, `stale_base`, `conflict`, `contended`,
   `unavailable`, and `needs_working_copy`. A `conflict` result identifies the
   target and paths to resolve; `stale_base` means the line moved and the
   workspace must be synchronized before retrying.
@@ -134,7 +134,7 @@ prefixes you plan to change. It never returns file contents.
   `cursor`.
 - Result: `line`, grouped `overlaps` with workspace, owner, session, work item,
   draft age, lease and paths, plus `next`. Keep paging with `cursor`.
-- Errors: requires the repository drafts scope; otherwise returns `forbidden`.
+- Errors: requires the repository drafts scope; otherwise returns `permission_denied`.
 
 ### `graft_review_queue`
 
