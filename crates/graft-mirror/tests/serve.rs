@@ -21,8 +21,8 @@ use graft_mirror::service::follow_task::FollowSpawner;
 use graft_mirror::service::requests::{self, PullDesk, RequestFailure, RequestRunner};
 use graft_mirror::service::status::PollFailure;
 use graft_mirror::service::{
-    ExitReason, MIGRATION_MARKER, PollReport, PollStep, ServeConfig, Service, Spawner, TaskCtx,
-    netguard,
+    ExitReason, MIGRATION_MARKER, PollReport, PollStep, ServeConfig, Service, ServiceMetrics,
+    Spawner, TaskCtx, netguard,
 };
 use graft_proto::error::ApiResult;
 use graft_proto::pb::{self, MirrorErrorCode, MirrorRequestKind};
@@ -359,6 +359,8 @@ struct Script {
 struct FakeStep {
     version: u64,
     script: Arc<Script>,
+    /// Stands in for the follower: writes the repository's lag series.
+    series: Option<(String, ServiceMetrics)>,
 }
 
 impl PollStep for FakeStep {
@@ -373,6 +375,12 @@ impl PollStep for FakeStep {
             self.script.gate.notified().await;
         }
         self.script.finished.fetch_add(1, Ordering::SeqCst);
+        if let Some((repo, m)) = &self.series {
+            let l = [repo.as_str(), "main"];
+            m.base().mirror_lag_seconds.with_label_values(&l).set(1.0);
+            m.base().mirror_lag_changesets.with_label_values(&l).set(0);
+            m.base().mirror_divergence.with_label_values(&l).set(0);
+        }
         if let Some(f) = self.script.fail.lock().unwrap().clone() {
             return Err(f);
         }
@@ -391,6 +399,7 @@ impl Spawner<Fake> for FakeSpawner {
         let mut step = FakeStep {
             version: task.row.version,
             script: self.0.clone(),
+            series: task.metrics.clone().map(|m| (task.row.repo.clone(), m)),
         };
         tokio::spawn(async move { task.run(&mut step).await });
     }
@@ -426,6 +435,218 @@ async fn settle() {
 }
 
 const GH: &str = "https://github.com/o/r.git";
+
+// ---- metrics ---------------------------------------------------------------
+
+/// A service exporting metrics into a fresh registry.
+fn metered_service(
+    fake: &Arc<Fake>,
+    script: &Arc<Script>,
+    dir: &Path,
+) -> (
+    Service<Fake, FakeSpawner>,
+    ServiceMetrics,
+    prometheus::Registry,
+) {
+    let (registry, base) = graft_telemetry::registry().unwrap();
+    let metrics = ServiceMetrics::register(&registry, base).unwrap();
+    let service = fake_service(fake, script, dir).with_metrics(metrics.clone());
+    (service, metrics, registry)
+}
+
+/// The mirror series in the `/metrics` text that name `repo`, comments and
+/// the repository-less series left out.
+fn series_of(registry: &prometheus::Registry, repo: &str) -> Vec<String> {
+    let needle = format!("repo=\"{repo}\"");
+    graft_telemetry::encode(registry)
+        .lines()
+        .filter(|l| l.starts_with("graft_mirror_") && l.contains(&needle))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn value_of(registry: &prometheus::Registry, name: &str) -> Option<String> {
+    graft_telemetry::encode(registry)
+        .lines()
+        .find(|l| l.starts_with(name) && !l.starts_with('#'))
+        .and_then(|l| l.rsplit(' ').next().map(str::to_owned))
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_mirror_series_carries_repo_and_exists_only_for_running_tasks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let (mut service, _m, registry) = metered_service(&fake, &script, tmp.path());
+    fake.set_row(row("r", GH, 15));
+    fake.set_row(row("s", GH, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+
+    // No mirror series without a repo label, but the service-wide ones.
+    let text = graft_telemetry::encode(&registry);
+    for l in text.lines().filter(|l| l.starts_with("graft_mirror_")) {
+        assert!(
+            l.contains("repo=")
+                || l.starts_with("graft_mirror_tasks ")
+                || l.starts_with("graft_mirror_lease_lost_total "),
+            "{l}"
+        );
+    }
+    let r = series_of(&registry, "r");
+    for name in [
+        "graft_mirror_lag_seconds",
+        "graft_mirror_lag_changesets",
+        "graft_mirror_divergence",
+        "graft_mirror_last_success_timestamp_seconds",
+    ] {
+        assert!(r.iter().any(|l| l.starts_with(name)), "{name}: {r:?}");
+    }
+    assert_eq!(series_of(&registry, "s").len(), r.len());
+    assert_eq!(
+        value_of(&registry, "graft_mirror_tasks").as_deref(),
+        Some("2")
+    );
+
+    // Stopping r's task removes all of r's series and none of s's.
+    fake.remove("r");
+    service.reconcile().await.unwrap();
+    assert_eq!(
+        service.next_exit().await.unwrap().reason,
+        ExitReason::Stopped
+    );
+    assert_eq!(series_of(&registry, "r"), Vec::<String>::new());
+    assert_eq!(series_of(&registry, "s").len(), r.len());
+    assert_eq!(
+        value_of(&registry, "graft_mirror_tasks").as_deref(),
+        Some("1")
+    );
+
+    // Stopping the rest leaves nothing: the cardinality is the running tasks.
+    service.stop_all().await;
+    assert_eq!(series_of(&registry, "s"), Vec::<String>::new());
+    assert_eq!(
+        value_of(&registry, "graft_mirror_tasks").as_deref(),
+        Some("0")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_for_a_changed_row_leaves_no_series_of_the_old_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let (mut service, m, registry) = metered_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+    // A line the new row will not have.
+    m.base()
+        .mirror_divergence
+        .with_label_values(&[REPO, "gone"])
+        .set(1);
+    assert!(
+        series_of(&registry, REPO)
+            .iter()
+            .any(|l| l.contains("line=\"gone\""))
+    );
+
+    // The row changes and the task restarts; the old row's line is dropped
+    // only if its row said so, so the row names it.
+    let mut old = row(REPO, GH, 15);
+    old.lines.push(pb::MirrorLine {
+        branch: "gone".to_owned(),
+        line: "gone".to_owned(),
+        direction: "follow".to_owned(),
+    });
+    old.version = 2;
+    fake.set_row(old);
+    service.reconcile().await.unwrap();
+    service.next_exit().await.unwrap();
+    settle().await;
+    let mut new = row(REPO, GH, 15);
+    new.version = 3;
+    fake.set_row(new);
+    service.reconcile().await.unwrap();
+    service.next_exit().await.unwrap();
+    settle().await;
+    assert!(
+        !series_of(&registry, REPO)
+            .iter()
+            .any(|l| l.contains("line=\"gone\"")),
+        "{:?}",
+        series_of(&registry, REPO)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_error_is_one_series_until_the_poll_succeeds_and_goes_with_the_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    *script.fail.lock().unwrap() = Some(PollFailure::new(
+        MirrorErrorCode::AuthFailed,
+        "the credential was refused",
+    ));
+    let (mut service, _m, registry) = metered_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+    let errors = |registry: &prometheus::Registry| -> Vec<String> {
+        series_of(registry, REPO)
+            .into_iter()
+            .filter(|l| l.starts_with("graft_mirror_poll_error"))
+            .collect()
+    };
+    let e = errors(&registry);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].contains("code=\"auth_failed\"") && e[0].ends_with(" 1"));
+
+    // A different failure replaces it rather than adding a series.
+    *script.fail.lock().unwrap() = Some(PollFailure::new(
+        MirrorErrorCode::Timeout,
+        "the poll did not finish in time",
+    ));
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let e = errors(&registry);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].contains("code=\"timeout\""));
+
+    // Success clears it.
+    *script.fail.lock().unwrap() = None;
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert_eq!(errors(&registry), Vec::<String>::new());
+
+    *script.fail.lock().unwrap() = Some(PollFailure::new(MirrorErrorCode::AuthFailed, "no"));
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert_eq!(errors(&registry).len(), 1);
+    service.stop_all().await;
+    assert_eq!(series_of(&registry, REPO), Vec::<String>::new());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lost_lease_is_counted_and_drops_the_series() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let (mut service, _m, registry) = metered_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+    assert!(!series_of(&registry, REPO).is_empty());
+
+    fake.steal(REPO).await;
+    service.renew().await;
+    assert_eq!(
+        service.next_exit().await.unwrap().reason,
+        ExitReason::LeaseLost
+    );
+    assert_eq!(series_of(&registry, REPO), Vec::<String>::new());
+    assert_eq!(
+        value_of(&registry, "graft_mirror_lease_lost_total").as_deref(),
+        Some("1")
+    );
+}
 
 // ---- reconcile ---------------------------------------------------------------
 

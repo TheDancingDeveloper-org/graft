@@ -1,0 +1,78 @@
+# Prometheus alert rules for the graft-mirror service (D41, WI-3211,
+# docs/notes/mirror-service.md §3.3). One service serves every repository on
+# one /metrics endpoint, so these rules select one job and carry the `repo`
+# label instead of one rule set per mirror process. Scrape config:
+# deploy/monitoring/prometheus-scrape-service.yml.
+#
+# A repository's series exist only while the service has a task for an
+# enabled row (the service drops them when the task stops), so a disabled or
+# removed mirror stops alerting by itself. That also means an alert cannot
+# fire for a repository whose task is gone: the lease-lost alert reads a
+# service-wide counter for that reason.
+groups:
+  - name: graft-mirror
+    rules:
+      - alert: GraftMirrorDown
+        expr: up{job="graft-mirror"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "graft-mirror: the service's metrics are unreachable for 10m"
+
+      # A repository that has not polled successfully for an hour, whatever
+      # the reason (errors, back-off, a stuck poll).
+      - alert: GraftMirrorStalled
+        expr: time() - graft_mirror_last_success_timestamp_seconds{job="graft-mirror"} > 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "graft-mirror: {{ $labels.repo }} has not polled successfully for {{ $value | humanizeDuration }}"
+
+      # The line stopped on a divergence; graft is unchanged and a person
+      # decides (design §11).
+      - alert: GraftMirrorDiverged
+        expr: max by (repo, line) (graft_mirror_divergence{job="graft-mirror"}) == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "graft-mirror: {{ $labels.repo }} line {{ $labels.line }} has diverged from upstream and is stopped"
+
+      - alert: GraftMirrorForcePushed
+        expr: graft_mirror_poll_error{job="graft-mirror", code="force_pushed"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "graft-mirror: {{ $labels.repo }} upstream was force-pushed; the line is stopped"
+
+      # A repository's lease went to another holder (or lapsed). A restart
+      # of the service on a new instance shows up here once per repository.
+      - alert: GraftMirrorLeaseLost
+        expr: increase(graft_mirror_lease_lost_total{job="graft-mirror"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "graft-mirror: {{ $value | printf \"%.0f\" }} repository lease(s) lost in 15m; check for a second mirror process on the same data"
+
+      # The upstream refuses the repository's credential.
+      - alert: GraftMirrorCredentialError
+        expr: graft_mirror_poll_error{job="graft-mirror", code="auth_failed"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "graft-mirror: the credential for {{ $labels.repo }} has been refused for 15m"
+
+      # Batch, settle, exclude or rewind requests are waiting: the last turn
+      # hit its per-turn cap or the forge failed and the request was left to
+      # retry.
+      - alert: GraftMirrorRequestBacklog
+        expr: graft_mirror_request_backlog{job="graft-mirror"} == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "graft-mirror: {{ $labels.repo }} has had mirror requests waiting for 30m"

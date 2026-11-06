@@ -25,9 +25,9 @@ const DESIGN: &[(&str, &[&str])] = &[
     ("graft_gc_collected_total", &[]),
     ("graft_gc_doomed_total", &[]),
     ("graft_gc_deleted_total", &[]),
-    ("graft_mirror_lag_seconds", &["line"]),
-    ("graft_mirror_lag_changesets", &["line"]),
-    ("graft_mirror_divergence", &["line"]),
+    ("graft_mirror_lag_seconds", &["repo", "line"]),
+    ("graft_mirror_lag_changesets", &["repo", "line"]),
+    ("graft_mirror_divergence", &["repo", "line"]),
     ("graft_journal_lsn", &["repo"]),
     ("graft_watch_subscribers", &[]),
     ("graft_workspaces", &["state"]),
@@ -104,9 +104,15 @@ fn exposition_uses_documented_names_and_labels() {
     m.gc_collected_total.inc();
     m.gc_doomed_total.inc_by(2);
     m.gc_deleted_total.inc_by(2);
-    m.mirror_lag_seconds.with_label_values(&["main"]).set(1.5);
-    m.mirror_lag_changesets.with_label_values(&["main"]).set(2);
-    m.mirror_divergence.with_label_values(&["main"]).set(0);
+    m.mirror_lag_seconds
+        .with_label_values(&["graft", "main"])
+        .set(1.5);
+    m.mirror_lag_changesets
+        .with_label_values(&["graft", "main"])
+        .set(2);
+    m.mirror_divergence
+        .with_label_values(&["graft", "main"])
+        .set(0);
     m.journal_lsn.with_label_values(&["graft"]).set(42);
     m.watch_subscribers.set(4);
     m.workspaces.with_label_values(&["active"]).set(6);

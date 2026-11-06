@@ -553,8 +553,12 @@ async fn cmd_serve(args: &[String]) -> Result<(), CmdError> {
         data_dir = %config.data_dir.display(), instance = %config.instance,
         "mirror service starting"
     );
+    let metrics =
+        crate::service::ServiceMetrics::register(telemetry.registry(), telemetry.metrics().clone())
+            .map_err(|e| MirrorError::Config(e.to_string()))?;
     let service =
-        crate::service::Service::new(api.clone(), crate::service::FollowSpawner::new(api), config);
+        crate::service::Service::new(api.clone(), crate::service::FollowSpawner::new(api), config)
+            .with_metrics(metrics);
     service.run(shutdown()).await;
     tracing::info!("mirror service stopped");
     Ok(())

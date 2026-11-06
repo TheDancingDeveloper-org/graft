@@ -205,17 +205,22 @@ pub const SPECS: &[MetricSpec] = &[
     ),
     spec(GC_DOOMED_TOTAL, Counter, &[], "Objects doomed by GC."),
     spec(GC_DELETED_TOTAL, Counter, &[], "Objects deleted by GC."),
-    spec(MIRROR_LAG_SECONDS, G, &["line"], "Mirror lag in seconds."),
+    spec(
+        MIRROR_LAG_SECONDS,
+        G,
+        &["repo", "line"],
+        "Mirror lag in seconds.",
+    ),
     spec(
         MIRROR_LAG_CHANGESETS,
         G,
-        &["line"],
+        &["repo", "line"],
         "Mirror lag in changesets; -1 means the upstream fetch or list failed and lag is unknown.",
     ),
     spec(
         MIRROR_DIVERGENCE,
         G,
-        &["line"],
+        &["repo", "line"],
         "1 when a mirrored line has diverged.",
     ),
     spec(JOURNAL_LSN, G, &["repo"], "Latest journal LSN."),
@@ -300,11 +305,11 @@ pub struct Metrics {
     pub gc_doomed_total: IntCounter,
     /// [`GC_DELETED_TOTAL`].
     pub gc_deleted_total: IntCounter,
-    /// [`MIRROR_LAG_SECONDS`] `{line}`.
+    /// [`MIRROR_LAG_SECONDS`] `{repo, line}`.
     pub mirror_lag_seconds: GaugeVec,
-    /// [`MIRROR_LAG_CHANGESETS`] `{line}`.
+    /// [`MIRROR_LAG_CHANGESETS`] `{repo, line}`.
     pub mirror_lag_changesets: IntGaugeVec,
-    /// [`MIRROR_DIVERGENCE`] `{line}`.
+    /// [`MIRROR_DIVERGENCE`] `{repo, line}`.
     pub mirror_divergence: IntGaugeVec,
     /// [`JOURNAL_LSN`] `{repo}`.
     pub journal_lsn: IntGaugeVec,

@@ -33,6 +33,7 @@ tonic = { workspace = true, features = ["gzip"] }
 tracing.workspace = true
 getrandom.workspace = true
 jsonwebtoken = "9"
+prometheus.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
@@ -41,7 +42,6 @@ graft-store = { workspace = true, features = ["testkit"] }
 graft-store-fs.workspace = true
 graft-store-sqlite.workspace = true
 graft-testkit.workspace = true
-prometheus.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber.workspace = true
 wiremock = "0.6.5"
