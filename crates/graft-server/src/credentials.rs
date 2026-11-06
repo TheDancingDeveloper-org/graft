@@ -7,14 +7,18 @@
 //! XChaCha20-Poly1305, and both bind the row through associated data:
 //!
 //! ```text
-//! aad(label) = label ‖ lp(repo) ‖ lp(upstream) ‖ lp(kek_id)
+//! aad(label) = label ‖ lp(repo_id) ‖ lp(upstream) ‖ lp(kek_id)
 //!   lp(x)    = u32-be byte length of x ‖ x
+//!   repo_id  = the repository's numeric id, u32-be (4 bytes)
 //!   label    = "graft.mirror.cred.v1" (credential) or
 //!              "graft.mirror.dek.v1"  (data-key wrap)
 //! ```
 //!
-//! The length prefixes keep two different `(repo, upstream)` pairs from
-//! ever producing the same associated data. A ciphertext moved to another
+//! The repository is bound by its id, not its name: a rename keeps every
+//! credential, and a repository re-created under an old name has a new id,
+//! so it cannot open the old ciphertext. The length prefixes keep two
+//! different `(repo, upstream)` pairs from ever producing the same
+//! associated data. A ciphertext moved to another
 //! row, or relabelled with another key id, fails to open.
 //!
 //! The envelope (a durable encoding, frozen by the golden vector below):
@@ -32,6 +36,7 @@ use std::fmt;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use graft_store::RepoId;
 
 /// The envelope's format byte.
 const VERSION: u8 = 1;
@@ -199,7 +204,7 @@ impl KeyRing {
     /// with a fresh data key.
     pub(crate) fn seal(
         &self,
-        repo: &str,
+        repo: RepoId,
         upstream: &str,
         plaintext: &[u8],
     ) -> Result<Sealed, CredentialError> {
@@ -213,7 +218,7 @@ impl KeyRing {
     /// Opens the row's credential under the key it names, active or retired.
     pub(crate) fn open(
         &self,
-        repo: &str,
+        repo: RepoId,
         upstream: &str,
         kek_id: &str,
         envelope: &[u8],
@@ -228,7 +233,7 @@ impl KeyRing {
     /// already sealed under the active key.
     pub(crate) fn rewrap(
         &self,
-        repo: &str,
+        repo: RepoId,
         upstream: &str,
         kek_id: &str,
         envelope: &[u8],
@@ -259,13 +264,14 @@ fn random<const N: usize>() -> Result<[u8; N], CredentialError> {
     Ok(b)
 }
 
-fn aad(label: &[u8], repo: &str, upstream: &str, kek_id: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(label.len() + 12 + repo.len() + upstream.len() + kek_id.len());
+fn aad(label: &[u8], repo: RepoId, upstream: &str, kek_id: &str) -> Vec<u8> {
+    let repo = repo.0.to_be_bytes();
+    let mut out = Vec::with_capacity(label.len() + 16 + upstream.len() + kek_id.len());
     out.extend_from_slice(label);
-    for part in [repo, upstream, kek_id] {
+    for part in [&repo[..], upstream.as_bytes(), kek_id.as_bytes()] {
         let len = u32::try_from(part.len()).expect("bounded at the boundary");
         out.extend_from_slice(&len.to_be_bytes());
-        out.extend_from_slice(part.as_bytes());
+        out.extend_from_slice(part);
     }
     out
 }
@@ -277,7 +283,7 @@ fn seal_with(
     dek: &[u8; KEY],
     wrap_nonce: &[u8; NONCE],
     nonce: &[u8; NONCE],
-    repo: &str,
+    repo: RepoId,
     upstream: &str,
     plaintext: &[u8],
 ) -> Sealed {
@@ -313,7 +319,7 @@ fn seal_with(
 
 fn open_with(
     kek: &Kek,
-    repo: &str,
+    repo: RepoId,
     upstream: &str,
     envelope: &[u8],
 ) -> Result<([u8; KEY], Secret), CredentialError> {
@@ -354,7 +360,7 @@ fn open_with(
 mod tests {
     use super::*;
 
-    const REPO: &str = "r";
+    const REPO: RepoId = RepoId(7);
     const UP: &str = "https://github.com/o/r.git";
 
     fn kek(id: &str, byte: u8) -> Kek {
@@ -386,7 +392,7 @@ mod tests {
         assert_eq!(
             hex(&aad(CRED_LABEL, REPO, UP, "k1")),
             "67726166742e6d6972726f722e637265642e7631\
-             0000000172\
+             0000000400000007\
              0000001a68747470733a2f2f6769746875622e636f6d2f6f2f722e676974\
              000000026b31"
         );
@@ -398,9 +404,9 @@ mod tests {
         "01",                                               // version
         "333333333333333333333333333333333333333333333333", // wrap nonce
         "988655ab5a492115a0b60a86eccfdcf4a9655edc6e9156ae",
-        "c946b458b235dd63757656183cb92b92f5b01e849c68788e", // wrapped data key
+        "c946b458b235dd63dbd69092e780fabcbd32cae07706f70c", // wrapped data key
         "444444444444444444444444444444444444444444444444", // nonce
-        "d9266a210d828a233d5c4a359b84235d350bc538984c792803a046", // ciphertext and tag
+        "d9266a210d828a233d5c4a56570b42d7eebd85b21abcb41faabccd", // ciphertext and tag
     );
 
     #[test]
@@ -409,15 +415,14 @@ mod tests {
         let s = ring.seal(REPO, UP, b"pat").expect("seal");
         assert!(ring.open(REPO, UP, "k1", &s.envelope).is_ok());
         for (repo, up) in [
-            ("other", UP),
+            // Another repository: a re-created one gets a new id.
+            (RepoId(8), UP),
             (REPO, "https://github.com/o/other.git"),
-            // A shifted boundary between the fields is another row too.
-            ("rh", "ttps://github.com/o/r.git"),
         ] {
             assert_eq!(
                 ring.open(repo, up, "k1", &s.envelope).err(),
                 Some(CredentialError::DoesNotOpen),
-                "{repo} {up}"
+                "{repo:?} {up}"
             );
         }
         let mut flipped = s.envelope.clone();

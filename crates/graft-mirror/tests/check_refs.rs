@@ -838,7 +838,7 @@ fn the_token_is_never_in_argv() {
         &git,
         format!(
             "#!/bin/sh\ncase \" $* \" in *\" push \"*|*\" ls-remote \"*)\n  \
-             printf 'call argv=%s header=%s\\n' \"$*\" \"${{GIT_CONFIG_VALUE_0:-none}}\" >>'{}'\n  \
+             h=none; i=0; while [ \"$i\" -lt \"${{GIT_CONFIG_COUNT:-0}}\" ]; do eval k=\\\"\\$GIT_CONFIG_KEY_$i\\\"; eval v=\\\"\\$GIT_CONFIG_VALUE_$i\\\"; [ \"$k\" = http.extraHeader ] && h=$v; i=$((i+1)); done; printf 'call argv=%s header=%s\\n' \"$*\" \"$h\" >>'{}'\n  \
              exit 0;;\nesac\nexec '{}' \"$@\"\n",
             log.display(),
             real.display()

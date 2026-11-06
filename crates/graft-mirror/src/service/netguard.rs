@@ -159,8 +159,11 @@ pub fn judge(addrs: &[SocketAddr]) -> Result<(), PollFailure> {
 }
 
 /// Checks `upstream` by the rules and resolves it with `resolve`; refuses
-/// it if any address it resolves to is blocked.
-pub async fn check(upstream: &str, resolve: &Resolve) -> Result<Target, PollFailure> {
+/// it if any address it resolves to is blocked. Returns the target and the
+/// vetted address git must connect to: the caller pins git to it
+/// ([`crate::git::Mirror::set_resolve_pin`]) so git does not resolve the
+/// name again and reach another address (DNS rebinding).
+pub async fn check(upstream: &str, resolve: &Resolve) -> Result<(Target, IpAddr), PollFailure> {
     let t = target(upstream)?;
     let addrs = resolve(t.host.clone(), t.port).await.map_err(|_| {
         PollFailure::new(
@@ -169,7 +172,8 @@ pub async fn check(upstream: &str, resolve: &Resolve) -> Result<Target, PollFail
         )
     })?;
     judge(&addrs)?;
-    Ok(t)
+    let addr = addrs[0].ip();
+    Ok((t, addr))
 }
 
 #[cfg(test)]
@@ -234,7 +238,12 @@ mod tests {
         let public: Resolve = std::sync::Arc::new(|_, port| {
             Box::pin(async move { Ok(vec![SocketAddr::from(([140, 82, 112, 3], port))]) })
         });
-        assert!(check("https://github.com/o/r", &public).await.is_ok());
+        let (t, addr) = check("https://github.com/o/r", &public)
+            .await
+            .expect("public");
+        assert_eq!(t.host, "github.com");
+        // The vetted address is returned, for git to be pinned to.
+        assert_eq!(addr, IpAddr::from([140, 82, 112, 3]));
         assert_eq!(
             judge(&[]).unwrap_err().code,
             MirrorErrorCode::UpstreamUnreachable

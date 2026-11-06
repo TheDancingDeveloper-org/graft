@@ -286,8 +286,15 @@ guards both sides of the swap:
 - **Readiness gate and rollback.** After `compose up --wait` it waits up to
   `GRAFT_READY_WAIT` seconds (default 120) for `/readyz`. If the server or
   the stack doesn't come up, it copies the last good `image.env`,
-  `server.toml` and `mirror-service.toml` back into the checkout, brings that stack
-  up, and exits non-zero either way.
+  `server.toml` and `mirror-service.toml` back into the checkout, restores
+  the metadata database backup (below) if this deploy took one, brings that
+  stack up, and exits non-zero either way.
+- **Database backup.** A new server image may migrate the metadata
+  database, and an older build refuses a newer schema. So before a server
+  image other than the running one starts, `up.sh` stops graft-server and
+  copies `meta.db` and its WAL files to `pre-deploy/` on the
+  `graft-dev-meta` volume; a rollback restores it before the old image
+  starts. Tested by `deploy/tests/meta-backup.sh`.
 - **Last good.** A deploy that passes `/healthz` and `/readyz` records its
   `image.env`, `server.toml` and `mirror-service.toml` under
   `/etc/graft/last-good/` (root-owned, 0644; no secrets). The first deploy

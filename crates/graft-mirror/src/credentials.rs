@@ -39,9 +39,10 @@ const JWT_SKEW_SECS: i64 = 60;
 pub struct SecretToken(String);
 
 impl SecretToken {
-    /// Wraps `value`, which must not be empty.
+    /// Wraps `value`, which must not be empty, nor hold a line break or a
+    /// NUL: either would let it add lines to git's credential protocol.
     pub fn new(value: String) -> Option<SecretToken> {
-        if value.is_empty() {
+        if value.is_empty() || value.contains(['\n', '\r', '\0']) {
             None
         } else {
             Some(SecretToken(value))
@@ -107,13 +108,28 @@ impl CredentialPipe {
         Ok(CredentialPipe { dir, writer })
     }
 
-    /// The `credential.helper` value: answers `get` from the pipe, and
-    /// ignores `store` and `erase`.
-    pub fn helper(&self) -> String {
-        format!(
-            "!f() {{ test \"$1\" = get && cat '{}'; }}; f",
+    /// The `credential.helper` value for the upstream at `host` (git's
+    /// `host=`, with a port if the URL names one): answers `get` from the
+    /// pipe only when git asks over https or http for exactly `host`, and
+    /// ignores `store`, `erase` and any other host, so a redirect or a
+    /// rewritten URL never receives the credential. `None` if `host` holds
+    /// anything but the characters of a host name, an address or a port.
+    pub fn helper(&self, host: &str) -> Option<String> {
+        let safe = !host.is_empty()
+            && host.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
+            });
+        if !safe {
+            return None;
+        }
+        Some(format!(
+            "!f() {{ test \"$1\" = get || return 0; h=; p=; \
+             while IFS= read -r l && test -n \"$l\"; do case \"$l\" in \
+             host=*) h=\"${{l#host=}}\";; protocol=*) p=\"${{l#protocol=}}\";; esac; done; \
+             case \"$p\" in https|http) ;; *) return 0;; esac; \
+             test \"$h\" = '{host}' && cat '{}'; return 0; }}; f",
             self.dir.path().join("pipe").display()
-        )
+        ))
     }
 }
 
@@ -390,7 +406,7 @@ mod tests {
         let pipe = CredentialPipe::open(SecretToken::new(secret.to_owned()).unwrap())
             .await
             .expect("pipe");
-        let helper = pipe.helper();
+        let helper = pipe.helper("github.com").expect("a plain host");
         assert!(!helper.contains(secret));
         assert!(!format!("{pipe:?}").contains(secret));
         let mut cmd = tokio::process::Command::new("git");
@@ -425,5 +441,81 @@ mod tests {
         let dir = pipe.dir.path().to_owned();
         drop(pipe);
         assert!(!dir.exists(), "the pipe's directory is removed with it");
+    }
+
+    /// Runs `git credential fill` with `helper` for `request`; returns the
+    /// password it got, if any.
+    async fn fill(helper: &str, request: &str) -> Option<String> {
+        use tokio::io::AsyncWriteExt;
+        let mut child = tokio::process::Command::new("git")
+            .args(["credential", "fill"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "/bin/false")
+            .env("SSH_ASKPASS", "/bin/false")
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", "credential.helper")
+            .env("GIT_CONFIG_VALUE_0", "")
+            .env("GIT_CONFIG_KEY_1", "credential.helper")
+            .env("GIT_CONFIG_VALUE_1", helper)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("git runs");
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(request.as_bytes()).await.unwrap();
+        drop(stdin);
+        let out = child.wait_with_output().await.unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("password=").map(str::to_owned))
+    }
+
+    #[tokio::test]
+    async fn the_helper_answers_only_for_the_upstream_host_over_http() {
+        let secret = "ghp_hostBOUND123";
+        let pipe = CredentialPipe::open(SecretToken::new(secret.to_owned()).unwrap())
+            .await
+            .expect("pipe");
+        let helper = pipe.helper("github.com").unwrap();
+        // A redirect target, a look-alike host, another port or another
+        // protocol gets nothing.
+        for request in [
+            "protocol=https\nhost=169.254.169.254\n\n",
+            "protocol=https\nhost=github.com.evil.example\n\n",
+            "protocol=https\nhost=evil.example\n\n",
+            "protocol=https\nhost=github.com:8443\n\n",
+            "protocol=ftp\nhost=github.com\n\n",
+        ] {
+            assert_eq!(fill(&helper, request).await, None, "{request:?}");
+        }
+        assert_eq!(
+            fill(&helper, "protocol=https\nhost=github.com\n\n")
+                .await
+                .as_deref(),
+            Some(secret)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_with_shell_characters_gets_no_helper() {
+        let pipe = CredentialPipe::open(SecretToken::new("t".to_owned()).unwrap())
+            .await
+            .expect("pipe");
+        for host in ["", "a'b", "a b", "a;b", "a$(x)", "a\nb"] {
+            assert!(pipe.helper(host).is_none(), "{host:?}");
+        }
+        assert!(pipe.helper("[2606:4700::1]:443").is_some());
+    }
+
+    #[test]
+    fn a_token_with_a_line_break_or_nul_is_refused() {
+        for bad in ["a\nb", "a\rb", "a\0b", "tok\nhost=evil"] {
+            assert!(SecretToken::new(bad.to_owned()).is_none(), "{bad:?}");
+        }
+        assert!(SecretToken::new("ghp_ok".to_owned()).is_some());
     }
 }

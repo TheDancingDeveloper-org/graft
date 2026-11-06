@@ -8,9 +8,10 @@ prints a secret: every token and credential goes from its store into a
 
 Steps 1–6 prepare the server and move the data while the old containers are
 stopped; step 7 deploys the service; step 8 retires the old files and secrets
-and is the point of no return. Rollback is possible until step 8 (the old
-containers are only stopped, and the per-repository data layout is unchanged
-apart from the two renames). See "Rollback" below.
+and is the point of no return. Rollback is possible until step 8: the old
+containers are only stopped, the per-repository data layout is unchanged
+apart from the two renames, and `deploy/up.sh` backs up the metadata database
+before the new server migrates it. See "Rollback" below.
 
 **Two checkouts.** The retirement change removes `mirrors.tsv`,
 `mirror-*.toml`, `compose.onboarded.yml` and the per-repository services from
@@ -184,22 +185,50 @@ From here, onboarding is `graft repo mirror add` (deploy/README.md).
 
 ## Rollback (before step 8 only)
 
+The new server migrates the metadata database (schema v8 to v12) the first
+time it opens it, at step 1, and an older build refuses a database newer than
+it knows. So rolling back means restoring the database as it was before that
+migration, together with the old image: there are no down-migrations, and the
+old server does not start on the migrated database.
+
+`deploy/up.sh` takes that backup itself. Whenever it deploys a server image
+other than the one running, it stops graft-server first and copies `meta.db`
+and its WAL files to `pre-deploy/` on the `graft-dev-meta` volume (with the
+image that wrote them in `pre-deploy/image`). If the new stack does not come
+up, its `rollback()` restores that copy before it starts the last good image.
+Before step 1, confirm `pre-deploy/` exists after the deploy:
+`docker run --rm -v graft-dev-meta:/m alpine ls -l /m/pre-deploy`. Keep a
+copy of it off the volume until step 8 is done, since the next image change
+replaces it.
+
+Restoring the backup loses every write made since step 1: rows, leases,
+requests, and any lands, so roll back before the service has followed
+anything you need to keep, or re-import those changes after.
+
 Order matters: the old processes do not read the lease, so the service must be
 gone before they start (§6 step 7).
 
 1. Scale `graft-mirror serve` to zero first:
    `docker compose --env-file deploy/image.env -f deploy/compose.yml stop graft-mirror`
    (and `rm` it). Confirm `docker ps | grep graft-dev-mirror` prints nothing.
-2. Move each `<data>/<repo>/mirror.git` and `mirror.sqlite` back to the old
+2. Stop graft-server, then restore the pre-migration database:
+   ```sh
+   docker compose --env-file deploy/image.env -f deploy/compose.yml stop graft-server
+   docker run --rm -v graft-dev-meta:/m alpine sh -c 'set -e; cd /m
+     test -s pre-deploy/meta.db
+     rm -f meta.db meta.db-wal meta.db-shm
+     for f in meta.db meta.db-wal meta.db-shm; do
+       [ -e pre-deploy/$f ] && cp -p pre-deploy/$f .; done'
+   ```
+3. Move each `<data>/<repo>/mirror.git` and `mirror.sqlite` back to the old
    volume as `<repo>.git` and `<repo>.sqlite`, and `rusttorrent`'s back up to
    the root of `graft-dev-mirror`.
-3. Restore the old deployment and token secrets: check out `$RETIRE^` (the
-   old tree), whose `deploy/` still has the per-repository services, and run
-   its `deploy/up.sh`. The `mirror-token*` files and the
-   `GRAFT_DEV_MIRROR_TOKEN_*` secrets are still in place because step 8 has
-   not run. The old tree keeps the `[mirror]` table and the `kek-k1` mount from
-   step 1, so sealed credentials stay readable.
+4. Restore the old deployment, image and token secrets: check out `$RETIRE^`
+   (the old tree), set its `deploy/image.env` to the image recorded in
+   `pre-deploy/image` (the one that wrote the backup), and run its
+   `deploy/up.sh`. Its per-repository services come back. The
+   `mirror-token*` files and the `GRAFT_DEV_MIRROR_TOKEN_*` secrets are still
+   in place because step 8 has not run.
 
-The rows, leases and requests are additive and the old processes ignore
-them. After step 8, rolling back means re-creating the volumes, tokens and
-configs from history and Infisical; do not plan on it.
+After step 8, rolling back means re-creating the volumes, tokens and configs
+from history and Infisical as well; do not plan on it.

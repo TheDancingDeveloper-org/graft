@@ -739,12 +739,7 @@ pub(crate) async fn set_status<M: MetaStore>(
     now_ms: i64,
     req: pb::SetMirrorStatusRequest,
 ) -> Result<(), ApiError> {
-    any_of(
-        p,
-        &[Scope::Mirror {
-            repo: req.repo.clone(),
-        }],
-    )?;
+    lease_caller(p, &req.repo)?;
     let s = req.status.unwrap_or_default();
     let message = s
         .error_message
@@ -794,6 +789,9 @@ pub(crate) async fn set_status<M: MetaStore>(
     {
         return Err(not_found(&req.repo));
     }
+    // The holder is checked here and the epoch again in the transaction;
+    // an epoch names one holder, so the pair cannot change in between.
+    caller_lease(meta, p, id, &req.repo, status.lease_epoch, now_ms).await?;
     let txn = MetaTxn {
         preconditions: vec![Precondition::LeaseHeld {
             epoch: status.lease_epoch,
@@ -841,6 +839,34 @@ fn lease_view(repo: &str, l: &LeaseRecord) -> pb::Lease {
     }
 }
 
+/// Whether the lease `holder` (`<subject>/<instance>`) belongs to exactly
+/// `subject`. An instance never holds a `/` (acquire refuses one), so a
+/// subject that is a prefix of another (`m` and `m/x`) does not match.
+fn held_by(holder: Option<&str>, subject: &str) -> bool {
+    holder
+        .and_then(|h| h.strip_prefix(subject))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|instance| !instance.is_empty() && !instance.contains('/'))
+}
+
+/// The lease when the caller `p` holds it under `epoch` now; else
+/// `LeaseLost`. Holder and epoch are both checked: the epoch alone is a
+/// small integer another mirror subject could guess.
+async fn caller_lease<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    id: RepoId,
+    repo: &str,
+    epoch: u64,
+    now_ms: i64,
+) -> Result<LeaseRecord, ApiError> {
+    meta.get_lease(id)
+        .await
+        .map_err(store)?
+        .filter(|l| l.held(epoch, now_ms) && held_by(l.holder.as_deref(), &p.subject))
+        .ok_or_else(|| lease_lost(repo))
+}
+
 /// Writes `next` under a CAS on the stored epoch `expected`.
 async fn put_lease<M: MetaStore>(
     meta: &M,
@@ -874,11 +900,11 @@ pub(crate) async fn acquire_lease<M: MetaStore>(
         || req
             .instance
             .chars()
-            .any(|c| c.is_control() || c.is_whitespace())
+            .any(|c| c.is_control() || c.is_whitespace() || c == '/')
     {
         return Err(refused(
             "mirror-field",
-            format!("instance is 1 to {MAX_INSTANCE} bytes with no whitespace"),
+            format!("instance is 1 to {MAX_INSTANCE} bytes with no whitespace or '/'"),
         ));
     }
     let id = repo_id(meta, &req.repo).await?;
@@ -908,10 +934,7 @@ pub(crate) async fn renew_lease<M: MetaStore>(
 ) -> Result<pb::Lease, ApiError> {
     lease_caller(p, &req.repo)?;
     let id = repo_id(meta, &req.repo).await?;
-    let current = meta.get_lease(id).await.map_err(store)?;
-    let Some(l) = current.filter(|l| l.held(req.epoch, now_ms)) else {
-        return Err(lease_lost(&req.repo));
-    };
+    let l = caller_lease(meta, p, id, &req.repo, req.epoch, now_ms).await?;
     let next = LeaseRecord {
         expires_at_ms: now_ms.saturating_add(LEASE_TTL_MS),
         ..l
@@ -931,10 +954,7 @@ pub(crate) async fn release_lease<M: MetaStore>(
 ) -> Result<(), ApiError> {
     lease_caller(p, &req.repo)?;
     let id = repo_id(meta, &req.repo).await?;
-    let current = meta.get_lease(id).await.map_err(store)?;
-    if !current.is_some_and(|l| l.held(req.epoch, now_ms)) {
-        return Err(lease_lost(&req.repo));
-    }
+    caller_lease(meta, p, id, &req.repo, req.epoch, now_ms).await?;
     let next = LeaseRecord {
         holder: None,
         epoch: req.epoch,
@@ -965,6 +985,20 @@ pub(crate) async fn set_credential<M: MetaStore>(
             format!("credential is at most {MAX_CREDENTIAL} bytes"),
         ));
     }
+    // A line break or NUL inside would add lines to git's credential
+    // protocol; trailing whitespace (a file's last newline) is trimmed by
+    // the reader.
+    if req
+        .credential
+        .trim_ascii()
+        .iter()
+        .any(|b| matches!(b, b'\n' | b'\r' | 0))
+    {
+        return Err(refused(
+            "mirror-field",
+            "credential must not hold a line break or NUL",
+        ));
+    }
     let id = repo_id(meta, &req.repo).await?;
     let Some(old) = meta.get_mirror(id, &req.upstream).await.map_err(store)? else {
         return Err(not_found(&req.repo));
@@ -980,7 +1014,7 @@ pub(crate) async fn set_credential<M: MetaStore>(
     } else {
         let plain = Secret::new(req.credential);
         Some(
-            ring.seal(&req.repo, &req.upstream, plain.expose())
+            ring.seal(id, &req.upstream, plain.expose())
                 .map_err(credential_refused)?,
         )
     };
@@ -1024,13 +1058,7 @@ pub(crate) async fn get_credential<M: MetaStore>(
 ) -> Result<pb::MirrorCredential, ApiError> {
     lease_caller(p, &req.repo)?;
     let id = repo_id(meta, &req.repo).await?;
-    let lease = meta.get_lease(id).await.map_err(store)?;
-    let holder = format!("{}/", p.subject);
-    if !lease.is_some_and(|l| {
-        l.held(req.epoch, now_ms) && l.holder.is_some_and(|h| h.starts_with(&holder))
-    }) {
-        return Err(lease_lost(&req.repo));
-    }
+    caller_lease(meta, p, id, &req.repo, req.epoch, now_ms).await?;
     let row = meta
         .get_mirror(id, &req.upstream)
         .await
@@ -1042,7 +1070,7 @@ pub(crate) async fn get_credential<M: MetaStore>(
         });
     };
     let plain = ring
-        .open(&req.repo, &req.upstream, &kek_id, &envelope)
+        .open(id, &req.upstream, &kek_id, &envelope)
         .map_err(|e| {
             tracing::error!(repo = %req.repo, kek_id = %kek_id, error = %e, "mirror credential did not open");
             credential_refused(e)
@@ -1126,7 +1154,7 @@ async fn rewrap_row<M: MetaStore>(
             report.unchanged += 1;
             return Ok(());
         };
-        let sealed = match ring.rewrap(repo, &row.upstream, kek_id, envelope) {
+        let sealed = match ring.rewrap(id, &row.upstream, kek_id, envelope) {
             Ok(Some(s)) => s,
             Ok(None) => {
                 report.unchanged += 1;
