@@ -343,16 +343,14 @@ docker compose -f examples/compose/compose.yaml run --rm \
   -v "$BACKUP:/restore:ro" \
   server -c 'rm -f /var/lib/graft/meta/meta.db &&
     cp /restore/meta.db /var/lib/graft/meta/meta.db &&
-    rm -rf /var/lib/graft/objects &&
-    cp -a /restore/objects /var/lib/graft/objects'
-docker compose -f examples/compose/compose.yaml up -d
+    find /var/lib/graft/objects -mindepth 1 -delete &&
+    cp -a /restore/objects/. /var/lib/graft/objects/'
 ```
 
-Run fsck only after the server has stopped again. It opens the same metadata
+Run fsck before the first start of the stack. It opens the same metadata
 and object stores as the server and refuses to run against a live database:
 
 ```sh
-docker compose -f examples/compose/compose.yaml down
 docker compose -f examples/compose/compose.yaml run --rm \
   --entrypoint graft-server server \
   --config /etc/example/server.toml admin fsck example
@@ -361,7 +359,11 @@ docker compose -f examples/compose/compose.yaml run --rm \
 A clean result ends with `0 problems`, for example:
 `fsck example: ... 0 problems`. Any reported problem is a failed restore;
 keep the original backup and investigate rather than starting the stack on
-that copy.
+that copy. After a clean result, start the stack:
+
+```sh
+docker compose -f examples/compose/compose.yaml up -d
+```
 
 ### Upgrade and rollback
 
