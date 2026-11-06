@@ -1510,6 +1510,20 @@ and `R` indexed reads), one tree merge over the paths that differ from
 the history, or a line's changesets. `line merges` is paginated (limit 100,
 max 1,000).
 
+### 8.10 Mirror authority lease
+
+[D41](decisions.md#d41-mirrors-as-repository-settings-one-mirror-service)
+adds one lease per repository in the meta table `mirror_leases`: holder,
+a monotonic `epoch`, and `expires_at` (TTL 60 s, renewed every 20 s).
+`AcquireLease` takes it by CAS when free or expired and bumps the epoch.
+Every mirror write carries the epoch: `UpdateRef` on a followed line by the
+`mirror` kind, `SetMirrorStatus`, `GetMirrorCredential`, and claiming or
+completing a mirror request. A stale epoch is rejected with `lease_lost`,
+so a second mirror process (a copied data directory) is fenced, not forked.
+The lease decides who may act; which side is authoritative for a line is
+still the per-line authority of §11.3. The holder's instance id is never
+written into a ref or object (rule 5).
+
 ## 9. Client and working copy
 
 ### 9.1 Layout
@@ -1599,6 +1613,11 @@ core model has no git fields, and the server does not know git exists. Mirror
 state, including the graft id ↔ git sha map and the raw headers of imported
 commits, lives in the mirror's own SQLite database. That database is backed up
 like the server's and can be rebuilt from GitHub.
+
+Under [D41](decisions.md#d41-mirrors-as-repository-settings-one-mirror-service)
+the mirror is **one** service process for every repository, driven by
+mirror settings stored in the server (§11.7). Where the subsections below say
+"the mirror's config", read the repository's mirror row.
 
 ### 11.1 Import
 
@@ -1905,6 +1924,49 @@ append:         B ── c1 ── … ── ck ── c(k+1) ── … ──
   project's language or layout; the forge's own required checks run on the
   new head as on any push.
 
+### 11.7 Mirror settings and the mirror service
+
+[D41](decisions.md#d41-mirrors-as-repository-settings-one-mirror-service);
+the full design is [notes/mirror-service.md](notes/mirror-service.md).
+
+- **Settings.** A meta table `repo_mirrors` holds one row per
+  `(repo, upstream)`: the followed and exported lines, interval, enabled
+  flag, an optional encrypted credential, the export author mapping, a
+  `version` used as an etag, and status. Upstreams and branch names are
+  strings; the server never fetches them and holds no git type.
+  `SetMirror`, `GetMirror`, `ListMirrors`, `RemoveMirror` and `PurgeMirror`
+  are on `RepoService`; responses are paginated and never carry a
+  credential.
+- **Grants.** Creating a row or changing its upstream, setting its
+  credential, removing and purging need `mirror:bind`; turning on export
+  needs `mirror:export`. Both are operator-only and can't be minted into
+  agent or session tokens. A repository admin may enable or disable a
+  mirror, change its interval (not below `mirror.min_interval_s`) and edit
+  its follow lines.
+- **Upstream allowlist.** `https` or `ssh` only; loopback, link-local,
+  private, CGNAT, unique-local and cluster names rejected; host in
+  `mirror.allowed_hosts`. The service checks again after DNS resolution.
+- **The service.** `graft-mirror serve` lists no repositories. It
+  reconciles from `ListMirrors` every `reconcile_s`, holds one task per
+  enabled row, restarts a task only between polls when the row's `version`
+  changes, and writes coalesced, non-journaled status with typed error
+  codes (never git stderr). Each repository's cache and SQLite stay in one
+  directory, as in §11.1–§11.6. It runs with a `mirror`-kind token limited
+  to `repo:*:mirror`.
+- **Credentials.** Sealed per row (XChaCha20-Poly1305, per-row data key,
+  separate KEK ring with ids, associated data binding repo and upstream),
+  frozen by a golden vector. `GetMirrorCredential` returns plaintext only
+  to the `mirror` kind holding the repository's lease (§8.10).
+- **Batching.** §11.4–§11.6 are unchanged in what they deliver. Cutting,
+  settling and excluding become server requests (`CutBatch`, `GetBatch`,
+  `ListBatches`, `GetRequest`) in `mirror_requests`, idempotent by
+  `client_request_id`, with one open batch per line held by a CAS pointer.
+  The service claims them by lease epoch and recovers a crashed cut by the
+  deterministic `graft/batch-<n>` branch. The followed-line rewind is a
+  `RewindFollowed` request under `mirror:bind`.
+- **Scheduling.** The service schedules mirror polls and mirror requests
+  only. It runs no build, test or check (D22).
+
 ## 12. Auth
 
 ### 12.1 Principals and tokens
@@ -1914,7 +1976,7 @@ append:         B ── c1 ── … ── ck ── c(k+1) ── … ──
 | operator (human) | `graft-server admin token mint` on the server host, stored in Infisical |
 | agent session | the caller's orchestrator, if any, mints per session through `MintToken`, using its own service token, scoped to the session's repos and work, with a TTL ≤ 12 h. It is delivered to the session like other brokered credentials (see [D10](decisions.md#d10-agent-token-issuance)) |
 | CI job | phase 2: a per-repo CI token in Infisical. Phase 3: an exchange of a GitHub Actions OIDC token, or a Woodpecker job token, for a short graft token |
-| services (node, mirror) | long-lived service tokens with narrow scopes, rotated through Infisical |
+| services (node, mirror) | long-lived service tokens with narrow scopes, rotated by the operator. The mirror service uses the `mirror` token kind, limited to `repo:*:mirror` (D41) |
 
 Tokens are signed by the server (Ed25519, PASETO v4.public or an equivalent
 compact format) and carry: `sub`, principal `kind`, `session` (`ses_…` when the orchestrator sets one),
