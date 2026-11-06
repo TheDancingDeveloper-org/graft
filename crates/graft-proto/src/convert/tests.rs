@@ -912,6 +912,14 @@ fn mirror_credential_debug_is_redacted() {
 }
 
 #[test]
+fn revoke_token_debug_is_redacted() {
+    let r = pb::RevokeTokenRequest {
+        token: "v4.public.secret".into(),
+    };
+    assert!(!format!("{r:?}").contains("secret"));
+}
+
+#[test]
 fn conflict_types_round_trip() {
     let side =
         || prop::option::of((oid(), entry_kind()).prop_map(|(id, kind)| ConflictSide { id, kind }));

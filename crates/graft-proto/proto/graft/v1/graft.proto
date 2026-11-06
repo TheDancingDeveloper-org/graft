@@ -805,6 +805,13 @@ message MintTokenRequest {
   optional string work_item = 5;
 }
 
+// The token to revoke (docs/design.md §12.1). Its generated `Debug` is
+// replaced by one that redacts it. The token must be live and signed by this
+// server; only its `jti` and expiry are stored.
+message RevokeTokenRequest {
+  string token = 1;
+}
+
 // A bearer token. Its generated `Debug` is replaced by one that redacts it.
 message Token {
   string token = 1;
@@ -1292,6 +1299,14 @@ service AdminService {
   rpc ImportChangesets(ImportChangesetsRequest) returns (CreatedList);
   rpc Gc(GcRequest) returns (GcReport);
   rpc MintToken(MintTokenRequest) returns (Token);
+  // Refuses a live token from now on, for writes (the same denylist as
+  // `graft-server admin token revoke`). The caller must be a service principal
+  // that minted the token through MintToken, or hold `repo:<r>:admin` on every
+  // repository the token names; anyone else gets PermissionDenied. A token
+  // that is expired, malformed or signed by another key is InvalidChange.
+  // Revoking twice is fine. Every revoke and every refusal is audited by
+  // principal and token id, never by token value.
+  rpc RevokeToken(RevokeTokenRequest) returns (Empty);
 }
 
 // Called without a bearer token: the CI token in the request is the

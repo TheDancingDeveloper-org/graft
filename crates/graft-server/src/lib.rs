@@ -39,6 +39,7 @@ mod mcp;
 mod mint;
 mod mirror_requests;
 mod mirrors;
+mod revoke;
 mod serve;
 mod watch;
 mod webhooks;
