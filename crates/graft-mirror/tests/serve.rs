@@ -1925,11 +1925,6 @@ async fn a_minted_mirror_token_follows_a_merged_batch() {
     drop(service);
     commit(&work, "b");
     let c3 = commit(&work, "c");
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    eprintln!(
-        "DBG {:?}",
-        fake.statuses().iter().rev().take(3).collect::<Vec<_>>()
-    );
     eventually(|| {
         fake.statuses()
             .iter()
