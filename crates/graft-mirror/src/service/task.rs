@@ -42,6 +42,10 @@ pub trait PollStep: Send {
         &mut self,
         credential: Option<SecretToken>,
     ) -> impl std::future::Future<Output = Result<PollReport, PollFailure>> + Send;
+
+    /// Pins the next poll's git to `addr`, the address the upstream check
+    /// vetted for `host`:`port`, or stops pinning (`None`, a local upstream).
+    fn pin(&mut self, _host: &str, _port: u16, _addr: Option<std::net::IpAddr>) {}
 }
 
 /// How the service steers a running task.
@@ -296,10 +300,14 @@ impl<C: Control> TaskCtx<C> {
     ) -> (Result<PollReport, PollFailure>, Option<(String, u64)>) {
         let (repo, upstream) = (self.row.repo.as_str(), self.row.upstream.as_str());
         let host = if self.config.allow_local_upstreams && netguard::target(upstream).is_err() {
+            step.pin("", 0, None);
             "local".to_owned()
         } else {
             match netguard::check(upstream, &self.shared.resolve).await {
-                Ok(t) => t.host,
+                Ok((t, addr)) => {
+                    step.pin(&t.host, t.port, Some(addr));
+                    t.host
+                }
                 Err(f) => return (Err(f), None),
             }
         };

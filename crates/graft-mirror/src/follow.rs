@@ -238,6 +238,12 @@ where
         self.mirror.set_credential_pipe(pipe);
     }
 
+    /// Pins git's connections to the upstream host to `addr`, the address
+    /// the service vetted; `None` stops (see [`crate::git::Mirror::set_resolve_pin`]).
+    pub fn set_resolve_pin(&mut self, host: &str, port: u16, addr: Option<std::net::IpAddr>) {
+        self.mirror.set_resolve_pin(host, port, addr);
+    }
+
     /// Exports lag and divergence to `metrics`.
     pub fn with_metrics(mut self, metrics: Metrics) -> Self {
         self.metrics = Some(metrics);

@@ -201,3 +201,142 @@ async fn credentials_seal_open_only_for_the_lease_holder_and_survive_rotation() 
         assert!(!text.contains(secret), "plaintext in the server log");
     }
 }
+
+#[tokio::test]
+async fn only_the_exact_lease_holder_renews_releases_reports_or_reads() {
+    let site = Site::new("mirror-holder", "");
+    let k1 = site.dir.path().join("kek-k1");
+    write_key(&k1, 0x11);
+    set_keys(
+        &site,
+        &format!(
+            "credential_kek = {{ id = \"k1\", file = \"{}\" }}",
+            k1.display()
+        ),
+    );
+    let server = site.start();
+    let admin = site.mint(&["repos:admin"]);
+    common::Clients::new(server.channel().await, Auth::new(Some(&admin)))
+        .create_repo("r")
+        .await
+        .expect("repo");
+    let operator = site.mint_kind("op", "human", &["mirror:bind"], 3600);
+    let mut op = client(&server, &operator).await;
+    let row = op
+        .set_mirror(pb::SetMirrorRequest {
+            repo: "r".into(),
+            upstream: UP.into(),
+            lines: vec![pb::MirrorLine {
+                branch: "main".into(),
+                line: "main".into(),
+                direction: "follow".into(),
+            }],
+            interval_s: 0,
+            enabled: true,
+            export: None,
+            expected_version: None,
+        })
+        .await
+        .expect("row")
+        .into_inner();
+    // A credential with a line break inside would inject helper lines.
+    for bad in ["tok\nhost=evil", "tok\rx", "tok\0x"] {
+        let err = op
+            .set_mirror_credential(pb::SetMirrorCredentialRequest {
+                repo: "r".into(),
+                upstream: UP.into(),
+                credential: bad.as_bytes().to_vec(),
+                expected_version: row.version,
+            })
+            .await
+            .expect_err("line break refused");
+        assert_eq!(err.code(), Code::FailedPrecondition, "{bad:?}: {err:?}");
+        assert!(err.message().contains("line break"), "{bad:?}: {err:?}");
+    }
+    op.set_mirror_credential(pb::SetMirrorCredentialRequest {
+        repo: "r".into(),
+        upstream: UP.into(),
+        credential: format!("{PAT}\n").into_bytes(),
+        expected_version: row.version,
+    })
+    .await
+    .expect("a trailing newline is fine");
+
+    // The holder's subject is "svc/x"; "svc" is a prefix of it, and
+    // "other" is another mirror subject altogether.
+    let holder = site.mint_kind("svc/x", "mirror", &["repo:*:mirror"], 3600);
+    let mut h = client(&server, &holder).await;
+    let slash = h
+        .acquire_lease(pb::AcquireLeaseRequest {
+            repo: "r".into(),
+            instance: "a/b".into(),
+        })
+        .await
+        .expect_err("an instance holds no '/'");
+    assert_eq!(slash.code(), Code::FailedPrecondition);
+    assert!(slash.message().contains("'/'"), "{slash:?}");
+    let lease = h
+        .acquire_lease(pb::AcquireLeaseRequest {
+            repo: "r".into(),
+            instance: "i1".into(),
+        })
+        .await
+        .expect("lease")
+        .into_inner();
+    let status = |epoch| pb::SetMirrorStatusRequest {
+        repo: "r".into(),
+        upstream: UP.into(),
+        status: Some(pb::MirrorStatus {
+            lease_epoch: epoch,
+            ..Default::default()
+        }),
+    };
+    let lease_req = pb::LeaseRequest {
+        repo: "r".into(),
+        epoch: lease.epoch,
+    };
+    let read = pb::GetMirrorCredentialRequest {
+        repo: "r".into(),
+        upstream: UP.into(),
+        epoch: lease.epoch,
+    };
+    for subject in ["svc", "other"] {
+        let tok = site.mint_kind(subject, "mirror", &["repo:*:mirror"], 3600);
+        let mut o = client(&server, &tok).await;
+        let lost = |s: tonic::Status| {
+            assert_ne!(s.code(), Code::Ok);
+            assert!(s.message().contains("lease"), "{subject}: {s:?}");
+        };
+        lost(o.renew_lease(lease_req.clone()).await.expect_err("renew"));
+        lost(
+            o.release_lease(lease_req.clone())
+                .await
+                .expect_err("release"),
+        );
+        lost(
+            o.set_mirror_status(status(lease.epoch))
+                .await
+                .expect_err("status"),
+        );
+        lost(
+            o.get_mirror_credential(read.clone())
+                .await
+                .expect_err("read"),
+        );
+    }
+    // The holder still holds it, untouched by the others.
+    h.set_mirror_status(status(lease.epoch))
+        .await
+        .expect("holder reports");
+    let got = h
+        .get_mirror_credential(read)
+        .await
+        .expect("holder reads")
+        .into_inner();
+    assert_eq!(got.credential, format!("{PAT}\n").as_bytes());
+    h.renew_lease(lease_req.clone())
+        .await
+        .expect("holder renews");
+    h.release_lease(lease_req).await.expect("holder releases");
+    server.stop();
+}

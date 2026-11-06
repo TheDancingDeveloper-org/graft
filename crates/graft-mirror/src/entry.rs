@@ -42,8 +42,8 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
          configuration; a URL with userinfo is refused.
   init-config [--out <file>]            write a commented sample mirror.toml
   serve --config <file>                 the mirror service: follow every
-                                        enabled mirror row the server lists
-                                        (D41); the config names the server,
+                                        enabled mirror row the server
+                                        lists; the config names the server,
                                         token file, data dir, metrics
                                         address and limits, no repositories
   import-config <toml>... --data-dir <dir> [--credential-dir <dir>]
