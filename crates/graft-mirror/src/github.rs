@@ -27,6 +27,9 @@ const MESSAGE_CHARS: usize = 200;
 /// Connect and read timeout for one request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// GitHub's REST API.
+pub const GITHUB_API: &str = "https://api.github.com";
+
 /// Bounded retries for transient answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetryPolicy {

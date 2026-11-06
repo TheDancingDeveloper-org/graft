@@ -10,33 +10,97 @@ use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::pb::MirrorErrorCode;
 use graft_proto::{CallContext, Principal, PrincipalKind};
 
+use super::batch_task::{BatchRunner, LeaseCredential, github_repo};
 use super::status::{PollFailure, classify};
 use super::task::{PollReport, PollStep, TaskCtx};
 use super::{Control, DB_FILE, GIT_DIR, Spawner};
+use crate::ExportLog;
+use crate::MirrorError;
 use crate::credentials::{CredentialPipe, SecretToken};
 use crate::db::MirrorDb;
 use crate::follow::{Divergence, FollowConfig, FollowLine, Follower, LineOutcome, POLL_INTERVAL};
 use crate::git::Mirror;
+use crate::github::{Forge, GITHUB_API, HttpForge, RetryPolicy};
 
 /// Changesets per `ImportChangesets` call: the bound on one import step.
 pub const IMPORT_BATCH: usize = 256;
 
+/// Builds the forge a task's batch cuts use, from the row's upstream.
+pub trait Forges: Send + Sync + 'static {
+    /// The forge of a task under control `C`.
+    type Forge<C: Control>: Forge + 'static;
+    /// The forge for `upstream`, reading its token through `credential`;
+    /// `None` when the upstream has no forge (no batches).
+    fn forge<C: Control>(
+        &self,
+        upstream: &str,
+        credential: LeaseCredential<C>,
+    ) -> Option<Result<Self::Forge<C>, MirrorError>>;
+}
+
+/// GitHub's API, for an `https://github.com/<owner>/<repo>` upstream.
+pub struct GitHubForges;
+
+impl Forges for GitHubForges {
+    type Forge<C: Control> = HttpForge<LeaseCredential<C>>;
+
+    fn forge<C: Control>(
+        &self,
+        upstream: &str,
+        credential: LeaseCredential<C>,
+    ) -> Option<Result<Self::Forge<C>, MirrorError>> {
+        let (owner, name) = github_repo(upstream)?;
+        Some(HttpForge::new(
+            GITHUB_API,
+            &owner,
+            &name,
+            credential,
+            RetryPolicy::default(),
+        ))
+    }
+}
+
 /// Starts follower tasks calling `api`.
-pub struct FollowSpawner<A> {
+pub struct FollowSpawner<A, G = GitHubForges> {
     api: Arc<A>,
     cx: fn(&str) -> CallContext,
+    exports: Option<Arc<dyn ExportLog>>,
+    forges: Arc<G>,
 }
 
 impl<A> FollowSpawner<A> {
     /// Tasks call the graft API `api`.
     pub fn new(api: Arc<A>) -> Self {
-        FollowSpawner { api, cx: task_cx }
+        FollowSpawner {
+            api,
+            cx: task_cx,
+            exports: None,
+            forges: Arc::new(GitHubForges),
+        }
+    }
+}
+
+impl<A, G> FollowSpawner<A, G> {
+    /// Batch cuts use the forges `forges` builds instead of GitHub's.
+    pub fn with_forges<H>(self, forges: H) -> FollowSpawner<A, H> {
+        FollowSpawner {
+            api: self.api,
+            cx: self.cx,
+            exports: self.exports,
+            forges: Arc::new(forges),
+        }
     }
 
     /// Tasks call as `cx(repo)`. A server reads the principal from the
     /// token; this matters only for an in-process API.
     pub fn with_cx(mut self, cx: fn(&str) -> CallContext) -> Self {
         self.cx = cx;
+        self
+    }
+
+    /// Batch cuts record each batch commit's export in `log` (D40).
+    pub fn with_export_log(mut self, log: Arc<dyn ExportLog>) -> Self {
+        self.exports = Some(log);
         self
     }
 }
@@ -67,14 +131,17 @@ pub fn follow_lines(row: &graft_proto::pb::Mirror) -> Vec<FollowLine> {
         .collect()
 }
 
-impl<A, C> Spawner<C> for FollowSpawner<A>
+impl<A, G, C> Spawner<C> for FollowSpawner<A, G>
 where
     A: AdminApi + ObjectApi + RepoApi + Send + Sync + 'static,
+    G: Forges,
     C: Control,
 {
     fn spawn(&self, task: TaskCtx<C>) {
         let api = self.api.clone();
         let cx = self.cx;
+        let exports = self.exports.clone();
+        let forges = self.forges.clone();
         tokio::spawn(async move {
             let db = match MirrorDb::open(&task.dir.join(DB_FILE)) {
                 Ok(db) => db,
@@ -82,6 +149,7 @@ where
             };
             let lines = follow_lines(&task.row);
             let first = lines.first().map(|l| l.line.clone());
+            let base = lines.first().cloned();
             let config = FollowConfig {
                 repo: task.row.repo.clone(),
                 lines,
@@ -91,6 +159,24 @@ where
                 tags: None,
             };
             let mirror = Mirror::new(task.dir.join(GIT_DIR), task.row.upstream.clone());
+            // Batch cuts need a forge (its PRs) and a followed base.
+            let forge = if task.config.claim_requests && base.is_some() {
+                let credential = LeaseCredential::new(
+                    task.control.clone(),
+                    &task.row.repo,
+                    &task.row.upstream,
+                    task.epoch,
+                );
+                match forges.forge(&task.row.upstream, credential) {
+                    Some(Ok(f)) => Some(f),
+                    Some(Err(_)) => return task.broken("the forge client could not be built"),
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let batch_follow = config.clone();
+            let batch_mirror = mirror.clone();
             let mut follower = Follower::new(&*api, cx(&task.row.repo), &db, mirror, config)
                 .with_lease_epoch(task.epoch);
             if let Some(m) = &task.metrics {
@@ -101,7 +187,26 @@ where
                 db: &db,
                 first,
             };
-            task.run(&mut step).await;
+            match (&forge, base) {
+                (Some(forge), Some(base)) => {
+                    let runner = BatchRunner::new(
+                        &*api,
+                        cx(&task.row.repo),
+                        &db,
+                        batch_mirror,
+                        forge,
+                        base,
+                        batch_follow,
+                    )
+                    .with_lease_epoch(task.epoch);
+                    let runner = match &exports {
+                        Some(log) => runner.with_export_log(&**log),
+                        None => runner,
+                    };
+                    task.run_with(&mut step, forge, &runner).await;
+                }
+                _ => task.run(&mut step).await,
+            }
         });
     }
 }
