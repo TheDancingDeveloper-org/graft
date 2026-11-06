@@ -248,8 +248,142 @@ tokens.
 
 ## Running with compose
 
-Compose deployment instructions will be added below.
+The example stack keeps its metadata, objects, secrets, and node cache in
+named volumes. From the repository root, start the server and node with:
+
+```sh
+docker compose -f examples/compose/compose.yaml up -d
+docker compose -f examples/compose/compose.yaml ps
+```
+
+The server writes a one-time administrator token to the token file configured
+by `bootstrap_admin_token_file`. The example configuration uses
+`/var/lib/graft/secrets/admin.token` inside the server container. Read it
+without putting the token in a command argument or in shell history:
+
+```sh
+docker compose -f examples/compose/compose.yaml cp \
+  server:/var/lib/graft/secrets/admin.token ./admin.token
+chmod 600 ./admin.token
+```
+
+Store the copied file securely. It is a bearer credential; do not commit it,
+print it, or include it in a bug report. Log a client in by giving `graft`
+the endpoint and the file, for example:
+
+```sh
+graft login example --endpoint http://127.0.0.1:7878 \
+  --repo example --token-file ./admin.token
+```
+
+The bootstrap token administers the repository named `example` in the sample
+configuration. Repository creation is idempotent:
+
+```sh
+graft repo create example --endpoint http://127.0.0.1:7878 \
+  --token-file ./admin.token
+```
+
+A line is a ref to an existing changeset; creating a repository does not
+invent an initial changeset. After the repository has been seeded (for
+example by a mirror import), fork a line from an existing ref and clone it:
+
+```sh
+graft line create release --repo example --from main \
+  --endpoint http://127.0.0.1:7878 --token-file ./admin.token
+graft clone example ./example --line release \
+  --endpoint http://127.0.0.1:7878 --token-file ./admin.token
+```
+
+If the bootstrap token has already been consumed or rotated, mint an
+operator token with the server administration command and redirect its output
+to a mode-0600 file, as shown in [Tokens and scopes](#tokens-and-scopes).
+The token file is the only supported way to pass a bearer token to the CLI.
 
 ## Backup and restore
 
-Backup and restore instructions will be added below.
+### Backup
+
+Take the metadata snapshot before copying objects. The metadata operation is
+SQLite's online `VACUUM INTO`, so it is consistent while the server is
+running. Objects are immutable and the object tree is a superset of the
+objects referenced by a metadata snapshot; copying it second therefore gives
+the snapshot a complete object set without stopping the server.
+
+Create a local backup directory and run the server's administration command in
+a throwaway compose container. The `--objects` option performs the second,
+immutable-tree copy after writing `meta.db`:
+
+```sh
+mkdir -p backups/current
+docker compose -f examples/compose/compose.yaml run --rm \
+  --entrypoint graft-server \
+  -v "$PWD/backups/current:/backup" \
+  server --config /etc/example/server.toml admin backup /backup --objects
+```
+
+The result is `backups/current/meta.db` and
+`backups/current/objects/`. Copy both together to protected backup storage.
+Keep the signing key with the deployment: it is deliberately not included in
+the backup, and replacing it invalidates existing tokens. Do not back up
+token files as a substitute for the signing key.
+
+### Restore and fsck
+
+Restore into stopped volumes, and restore the metadata database before the
+object tree. The following uses a temporary container so the host does not
+need access to Docker's volume directory. Replace `BACKUP` with the absolute
+path to the backup directory:
+
+```sh
+docker compose -f examples/compose/compose.yaml down
+BACKUP=/absolute/path/to/backups/current
+docker compose -f examples/compose/compose.yaml run --rm \
+  --entrypoint sh \
+  -v "$BACKUP:/restore:ro" \
+  server -c 'rm -f /var/lib/graft/meta/meta.db &&
+    cp /restore/meta.db /var/lib/graft/meta/meta.db &&
+    rm -rf /var/lib/graft/objects &&
+    cp -a /restore/objects /var/lib/graft/objects'
+docker compose -f examples/compose/compose.yaml up -d
+```
+
+Run fsck only after the server has stopped again. It opens the same metadata
+and object stores as the server and refuses to run against a live database:
+
+```sh
+docker compose -f examples/compose/compose.yaml down
+docker compose -f examples/compose/compose.yaml run --rm \
+  --entrypoint graft-server server \
+  --config /etc/example/server.toml admin fsck example
+```
+
+A clean result ends with `0 problems`, for example:
+`fsck example: ... 0 problems`. Any reported problem is a failed restore;
+keep the original backup and investigate rather than starting the stack on
+that copy.
+
+### Upgrade and rollback
+
+Set `GRAFT_IMAGE` to the new image tag, then recreate the services:
+
+```sh
+GRAFT_IMAGE=ghcr.io/thedancingdeveloper-org/graft:<new-tag> \
+  docker compose -f examples/compose/compose.yaml up -d
+docker compose -f examples/compose/compose.yaml ps
+```
+
+On startup, the server applies pending SQLite schema migrations before it is
+ready. Migrations are append-only; a binary refuses a database newer than the
+version it understands. Verify readiness before using the service:
+
+```sh
+curl --fail http://127.0.0.1:9464/readyz
+```
+
+To roll back, point `GRAFT_IMAGE` at the previous tag and run the same
+`up -d` command. A rollback is supported only when the previous binary
+understands the resulting schema; restore the pre-upgrade metadata and object
+backup instead when the migration is not backward-compatible. Never restore
+only one of the two: the metadata snapshot and immutable object tree are a
+pair.
