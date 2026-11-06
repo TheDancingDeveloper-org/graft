@@ -13,7 +13,7 @@ use std::time::Duration;
 use base64::Engine;
 use graft_git::GitSha;
 
-use crate::credentials::SecretToken;
+use crate::credentials::{CredentialPipe, SecretToken};
 use tokio::process::Command;
 
 /// The longest any one git command may run.
@@ -109,6 +109,9 @@ pub struct Mirror {
     upstream: String,
     /// The HTTPS credential every network command carries (WI-2571).
     credential: Option<SecretToken>,
+    /// A credential helper on a pipe (`graft-mirror serve`, D41 §3.4): used
+    /// instead of `credential` when set.
+    pipe: Option<std::sync::Arc<CredentialPipe>>,
     /// Whether git ignores the user's and the system's config here (the
     /// import-pr scratch repository, WI-2716). See [`Mirror::scratch`].
     isolated: bool,
@@ -295,6 +298,7 @@ impl Mirror {
             dir: dir.into(),
             upstream: upstream.into(),
             credential: None,
+            pipe: None,
             isolated: false,
         }
     }
@@ -335,6 +339,13 @@ impl Mirror {
     pub fn with_credential(mut self, credential: Option<SecretToken>) -> Mirror {
         self.credential = credential;
         self
+    }
+
+    /// Hands git the credential through `pipe`'s helper on network commands
+    /// to an HTTPS upstream; `None` stops. A bearer given to a push still
+    /// wins.
+    pub fn set_credential_pipe(&mut self, pipe: Option<std::sync::Arc<CredentialPipe>>) {
+        self.pipe = pipe;
     }
 
     /// Whether the upstream is reached over HTTPS (where a token is needed).
@@ -770,6 +781,26 @@ impl Mirror {
     /// credential here, so follow, export and pr-batch agree (WI-2571).
     fn credential_env(&self, bearer: Option<&str>) -> Vec<(String, String)> {
         let mut env = Vec::new();
+        // The service refuses any upstream but https and ssh before a
+        // poll; plain http reaches here only in tests.
+        if bearer.is_none()
+            && let Some(pipe) = &self.pipe
+            && (self.is_https() || self.upstream.starts_with("http://"))
+        {
+            // The first, empty, helper clears any configured elsewhere.
+            env.push(("GIT_CONFIG_COUNT".to_owned(), "2".to_owned()));
+            env.push((
+                "GIT_CONFIG_KEY_0".to_owned(),
+                "credential.helper".to_owned(),
+            ));
+            env.push(("GIT_CONFIG_VALUE_0".to_owned(), String::new()));
+            env.push((
+                "GIT_CONFIG_KEY_1".to_owned(),
+                "credential.helper".to_owned(),
+            ));
+            env.push(("GIT_CONFIG_VALUE_1".to_owned(), pipe.helper()));
+            return env;
+        }
         if let Some(token) = bearer.or(self.credential.as_ref().map(SecretToken::expose))
             && self.is_https()
         {

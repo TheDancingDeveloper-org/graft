@@ -33,6 +33,8 @@
 //!   and holding follow's, export's and batch's per-line state.
 //! - [`git`]: the git CLI for `ls-remote`, `fetch` and ancestry.
 //! - [`server`]: the graft API over gRPC, including the admin service.
+//! - [`service`]: `graft-mirror serve`, the one mirror service that runs
+//!   every enabled repository mirror the server lists (D41).
 //!
 //! The library is generic over the API traits, so tests run it against an
 //! in-process engine.
@@ -66,6 +68,7 @@ pub mod land;
 pub mod pulls;
 pub mod reconcile;
 pub mod server;
+pub mod service;
 pub mod text;
 
 pub use db::MirrorDb;
@@ -266,6 +269,22 @@ pub async fn move_ref<A: RepoApi>(
     new: ChangesetId,
     kind: RefKind,
 ) -> Result<(), ApiError> {
+    move_ref_fenced(api, cx, repo, name, expected, new, kind, None).await
+}
+
+/// [`move_ref`] carrying the mirror authority lease `epoch` (D41 §3.6), so
+/// the server refuses the move once another process holds the lease.
+#[allow(clippy::too_many_arguments)]
+pub async fn move_ref_fenced<A: RepoApi>(
+    api: &A,
+    cx: &CallContext,
+    repo: &str,
+    name: &str,
+    expected: Option<ChangesetId>,
+    new: ChangesetId,
+    kind: RefKind,
+    lease_epoch: Option<u64>,
+) -> Result<(), ApiError> {
     if expected == Some(new) {
         return Ok(());
     }
@@ -277,7 +296,7 @@ pub async fn move_ref<A: RepoApi>(
             expected,
             new,
             kind,
-            lease_epoch: None,
+            lease_epoch,
         },
     )
     .await

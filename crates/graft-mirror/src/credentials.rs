@@ -60,6 +60,92 @@ impl fmt::Debug for SecretToken {
     }
 }
 
+/// One upstream credential handed to git through a credential helper that
+/// reads a named pipe (D41 §3.4). The secret is never in a URL, argv, the
+/// environment or a file: the pipe lives in a private (0700) temporary
+/// directory, and a writer task answers each `get` the helper makes with
+/// the credential from memory. Dropping the pipe stops the writer and
+/// removes the directory, so the credential lives for one poll.
+pub struct CredentialPipe {
+    dir: tempfile::TempDir,
+    writer: tokio::task::JoinHandle<()>,
+}
+
+impl fmt::Debug for CredentialPipe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CredentialPipe(<redacted>)")
+    }
+}
+
+impl CredentialPipe {
+    /// The user name git sends with a token (GitHub's convention).
+    pub const USERNAME: &'static str = "x-access-token";
+
+    /// Opens a pipe serving `token` to git's credential helper.
+    pub async fn open(token: SecretToken) -> Result<CredentialPipe, MirrorError> {
+        let dir = tempfile::Builder::new()
+            .prefix("graft-mirror-cred-")
+            .tempdir()
+            .map_err(|e| MirrorError::Config(format!("credential pipe: {e}")))?;
+        let path = dir.path().join("pipe");
+        let made = tokio::process::Command::new("mkfifo")
+            .arg("-m")
+            .arg("600")
+            .arg(&path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map_err(|e| MirrorError::Config(format!("credential pipe: cannot run mkfifo: {e}")))?;
+        if !made.success() {
+            return Err(MirrorError::Config(
+                "credential pipe: mkfifo failed".to_owned(),
+            ));
+        }
+        let writer = tokio::spawn(serve_pipe(path, token));
+        Ok(CredentialPipe { dir, writer })
+    }
+
+    /// The `credential.helper` value: answers `get` from the pipe, and
+    /// ignores `store` and `erase`.
+    pub fn helper(&self) -> String {
+        format!(
+            "!f() {{ test \"$1\" = get && cat '{}'; }}; f",
+            self.dir.path().join("pipe").display()
+        )
+    }
+}
+
+impl Drop for CredentialPipe {
+    fn drop(&mut self) {
+        self.writer.abort();
+    }
+}
+
+/// Writes the credential to each reader that opens the pipe, until aborted.
+async fn serve_pipe(path: std::path::PathBuf, token: SecretToken) {
+    use tokio::io::AsyncWriteExt;
+    let body = format!(
+        "username={}\npassword={}\n",
+        CredentialPipe::USERNAME,
+        token.expose()
+    );
+    loop {
+        // Opening the write end fails (ENXIO) until a reader has the pipe
+        // open; poll for one. Each helper run is one reader.
+        match tokio::net::unix::pipe::OpenOptions::new().open_sender(&path) {
+            Ok(mut tx) => {
+                let _ = tx.write_all(body.as_bytes()).await;
+                drop(tx);
+                // Let the reader see end of file before the next open.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+}
+
 /// Where the mirror's GitHub credential comes from.
 pub trait CredentialProvider: Send + Sync {
     /// A token that is valid now, minted or read as the provider needs.
@@ -296,5 +382,48 @@ mod tests {
             .build()
             .unwrap()
             .block_on(f)
+    }
+
+    #[tokio::test]
+    async fn the_pipe_hands_git_the_credential_without_env_or_argv_holding_it() {
+        let secret = "ghp_pipeSECRET123";
+        let pipe = CredentialPipe::open(SecretToken::new(secret.to_owned()).unwrap())
+            .await
+            .expect("pipe");
+        let helper = pipe.helper();
+        assert!(!helper.contains(secret));
+        assert!(!format!("{pipe:?}").contains(secret));
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.args(["credential", "fill"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", "credential.helper")
+            .env("GIT_CONFIG_VALUE_0", "")
+            .env("GIT_CONFIG_KEY_1", "credential.helper")
+            .env("GIT_CONFIG_VALUE_1", &helper)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        // Twice: each git command asks again, and gets it again.
+        for _ in 0..2 {
+            let mut child = cmd.spawn().expect("git runs");
+            {
+                use tokio::io::AsyncWriteExt;
+                let mut stdin = child.stdin.take().unwrap();
+                stdin
+                    .write_all(b"protocol=https\nhost=github.com\n\n")
+                    .await
+                    .unwrap();
+            }
+            let out = child.wait_with_output().await.unwrap();
+            assert!(out.status.success());
+            let text = String::from_utf8(out.stdout).unwrap();
+            assert!(text.contains(&format!("password={secret}")), "{text}");
+            assert!(text.contains("username=x-access-token"));
+        }
+        let dir = pipe.dir.path().to_owned();
+        drop(pipe);
+        assert!(!dir.exists(), "the pipe's directory is removed with it");
     }
 }
