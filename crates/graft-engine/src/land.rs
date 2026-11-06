@@ -1092,6 +1092,23 @@ mod tests {
         assert_eq!(bytes, want);
     }
 
+    /// The principal kind byte of a stored attestation is durable; the
+    /// `mirror` kind (D41) is 4.
+    #[test]
+    fn attestation_kind_bytes_are_frozen() {
+        for (kind, byte) in [
+            (PrincipalKind::Human, 0),
+            (PrincipalKind::Agent, 1),
+            (PrincipalKind::Ci, 2),
+            (PrincipalKind::Service, 3),
+            (PrincipalKind::Mirror, 4),
+        ] {
+            let bytes = encode_attestation(true, kind, 0, "u", "a");
+            assert_eq!(bytes[2], byte, "{kind:?}");
+            assert_eq!(decode_attestation(&bytes).map(|a| a.kind), Some(kind));
+        }
+    }
+
     #[test]
     fn attestations_round_trip() {
         let bytes = encode_attestation(false, PrincipalKind::Ci, 5, "https://ci/1", "bot");

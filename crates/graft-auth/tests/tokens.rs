@@ -42,10 +42,27 @@ fn service_claims() -> Claims {
     }
 }
 
+/// The mirror service's token (D41): its own kind, holding only the mirror
+/// permission set.
+fn mirror_claims() -> Claims {
+    Claims {
+        principal: Principal {
+            subject: "graft-mirror".into(),
+            kind: PrincipalKind::Mirror,
+            session: None,
+            work_item: None,
+            scopes: vec!["repo:*:mirror".into()],
+        },
+        exp: NOW + 86_400,
+        jti: "tok_0003".into(),
+    }
+}
+
 /// Frozen encodings. A change here is a change to a durable format and needs
 /// a migration and an operator decision (AGENTS.md rule 1).
 const GOLDEN_PUBLIC_KEY: &str = "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12";
 const GOLDEN_AGENT: &str = "v4.public.eyJzdWIiOiJzZXNfMDFNNUhCS0FYS0UwUzg1TjBQQjNERFlYM1YiLCJraW5kIjoiYWdlbnQiLCJzZXNzaW9uIjoic2VzXzAxTTVIQktBWEtFMFM4NU4wUEIzRERZWDNWIiwid29ya19pdGVtIjoiV0ktMjE4NSIsInNjb3BlcyI6WyJyZXBvOmdyYWZ0OnJlYWQiLCJyZXBvOmdyYWZ0OmxhbmQ6bWFpbiJdLCJleHAiOjE4MDAwMDM2MDAsImp0aSI6InRva18wMDAxIn3JOrYoercTlsW8stBlkG7EgWuCTIKn71w5go_QPqcR8XP7UgWte95yDaN7S2rNUMPZVF40mrITztkUuokvuvMA";
+const GOLDEN_MIRROR: &str = "v4.public.eyJzdWIiOiJncmFmdC1taXJyb3IiLCJraW5kIjoibWlycm9yIiwic2NvcGVzIjpbInJlcG86KjptaXJyb3IiXSwiZXhwIjoxODAwMDg2NDAwLCJqdGkiOiJ0b2tfMDAwMyJ9W7YZstguMbxGHNKZXdwnTzYhS02EMWHzKg3KUh5bvV0bSYUuDQEbm3-QL_krnhnvhNDsHwCBfLXN1gyI8H6XDA";
 const GOLDEN_SERVICE: &str = "v4.public.eyJzdWIiOiJub2RlLWIiLCJraW5kIjoic2VydmljZSIsInNjb3BlcyI6WyJvYmplY3RzOnJlYWQiXSwiZXhwIjoxODAwMDg2NDAwLCJqdGkiOiJ0b2tfMDAwMiJ9ygda27ZC4p6XjX8fvAkSyCV2oUnduRpFpweTvBEgmph0E_SiIV_6EifhfmMQZwR7Wu_WakcEPy2en2XoUGudDg";
 
 fn hex(b: &[u8]) -> String {
@@ -60,6 +77,8 @@ fn golden_tokens() {
     assert_eq!(agent.expose(), GOLDEN_AGENT);
     let service = mint(&key, &service_claims()).unwrap();
     assert_eq!(service.expose(), GOLDEN_SERVICE);
+    let mirror = mint(&key, &mirror_claims()).unwrap();
+    assert_eq!(mirror.expose(), GOLDEN_MIRROR);
 
     // The goldens verify, and decode to the claims they were minted from.
     let vk = key.verifying_key();
@@ -79,6 +98,14 @@ fn golden_tokens() {
     )
     .unwrap();
     assert_eq!(got, service_claims());
+    let got = verify(
+        &vk,
+        &Token::from_encoded(GOLDEN_MIRROR.into()),
+        NOW,
+        &NoDenylist,
+    )
+    .unwrap();
+    assert_eq!(got, mirror_claims());
 }
 
 #[test]
