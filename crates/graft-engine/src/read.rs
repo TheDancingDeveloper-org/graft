@@ -15,7 +15,7 @@ use graft_proto::types::{
 use graft_proto::{ApiError, CallContext};
 use graft_store::{MetaStore, ObjectStore, RepoId};
 
-use crate::access::{Need, require};
+use crate::access::Need;
 use crate::source::Trees;
 use crate::write::draft_state;
 use crate::{Engine, errors};
@@ -67,7 +67,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: PathAt,
     ) -> Result<EntryView, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         let trees = Trees::new(&*self.objects, repo);
         let e = self.entry_at(repo, &trees, req.at, &req.path).await?;
@@ -79,7 +79,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: PathAt,
     ) -> Result<FileContent, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         let trees = Trees::new(&*self.objects, repo);
         let e = self.entry_at(repo, &trees, req.at, &req.path).await?;
@@ -105,7 +105,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: ListTree,
     ) -> Result<Entries, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         let trees = Trees::new(&*self.objects, repo);
         let dir = match &req.path {
@@ -158,7 +158,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: GetChangesets,
     ) -> Result<Changesets, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         if req.ids.len() > self.config.max_ids as usize {
             return Err(errors::limit("ids", self.config.max_ids.into()));

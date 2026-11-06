@@ -10,14 +10,18 @@
 //! `Attest`; `drafts` grants `Drafts` (the draft overlap query, D24) and
 //! nothing else, and only it and `admin` grant `Drafts`. A `*` repository
 //! (`repo:*:<perm>[:<arg>]`) holds on every repository. `repo:*:mirror`
-//! grants `Mirror`, and `Read` and `Objects` on the repositories it names, to
-//! the `mirror` principal kind only: the service polls and imports what it
-//! follows. `admin` does not grant `Mirror`; `repos:admin` is checked by
+//! grants `Mirror` to the `mirror` principal kind only, and `admin` does not
+//! grant it. The same set reads (`Read`, `Objects`) only a repository bound
+//! to a mirror, which needs a store read: [`Engine::require_read`] checks
+//! that, and every read goes through it. `repos:admin` is checked by
 //! [`holds_repos_admin`] (D41). This is the engine's minimal reading of the
 //! text form until `graft_auth::authorize` (G1.9) replaces it.
 
 use graft_model::{Change, RepoPath};
 use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
+use graft_store::{MetaStore, MirrorQuery, ObjectStore};
+
+use crate::{Engine, errors};
 
 /// What an operation needs.
 #[derive(Clone, Copy, Debug)]
@@ -39,8 +43,7 @@ pub(crate) enum Need<'a> {
     Drafts,
     /// Administer the repository.
     Admin,
-    /// Act as the mirror service (`repo:*:mirror`, `mirror` kind only). The
-    /// same scope on that kind also grants `Read` and `Objects`.
+    /// Act as the mirror service (`repo:*:mirror`, `mirror` kind only).
     Mirror,
 }
 
@@ -103,17 +106,52 @@ pub(crate) fn holds_repos_admin(cx: &CallContext) -> bool {
 }
 
 fn granted(principal: &Principal, repo: &str, need: Need<'_>) -> bool {
-    let mirror_kind = principal.kind == PrincipalKind::Mirror;
-    if matches!(need, Need::Mirror) && !mirror_kind {
+    if matches!(need, Need::Mirror) && principal.kind != PrincipalKind::Mirror {
         return false;
     }
-    // The mirror service reads the repositories its set names, to poll and
-    // import them (D41); on any other kind the set grants nothing.
-    let mirror_reads = mirror_kind && matches!(need, Need::Objects | Need::Read);
-    principal
-        .scopes
-        .iter()
-        .any(|s| grants(s, repo, need) || (mirror_reads && grants(s, repo, Need::Mirror)))
+    principal.scopes.iter().any(|s| grants(s, repo, need))
+}
+
+impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
+    /// Fails with `PermissionDenied` unless the caller may read `repo`
+    /// (`need` is `Read` or `Objects`). Beyond the scopes, the mirror
+    /// service reads a repository only while it is bound to a mirror (has a
+    /// mirror row), to poll and import it (D41): one indexed read, and only
+    /// for the mirror kind. An unknown repository is refused the same way,
+    /// so the caller learns nothing about it.
+    pub(crate) async fn require_read(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+        need: Need<'_>,
+    ) -> Result<(), ApiError> {
+        debug_assert!(matches!(need, Need::Read | Need::Objects));
+        let denied = match require(cx, repo, need) {
+            Ok(()) => return Ok(()),
+            Err(denied) => denied,
+        };
+        if !is_mirror(cx, repo) {
+            return Err(denied);
+        }
+        let Some(id) = self.meta.repo(repo).await.map_err(errors::store)? else {
+            return Err(denied);
+        };
+        let bound = self
+            .meta
+            .list_mirrors(MirrorQuery {
+                repo: Some(id),
+                enabled: None,
+                after: None,
+                limit: 1,
+            })
+            .await
+            .map_err(errors::store)?;
+        if bound.is_empty() {
+            Err(denied)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 fn grants(scope: &str, repo: &str, need: Need<'_>) -> bool {
@@ -282,7 +320,10 @@ mod tests {
         };
         let mirror = principal(PrincipalKind::Mirror, "repo:*:mirror");
         assert!(granted(&mirror, "r", Need::Mirror));
+        // Its reads depend on the repository's binding: `require_read`.
         for need in [
+            Need::Read,
+            Need::Objects,
             Need::Write(None),
             Need::Write(Some(&path("a"))),
             Need::Workspace,
@@ -305,42 +346,5 @@ mod tests {
             Need::Mirror
         ));
         assert!(!grants("repo:*:admin", "r", Need::Mirror));
-    }
-
-    /// The mirror service polls and imports the repositories its set names
-    /// (D41): it reads those, and only those, and only as the mirror kind.
-    #[test]
-    fn the_mirror_kind_reads_the_repositories_its_set_names() {
-        let principal = |kind, scope: &str| Principal {
-            subject: "m".into(),
-            kind,
-            session: None,
-            work_item: None,
-            scopes: vec![scope.into()],
-        };
-        let every = principal(PrincipalKind::Mirror, "repo:*:mirror");
-        let bound = principal(PrincipalKind::Mirror, "repo:r:mirror");
-        for need in [Need::Read, Need::Objects] {
-            assert!(granted(&every, "r", need), "{need:?}");
-            assert!(granted(&every, "s", need), "{need:?}");
-            assert!(granted(&bound, "r", need), "{need:?}");
-            // Not a repository the set does not name.
-            assert!(!granted(&bound, "s", need), "{need:?}");
-            // Nor the set on any other kind.
-            for kind in [
-                PrincipalKind::Human,
-                PrincipalKind::Agent,
-                PrincipalKind::Ci,
-                PrincipalKind::Service,
-            ] {
-                assert!(
-                    !granted(&principal(kind, "repo:*:mirror"), "r", need),
-                    "{kind:?} {need:?}"
-                );
-            }
-        }
-        // A malformed set grants nothing.
-        let argued = principal(PrincipalKind::Mirror, "repo:*:mirror:x");
-        assert!(!granted(&argued, "r", Need::Read));
     }
 }

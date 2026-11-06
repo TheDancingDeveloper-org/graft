@@ -174,7 +174,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         from: &MergedFrom,
     ) -> Result<MergeSource, ApiError> {
         check_ref_name(&from.line)?;
-        require(cx, repo_name, Need::Read)?;
+        self.require_read(cx, repo_name, Need::Read).await?;
         if from.line == dst {
             return Err(errors::invalid(None, "merge-same-line"));
         }
@@ -583,7 +583,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: Pair,
     ) -> Result<MergeBaseResult, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         self.changeset(repo, req.a).await?;
         self.changeset(repo, req.b).await?;
@@ -606,7 +606,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     ) -> Result<LineMergeOutcome, ApiError> {
         check_ref_name(&req.src)?;
         check_ref_name(&req.dst)?;
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         require(cx, &req.repo, Need::Land(&req.dst))?;
         if req.src == req.dst {
             return Err(errors::invalid(None, "merge-same-line"));
@@ -765,7 +765,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         if let Some(src) = &req.src {
             check_ref_name(src)?;
         }
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         let tip = self.line_ref(repo, &req.dst).await?.target;
         let tip_pos = self

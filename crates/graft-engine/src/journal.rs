@@ -36,7 +36,7 @@ use graft_proto::types::{JournalEntry, JournalPage, Watch};
 use graft_proto::{ApiError, CallContext};
 use graft_store::{MetaStore, ObjectStore, Write};
 
-use crate::access::{Need, require};
+use crate::access::Need;
 use crate::{Engine, errors};
 
 /// Kind of the entry written with each new changeset.
@@ -374,7 +374,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: Watch,
     ) -> Result<JournalPage, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         let from = req.from_lsn.max(1);
         let limit = self.page_size(req.limit);

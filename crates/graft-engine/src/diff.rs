@@ -19,7 +19,7 @@ use imara_diff::{
     Algorithm, InternedInput, Interner, Token, UnifiedDiffConfig, UnifiedDiffPrinter,
 };
 
-use crate::access::{Need, require};
+use crate::access::Need;
 use crate::source::{Trees, model_root};
 use crate::{Engine, errors};
 
@@ -153,7 +153,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: Diff,
     ) -> Result<DiffResult, ApiError> {
-        require(cx, &req.repo, Need::Read)?;
+        self.require_read(cx, &req.repo, Need::Read).await?;
         let repo = self.repo_id(&req.repo).await?;
         if req.paths.len() > self.config.max_diff_paths as usize {
             return Err(errors::limit(
