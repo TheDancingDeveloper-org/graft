@@ -109,7 +109,7 @@ pub(crate) enum Command {
     Line(LineArgs),
     /// Create or list immutable tags
     Tag(TagArgs),
-    /// Create repositories
+    /// Create repositories and manage their git mirrors and batch PRs
     Repo(RepoArgs),
     /// List, squash, reorder, split or drop the drafts between the base and the head
     Stack(StackArgs),
@@ -629,6 +629,167 @@ pub(crate) enum RepoAction {
     Create {
         /// The repository's name, or a graft URL naming it
         name: String,
+    },
+    /// Bind, change, credential, remove, purge or show a repository's git mirrors
+    Mirror {
+        /// What to do
+        #[command(subcommand)]
+        action: MirrorAction,
+    },
+    /// Cut, show or list the batch PRs of a line
+    Batch {
+        /// What to do
+        #[command(subcommand)]
+        action: BatchAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MirrorAction {
+    /// Bind a repository to an upstream; needs mirror:bind (and mirror:export for export lines), operator-only grants
+    Add {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The upstream URL (https:// or ssh://), on the server's allowlist
+        upstream: String,
+        /// Follow an upstream branch into a line, as BRANCH=LINE; repeatable
+        #[arg(long, value_name = "BRANCH=LINE")]
+        follow: Vec<String>,
+        /// Export a line to an upstream branch, as BRANCH=LINE; repeatable
+        #[arg(long, value_name = "BRANCH=LINE")]
+        export: Vec<String>,
+        /// Poll interval in seconds (default: the server's)
+        #[arg(long, value_name = "SECONDS")]
+        interval: Option<u32>,
+        /// Add the mirror disabled
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// Enable, disable or change a mirror; needs the repository's admin (mirror:export to change export lines)
+    Set {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The mirror's upstream URL
+        upstream: String,
+        /// Enable the mirror
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        /// Disable the mirror
+        #[arg(long)]
+        disable: bool,
+        /// Replace the lines: follow BRANCH=LINE; repeatable
+        #[arg(long, value_name = "BRANCH=LINE")]
+        follow: Vec<String>,
+        /// Replace the lines: export BRANCH=LINE; repeatable
+        #[arg(long, value_name = "BRANCH=LINE")]
+        export: Vec<String>,
+        /// Poll interval in seconds
+        #[arg(long, value_name = "SECONDS")]
+        interval: Option<u32>,
+    },
+    /// Seal a credential into a mirror; needs mirror:bind and read access. Read from a file or standard input, never an argument
+    Credential {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The mirror's upstream URL
+        upstream: String,
+        /// File holding the credential
+        #[arg(
+            long,
+            value_name = "PATH",
+            required_unless_present = "stdin",
+            conflicts_with = "stdin"
+        )]
+        from_file: Option<PathBuf>,
+        /// Read the credential from standard input
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Remove a mirror; its lines stay closed to lands unless --clear-followed. Needs mirror:bind
+    Remove {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The mirror's upstream URL
+        upstream: String,
+        /// Also clear the followed-line markers, opening the lines to lands
+        #[arg(long)]
+        clear_followed: bool,
+    },
+    /// Request deletion of a removed or disabled mirror's local data; needs mirror:bind
+    Purge {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The mirror's upstream URL
+        upstream: String,
+        /// Idempotency key: pass the one a failed attempt printed to retry it
+        #[arg(long, value_name = "ID")]
+        request_id: Option<String>,
+    },
+    /// Show mirrors and their poll status; never a credential
+    Status {
+        /// One repository (default: every repository you can read)
+        #[arg(value_name = "REPO")]
+        name: Option<String>,
+        /// Only this upstream of the repository
+        #[arg(long, value_name = "URL", requires = "name")]
+        upstream: Option<String>,
+        /// Most mirrors to show
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        /// Resume token from a previous page
+        #[arg(long, value_name = "TOKEN")]
+        cursor: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum BatchAction {
+    /// Request a batch PR of a line's lands; needs the repository's admin. A retry with the same --request-id returns the same request
+    Cut {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The line to batch
+        #[arg(long, default_value = "main")]
+        line: String,
+        /// Full id of the changeset the batch starts after
+        #[arg(long, value_name = "CHANGESET")]
+        base: Option<String>,
+        /// Full id of a changeset to leave out; repeatable
+        #[arg(long, value_name = "CHANGESET")]
+        exclude: Vec<String>,
+        /// Idempotency key: pass the one a failed attempt printed to retry it
+        #[arg(long, value_name = "ID")]
+        request_id: Option<String>,
+    },
+    /// Show a line's open batch
+    Status {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The line
+        #[arg(long, default_value = "main")]
+        line: String,
+    },
+    /// List a repository's batches
+    List {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// Only this line's batches
+        #[arg(long)]
+        line: Option<String>,
+        /// Most batches to show
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        /// Resume token from a previous page
+        #[arg(long, value_name = "TOKEN")]
+        cursor: Option<String>,
     },
 }
 

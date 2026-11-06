@@ -480,6 +480,30 @@ async fn every_registered_tool_result_fits_and_an_oversized_status_is_typed() {
         ),
         ("graft_repo_create", json!({"repo": "new"})),
         (
+            "graft_mirror_add",
+            json!({"repo": "r", "upstream": "https://github.com/o/r.git", "lines": []}),
+        ),
+        (
+            "graft_mirror_set",
+            json!({"repo": "r", "upstream": "https://github.com/o/r.git"}),
+        ),
+        (
+            "graft_mirror_status",
+            json!({"repo": "r", "upstream": "https://github.com/o/r.git"}),
+        ),
+        ("graft_mirror_list", json!({"repo": "*"})),
+        (
+            "graft_mirror_remove",
+            json!({"repo": "r", "upstream": "https://github.com/o/r.git"}),
+        ),
+        (
+            "graft_mirror_purge",
+            json!({"repo": "r", "upstream": "https://github.com/o/r.git"}),
+        ),
+        ("graft_batch_cut", json!({"repo": "r", "line": "main"})),
+        ("graft_batch_status", json!({"repo": "r", "line": "main"})),
+        ("graft_batch_list", json!({"repo": "r"})),
+        (
             "graft_workspace",
             json!({"repo": "r", "action": "get", "name": "w"}),
         ),

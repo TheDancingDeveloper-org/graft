@@ -42,6 +42,17 @@ Generated from `graft --help`. Hidden commands are left out.
 - [`graft tag list`](#tag-list)
 - [`graft repo`](#repo)
 - [`graft repo create`](#repo-create)
+- [`graft repo mirror`](#repo-mirror)
+- [`graft repo mirror add`](#repo-mirror-add)
+- [`graft repo mirror set`](#repo-mirror-set)
+- [`graft repo mirror credential`](#repo-mirror-credential)
+- [`graft repo mirror remove`](#repo-mirror-remove)
+- [`graft repo mirror purge`](#repo-mirror-purge)
+- [`graft repo mirror status`](#repo-mirror-status)
+- [`graft repo batch`](#repo-batch)
+- [`graft repo batch cut`](#repo-batch-cut)
+- [`graft repo batch status`](#repo-batch-status)
+- [`graft repo batch list`](#repo-batch-list)
 - [`graft stack`](#stack)
 - [`graft stack list`](#stack-list)
 - [`graft stack squash`](#stack-squash)
@@ -867,12 +878,14 @@ Options:
 ## `graft repo`
 
 ```text
-Create repositories
+Create repositories and manage their git mirrors and batch PRs
 
 Usage: graft repo [OPTIONS] <COMMAND>
 
 Commands:
   create  Create a repository; needs repos:admin (the creator then administers it) or the repository's admin
+  mirror  Bind, change, credential, remove, purge or show a repository's git mirrors
+  batch   Cut, show or list the batch PRs of a line
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -898,6 +911,264 @@ Arguments:
 Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo mirror`
+
+```text
+Bind, change, credential, remove, purge or show a repository's git mirrors
+
+Usage: graft repo mirror [OPTIONS] <COMMAND>
+
+Commands:
+  add         Bind a repository to an upstream; needs mirror:bind (and mirror:export for export lines), operator-only grants
+  set         Enable, disable or change a mirror; needs the repository's admin (mirror:export to change export lines)
+  credential  Seal a credential into a mirror; needs mirror:bind and read access. Read from a file or standard input, never an argument
+  remove      Remove a mirror; its lines stay closed to lands unless --clear-followed. Needs mirror:bind
+  purge       Request deletion of a removed or disabled mirror's local data; needs mirror:bind
+  status      Show mirrors and their poll status; never a credential
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo mirror add`
+
+```text
+Bind a repository to an upstream; needs mirror:bind (and mirror:export for export lines), operator-only grants
+
+Usage: graft repo mirror add [OPTIONS] <REPO> <UPSTREAM>
+
+Arguments:
+  <REPO>      The graft repository
+  <UPSTREAM>  The upstream URL (https:// or ssh://), on the server's allowlist
+
+Options:
+      --follow <BRANCH=LINE>  Follow an upstream branch into a line, as BRANCH=LINE; repeatable
+      --json                  Print stable JSON; its schema is published with the release
+      --endpoint <URL>        Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --export <BRANCH=LINE>  Export a line to an upstream branch, as BRANCH=LINE; repeatable
+      --interval <SECONDS>    Poll interval in seconds (default: the server's)
+      --repo <NAME>           Repository name (default: the working copy's)
+      --disabled              Add the mirror disabled
+      --token-file <PATH>     File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>         Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>       Run as if started in this directory, like `git -C`
+  -h, --help                  Print help
+```
+
+## `graft repo mirror set`
+
+```text
+Enable, disable or change a mirror; needs the repository's admin (mirror:export to change export lines)
+
+Usage: graft repo mirror set [OPTIONS] <REPO> <UPSTREAM>
+
+Arguments:
+  <REPO>      The graft repository
+  <UPSTREAM>  The mirror's upstream URL
+
+Options:
+      --enable                Enable the mirror
+      --json                  Print stable JSON; its schema is published with the release
+      --disable               Disable the mirror
+      --endpoint <URL>        Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --follow <BRANCH=LINE>  Replace the lines: follow BRANCH=LINE; repeatable
+      --repo <NAME>           Repository name (default: the working copy's)
+      --export <BRANCH=LINE>  Replace the lines: export BRANCH=LINE; repeatable
+      --token-file <PATH>     File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --interval <SECONDS>    Poll interval in seconds
+      --server <NAME>         Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>       Run as if started in this directory, like `git -C`
+  -h, --help                  Print help
+```
+
+## `graft repo mirror credential`
+
+```text
+Seal a credential into a mirror; needs mirror:bind and read access. Read from a file or standard input, never an argument
+
+Usage: graft repo mirror credential [OPTIONS] <REPO> <UPSTREAM>
+
+Arguments:
+  <REPO>      The graft repository
+  <UPSTREAM>  The mirror's upstream URL
+
+Options:
+      --from-file <PATH>   File holding the credential
+      --json               Print stable JSON; its schema is published with the release
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --stdin              Read the credential from standard input
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo mirror remove`
+
+```text
+Remove a mirror; its lines stay closed to lands unless --clear-followed. Needs mirror:bind
+
+Usage: graft repo mirror remove [OPTIONS] <REPO> <UPSTREAM>
+
+Arguments:
+  <REPO>      The graft repository
+  <UPSTREAM>  The mirror's upstream URL
+
+Options:
+      --clear-followed     Also clear the followed-line markers, opening the lines to lands
+      --json               Print stable JSON; its schema is published with the release
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo mirror purge`
+
+```text
+Request deletion of a removed or disabled mirror's local data; needs mirror:bind
+
+Usage: graft repo mirror purge [OPTIONS] <REPO> <UPSTREAM>
+
+Arguments:
+  <REPO>      The graft repository
+  <UPSTREAM>  The mirror's upstream URL
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --request-id <ID>    Idempotency key: pass the one a failed attempt printed to retry it
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo mirror status`
+
+```text
+Show mirrors and their poll status; never a credential
+
+Usage: graft repo mirror status [OPTIONS] [REPO]
+
+Arguments:
+  [REPO]  One repository (default: every repository you can read)
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --upstream <URL>     Only this upstream of the repository
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --limit <LIMIT>      Most mirrors to show [default: 20]
+      --cursor <TOKEN>     Resume token from a previous page
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo batch`
+
+```text
+Cut, show or list the batch PRs of a line
+
+Usage: graft repo batch [OPTIONS] <COMMAND>
+
+Commands:
+  cut     Request a batch PR of a line's lands; needs the repository's admin. A retry with the same --request-id returns the same request
+  status  Show a line's open batch
+  list    List a repository's batches
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo batch cut`
+
+```text
+Request a batch PR of a line's lands; needs the repository's admin. A retry with the same --request-id returns the same request
+
+Usage: graft repo batch cut [OPTIONS] <REPO>
+
+Arguments:
+  <REPO>  The graft repository
+
+Options:
+      --json                 Print stable JSON; its schema is published with the release
+      --line <LINE>          The line to batch [default: main]
+      --base <CHANGESET>     Full id of the changeset the batch starts after
+      --endpoint <URL>       Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --exclude <CHANGESET>  Full id of a changeset to leave out; repeatable
+      --repo <NAME>          Repository name (default: the working copy's)
+      --request-id <ID>      Idempotency key: pass the one a failed attempt printed to retry it
+      --token-file <PATH>    File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>        Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>      Run as if started in this directory, like `git -C`
+  -h, --help                 Print help
+```
+
+## `graft repo batch status`
+
+```text
+Show a line's open batch
+
+Usage: graft repo batch status [OPTIONS] <REPO>
+
+Arguments:
+  <REPO>  The graft repository
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --line <LINE>        The line [default: main]
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo batch list`
+
+```text
+List a repository's batches
+
+Usage: graft repo batch list [OPTIONS] <REPO>
+
+Arguments:
+  <REPO>  The graft repository
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --line <LINE>        Only this line's batches
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --limit <LIMIT>      Most batches to show [default: 20]
+      --cursor <TOKEN>     Resume token from a previous page
       --repo <NAME>        Repository name (default: the working copy's)
       --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument

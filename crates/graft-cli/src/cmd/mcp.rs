@@ -38,6 +38,7 @@ use crate::conn::{
 };
 use crate::error::Failure;
 use crate::identity;
+use crate::mirror_client::MirrorClient;
 use crate::render;
 
 /// Paths listed in a status or commit result before it says `truncated`.
@@ -68,6 +69,14 @@ pub(crate) fn run(g: &Global, args: &McpArgs) -> Result<(), Failure> {
             .with_repo_admin(Arc::new(Admin(Arc::clone(&remote))));
         if let Some(endpoint) = remote.endpoint() {
             server = server.with_endpoint(endpoint.to_string());
+        }
+        // The mirror tools need a server; without one they say so.
+        if local.is_none() {
+            let user = crate::config::load()?;
+            let settings = resolve_settings(g, wc.as_ref(), &user)?;
+            if let Ok(mirrors) = MirrorClient::connect(&settings.endpoint, settings.token).await {
+                server = server.with_mirror_admin(Arc::new(mirrors));
+            }
         }
         if let Some(wc) = wc {
             server = server.with_working_copy(Arc::new(Served {
