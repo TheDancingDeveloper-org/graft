@@ -517,3 +517,156 @@ fn version_7_adds_line_merges_to_a_version_6_database() {
     };
     assert!(block_on(store.commit(repo, txn)).is_err());
 }
+
+/// Every row of `table`, every column, in key order.
+fn rows_of(conn: &Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT * FROM {table}"))
+        .expect("prepare");
+    let n = stmt.column_count();
+    let mut rows: Vec<Vec<rusqlite::types::Value>> = stmt
+        .query_map([], |r| (0..n).map(|i| r.get(i)).collect())
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    rows.sort_by_key(|r| format!("{r:?}"));
+    rows
+}
+
+/// The mirror tables (versions 9 to 12) on a populated version 8 database:
+/// every existing row of every table survives, column for column, and still
+/// reads through the store; the new tables exist and are empty.
+#[test]
+fn a_populated_version_8_database_migrates_to_the_mirror_tables_intact() {
+    let dir = TempDir::new("mig-v8-full");
+    let cs = ChangesetId(ObjectId([7; 32]));
+    let h = |b: u8| format!("X'{}'", format!("{b:02x}").repeat(32));
+    let v8_tables: Vec<String>;
+    let before: Vec<(String, Vec<Vec<rusqlite::types::Value>>)>;
+    {
+        let mut conn = Connection::open(dir.db()).expect("open");
+        migrations::migrate_to(&mut conn, 8).expect("migrate to v8");
+        conn.execute_batch(&format!(
+            "INSERT INTO repos (id, name, gc_protection) VALUES (1, 'old', 1), (2, 'other', 0);
+             INSERT INTO changesets
+                 (repo, id, content, lsn, received_at, state, holder, superseded_by,
+                  pins, expires_at)
+                 VALUES (1, {c7}, X'636f6e74656e74', 1, 1000, 1, NULL, NULL, 1, NULL),
+                        (1, {c8}, X'6472616674', 2, 2000, 0, 'ws:a', NULL, 0, 9000),
+                        (2, {c9}, X'78', 1, 3000, 2, NULL, {c7}, 0, NULL);
+             INSERT INTO refs (repo, name, target, version, kind)
+                 VALUES (1, 'main', {c7}, 3, 0), (1, 'v1', {c7}, 1, 1),
+                        (1, 'graft.followed/main', {c7}, 1, 2), (2, 'main', {c9}, 1, 0);
+             INSERT INTO journal (repo, lsn, kind, body)
+                 VALUES (1, 1, 'ChangesetCreated', X'01'), (1, 2, 'RefMoved', X'0203'),
+                        (2, 1, 'ChangesetCreated', X'04');
+             INSERT INTO workspaces
+                 (repo, name, owner, session, line, base, head, lease_until, work_item)
+                 VALUES (1, 'a', 'alice', 's1', 'main', {c7}, {c8}, 5000, 'WI-1');
+             INSERT INTO derived (repo, kind, ver, key, value)
+                 VALUES (1, 'tree', 1, X'aa', X'bb');
+             INSERT INTO line_pos (repo, line, changeset, pos) VALUES (1, 'main', {c7}, 3);
+             INSERT INTO line_paths (repo, line, path, pos, changeset)
+                 VALUES (1, 'main', 'src/a.rs', 3, {c7});
+             INSERT INTO holders (repo, object, holder, expires)
+                 VALUES (1, {c8}, 'upload:9000:alice', 9000), (1, {c7}, 'line:main', NULL);
+             INSERT INTO uploads (repo, object, owner, expires) VALUES (1, {c8}, 'alice', 9000);
+             INSERT INTO doomed (repo, object, since, deleting) VALUES (1, {c9}, 100, 1);
+             INSERT INTO lands (repo, draft, line, landed) VALUES (1, {c8}, 'main', {c7});
+             INSERT INTO tombstones (repo, id, at, reason) VALUES (2, {c8}, 50, 'gc');
+             INSERT INTO line_forks (repo, line, parent, pos) VALUES (1, 'dev', 'main', 3);
+             INSERT INTO draft_paths (repo, line, path, workspace)
+                 VALUES (1, 'main', 'src/a.rs', 'a');
+             INSERT INTO line_merges (repo, dst, dst_pos, src, src_changeset, src_pos)
+                 VALUES (1, 'main', 4, 'dev', {c7}, 3);
+             INSERT INTO attestations
+                 (repo, lsn, seq, changeset, line, pos, kind, name, status, by, url)
+                 VALUES (1, 2, 0, {c7}, 'main', 3, 0, 'ci', 0, 'bot', 'https://ci/1'),
+                        (1, 2, 1, {c7}, NULL, NULL, 1, 'review', 1, NULL, '');
+             INSERT INTO land_checks (repo, line, pos, changeset, state, revert)
+                 VALUES (1, 'main', 3, {c7}, 1, NULL), (1, 'main', 4, {c8}, 3, {c9});
+             INSERT INTO review_queue (repo, line, lsn, pos, changeset)
+                 VALUES (1, 'main', 2, 3, {c7});",
+            c7 = h(7),
+            c8 = h(8),
+            c9 = h(9),
+        ))
+        .expect("seed");
+        v8_tables = tables(&conn);
+        before = v8_tables
+            .iter()
+            .map(|t| (t.clone(), rows_of(&conn, t)))
+            .collect();
+        // Every version 8 table holds at least one row.
+        for (t, rows) in &before {
+            assert!(!rows.is_empty(), "{t} is seeded");
+        }
+    }
+    let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
+    let conn = Connection::open(dir.db()).expect("inspect");
+    assert_eq!(migrations::version(&conn).expect("version"), SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 12);
+    assert_eq!(tables(&conn), TABLES);
+    for (t, rows) in &before {
+        assert_eq!(&rows_of(&conn, t), rows, "{t} survives intact");
+    }
+    let new: Vec<&&str> = TABLES
+        .iter()
+        .filter(|t| !v8_tables.iter().any(|o| o == *t))
+        .collect();
+    assert_eq!(
+        new,
+        [
+            &"mirror_leases",
+            &"mirror_line_slots",
+            &"mirror_requests",
+            &"repo_mirrors",
+            &"repo_owners"
+        ]
+    );
+    for t in new {
+        assert!(rows_of(&conn, t).is_empty(), "{t} starts empty");
+    }
+
+    // The old rows still read through the store, and the mirror reads are
+    // empty.
+    let repo = block_on(store.repo("old")).expect("repo").expect("exists");
+    let (content, record) = block_on(store.changeset(repo, cs))
+        .expect("read")
+        .expect("changeset");
+    assert_eq!(content, b"content");
+    assert_eq!(record.state, graft_store::RecordState::Landed);
+    let main = block_on(store.get_ref(repo, "main"))
+        .expect("ref")
+        .expect("main");
+    assert_eq!((main.target, main.version), (cs, 3));
+    assert_eq!(block_on(store.journal_tip(repo)).expect("tip"), Some(2));
+    assert_eq!(
+        block_on(store.line_pos(repo, "main", cs)).expect("pos"),
+        Some(3)
+    );
+    assert_eq!(block_on(store.repo_owner(repo)).expect("owner"), None);
+    assert_eq!(block_on(store.get_lease(repo)).expect("lease"), None);
+    assert!(
+        block_on(store.list_mirrors(graft_store::MirrorQuery {
+            repo: None,
+            enabled: None,
+            after: None,
+            limit: 10,
+        }))
+        .expect("mirrors")
+        .is_empty()
+    );
+    // New writes take the next journal position.
+    let txn = MetaTxn {
+        preconditions: vec![],
+        writes: vec![Write::Journal {
+            kind: "RefMoved".to_owned(),
+            body: vec![],
+        }],
+    };
+    assert_eq!(
+        block_on(store.commit(repo, txn)).expect("commit"),
+        TxnOutcome::Committed(vec![3])
+    );
+}
