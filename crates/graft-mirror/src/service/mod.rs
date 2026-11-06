@@ -25,6 +25,7 @@
 //! There are no check jobs and no worker pool here (D22, D35): the service
 //! schedules mirror polls and mirror requests only.
 
+pub mod batch_task;
 pub mod control;
 pub mod limits;
 pub mod metrics;

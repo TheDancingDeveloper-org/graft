@@ -1405,3 +1405,56 @@ Rejected:
   restart storm, the duplicate runtimes and the deploy-time onboarding stay.
 - Letting repository admins bind upstreams. Binding decides what the
   service fetches with its credential, an exfiltration route.
+
+## D42. A line's land scope may land a server-built revert of a change already on that line
+
+**Decided (operator, 2026-11-06, on WI-2636): `Revert` gains an optional
+`land = <line>`. With it set, the server builds the revert and lands it in
+the same call, and the call needs `read` and a named-repository
+`repo:<r>:land:<line>` (or `repo:<r>:admin`), not `write`.**
+
+Context: the #297 security review. The post-land checker reverts a bad land
+and lands the revert on the same line. Both `Revert` and `Land` check
+`write` on every path the reverted changeset touched, and the checker can't
+know those paths in advance, so it held repository-wide `write`. That also
+let it create any changeset, upload objects and create tags, while it runs
+beside untrusted landed code. The operator accepted the finding on
+2026-10-27.
+
+The rule:
+
+- `Revert` with `land = <line>` needs `read` and `land:<line>` on the named
+  repository. The reverted changeset must be the line's tip or reachable
+  from it (`is_ancestor` over the index, no history walk), else
+  `Invalid("revert-not-on-line")`. `onto` is the line's tip.
+- The server lands the revert through the normal land path (merge3 rebase,
+  CAS, retry, the git-primary `authority` rejection and any followed-line
+  guard). Only the one changeset the server built in this call skips the
+  per-path `write` check.
+- A changeset's `graft.reverts` metadata never grants anything: anyone with
+  prefix `write` can set it.
+- **Wildcard land does not authorise it.** A wildcard `repo:*:land:<line>`
+  scope does not satisfy revert-land; only a named-repository scope does. A
+  leaked service token can then revert only on the repositories it names.
+- **No version gate.** An old server ignores `land` and returns the revert
+  unlanded. A new client checks that the land happened and fails if not.
+- `Revert` without `land` is unchanged: it needs `write` on every changed path.
+- No new scope and no encoding changes: one optional, additive proto field,
+  no new table, no golden-vector change. `revert-empty` on this path means
+  "already undone", and callers treat it as done.
+
+Why it is safe: a revert of `c` creates no new content. Each entry is `c`'s
+first-parent entry at that path or a delete, and after the merge3 rebase onto
+the tip it is built only from objects already on the line. Choosing what goes
+on a line is already the `land:<line>` decision; reverting a change already
+on it is a narrower case.
+
+Rejected:
+
+- **A stored revert record that `Land` trusts.** It keeps the two-call client
+  flow, but adds a MetaStore table (a durable format, with golden vectors, a
+  migration and GC for orphaned records), and a stored revert can be landed
+  later by any `land:<line>` holder. More state for the same result.
+- **A dedicated `repo:<r>:revert:<line>` scope.** Finer grained, but a scope
+  grammar and mint change for a principal nobody needs yet. Kept as a later
+  refinement if a revert-only principal appears.

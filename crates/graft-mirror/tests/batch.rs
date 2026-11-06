@@ -3472,6 +3472,30 @@ async fn a_line_that_merged_main_and_edits_next_to_it_batches_without_conflict()
 }
 
 #[tokio::test]
+async fn a_batch_squashes_through_a_line_merge_resolution() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    let first = opened(w.batcher().run().await.unwrap().outcome);
+    w.land(&[("shared.txt", "one\ntwo\nthree\nD42\n")], "D42", 2)
+        .await;
+    w.github.squash_merge(first.pr_number.unwrap());
+    git(&w.work, &["fetch", "-q", "origin"]);
+    git(&w.work, &["reset", "-q", "--hard", "origin/main"]);
+    w.push_main(&[("shared.txt", "one\ntwo\nthree\nD41\n")], "D41");
+    w.follow_main().await;
+    w.land_merge_of_main(&[("shared.txt", "one\ntwo\nthree\nD41\nD42\n")], &[], 3)
+        .await;
+
+    let run = w.batcher().run().await.unwrap();
+    let rec = opened(run.outcome);
+    assert_eq!(
+        w.show(&rec.squash_sha.to_hex(), "shared.txt"),
+        "one\ntwo\nthree\nD41\nD42"
+    );
+}
+
+#[tokio::test]
 async fn a_revert_landed_after_merging_main_is_kept_not_dropped() {
     let w = World::new().await;
     w.start().await;
@@ -3517,4 +3541,158 @@ async fn a_revert_landed_after_merging_main_is_kept_not_dropped() {
             .is_empty(),
         "the line still lacks c.txt"
     );
+}
+
+// ---- the service's batch-cut request (D41 §3.5) -----------------------------
+
+mod request_cut {
+    use graft_mirror::service::batch_task::{self, BatchRunner};
+    use graft_mirror::service::requests::{PullDesk, RequestRunner};
+    use graft_proto::pb::{self, MirrorRequestKind};
+
+    use super::*;
+
+    fn runner(w: &World) -> BatchRunner<'_, Api, FakeGitHub> {
+        let base = FollowLine {
+            branch: "main".to_owned(),
+            line: "main".to_owned(),
+        };
+        let follow = FollowConfig {
+            repo: REPO.to_owned(),
+            lines: vec![base.clone()],
+            allow_lossy: Vec::new(),
+            batch: 256,
+            interval: POLL_INTERVAL,
+            tags: None,
+        };
+        BatchRunner::new(
+            &w.api,
+            cx(),
+            &w.db,
+            Mirror::new(&w.mirror_dir, w.upstream.to_str().unwrap()),
+            &w.github,
+            base,
+            follow,
+        )
+    }
+
+    fn cut(id: u64) -> pb::MirrorRequest {
+        pb::MirrorRequest {
+            repo: REPO.to_owned(),
+            id,
+            line: LINE.to_owned(),
+            kind: MirrorRequestKind::CutBatch as i32,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cut_request_pushes_one_commit_per_land_on_its_own_branch() {
+        let w = World::new().await;
+        w.start().await;
+        let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+        let b = w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+        let main = git(&w.upstream, &["rev-parse", "main"]);
+
+        let new = runner(&w)
+            .prepare_batch(&cut(7), "graft/batch-7")
+            .await
+            .expect("the batch is cut");
+        assert_eq!(
+            (new.head.as_str(), new.base.as_str()),
+            ("graft/batch-7", "main")
+        );
+        for id in [a, b] {
+            assert!(new.body.contains(&id.to_string()[..13]), "{}", new.body);
+        }
+        // One commit per land on main (D26), and no PR: the desk opens it.
+        let head = support::branch(&w.upstream, "graft/batch-7").expect("branch pushed");
+        assert_eq!(git(&w.upstream, &["rev-parse", &format!("{head}~2")]), main);
+        assert_eq!(w.changed(&main, &head), ["a.txt", "b.txt"]);
+        assert!(w.github.prs().is_empty(), "the runner opens no PR");
+
+        // A crash before the PR was opened: the retry rebuilds nothing.
+        let again = runner(&w)
+            .prepare_batch(&cut(7), "graft/batch-7")
+            .await
+            .expect("the retry finds the pushed batch");
+        assert_eq!(again.head, new.head);
+        assert_eq!(
+            support::branch(&w.upstream, "graft/batch-7").unwrap(),
+            head,
+            "the branch is not moved"
+        );
+
+        // The desk opens the PR; pr-batch's own run then adopts it.
+        PullDesk::create(&w.github, &new).await.unwrap();
+        let rec = w.batcher().track().await.unwrap().unwrap();
+        assert_eq!(rec.state, BatchState::Open);
+        assert_eq!(rec.number, 7);
+        assert_eq!(rec.pr_number, Some(1));
+
+        // While it is open, another cut is refused and opens nothing.
+        let busy = runner(&w).prepare_batch(&cut(8), "graft/batch-8").await;
+        assert_eq!(busy.unwrap_err(), batch_task::BATCH_OPEN);
+        assert!(support::branch(&w.upstream, "graft/batch-8").is_none());
+        assert_eq!(w.github.prs().len(), 1);
+
+        // Once merged, the next cut settles it and batches only new lands.
+        let merged = w.github.squash_merge(1);
+        let c = w.land(&[("c.txt", "c1\n")], "add c", 3).await;
+        let next = runner(&w)
+            .prepare_batch(&cut(9), "graft/batch-9")
+            .await
+            .expect("the next batch is cut");
+        assert!(next.body.contains(&c.to_string()[..13]));
+        assert!(!next.body.contains(&a.to_string()[..13]));
+        let head = support::branch(&w.upstream, "graft/batch-9").unwrap();
+        assert_eq!(w.changed(&merged, &head), ["c.txt"]);
+    }
+
+    #[tokio::test]
+    async fn a_cut_request_with_nothing_to_batch_fails_typed() {
+        let w = World::new().await;
+        w.start().await;
+        let r = runner(&w).prepare_batch(&cut(3), "graft/batch-3").await;
+        assert_eq!(r.unwrap_err(), batch_task::NOTHING_TO_BATCH);
+        assert!(support::branch(&w.upstream, "graft/batch-3").is_none());
+        assert!(w.github.prs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cut_request_at_a_chosen_base_or_with_a_bad_exclude_is_refused() {
+        let w = World::new().await;
+        w.start().await;
+        w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+        let mut at = cut(4);
+        at.base = Some(vec![1; 32]);
+        let r = runner(&w).prepare_batch(&at, "graft/batch-4").await;
+        assert_eq!(r.unwrap_err(), graft_mirror::service::requests::UNSUPPORTED);
+        let mut bad = cut(5);
+        bad.excludes = vec![vec![1; 3]];
+        let r = runner(&w).prepare_batch(&bad, "graft/batch-5").await;
+        assert_eq!(r.unwrap_err(), graft_mirror::service::requests::BAD_REQUEST);
+        assert!(w.github.prs().is_empty());
+    }
+
+    #[test]
+    fn only_a_github_upstream_has_a_forge() {
+        assert_eq!(
+            batch_task::github_repo("https://github.com/acme/widget.git"),
+            Some(("acme".to_owned(), "widget".to_owned()))
+        );
+        assert_eq!(
+            batch_task::github_repo("https://github.com/acme/widget"),
+            Some(("acme".to_owned(), "widget".to_owned()))
+        );
+        for bad in [
+            "https://gitlab.com/acme/widget.git",
+            "https://github.com/acme",
+            "https://github.com/acme/widget/extra",
+            "https://github.com/../widget",
+            "/srv/git/widget.git",
+        ] {
+            assert_eq!(batch_task::github_repo(bad), None, "{bad}");
+        }
+    }
 }

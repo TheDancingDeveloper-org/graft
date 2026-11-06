@@ -622,9 +622,12 @@ async fn cmd_serve(args: &[String]) -> Result<(), CmdError> {
     let metrics =
         crate::service::ServiceMetrics::register(telemetry.registry(), telemetry.metrics().clone())
             .map_err(|e| MirrorError::Config(e.to_string()))?;
-    let service =
-        crate::service::Service::new(api.clone(), crate::service::FollowSpawner::new(api), config)
-            .with_metrics(metrics);
+    let service = crate::service::Service::new(
+        api.clone(),
+        crate::service::FollowSpawner::new(api.clone()).with_export_log(api),
+        config,
+    )
+    .with_metrics(metrics);
     service.run(shutdown()).await;
     tracing::info!("mirror service stopped");
     Ok(())
@@ -683,7 +686,7 @@ impl AsyncCredentialFn<()> for RunFollowChecked<'_> {
 }
 
 /// The default GitHub API root.
-const GITHUB_API: &str = "https://api.github.com";
+use crate::github::GITHUB_API;
 
 fn system_ms() -> i64 {
     std::time::SystemTime::now()

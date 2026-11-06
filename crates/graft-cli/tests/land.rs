@@ -1678,4 +1678,14 @@ fn a_landed_changeset_shows_by_full_and_short_id() {
         .assert()
         .failure();
     assert_eq!(error_of(&failed)["kind"], json!("not_found"));
+    let message = error_of(&failed)["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("give the full id"), "{message}");
+    // `pick` resolves the same way, so a missed short id says what to do.
+    let picked = wc_cmd(&app)
+        .args(["--json", "pick", &missing])
+        .assert()
+        .failure();
+    assert_eq!(error_of(&picked)["kind"], json!("not_found"));
+    let message = error_of(&picked)["message"].as_str().unwrap().to_owned();
+    assert!(message.contains("give the full id"), "{message}");
 }

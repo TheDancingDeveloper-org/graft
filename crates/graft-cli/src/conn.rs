@@ -480,7 +480,10 @@ impl Conn {
                 "the short id {prefix} is ambiguous; give more of it"
             ))),
             (None, _) => Err(ApiError::NotFound {
-                what: format!("changeset {prefix}"),
+                what: format!(
+                    "changeset {prefix}: no match among the refs and the line's recent \
+                     history, which a short id is searched in; give the full id"
+                ),
             }
             .into()),
         }

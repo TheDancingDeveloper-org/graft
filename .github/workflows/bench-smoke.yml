@@ -101,6 +101,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      # The self-hosted runner image ships no pytest; install it here.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install pytest
+        run: python3 -m pip install --quiet pytest
       - name: pytest and ruff
         run: |
           python3 -I -m pytest -q bench/tests
