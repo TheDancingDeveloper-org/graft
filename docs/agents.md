@@ -149,8 +149,8 @@ Results are capped or paginated.
 
 ## Checkout-less agents (`/mcp`)
 
-An agent with no working copy talks to the server's `/mcp` endpoint (streamable HTTP) with a bearer token, instead of the CLI. Send the token as the `Authorization` header. Do not put it in a URL, a config file the client stores, or a prompt.
+An agent with no working copy talks to the server's `/mcp` endpoint (streamable HTTP) instead of the CLI. Register `http://HOST:PORT/mcp` in the MCP client with the bearer token as the `Authorization` header. Never put the token in a URL, a tool argument, a config the client stores in a repository, or a prompt.
 
-The same repository tools exist there. Working-copy tools (`graft_status`, and commit from the working copy) exist only on stdio inside a checkout.
+The repository tools are the same as over stdio: `graft_log`, `graft_show`, `graft_diff`, `graft_blame`, `graft_read`, `graft_ls`, and the writes `graft_workspace`, `graft_commit` (inline file content), `graft_sync`, `graft_land`, `graft_conflicts`, `graft_resolve`. The loop is: `graft_workspace` to open one, `graft_commit` with the files, `graft_sync`, `graft_land`. Working-copy tools (`graft_status`, `graft_commit` with `from_working_copy`) exist only on stdio inside a checkout.
 
-Results are capped. A token sent to `/mcp` follows the same rule: it is a credential, not something to print.
+Results are capped; when a result has `next`, call again with it as `cursor`. Errors carry a `kind`: `conflict` lists the paths to fix with `graft_conflicts` and `graft_resolve`; `stale_base` means call `graft_sync` first; `contended` means call `graft_land` again; `unauthenticated` and `forbidden` mean stop and report. See the [MCP guide](guide/mcp.md) for every tool's arguments.
