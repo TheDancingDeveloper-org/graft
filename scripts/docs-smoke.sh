@@ -121,8 +121,11 @@ GRAFT_CONFIG=$server_home/config.toml \
   graft serve --dev >"$serve_log" 2>&1 &
 server_pid=$!
 
+# Wait for the clone command or an exit, not a fixed time: a cold server
+# start on a busy runner can take minutes. Capped at about 300 s.
 url=
-for _ in $(seq 1 100); do
+deadline=$((SECONDS + 300))
+while ((SECONDS < deadline)); do
   if ! kill -0 "$server_pid" 2>/dev/null; then
     echo "docs-smoke: graft serve --dev exited" >&2
     cat "$serve_log" >&2 || true

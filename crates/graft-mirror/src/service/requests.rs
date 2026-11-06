@@ -1,8 +1,9 @@
 //! Mirror requests (D41 §3.5) as the service runs them: claimed under the
 //! repository's lease epoch, executed, then completed or failed with a
-//! typed code. A batch's branch is `graft/batch-<id>` from the request's
-//! server id, so a cut that crashed between opening its PR and recording it
-//! adopts that PR on the next claim instead of opening a second.
+//! typed code. A batch takes the next free batch number, and the runner
+//! remembers which request cut it, so a cut that crashed between opening its
+//! PR and recording it adopts that PR on the next claim instead of opening a
+//! second.
 
 use std::future::Future;
 use std::path::Path;
@@ -11,16 +12,10 @@ use graft_proto::pb::{self, MirrorRequestKind};
 use graft_proto::{ApiError, error::ApiResult};
 
 use super::control::Control;
-use crate::batch::BRANCH_PREFIX;
 use crate::github::{Forge, ForgeError, NewPull, Pull};
 
 /// The most requests one task runs between two polls.
 pub const REQUESTS_PER_TURN: usize = 4;
-
-/// The batch branch of request `id`.
-pub fn batch_branch(id: u64) -> String {
-    format!("{BRANCH_PREFIX}{id}")
-}
 
 /// Why a request failed: a typed code the server records.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,13 +55,17 @@ impl<F: Forge> PullDesk for F {
 
 /// The repository work behind each request kind.
 pub trait RequestRunner: Send + Sync {
-    /// Pushes the batch `req` asks for to `branch` and returns the PR to
-    /// open. Called only when no PR is open on `branch`; pushing the same
-    /// branch again must be safe.
+    /// The branch of the batch an earlier attempt at `req` cut, if any.
+    fn cut_branch(
+        &self,
+        req: &pb::MirrorRequest,
+    ) -> impl Future<Output = Result<Option<String>, RequestFailure>> + Send;
+    /// Pushes the batch `req` asks for and returns the PR to open, its head
+    /// the batch's branch. Called only when no PR is open on that branch;
+    /// running it again for the same request must be safe.
     fn prepare_batch(
         &self,
         req: &pb::MirrorRequest,
-        branch: &str,
     ) -> impl Future<Output = Result<NewPull, RequestFailure>> + Send;
     /// Runs a settle, exclude or rewind request.
     fn run(
@@ -80,11 +79,11 @@ pub trait RequestRunner: Send + Sync {
 pub struct Unwired;
 
 impl RequestRunner for Unwired {
-    async fn prepare_batch(
-        &self,
-        _req: &pb::MirrorRequest,
-        _branch: &str,
-    ) -> Result<NewPull, RequestFailure> {
+    async fn cut_branch(&self, _req: &pb::MirrorRequest) -> Result<Option<String>, RequestFailure> {
+        Ok(None)
+    }
+
+    async fn prepare_batch(&self, _req: &pb::MirrorRequest) -> Result<NewPull, RequestFailure> {
         Err(UNSUPPORTED)
     }
 
@@ -127,23 +126,25 @@ async fn cut<D: PullDesk, R: RequestRunner>(
     runner: &R,
     req: &pb::MirrorRequest,
 ) -> Result<Result<pb::MirrorRequestOutcome, RequestFailure>, ForgeError> {
-    let branch = batch_branch(req.id);
-    if let Some(p) = desk.find_open(&branch).await? {
+    let earlier = match runner.cut_branch(req).await {
+        Ok(b) => b,
+        Err(f) => return Ok(Err(f)),
+    };
+    if let Some(branch) = earlier
+        && let Some(p) = desk.find_open(&branch).await?
+    {
         tracing::info!(
             repo = %req.repo, request = req.id, pr = p.number,
             "mirror request: adopted the PR an earlier attempt opened"
         );
         return Ok(Ok(pr_outcome(&p, &branch)));
     }
-    let new = match runner.prepare_batch(req, &branch).await {
+    let new = match runner.prepare_batch(req).await {
         Ok(new) => new,
         Err(f) => return Ok(Err(f)),
     };
-    if new.head != branch {
-        return Ok(Err(INTERNAL));
-    }
     match desk.create(&new).await {
-        Ok(p) => Ok(Ok(pr_outcome(&p, &branch))),
+        Ok(p) => Ok(Ok(pr_outcome(&p, &new.head))),
         Err(ForgeError::Refused(_)) => Ok(Err(FORGE_REFUSED)),
         Err(e) => Err(e),
     }

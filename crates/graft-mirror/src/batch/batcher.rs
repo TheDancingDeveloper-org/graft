@@ -52,6 +52,9 @@ pub struct Batcher<'a, A, F> {
     clock: fn() -> i64,
     calls: u64,
     exports: Option<&'a dyn ExportLog>,
+    /// A request's batch: its fixed number, and the caller opens its PR.
+    request: Option<u64>,
+    lease_epoch: Option<u64>,
 }
 
 impl<'a, A, F> Batcher<'a, A, F>
@@ -93,6 +96,8 @@ where
             clock: system_ms,
             calls: 0,
             exports: None,
+            request: None,
+            lease_epoch: None,
         })
     }
 
@@ -107,6 +112,22 @@ where
     /// exchange its token for that land (D40).
     pub fn with_export_log(mut self, log: &'a dyn ExportLog) -> Self {
         self.exports = Some(log);
+        self
+    }
+
+    /// Cuts the batch of mirror request `id` (D41 §3.5): it takes the next
+    /// free batch number, as `pr-batch` does, and records that `id` cut it;
+    /// the run stops once the branch is pushed, leaving the PR to the
+    /// caller. A later run adopts the PR on that branch when it is at the
+    /// batch's head.
+    pub fn for_request(mut self, id: u64) -> Self {
+        self.request = Some(id);
+        self
+    }
+
+    /// Fences the base follow's ref moves by the service's lease `epoch`.
+    pub fn with_lease_epoch(mut self, epoch: u64) -> Self {
+        self.lease_epoch = Some(epoch);
         self
     }
 
@@ -142,7 +163,8 @@ where
             conflict = Some(c);
         }
         if let Some(mut rec) = open {
-            if conflict.is_none() {
+            // A request's batch waits Pushed until its caller opens the PR.
+            if conflict.is_none() && rec.state == BatchState::Open {
                 self.append_open(&mut rec).await?;
             }
             run.outcome = conflict.unwrap_or(BatchOutcome::Waiting(rec));
@@ -260,6 +282,9 @@ where
             config,
         )
         .with_clock(self.clock);
+        if let Some(epoch) = self.lease_epoch {
+            follower = follower.with_lease_epoch(epoch);
+        }
         let outcomes = follower.poll_once().await?;
         match outcomes.into_iter().next().map(|(_, o)| o) {
             Some(LineOutcome::UpToDate | LineOutcome::Imported { .. }) => Ok(None),
@@ -494,17 +519,33 @@ where
     ) -> Result<Result<Option<ChangesetId>, BatchOutcome>, MirrorError> {
         // The line's own change, as one changeset on the snapshot it holds
         // of the base, rebased onto the base tip.
-        let from = match state.sync_batch {
+        // `landed` is the newest landed changeset the sync point already
+        // holds: the sync point itself, or, for a merged batch rebuilt by
+        // `merged_on_synced` (unlanded, so no ancestor of anything), the
+        // batch's merge on the base.
+        let (from, landed) = match state.sync_batch {
             Some(number) => {
                 let rec = self
                     .db
                     .batch(number)?
                     .ok_or_else(|| config_err(format!("batch {number} is not recorded")))?;
-                self.merged_on_synced(&rec, state).await?
+                let from = self.merged_on_synced(&rec, state).await?;
+                let landed = rec.merged.filter(|_| from != state.sync_from);
+                (from, landed.unwrap_or(from))
             }
-            None => state.sync_from,
+            // The sync point is the tip of the last batch, merged on the
+            // base: the base holds that batch, so a merge of the base into
+            // the line past it carries the line's sync point forward.
+            None => {
+                let landed = self
+                    .db
+                    .last_batch(&self.config.line)?
+                    .filter(|rec| rec.state == BatchState::Merged && rec.tip == state.sync_from)
+                    .and_then(|rec| rec.merged);
+                (state.sync_from, landed.unwrap_or(state.sync_from))
+            }
         };
-        let from = self.newest_base(from, tip, base_tip).await?;
+        let from = self.newest_base(from, landed, tip, base_tip).await?;
         let net = self.diff(from, tip).await?;
         let target = if net.is_empty() {
             base_tip
@@ -585,10 +626,12 @@ where
     /// newest common ancestor of `tip` and `base_tip` when a land merged
     /// the base past `from`. Diffing from an older point would count the
     /// base's own edits as the line's, which reports false conflicts and
-    /// drops a revert of base content as nothing the base lacks.
+    /// drops a revert of base content as nothing the base lacks. `landed` is
+    /// the landed changeset `from` stands for, when `from` is itself unlanded.
     async fn newest_base(
         &mut self,
         from: ChangesetId,
+        landed: ChangesetId,
         tip: ChangesetId,
         base_tip: ChangesetId,
     ) -> Result<ChangesetId, MirrorError> {
@@ -608,8 +651,8 @@ where
         else {
             return Ok(from);
         };
-        if common == from {
-            return Ok(from);
+        if common == from || common == landed {
+            return Ok(common);
         }
         let cx = self.call("is-ancestor");
         let newer = self
@@ -618,7 +661,7 @@ where
                 &cx,
                 Pair {
                     repo,
-                    a: from,
+                    a: landed,
                     b: common,
                 },
             )
@@ -1400,7 +1443,7 @@ where
             merged: None,
             settled_ms: None,
         };
-        if !self.db.insert_batch(&rec, &commits)? {
+        if !self.db.insert_batch_for(&rec, &commits, self.request)? {
             return Err(config_err(format!(
                 "another run opened a batch for line {} first",
                 self.config.line
@@ -1630,7 +1673,11 @@ where
             self.push(rec).await?;
         }
         if rec.state == BatchState::Pushed {
-            self.open(rec).await?;
+            if self.request.is_some() {
+                self.adopt(rec).await?;
+            } else {
+                self.open(rec).await?;
+            }
         }
         if rec.state == BatchState::Open {
             self.observe(rec).await?;
@@ -1967,6 +2014,20 @@ where
     /// fine (a retry); other commits are not overwritten, and the batch is
     /// rejected.
     async fn push(&mut self, rec: &mut BatchRecord) -> Result<(), MirrorError> {
+        // A branch already holding other commits is refused before any
+        // export is recorded: its commits would never be published.
+        let there = self.mirror.ls_remote(&[rec.branch.as_str()]).await?;
+        if let Some(sha) = there.first().and_then(|(_, s)| *s)
+            && sha != rec.squash_sha
+        {
+            return self.reject(
+                rec,
+                format!(
+                    "branch {} exists with other commits; not overwritten",
+                    rec.branch
+                ),
+            );
+        }
         let commits = self.db.batch_commits(rec.number)?;
         if commits.is_empty() {
             // A squashed batch: its one commit holds the cut tip's tree.
@@ -2071,6 +2132,30 @@ where
             line = %rec.line, batch = rec.number, pr = pull.number,
             "mirror batch: PR open"
         );
+        Ok(())
+    }
+
+    /// A request's pushed batch: the PR the caller opened on its branch is
+    /// adopted when it is at the batch's head (open or not, so a merge or a
+    /// close is then observed). Any other PR is refused as [`Self::open`]
+    /// refuses it; with none, the batch waits for the caller to open one.
+    async fn adopt(&mut self, rec: &mut BatchRecord) -> Result<(), MirrorError> {
+        let Some(pull) = self.forge.find_pull(&rec.branch).await? else {
+            return Ok(());
+        };
+        if pull.head_sha != rec.squash_sha.to_hex() {
+            return self.reject(
+                rec,
+                format!(
+                    "branch {} already has PR #{} that this batch did not open; not adopted",
+                    rec.branch, pull.number
+                ),
+            );
+        }
+        self.record_pull(rec, &pull);
+        rec.state = BatchState::Open;
+        rec.detail = "waiting for review; land-pr merges it once its checks pass".to_owned();
+        self.db.put_batch(rec)?;
         Ok(())
     }
 

@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS batch_commits (
     merged_sha BLOB,
     PRIMARY KEY (batch, seq)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS batch_requests (
+    request INTEGER PRIMARY KEY,
+    batch INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS check_lines (
     line TEXT PRIMARY KEY,
     lsn INTEGER NOT NULL,
@@ -780,6 +784,17 @@ impl MirrorDb {
         rec: &BatchRecord,
         commits: &[BatchCommit],
     ) -> Result<bool, GitError> {
+        self.insert_batch_for(rec, commits, None)
+    }
+
+    /// [`insert_batch`](Self::insert_batch), also recording in the same
+    /// transaction that mirror request `request` cut the batch (D41 §3.5).
+    pub fn insert_batch_for(
+        &self,
+        rec: &BatchRecord,
+        commits: &[BatchCommit],
+        request: Option<u64>,
+    ) -> Result<bool, GitError> {
         let mut conn = self.conn();
         let txn = conn.transaction().map_err(db_err)?;
         let busy: i64 = txn
@@ -808,8 +823,32 @@ impl MirrorDb {
             )
             .map_err(db_err)?;
         }
+        if let Some(request) = request {
+            txn.execute(
+                "INSERT INTO batch_requests (request, batch) VALUES (?1, ?2)",
+                params![request as i64, rec.number as i64],
+            )
+            .map_err(db_err)?;
+        }
         txn.commit().map_err(db_err)?;
         Ok(true)
+    }
+
+    /// The batch mirror request `request` cut, if it cut one.
+    pub fn batch_of_request(&self, request: u64) -> Result<Option<BatchRecord>, GitError> {
+        let number: Option<i64> = self
+            .conn()
+            .query_row(
+                "SELECT batch FROM batch_requests WHERE request = ?1",
+                params![request as i64],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        match number {
+            Some(n) => self.batch(n as u64),
+            None => Ok(None),
+        }
     }
 
     /// Batch `number`'s per-land commits, oldest first (D26). Empty for a

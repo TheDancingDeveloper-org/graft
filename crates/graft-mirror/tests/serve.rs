@@ -16,8 +16,9 @@ use graft_engine::{Engine, EngineConfig};
 use graft_mirror::credentials::SecretToken;
 use graft_mirror::current_ref;
 use graft_mirror::github::{ForgeError, NewPull, Pull};
+use graft_mirror::service::batch_task::LeaseCredential;
 use graft_mirror::service::control::Control;
-use graft_mirror::service::follow_task::FollowSpawner;
+use graft_mirror::service::follow_task::{FollowSpawner, Forges};
 use graft_mirror::service::requests::{self, PullDesk, RequestFailure, RequestRunner};
 use graft_mirror::service::status::PollFailure;
 use graft_mirror::service::{
@@ -1056,16 +1057,16 @@ struct Runner {
 }
 
 impl RequestRunner for Runner {
-    async fn prepare_batch(
-        &self,
-        _req: &pb::MirrorRequest,
-        branch: &str,
-    ) -> Result<NewPull, RequestFailure> {
+    async fn cut_branch(&self, req: &pb::MirrorRequest) -> Result<Option<String>, RequestFailure> {
+        Ok((self.prepared.load(Ordering::SeqCst) > 0).then(|| format!("graft/batch-{}", req.id)))
+    }
+
+    async fn prepare_batch(&self, req: &pb::MirrorRequest) -> Result<NewPull, RequestFailure> {
         self.prepared.fetch_add(1, Ordering::SeqCst);
         Ok(NewPull {
             title: "batch".to_owned(),
             body: String::new(),
-            head: branch.to_owned(),
+            head: format!("graft/batch-{}", req.id),
             base: "main".to_owned(),
         })
     }
@@ -1616,4 +1617,212 @@ async fn a_sweep_never_purges_a_re_enabled_row_whose_task_has_not_started() {
     // The next reconcile starts it, over the kept data.
     service.reconcile().await.unwrap();
     assert_eq!(service.running(), vec![(REPO.to_owned(), 3, 2)]);
+}
+
+// ---- the spawner's batch cut (D41 §3.5) ------------------------------------
+
+/// PRs in memory, for a forge the spawner builds over a local upstream.
+#[derive(Default)]
+struct PrBook {
+    /// Forges the spawner built.
+    built: AtomicUsize,
+    pulls: Mutex<Vec<Pull>>,
+}
+
+#[derive(Clone)]
+struct LocalForge(Arc<PrBook>);
+
+impl graft_mirror::github::Forge for LocalForge {
+    async fn find_pull(&self, branch: &str) -> Result<Option<Pull>, ForgeError> {
+        let pulls = self.0.pulls.lock().unwrap();
+        Ok(pulls.iter().find(|p| p.head_ref == branch).cloned())
+    }
+
+    async fn create_pull(&self, new: &NewPull) -> Result<Pull, ForgeError> {
+        let mut pulls = self.0.pulls.lock().unwrap();
+        let n = pulls.len() as u64 + 1;
+        let pull = Pull {
+            number: n,
+            url: format!("https://github.com/o/r/pull/{n}"),
+            node_id: format!("PR_{n}"),
+            open: true,
+            merged: false,
+            merge_commit: None,
+            head_sha: "0".repeat(40),
+            head_ref: new.head.clone(),
+            body: new.body.clone(),
+            settled_ms: None,
+        };
+        pulls.push(pull.clone());
+        Ok(pull)
+    }
+
+    async fn get_pull(&self, number: u64) -> Result<Pull, ForgeError> {
+        let pulls = self.0.pulls.lock().unwrap();
+        pulls
+            .iter()
+            .find(|p| p.number == number)
+            .cloned()
+            .ok_or_else(|| ForgeError::Refused("status 404: Not Found".into()))
+    }
+
+    async fn update_pull(&self, _number: u64, _body: &str) -> Result<(), ForgeError> {
+        Ok(())
+    }
+
+    async fn enqueue(&self, _node_id: &str) -> Result<(), ForgeError> {
+        Ok(())
+    }
+
+    async fn check_runs(
+        &self,
+        _sha: &str,
+    ) -> Result<Vec<graft_mirror::github::CheckRun>, ForgeError> {
+        Ok(Vec::new())
+    }
+
+    async fn token(&self) -> Result<SecretToken, ForgeError> {
+        Err(ForgeError::Refused(
+            "a local upstream needs no token".into(),
+        ))
+    }
+
+    async fn merging(&self, _node_id: &str) -> Result<bool, ForgeError> {
+        Ok(false)
+    }
+
+    async fn close_pr(&self, _number: u64, _comment: &str) -> Result<(), ForgeError> {
+        Ok(())
+    }
+}
+
+/// Builds a [`LocalForge`] for every upstream, standing in for GitHub's.
+struct LocalForges(Arc<PrBook>);
+
+impl Forges for LocalForges {
+    type Forge<C: Control> = LocalForge;
+
+    fn forge<C: Control>(
+        &self,
+        _upstream: &str,
+        _credential: LeaseCredential<C>,
+    ) -> Option<Result<LocalForge, graft_mirror::MirrorError>> {
+        self.0.built.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(LocalForge(self.0.clone())))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claimed_cut_request_runs_through_the_spawned_task_and_opens_its_pr() {
+    use graft_model::{
+        Author, AuthorKind, Change, EntryKind, Metadata, ObjectKind, RepoPath, Timestamp,
+    };
+    use graft_proto::Frame;
+    use graft_proto::types::CreateChangeset;
+
+    const LINE: &str = "integration";
+    let tmp = tempfile::tempdir().unwrap();
+    let (bare, work) = upstream(tmp.path());
+    let c1 = commit(&work, "a");
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    let fake = Arc::new(Fake::with_store(store));
+    fake.set_row(row(REPO, bare.to_str().unwrap(), 0));
+    let data = tmp.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let book = Arc::new(PrBook::default());
+    let mut config = local_config(&data, "a");
+    config.claim_requests = true;
+
+    let mut service = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone())
+            .with_cx(mirror_cx)
+            .with_forges(LocalForges(book.clone())),
+        config,
+    );
+    service.reconcile().await.unwrap();
+    eventually(|| {
+        fake.statuses()
+            .iter()
+            .any(|s| s.last_imported_sha.as_deref() == Some(c1.as_str()))
+    })
+    .await;
+    assert_eq!(
+        book.built.load(Ordering::SeqCst),
+        1,
+        "the task built a forge"
+    );
+
+    // One land on the integration line, cut from main's tip.
+    let main = current_ref(&*api, &mirror_cx(REPO), REPO, "main")
+        .await
+        .unwrap()
+        .expect("followed");
+    let body = b"b1\n";
+    let land = api
+        .create_changeset(
+            &mirror_cx(REPO),
+            CreateChangeset {
+                repo: REPO.to_owned(),
+                parents: vec![main],
+                changes: vec![Change::Put {
+                    path: RepoPath::new("b.txt").unwrap(),
+                    kind: EntryKind::File,
+                    id: graft_model::ObjectId::hash(ObjectKind::Blob, body),
+                }],
+                author: Author {
+                    name: "Tess".to_owned(),
+                    email: "tess@example.com".to_owned(),
+                    kind: AuthorKind::Agent,
+                },
+                authored_at: Timestamp {
+                    ms: 1_700_000_000_000,
+                    offset_min: 0,
+                },
+                message: "add b".to_owned(),
+                metadata: Metadata::new(),
+                inline_blobs: vec![Frame::encode(ObjectKind::Blob, body)],
+                workspace: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    api.update_ref(
+        &mirror_cx(REPO),
+        UpdateRef {
+            repo: REPO.to_owned(),
+            name: LINE.to_owned(),
+            expected: None,
+            new: land,
+            kind: RefKind::Line,
+            lease_epoch: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut req = request(7, MirrorRequestKind::CutBatch);
+    req.line = LINE.to_owned();
+    fake.st().pending.push_back(req);
+    eventually(|| {
+        let st = fake.st();
+        !st.completed.is_empty() || !st.failed.is_empty()
+    })
+    .await;
+    let st = fake.st();
+    assert!(st.failed.is_empty(), "the cut failed: {:?}", st.failed);
+    let (id, outcome) = &st.completed[0];
+    assert_eq!(*id, 7);
+    assert_eq!(outcome.branch.as_deref(), Some("graft/batch-1"));
+    assert_eq!(outcome.pr_number, Some(1));
+    // The batch branch holds the land's one commit on main.
+    let head = git(&bare, &["rev-parse", "graft/batch-1"]);
+    assert_eq!(git(&bare, &["rev-parse", &format!("{head}~1")]), c1);
+    let pulls = book.pulls.lock().unwrap();
+    assert_eq!(pulls.len(), 1);
+    assert_eq!(pulls[0].head_ref, "graft/batch-1");
 }
