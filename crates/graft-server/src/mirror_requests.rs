@@ -32,6 +32,9 @@ use crate::mirrors::{
     MAX_PAGE, any_of, lease_caller, lease_lost, may_read, name, refused, repo_id, store,
 };
 
+/// The error code of a request the operator cancelled.
+pub(crate) const CANCELLED: &str = "cancelled";
+
 /// How long a request may stay live (§3.5).
 pub(crate) const REQUEST_TIMEOUT_MS: i64 = 30 * 60_000;
 
@@ -865,6 +868,51 @@ pub(crate) async fn set_batch_state<M: MetaStore>(
         Ok(next)
     })
     .await
+}
+
+/// `CancelRequest`, under `mirror:bind`: the operator's way out of a
+/// request no service will finish. A live request fails with the code
+/// `cancelled`, and a cut's batch is settled, so its line is free for the
+/// next cut. No lease fence: the operator holds none. A service still
+/// running the request is refused when it next completes or fails it.
+pub(crate) async fn cancel<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    now_ms: i64,
+    req: pb::CancelRequestRequest,
+) -> Result<pb::MirrorRequest, ApiError> {
+    any_of(p, &[Scope::MirrorBind])?;
+    let id = repo_id(meta, &req.repo).await?;
+    for _ in 0..MAX_TRIES {
+        let r = reread(meta, id, &req.repo, req.id).await?;
+        let r = settle(meta, id, &req.repo, r, now_ms).await?;
+        let holds_batch = matches!(
+            r.batch,
+            Some(BatchState::Requested | BatchState::Open | BatchState::Sealed)
+        ) && !frees_slot(&r);
+        if !r.state.is_live() && !holds_batch {
+            return Err(wrong_state(format!(
+                "request {} is {} and holds no line",
+                r.id,
+                r.state.as_str()
+            )));
+        }
+        let mut next = r.clone();
+        if r.state.is_live() {
+            next.state = MirrorRequestState::Failed;
+            next.result.error_code = Some(CANCELLED.to_owned());
+        }
+        if r.kind == MirrorRequestKind::CutBatch {
+            next.batch = Some(BatchState::Settled);
+        }
+        next.version = r.version + 1;
+        next.updated_at_ms = now_ms;
+        let txn = rewrite(meta, id, &r, next.clone(), None).await?;
+        if let TxnOutcome::Committed(_) = meta.commit(id, txn).await.map_err(store)? {
+            return Ok(view(&req.repo, next));
+        }
+    }
+    Err(busy())
 }
 
 #[cfg(test)]

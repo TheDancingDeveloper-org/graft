@@ -185,4 +185,11 @@ impl MirrorAdmin for MirrorClient {
     ) -> MirrorFuture<'a, pb::BatchPage> {
         unary!(self, cx, list_batches, req)
     }
+    fn cancel_request<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::CancelRequestRequest,
+    ) -> MirrorFuture<'a, pb::MirrorRequest> {
+        unary!(self, cx, cancel_request, req)
+    }
 }

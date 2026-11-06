@@ -17,10 +17,10 @@ mod write;
 
 pub use drafts::DraftOverlapArgs;
 pub use mirrors::{
-    BatchCutArgs, BatchListArgs, BatchStatusArgs, MirrorAddArgs, MirrorAdmin, MirrorFuture,
-    MirrorKeyArgs, MirrorLineArg, MirrorListArgs, MirrorPurgeArgs, MirrorRemoveArgs, MirrorSetArgs,
-    changeset_bytes, join_lines, mirror_json, new_client_request_id, parse_lines, request_json,
-    with_retry,
+    BatchCancelArgs, BatchCutArgs, BatchListArgs, BatchStatusArgs, MirrorAddArgs, MirrorAdmin,
+    MirrorFuture, MirrorKeyArgs, MirrorLineArg, MirrorListArgs, MirrorPurgeArgs, MirrorRemoveArgs,
+    MirrorSetArgs, changeset_bytes, join_lines, mirror_json, new_client_request_id, parse_lines,
+    request_json, with_retry,
 };
 pub use render::{MAX_RESULT_BYTES, PATCH_MAX_BYTES};
 pub use repos::{RepoAdmin, RepoAdminFuture, RepoCreateArgs};
@@ -197,6 +197,12 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "graft_merge",
         description: "Merge one line into another, recording a merge point.",
+        read_only: false,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_batch_cancel",
+        description: "Cancel a stuck batch request; needs mirror:bind.",
         read_only: false,
         bound: ToolBound::Capped,
     },

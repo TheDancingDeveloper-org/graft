@@ -380,6 +380,18 @@ A repository's batch history.
   20) and `page_token`.
 - Result: `batches` and `next_page_token`.
 
+### `graft_batch_cancel`
+
+Cancels a stuck batch or other mirror request and frees its line: a cut
+no mirror service will finish, or a batch whose PR was closed by hand.
+
+- Arguments: required `repo` and `id` (the request's id).
+- Result: the request, `failed` with error code `cancelled` if it was
+  still live, and a cut's batch `settled`. A service still running it is
+  refused when it next reports.
+- Errors: needs `mirror:bind` (operator only), else `permission_denied`;
+  a request that holds nothing is refused (`mirror-request-state`).
+
 The mirror and batch tools are unavailable where the launcher provides no
 mirror service (a local repository, or the server's own HTTP mount).
 
