@@ -167,9 +167,46 @@ thirteen, and no per-repository mirror container is running
 
 ## 8. Retire the per-repository files and secrets (point of no return)
 
-Only after step 7 has run clean for a while (at least a day of polls with no
-`GraftMirrorStalled`, `GraftMirrorCredentialError` or `GraftMirrorLeaseLost`
-alert). This step makes the old layout unrecoverable:
+Run this straight after step 7 is verified (operator decision, 2026-11-06):
+there is no soak period. Back up first, so the old layout can still be
+rebuilt by hand from the backup. Nothing in the backup is printed; it holds
+token files, so it is root-owned and `0600`.
+
+**8a. Back up, off the docker volumes.** One directory per cutover, on the
+host's own disk, never under `/var/lib/docker/volumes`:
+
+```sh
+B=/var/backups/graft-dev/mirror-retire-$(date -u +%Y%m%dT%H%M%SZ)
+sudo install -d -m 0700 "$B"
+# The metadata database: the pre-migration copy up.sh took (the only
+# rollback to the old image), and the database as it is now. Stop the
+# writers for the copy, so meta.db and its WAL are consistent.
+docker compose --env-file deploy/image.env -f deploy/compose.yml stop graft-mirror graft-server
+docker run --rm -v graft-dev-meta:/m:ro -v "$B":/b alpine sh -c 'set -e
+  mkdir /b/pre-deploy /b/now
+  cp -p /m/pre-deploy/* /b/pre-deploy/
+  for f in meta.db meta.db-wal meta.db-shm; do
+    [ -e /m/$f ] && cp -p /m/$f /b/now/; done'
+docker compose --env-file deploy/image.env -f deploy/compose.yml start graft-server graft-mirror
+# The old containers' state: their volumes (empty after step 5, kept as a
+# listing), the moved data, the token files and configs, and the old tree.
+docker volume ls --format '{{.Name}}' | grep '^graft-dev-mirror-' | sudo tee "$B/old-volumes.txt" >/dev/null
+sudo tar -C / -czf "$B/old-state.tgz" \
+  var/lib/docker/volumes/graft-dev-mirror/_data \
+  etc/graft/mirror-configs $(cd / && ls -d etc/graft/mirror-token*) \
+  opt/graft-old/deploy
+git -C /opt/graft-old rev-parse HEAD | sudo tee "$B/old-tree.sha" >/dev/null
+sudo chmod -R go= "$B"
+# Check it before deleting anything:
+sudo test -s "$B/pre-deploy/meta.db" && sudo test -s "$B/now/meta.db" \
+  && sudo tar -tzf "$B/old-state.tgz" >/dev/null && echo backup ok
+```
+
+Copy `$B` off the VM as well (the graft-dev backup runbook,
+`docs/runbooks/graft-dev-backup-restore.md`), and only go on once
+`backup ok` printed and the copy is made.
+
+**8b. Retire.** This makes the old layout unrecoverable except from `$B`:
 
 1. Remove the old volumes, now empty: `docker volume rm` for each
    `graft-dev-mirror-<repo>` (not `graft-dev-mirror`).
@@ -177,9 +214,15 @@ alert). This step makes the old layout unrecoverable:
    `mirror-configs/`, and `/opt/graft-old`.
 3. Delete the `GRAFT_DEV_MIRROR_TOKEN_*` secrets from Infisical, and the ops
    repo's mirror rendering (`gen.py`) in its own PR. `/etc/graft/github-token`
-   goes with the last consumer of it.
+   goes with the last consumer of it. The token values survive only in
+   `$B/old-state.tgz`; revoke them with the server's token revocation once
+   nothing uses them.
 4. Scrape and alert config: apply `deploy/monitoring/prometheus-scrape.yml`
    (job `graft-mirror`, one target) in the ops repo's Prometheus.
+
+Then watch the alerts (`GraftMirrorStalled`, `GraftMirrorCredentialError`,
+`GraftMirrorLeaseLost`) for the first day; a problem now is fixed forward on
+the service, not by rolling back.
 
 From here, onboarding is `graft repo mirror add` (deploy/README.md).
 
@@ -197,9 +240,8 @@ and its WAL files to `pre-deploy/` on the `graft-dev-meta` volume (with the
 image that wrote them in `pre-deploy/image`). If the new stack does not come
 up, its `rollback()` restores that copy before it starts the last good image.
 Before step 1, confirm `pre-deploy/` exists after the deploy:
-`docker run --rm -v graft-dev-meta:/m alpine ls -l /m/pre-deploy`. Keep a
-copy of it off the volume until step 8 is done, since the next image change
-replaces it.
+`docker run --rm -v graft-dev-meta:/m alpine ls -l /m/pre-deploy`. Step 8a keeps
+a copy of it off the volume, since the next image change replaces it.
 
 Restoring the backup loses every write made since step 1: rows, leases,
 requests, and any lands, so roll back before the service has followed
@@ -230,5 +272,7 @@ gone before they start (§6 step 7).
    `mirror-token*` files and the `GRAFT_DEV_MIRROR_TOKEN_*` secrets are still
    in place because step 8 has not run.
 
-After step 8, rolling back means re-creating the volumes, tokens and configs
-from history and Infisical as well; do not plan on it.
+After step 8, rolling back means rebuilding the old layout by hand from the
+step 8a backup: `pre-deploy/` for the database, `old-state.tgz` for the data,
+token files and configs, and `old-tree.sha` for the deployment. Do not plan
+on it.
