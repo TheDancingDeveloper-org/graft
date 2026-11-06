@@ -10,9 +10,11 @@
 //! `Attest`; `drafts` grants `Drafts` (the draft overlap query, D24) and
 //! nothing else, and only it and `admin` grant `Drafts`. A `*` repository
 //! (`repo:*:<perm>[:<arg>]`) holds on every repository. `repo:*:mirror`
-//! grants `Mirror` to the `mirror` principal kind only, and `admin` does not
-//! grant it; `repos:admin` is checked by [`holds_repos_admin`] (D41). This is the engine's minimal reading of the text form until
-//! `graft_auth::authorize` (G1.9) replaces it.
+//! grants `Mirror`, and `Read` and `Objects` on the repositories it names, to
+//! the `mirror` principal kind only: the service polls and imports what it
+//! follows. `admin` does not grant `Mirror`; `repos:admin` is checked by
+//! [`holds_repos_admin`] (D41). This is the engine's minimal reading of the
+//! text form until `graft_auth::authorize` (G1.9) replaces it.
 
 use graft_model::{Change, RepoPath};
 use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
@@ -37,7 +39,8 @@ pub(crate) enum Need<'a> {
     Drafts,
     /// Administer the repository.
     Admin,
-    /// Act as the mirror service (`repo:*:mirror`, `mirror` kind only).
+    /// Act as the mirror service (`repo:*:mirror`, `mirror` kind only). The
+    /// same scope on that kind also grants `Read` and `Objects`.
     Mirror,
 }
 
@@ -100,10 +103,17 @@ pub(crate) fn holds_repos_admin(cx: &CallContext) -> bool {
 }
 
 fn granted(principal: &Principal, repo: &str, need: Need<'_>) -> bool {
-    if matches!(need, Need::Mirror) && principal.kind != PrincipalKind::Mirror {
+    let mirror_kind = principal.kind == PrincipalKind::Mirror;
+    if matches!(need, Need::Mirror) && !mirror_kind {
         return false;
     }
-    principal.scopes.iter().any(|s| grants(s, repo, need))
+    // The mirror service reads the repositories its set names, to poll and
+    // import them (D41); on any other kind the set grants nothing.
+    let mirror_reads = mirror_kind && matches!(need, Need::Objects | Need::Read);
+    principal
+        .scopes
+        .iter()
+        .any(|s| grants(s, repo, need) || (mirror_reads && grants(s, repo, Need::Mirror)))
 }
 
 fn grants(scope: &str, repo: &str, need: Need<'_>) -> bool {
@@ -273,10 +283,13 @@ mod tests {
         let mirror = principal(PrincipalKind::Mirror, "repo:*:mirror");
         assert!(granted(&mirror, "r", Need::Mirror));
         for need in [
-            Need::Read,
             Need::Write(None),
+            Need::Write(Some(&path("a"))),
+            Need::Workspace,
             Need::Admin,
             Need::Land("main"),
+            Need::Attest,
+            Need::Drafts,
         ] {
             assert!(!granted(&mirror, "r", need), "{need:?}");
         }
@@ -292,5 +305,42 @@ mod tests {
             Need::Mirror
         ));
         assert!(!grants("repo:*:admin", "r", Need::Mirror));
+    }
+
+    /// The mirror service polls and imports the repositories its set names
+    /// (D41): it reads those, and only those, and only as the mirror kind.
+    #[test]
+    fn the_mirror_kind_reads_the_repositories_its_set_names() {
+        let principal = |kind, scope: &str| Principal {
+            subject: "m".into(),
+            kind,
+            session: None,
+            work_item: None,
+            scopes: vec![scope.into()],
+        };
+        let every = principal(PrincipalKind::Mirror, "repo:*:mirror");
+        let bound = principal(PrincipalKind::Mirror, "repo:r:mirror");
+        for need in [Need::Read, Need::Objects] {
+            assert!(granted(&every, "r", need), "{need:?}");
+            assert!(granted(&every, "s", need), "{need:?}");
+            assert!(granted(&bound, "r", need), "{need:?}");
+            // Not a repository the set does not name.
+            assert!(!granted(&bound, "s", need), "{need:?}");
+            // Nor the set on any other kind.
+            for kind in [
+                PrincipalKind::Human,
+                PrincipalKind::Agent,
+                PrincipalKind::Ci,
+                PrincipalKind::Service,
+            ] {
+                assert!(
+                    !granted(&principal(kind, "repo:*:mirror"), "r", need),
+                    "{kind:?} {need:?}"
+                );
+            }
+        }
+        // A malformed set grants nothing.
+        let argued = principal(PrincipalKind::Mirror, "repo:*:mirror:x");
+        assert!(!granted(&argued, "r", Need::Read));
     }
 }

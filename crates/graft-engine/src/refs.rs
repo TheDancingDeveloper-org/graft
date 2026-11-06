@@ -129,7 +129,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     ) -> Result<RefView, ApiError> {
         check_ref_name(&req.name)?;
         // The mirror service moves a followed line, by CAS, and nothing
-        // else; its set has no read (D41, WI-3140).
+        // else; its set reads but never writes elsewhere (D41, WI-3140).
         let mirror = is_mirror(cx, &req.repo);
         let repo = if mirror {
             self.repo_id(&req.repo).await?

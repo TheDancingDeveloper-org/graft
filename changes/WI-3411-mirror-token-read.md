@@ -1,0 +1,1 @@
+- Mirror service: a `mirror`-kind token holding `repo:*:mirror` now reads (and fetches objects from) the repositories its set names, so the service can poll and import; it still writes only followed lines, and mint still refuses any other scope on that kind.
