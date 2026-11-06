@@ -892,14 +892,6 @@ fn ci_token_debug_is_redacted() {
 }
 
 #[test]
-fn revoke_token_debug_is_redacted() {
-    let r = pb::RevokeTokenRequest {
-        token: "v4.public.secret".into(),
-    };
-    assert!(!format!("{r:?}").contains("secret"));
-}
-
-#[test]
 fn mirror_credential_debug_is_redacted() {
     let r = pb::SetMirrorCredentialRequest {
         repo: "r".into(),
@@ -917,6 +909,14 @@ fn mirror_credential_debug_is_redacted() {
         // Nor the bytes as a list of numbers.
         assert!(!shown.contains("103, 104, 112"), "{shown}");
     }
+}
+
+#[test]
+fn revoke_token_debug_is_redacted() {
+    let r = pb::RevokeTokenRequest {
+        token: "v4.public.secret".into(),
+    };
+    assert!(!format!("{r:?}").contains("secret"));
 }
 
 #[test]
