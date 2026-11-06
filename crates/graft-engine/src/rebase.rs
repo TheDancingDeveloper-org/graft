@@ -631,9 +631,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         self.changeset(repo, req.onto).await?;
         let stack = self.chain(repo, req.changeset, req.onto).await?;
         // A dry run is checked as a real one: its conflicts name paths.
-        for (_, cs) in &stack {
-            require_changes(cx, &req.repo, &cs.changes)?;
-        }
+        let checked = stack
+            .iter()
+            .try_for_each(|(_, cs)| require_changes(cx, &req.repo, &cs.changes));
+        self.or_cut(cx, &req.repo, checked).await?;
         let plan = self
             .plan(repo, &stack, req.onto, req.merge, &self.config.default_line)
             .await?;
