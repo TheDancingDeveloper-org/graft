@@ -53,9 +53,10 @@ use graft_proto::types::{RefKind, followed_ref};
 use graft_proto::{ApiError, CallContext};
 use graft_telemetry::Metrics;
 
+use crate::credentials::CredentialPipe;
 use crate::db::{LineState, MirrorDb};
 use crate::git::Mirror;
-use crate::{GitCliError, MirrorError, current_ref, move_ref};
+use crate::{GitCliError, MirrorError, current_ref, move_ref_fenced};
 
 /// The poll interval of phase 1 (decision D9).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
@@ -186,6 +187,8 @@ pub struct Follower<'a, A> {
     /// Followed markers known to be set, by line: one marker read per line
     /// per run, not per poll.
     marked: Mutex<HashMap<String, ChangesetId>>,
+    /// The mirror authority lease epoch every ref move carries (D41 §3.6).
+    lease_epoch: Option<u64>,
 }
 
 fn system_ms() -> i64 {
@@ -218,7 +221,21 @@ where
             seen_tags: HashMap::new(),
             last_tags: TagReport::default(),
             marked: Mutex::new(HashMap::new()),
+            lease_epoch: None,
         }
+    }
+
+    /// Carries the mirror authority lease `epoch` on every ref move, so a
+    /// process that lost the lease cannot move a line (D41 §3.6).
+    pub fn with_lease_epoch(mut self, epoch: u64) -> Self {
+        self.lease_epoch = Some(epoch);
+        self
+    }
+
+    /// Hands git the upstream credential through `pipe` for the next polls,
+    /// or stops when `None` (`graft-mirror serve` sets it for one poll).
+    pub fn set_credential_pipe(&mut self, pipe: Option<std::sync::Arc<CredentialPipe>>) {
+        self.mirror.set_credential_pipe(pipe);
     }
 
     /// Exports lag and divergence to `metrics`.
@@ -430,7 +447,17 @@ where
                     // The record first: the graft ref never names a tag whose
                     // objects the mirror lost.
                     self.record_tag(name, tag.commit, objects)?;
-                    match move_ref(self.api, &cx, &repo, &graft_name, None, id, RefKind::Tag).await
+                    match move_ref_fenced(
+                        self.api,
+                        &cx,
+                        &repo,
+                        &graft_name,
+                        None,
+                        id,
+                        RefKind::Tag,
+                        self.lease_epoch,
+                    )
+                    .await
                     {
                         Ok(()) => {
                             tracing::info!(repo = %repo, tag = %name, "mirror tag created");
@@ -549,7 +576,18 @@ where
             .map(|(_, id)| *id)
             .ok_or_else(|| MirrorError::Config("import reported no line".to_owned()))?;
         let cx = self.call("update-ref");
-        match move_ref(self.api, &cx, &repo, &l.line, tip, to, RefKind::Line).await {
+        match move_ref_fenced(
+            self.api,
+            &cx,
+            &repo,
+            &l.line,
+            tip,
+            to,
+            RefKind::Line,
+            self.lease_epoch,
+        )
+        .await
+        {
             Ok(()) => {}
             Err(ApiError::Rejected { policy, .. }) if policy == "line-fast-forward" => {
                 return self.diverge(l, &mut state, up, Divergence::NotFirstParent);
@@ -580,7 +618,17 @@ where
         let name = followed_ref(line);
         let cx = self.call("mark-followed");
         let current = current_ref(self.api, &cx, repo, &name).await?;
-        move_ref(self.api, &cx, repo, &name, current, id, RefKind::Tool).await?;
+        move_ref_fenced(
+            self.api,
+            &cx,
+            repo,
+            &name,
+            current,
+            id,
+            RefKind::Tool,
+            self.lease_epoch,
+        )
+        .await?;
         self.marked
             .lock()
             .expect("marked")

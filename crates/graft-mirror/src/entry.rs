@@ -41,6 +41,11 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
          temp dir (removed afterwards). Credentials come from git's own
          configuration; a URL with userinfo is refused.
   init-config [--out <file>]            write a commented sample mirror.toml
+  serve --config <file>                 the mirror service: follow every
+                                        enabled mirror row the server lists
+                                        (D41); the config names the server,
+                                        token file, data dir, metrics
+                                        address and limits, no repositories
   follow --config <file>                git-primary: follow GitHub main;
                                         with [[check_refs]], also keep one
                                         branch per unsettled land of each
@@ -106,6 +111,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         Some("import") => execute(cmd_import(&args[1..])),
         Some("init-config") => cmd_init_config(&args[1..]),
         Some("follow") => execute(cmd_follow(&args[1..])),
+        Some("serve") => execute(cmd_serve(&args[1..])),
         Some("export") => execute(cmd_export(&args[1..])),
         Some("reconcile") => execute(cmd_reconcile(&args[1..])),
         Some("pr-batch") => execute(cmd_pr_batch(&args[1..])),
@@ -518,6 +524,40 @@ async fn cmd_follow(args: &[String]) -> Result<(), CmdError> {
         },
     )
     .await
+}
+
+async fn cmd_serve(args: &[String]) -> Result<(), CmdError> {
+    let path = match args {
+        [flag, path] if flag == "--config" => PathBuf::from(path),
+        _ => return Err(CmdError::Usage("serve takes --config <file>".into())),
+    };
+    let file = crate::service::ServeFile::load(&path)?;
+    let config = file.config()?;
+    let telemetry = graft_telemetry::init(&TelemetryConfig {
+        service: "graft-mirror".to_owned(),
+        json_logs: file.json_logs,
+        metrics_addr: file.metrics_addr.clone(),
+        otlp_endpoint: None,
+    })
+    .map_err(|e| MirrorError::Config(e.to_string()))?;
+    let telemetry = std::sync::Arc::new(telemetry);
+    if let Some(addr) = &file.metrics_addr {
+        serve_metrics(addr, telemetry.clone()).await?;
+    }
+    std::fs::create_dir_all(&config.data_dir)
+        .map_err(|e| MirrorError::Config(format!("creating data_dir: {e}")))?;
+    let api = std::sync::Arc::new(
+        Server::connect(&file.server, token(file.token_file.as_deref())?).await?,
+    );
+    tracing::info!(
+        data_dir = %config.data_dir.display(), instance = %config.instance,
+        "mirror service starting"
+    );
+    let service =
+        crate::service::Service::new(api.clone(), crate::service::FollowSpawner::new(api), config);
+    service.run(shutdown()).await;
+    tracing::info!("mirror service stopped");
+    Ok(())
 }
 
 /// `follow` with `[[check_refs]]`: each tick follows, then keeps the check

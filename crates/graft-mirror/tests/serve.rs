@@ -1,0 +1,1149 @@
+//! `graft-mirror serve` (D41): the reconcile loop, leases, limits,
+//! back-off, status coalescing and requests, against an in-process fake of
+//! the server's mirror calls. The fencing and credential tests follow a
+//! local git upstream into an in-process engine over the memory store,
+//! whose lease rows the fake writes, so the engine fences ref moves by the
+//! same epochs.
+
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use graft_engine::{Engine, EngineConfig};
+use graft_mirror::credentials::SecretToken;
+use graft_mirror::current_ref;
+use graft_mirror::github::{ForgeError, NewPull, Pull};
+use graft_mirror::service::control::Control;
+use graft_mirror::service::follow_task::FollowSpawner;
+use graft_mirror::service::requests::{self, PullDesk, RequestFailure, RequestRunner};
+use graft_mirror::service::status::PollFailure;
+use graft_mirror::service::{
+    ExitReason, MIGRATION_MARKER, PollReport, PollStep, ServeConfig, Service, Spawner, TaskCtx,
+    netguard,
+};
+use graft_proto::error::ApiResult;
+use graft_proto::pb::{self, MirrorErrorCode, MirrorRequestKind};
+use graft_proto::types::{RefKind, UpdateRef};
+use graft_proto::{AdminApi, ApiError, CallContext, Principal, PrincipalKind, RepoApi};
+use graft_store::memory::MemoryStore;
+use graft_store::{LeaseRecord, MetaStore, MetaTxn, Precondition, TxnOutcome, Write};
+use graft_testkit::clock::FakeClock;
+
+const REPO: &str = "r";
+const ENGINE_NOW: i64 = 1_000_000;
+
+type Api = Engine<MemoryStore, MemoryStore>;
+
+// ---- the fake server -------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct Lease {
+    holder: Option<String>,
+    epoch: u64,
+    expires_at_ms: i64,
+}
+
+#[derive(Default)]
+struct State {
+    rows: Vec<pb::Mirror>,
+    leases: HashMap<String, Lease>,
+    statuses: Vec<pb::MirrorStatus>,
+    stale_status: usize,
+    credentials: HashMap<String, String>,
+    pending: VecDeque<pb::MirrorRequest>,
+    claimed: Vec<pb::MirrorRequest>,
+    completed: Vec<(u64, pb::MirrorRequestOutcome)>,
+    failed: Vec<(u64, String)>,
+    list_calls: Vec<tokio::time::Instant>,
+}
+
+/// The server's mirror calls, in memory. Leases are mirrored into the
+/// engine's store when one is attached.
+#[derive(Default)]
+struct Fake {
+    state: Mutex<State>,
+    store: Option<Arc<MemoryStore>>,
+    server_down: AtomicBool,
+    fail_next_complete: AtomicBool,
+}
+
+impl Fake {
+    fn with_store(store: Arc<MemoryStore>) -> Fake {
+        Fake {
+            store: Some(store),
+            ..Fake::default()
+        }
+    }
+
+    fn st(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap()
+    }
+
+    fn set_row(&self, row: pb::Mirror) {
+        let mut st = self.st();
+        st.rows.retain(|r| r.repo != row.repo);
+        st.rows.push(row);
+    }
+
+    fn bump(&self, repo: &str) {
+        let mut st = self.st();
+        let row = st.rows.iter_mut().find(|r| r.repo == repo).unwrap();
+        row.version += 1;
+    }
+
+    fn remove(&self, repo: &str) {
+        self.st().rows.retain(|r| r.repo != repo);
+    }
+
+    fn lease(&self, repo: &str) -> Option<Lease> {
+        self.st().leases.get(repo).cloned()
+    }
+
+    fn statuses(&self) -> Vec<pb::MirrorStatus> {
+        self.st().statuses.clone()
+    }
+
+    /// Another process takes the lease (as after this one's lapsed).
+    async fn steal(&self, repo: &str) -> u64 {
+        let (prev, l) = {
+            let mut st = self.st();
+            let l = st.leases.get_mut(repo).unwrap();
+            let prev = l.epoch;
+            l.epoch += 1;
+            l.holder = Some("other".to_owned());
+            l.expires_at_ms = i64::MAX;
+            (prev, l.clone())
+        };
+        self.put_store_lease(prev, &l).await;
+        l.epoch
+    }
+
+    /// The lease lapses (its holder stopped renewing).
+    fn lapse(&self, repo: &str) {
+        let mut st = self.st();
+        st.leases.get_mut(repo).unwrap().expires_at_ms = 0;
+    }
+
+    async fn put_store_lease(&self, expected: u64, l: &Lease) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let id = store.repo(REPO).await.unwrap().unwrap();
+        let txn = MetaTxn {
+            preconditions: vec![Precondition::LeaseEpochIs { epoch: expected }],
+            writes: vec![Write::PutLease(LeaseRecord {
+                holder: l.holder.clone(),
+                epoch: l.epoch,
+                // The engine's clock is fixed; held means not released.
+                expires_at_ms: if l.holder.is_some() {
+                    ENGINE_NOW + 3_600_000
+                } else {
+                    0
+                },
+            })],
+        };
+        assert!(matches!(
+            store.commit(id, txn).await,
+            Ok(TxnOutcome::Committed(_))
+        ));
+    }
+
+    fn held(&self, repo: &str, epoch: u64) -> ApiResult<()> {
+        match self.st().leases.get(repo) {
+            Some(l) if l.holder.is_some() && l.epoch == epoch => Ok(()),
+            _ => Err(ApiError::LeaseLost {
+                repo: repo.to_owned(),
+            }),
+        }
+    }
+
+    fn up(&self) -> ApiResult<()> {
+        if self.server_down.load(Ordering::SeqCst) {
+            Err(ApiError::Unavailable { retry_after_ms: 0 })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Control for Fake {
+    async fn list_mirrors(
+        &self,
+        enabled: Option<bool>,
+        _token: String,
+    ) -> ApiResult<pb::MirrorPage> {
+        self.st().list_calls.push(tokio::time::Instant::now());
+        self.up()?;
+        let mirrors = self
+            .st()
+            .rows
+            .iter()
+            .filter(|r| enabled.is_none_or(|e| r.enabled == e))
+            .cloned()
+            .collect();
+        Ok(pb::MirrorPage {
+            mirrors,
+            next_page_token: String::new(),
+        })
+    }
+
+    async fn acquire_lease(&self, repo: &str, instance: &str) -> ApiResult<pb::Lease> {
+        self.up()?;
+        let (prev, l) = {
+            let mut st = self.st();
+            let now = 1;
+            let l = st.leases.entry(repo.to_owned()).or_insert(Lease {
+                holder: None,
+                epoch: 0,
+                expires_at_ms: 0,
+            });
+            if l.holder.is_some() && l.expires_at_ms > now {
+                return Err(ApiError::LeaseLost {
+                    repo: repo.to_owned(),
+                });
+            }
+            let prev = l.epoch;
+            l.epoch += 1;
+            l.holder = Some(instance.to_owned());
+            l.expires_at_ms = i64::MAX;
+            (prev, l.clone())
+        };
+        self.put_store_lease(prev, &l).await;
+        Ok(pb::Lease {
+            repo: repo.to_owned(),
+            epoch: l.epoch,
+            expires_at_ms: l.expires_at_ms,
+        })
+    }
+
+    async fn renew_lease(&self, repo: &str, epoch: u64) -> ApiResult<pb::Lease> {
+        self.up()?;
+        self.held(repo, epoch)?;
+        Ok(pb::Lease {
+            repo: repo.to_owned(),
+            epoch,
+            expires_at_ms: i64::MAX,
+        })
+    }
+
+    async fn release_lease(&self, repo: &str, epoch: u64) -> ApiResult<()> {
+        self.up()?;
+        self.held(repo, epoch)?;
+        let l = {
+            let mut st = self.st();
+            let l = st.leases.get_mut(repo).unwrap();
+            l.holder = None;
+            l.clone()
+        };
+        self.put_store_lease(epoch, &l).await;
+        Ok(())
+    }
+
+    async fn credential(
+        &self,
+        repo: &str,
+        _upstream: &str,
+        epoch: u64,
+    ) -> ApiResult<Option<SecretToken>> {
+        self.up()?;
+        self.held(repo, epoch)?;
+        Ok(self
+            .st()
+            .credentials
+            .get(repo)
+            .and_then(|c| SecretToken::new(c.clone())))
+    }
+
+    async fn set_status(
+        &self,
+        repo: &str,
+        _upstream: &str,
+        status: pb::MirrorStatus,
+    ) -> ApiResult<()> {
+        self.up()?;
+        if let Err(e) = self.held(repo, status.lease_epoch) {
+            self.st().stale_status += 1;
+            return Err(e);
+        }
+        self.st().statuses.push(status);
+        Ok(())
+    }
+
+    async fn claim_request(&self, repo: &str, epoch: u64) -> ApiResult<Option<pb::MirrorRequest>> {
+        self.up()?;
+        self.held(repo, epoch)?;
+        let mut st = self.st();
+        // A request claimed under an older epoch returns to pending.
+        let stale: Vec<_> = st
+            .claimed
+            .iter()
+            .filter(|r| r.claimed_by_epoch != Some(epoch))
+            .cloned()
+            .collect();
+        st.claimed.retain(|r| r.claimed_by_epoch == Some(epoch));
+        st.pending.extend(stale);
+        let Some(mut req) = st.pending.pop_front() else {
+            return Ok(None);
+        };
+        req.claimed_by_epoch = Some(epoch);
+        st.claimed.push(req.clone());
+        Ok(Some(req))
+    }
+
+    async fn complete_request(
+        &self,
+        repo: &str,
+        id: u64,
+        epoch: u64,
+        result: pb::MirrorRequestOutcome,
+        _done: bool,
+    ) -> ApiResult<()> {
+        if self.fail_next_complete.swap(false, Ordering::SeqCst) {
+            // The process "crashed" before the result was recorded.
+            return Err(ApiError::Unavailable { retry_after_ms: 0 });
+        }
+        self.held(repo, epoch)?;
+        let mut st = self.st();
+        st.claimed.retain(|r| r.id != id);
+        st.completed.push((id, result));
+        Ok(())
+    }
+
+    async fn fail_request(&self, repo: &str, id: u64, epoch: u64, code: &str) -> ApiResult<()> {
+        self.held(repo, epoch)?;
+        let mut st = self.st();
+        st.claimed.retain(|r| r.id != id);
+        st.failed.push((id, code.to_owned()));
+        Ok(())
+    }
+}
+
+fn row(repo: &str, upstream: &str, interval_s: u32) -> pb::Mirror {
+    pb::Mirror {
+        repo: repo.to_owned(),
+        upstream: upstream.to_owned(),
+        lines: vec![pb::MirrorLine {
+            branch: "main".to_owned(),
+            line: "main".to_owned(),
+            direction: "follow".to_owned(),
+        }],
+        interval_s,
+        enabled: true,
+        version: 1,
+        ..Default::default()
+    }
+}
+
+// ---- a fake poll ------------------------------------------------------------
+
+/// What fake polls do, shared with the test.
+#[derive(Default)]
+struct Script {
+    /// Every poll started: the row version and the virtual instant.
+    started: Mutex<Vec<(u64, tokio::time::Instant)>>,
+    /// Polls that ran to the end.
+    finished: AtomicUsize,
+    /// While set, a poll waits on `gate` before finishing.
+    hold: AtomicBool,
+    gate: tokio::sync::Notify,
+    entered: tokio::sync::Notify,
+    /// The failure every poll returns, if any.
+    fail: Mutex<Option<PollFailure>>,
+    /// The sha a successful poll reports.
+    sha: Mutex<String>,
+}
+
+struct FakeStep {
+    version: u64,
+    script: Arc<Script>,
+}
+
+impl PollStep for FakeStep {
+    async fn poll(&mut self, _credential: Option<SecretToken>) -> Result<PollReport, PollFailure> {
+        self.script
+            .started
+            .lock()
+            .unwrap()
+            .push((self.version, tokio::time::Instant::now()));
+        if self.script.hold.load(Ordering::SeqCst) {
+            self.script.entered.notify_one();
+            self.script.gate.notified().await;
+        }
+        self.script.finished.fetch_add(1, Ordering::SeqCst);
+        if let Some(f) = self.script.fail.lock().unwrap().clone() {
+            return Err(f);
+        }
+        Ok(PollReport {
+            imported_sha: Some(self.script.sha.lock().unwrap().clone()),
+            requests: 1,
+            ..PollReport::default()
+        })
+    }
+}
+
+struct FakeSpawner(Arc<Script>);
+
+impl Spawner<Fake> for FakeSpawner {
+    fn spawn(&self, task: TaskCtx<Fake>) {
+        let mut step = FakeStep {
+            version: task.row.version,
+            script: self.0.clone(),
+        };
+        tokio::spawn(async move { task.run(&mut step).await });
+    }
+}
+
+fn config(dir: &Path) -> ServeConfig {
+    let mut c = ServeConfig::new(dir);
+    c.instance = "a".to_owned();
+    c
+}
+
+/// A resolver that says every host is a public GitHub address.
+fn public() -> netguard::Resolve {
+    Arc::new(|_, port| {
+        Box::pin(async move { Ok(vec![std::net::SocketAddr::from(([140, 82, 112, 3], port))]) })
+    })
+}
+
+fn fake_service(fake: &Arc<Fake>, script: &Arc<Script>, dir: &Path) -> Service<Fake, FakeSpawner> {
+    Service::with_resolver(
+        fake.clone(),
+        FakeSpawner(script.clone()),
+        config(dir),
+        public(),
+    )
+}
+
+/// Lets spawned tasks run (virtual time does not move).
+async fn settle() {
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+}
+
+const GH: &str = "https://github.com/o/r.git";
+
+// ---- reconcile ---------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_row_added_through_the_api_starts_within_one_reconcile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let mut service = fake_service(&fake, &script, tmp.path());
+    service.reconcile().await.unwrap();
+    assert!(service.running().is_empty());
+
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    assert_eq!(service.running(), vec![(REPO.to_owned(), 1, 1)]);
+    settle().await;
+    assert_eq!(script.started.lock().unwrap().len(), 1);
+    // Its directory was created with the migration marker; the lease is
+    // held under the task's epoch and every status carries it.
+    assert!(tmp.path().join(REPO).join(MIGRATION_MARKER).is_file());
+    assert_eq!(fake.lease(REPO).unwrap().holder.as_deref(), Some("a"));
+    let statuses = fake.statuses();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].lease_epoch, 1);
+    assert_eq!(statuses[0].error_code, MirrorErrorCode::Unspecified as i32);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_version_change_restarts_the_task_after_its_in_flight_poll() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    script.hold.store(true, Ordering::SeqCst);
+    service.reconcile().await.unwrap();
+    script.entered.notified().await;
+
+    // The row changes while a poll is in flight: the task is told to stop,
+    // but the poll is not cancelled.
+    fake.bump(REPO);
+    service.reconcile().await.unwrap();
+    settle().await;
+    assert_eq!(service.running(), vec![(REPO.to_owned(), 1, 1)]);
+    assert_eq!(script.finished.load(Ordering::SeqCst), 0);
+
+    script.hold.store(false, Ordering::SeqCst);
+    script.gate.notify_one();
+    let exit = service.next_exit().await.unwrap();
+    assert_eq!(exit.reason, ExitReason::Stopped);
+    assert_eq!(
+        script.finished.load(Ordering::SeqCst),
+        1,
+        "the poll finished"
+    );
+    // Respawned from the new row under a fresh lease.
+    assert_eq!(service.running(), vec![(REPO.to_owned(), 2, 2)]);
+    settle().await;
+    let versions: Vec<u64> = script.started.lock().unwrap().iter().map(|s| s.0).collect();
+    assert_eq!(versions, [1, 2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_removed_row_stops_its_task_releases_the_lease_and_keeps_the_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+
+    fake.remove(REPO);
+    service.reconcile().await.unwrap();
+    let exit = service.next_exit().await.unwrap();
+    assert_eq!(exit.reason, ExitReason::Stopped);
+    assert!(service.running().is_empty());
+    assert_eq!(fake.lease(REPO).unwrap().holder, None, "released");
+    assert!(tmp.path().join(REPO).join(MIGRATION_MARKER).is_file());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_directory_without_the_migration_marker_is_not_adopted() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join(REPO)).unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+    assert!(service.running().is_empty());
+    assert!(script.started.lock().unwrap().is_empty());
+    assert_eq!(
+        fake.lease(REPO).unwrap().holder,
+        None,
+        "the lease is let go"
+    );
+    let st = fake.statuses();
+    assert_eq!(st.len(), 1);
+    assert!(
+        st[0]
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("migration marker")
+    );
+}
+
+// ---- leases ----------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_lost_lease_stops_the_task_and_it_writes_no_more() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+    let written = fake.statuses().len();
+
+    fake.steal(REPO).await;
+    service.renew().await;
+    let exit = service.next_exit().await.unwrap();
+    assert_eq!(exit.reason, ExitReason::LeaseLost);
+    assert!(service.running().is_empty());
+    // Nothing more was written, and nothing was released: the lease is the
+    // other holder's.
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert_eq!(fake.statuses().len(), written);
+    assert_eq!(fake.st().stale_status, 0);
+    assert_eq!(fake.lease(REPO).unwrap().holder.as_deref(), Some("other"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fenced_write_refused_mid_run_stops_the_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    script.hold.store(true, Ordering::SeqCst);
+    service.reconcile().await.unwrap();
+    script.entered.notified().await;
+    // Lost while polling, before any renewal noticed: the status write
+    // after the poll is refused, and the task stops on it.
+    fake.steal(REPO).await;
+    script.hold.store(false, Ordering::SeqCst);
+    script.gate.notify_one();
+    let exit = service.next_exit().await.unwrap();
+    assert_eq!(exit.reason, ExitReason::LeaseLost);
+    assert_eq!(fake.st().stale_status, 1);
+    assert!(fake.statuses().is_empty());
+}
+
+// ---- back-off ----------------------------------------------------------------
+
+fn gaps(at: &[tokio::time::Instant]) -> Vec<u64> {
+    at.windows(2).map(|w| (w[1] - w[0]).as_secs()).collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_reconcile_loop_backs_off_while_the_server_is_down_capped_at_a_minute() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    fake.server_down.store(true, Ordering::SeqCst);
+    let script = Arc::new(Script::default());
+    let service = fake_service(&fake, &script, tmp.path());
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let run = tokio::spawn(service.run(async move {
+        let _ = stop_rx.await;
+    }));
+    tokio::time::sleep(Duration::from_secs(250)).await;
+    let calls = fake.st().list_calls.clone();
+    assert_eq!(gaps(&calls), [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+
+    // The server is back: the next reconcile starts the row, and the loop
+    // returns to its 15 s cadence.
+    fake.server_down.store(false, Ordering::SeqCst);
+    fake.set_row(row(REPO, GH, 15));
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    let n = fake.st().list_calls.len();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(fake.st().list_calls.len() - n, 4);
+    assert!(!script.started.lock().unwrap().is_empty());
+    stop_tx.send(()).unwrap();
+    run.await.unwrap();
+    assert_eq!(fake.lease(REPO).unwrap().holder, None, "released on stop");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_repository_backs_off_exponentially_and_reports_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    *script.fail.lock().unwrap() = Some(PollFailure::new(
+        MirrorErrorCode::UpstreamUnreachable,
+        "the upstream could not be reached",
+    ));
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(15 + 30 + 60 + 120 + 1)).await;
+    let at: Vec<_> = script.started.lock().unwrap().iter().map(|s| s.1).collect();
+    assert_eq!(gaps(&at), [15, 30, 60, 120]);
+    let last = fake.statuses().pop().unwrap();
+    assert_eq!(last.error_code, MirrorErrorCode::UpstreamUnreachable as i32);
+    assert!(last.backoff_until_ms.is_some());
+
+    // It recovers: back to the row's interval.
+    *script.fail.lock().unwrap() = None;
+    tokio::time::sleep(Duration::from_secs(240 + 31)).await;
+    let at: Vec<_> = script.started.lock().unwrap().iter().map(|s| s.1).collect();
+    assert_eq!(gaps(&at)[4..], [240, 15, 15]);
+    assert_eq!(
+        fake.statuses().pop().unwrap().error_code,
+        MirrorErrorCode::Unspecified as i32
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_after_is_honoured() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    *script.fail.lock().unwrap() = Some(PollFailure {
+        retry_after: Some(Duration::from_secs(300)),
+        ..PollFailure::new(MirrorErrorCode::RateLimited, "rate limited")
+    });
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(301)).await;
+    let at: Vec<_> = script.started.lock().unwrap().iter().map(|s| s.1).collect();
+    assert_eq!(gaps(&at), [300]);
+}
+
+// ---- status ----------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn status_is_written_once_per_change_and_once_a_minute_otherwise() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    *script.sha.lock().unwrap() = "a".repeat(40);
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    // Thirteen polls over three minutes, nothing changing.
+    tokio::time::sleep(Duration::from_secs(180) + Duration::from_millis(1)).await;
+    assert_eq!(script.started.lock().unwrap().len(), 13);
+    assert_eq!(fake.statuses().len(), 4, "t = 0, 60, 120 and 180 s");
+
+    // A change is written at the next poll.
+    *script.sha.lock().unwrap() = "b".repeat(40);
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    let st = fake.statuses();
+    assert_eq!(st.len(), 5);
+    assert_eq!(
+        st[4].last_imported_sha.as_deref(),
+        Some("b".repeat(40).as_str())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_upstream_resolving_to_a_blocked_address_is_refused_before_any_fetch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let rebinding: netguard::Resolve = Arc::new(|_, port| {
+        Box::pin(async move { Ok(vec![std::net::SocketAddr::from(([10, 0, 0, 5], port))]) })
+    });
+    let mut service = Service::with_resolver(
+        fake.clone(),
+        FakeSpawner(script.clone()),
+        config(tmp.path()),
+        rebinding,
+    );
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+    assert!(script.started.lock().unwrap().is_empty(), "never polled");
+    let st = fake.statuses();
+    assert_eq!(st[0].error_code, MirrorErrorCode::UrlBlocked as i32);
+}
+
+// ---- requests ----------------------------------------------------------------
+
+#[derive(Default)]
+struct Desk {
+    pulls: Mutex<Vec<Pull>>,
+    created: AtomicUsize,
+}
+
+impl PullDesk for Desk {
+    async fn find_open(&self, branch: &str) -> Result<Option<Pull>, ForgeError> {
+        Ok(self
+            .pulls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.open && p.head_ref == branch)
+            .cloned())
+    }
+
+    async fn create(&self, new: &NewPull) -> Result<Pull, ForgeError> {
+        let n = self.created.fetch_add(1, Ordering::SeqCst) as u64 + 1;
+        let pull = Pull {
+            number: n,
+            url: format!("https://github.com/o/r/pull/{n}"),
+            node_id: format!("PR_{n}"),
+            open: true,
+            merged: false,
+            merge_commit: None,
+            head_sha: "0".repeat(40),
+            head_ref: new.head.clone(),
+            body: new.body.clone(),
+            settled_ms: None,
+        };
+        self.pulls.lock().unwrap().push(pull.clone());
+        Ok(pull)
+    }
+}
+
+#[derive(Default)]
+struct Runner {
+    prepared: AtomicUsize,
+}
+
+impl RequestRunner for Runner {
+    async fn prepare_batch(
+        &self,
+        _req: &pb::MirrorRequest,
+        branch: &str,
+    ) -> Result<NewPull, RequestFailure> {
+        self.prepared.fetch_add(1, Ordering::SeqCst);
+        Ok(NewPull {
+            title: "batch".to_owned(),
+            body: String::new(),
+            head: branch.to_owned(),
+            base: "main".to_owned(),
+        })
+    }
+
+    async fn run(
+        &self,
+        _req: &pb::MirrorRequest,
+    ) -> Result<pb::MirrorRequestOutcome, RequestFailure> {
+        Err(requests::UNSUPPORTED)
+    }
+}
+
+fn request(id: u64, kind: MirrorRequestKind) -> pb::MirrorRequest {
+    pb::MirrorRequest {
+        repo: REPO.to_owned(),
+        id,
+        line: "main".to_owned(),
+        kind: kind as i32,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_crash_between_opening_the_pr_and_recording_it_adopts_the_pr() {
+    let fake = Fake::default();
+    let epoch = fake.acquire_lease(REPO, "a").await.unwrap().epoch;
+    fake.st()
+        .pending
+        .push_back(request(7, MirrorRequestKind::CutBatch));
+    let (desk, runner) = (Desk::default(), Runner::default());
+
+    // The PR is opened, then the process dies before recording it.
+    fake.fail_next_complete.store(true, Ordering::SeqCst);
+    let err = requests::run_turn(&fake, &desk, &runner, REPO, epoch).await;
+    assert!(err.is_err());
+    assert_eq!(desk.created.load(Ordering::SeqCst), 1);
+    assert!(fake.st().completed.is_empty());
+
+    // The next process (a new epoch) claims it again and adopts that PR.
+    fake.lapse(REPO);
+    let epoch = fake.acquire_lease(REPO, "b").await.unwrap().epoch;
+    let turn = requests::run_turn(&fake, &desk, &runner, REPO, epoch)
+        .await
+        .unwrap();
+    assert_eq!(turn.finished, 1);
+    assert_eq!(desk.created.load(Ordering::SeqCst), 1, "no second PR");
+    assert_eq!(
+        runner.prepared.load(Ordering::SeqCst),
+        1,
+        "the branch was not rebuilt"
+    );
+    let st = fake.st();
+    assert_eq!(st.completed.len(), 1);
+    let (id, outcome) = &st.completed[0];
+    assert_eq!(*id, 7);
+    assert_eq!(outcome.pr_number, Some(1));
+    assert_eq!(outcome.branch.as_deref(), Some("graft/batch-7"));
+}
+
+#[tokio::test]
+async fn unwired_kinds_fail_typed_and_a_purge_deletes_only_an_idle_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Fake::default();
+    let epoch = fake.acquire_lease(REPO, "a").await.unwrap().epoch;
+    fake.st()
+        .pending
+        .push_back(request(1, MirrorRequestKind::Rewind));
+    fake.st()
+        .pending
+        .push_back(request(2, MirrorRequestKind::Purge));
+    let (desk, runner) = (Desk::default(), Runner::default());
+    requests::run_turn(&fake, &desk, &runner, REPO, epoch)
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.st().failed,
+        [(1, "unsupported".to_owned()), (2, "bad_request".to_owned())]
+    );
+
+    let dir = tmp.path().join(REPO);
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join(MIGRATION_MARKER), b"").unwrap();
+    fake.st()
+        .pending
+        .push_back(request(3, MirrorRequestKind::Purge));
+    assert!(requests::purge(&fake, REPO, epoch, &dir).await.unwrap());
+    assert!(!dir.exists());
+    assert_eq!(fake.st().completed.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_sweep_purges_a_removed_mirrors_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    fake.remove(REPO);
+    service.reconcile().await.unwrap();
+    service.next_exit().await.unwrap();
+    fake.st()
+        .pending
+        .push_back(request(9, MirrorRequestKind::Purge));
+    // The sweep runs every fourth reconcile.
+    for _ in 0..2 {
+        service.reconcile().await.unwrap();
+    }
+    assert!(!tmp.path().join(REPO).exists());
+    assert_eq!(fake.st().completed[0].0, 9);
+    assert_eq!(fake.lease(REPO).unwrap().holder, None);
+}
+
+// ---- the real follower: fencing and credentials ---------------------------------
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "T")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "T")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+        .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// A bare upstream at `root/up.git`, with a work tree at `root/work`.
+fn upstream(root: &Path) -> (PathBuf, PathBuf) {
+    let bare = root.join("up.git");
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    git(root, &["init", "--bare", "up.git"]);
+    git(&work, &["init"]);
+    git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    (bare, work)
+}
+
+fn commit(work: &Path, file: &str) -> String {
+    std::fs::write(work.join(file), file).unwrap();
+    git(work, &["add", "."]);
+    git(work, &["commit", "-m", file]);
+    git(work, &["push", "origin", "HEAD:main"]);
+    git(work, &["rev-parse", "HEAD"])
+}
+
+fn engine() -> (Arc<Api>, Arc<MemoryStore>) {
+    let store = Arc::new(MemoryStore::new());
+    let api = Engine::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(FakeClock::at(ENGINE_NOW)),
+        EngineConfig::default(),
+    );
+    (Arc::new(api), store)
+}
+
+fn mirror_cx(repo: &str) -> CallContext {
+    CallContext {
+        principal: Principal {
+            subject: "graft-mirror".to_owned(),
+            kind: PrincipalKind::Mirror,
+            session: None,
+            work_item: None,
+            // In-process: the followed marker is admin-only, and the
+            // engine reads scopes from here rather than a token.
+            scopes: vec![format!("repo:{repo}:mirror"), format!("repo:{repo}:admin")],
+        },
+        request_id: "test".to_owned(),
+        deadline_ms: None,
+    }
+}
+
+fn local_config(dir: &Path, instance: &str) -> ServeConfig {
+    let mut c = ServeConfig::new(dir);
+    c.instance = instance.to_owned();
+    c.allow_local_upstreams = true;
+    c.min_interval = Duration::from_millis(100);
+    c
+}
+
+/// Waits, bounded, for `f` to hold; the bound only catches a hang.
+async fn eventually(mut f: impl FnMut() -> bool) {
+    for _ in 0..600 {
+        if f() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("condition never held");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_process_on_the_same_data_is_fenced_by_the_lease_epoch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (bare, work) = upstream(tmp.path());
+    let c1 = commit(&work, "a");
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    let fake = Arc::new(Fake::with_store(store));
+    fake.set_row(row(REPO, bare.to_str().unwrap(), 0));
+    let data = tmp.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+
+    let mut a = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(mirror_cx),
+        local_config(&data, "a"),
+    );
+    a.reconcile().await.unwrap();
+    eventually(|| {
+        fake.statuses()
+            .iter()
+            .any(|s| s.last_imported_sha.as_deref() == Some(c1.as_str()))
+    })
+    .await;
+    let tip1 = current_ref(&*api, &mirror_cx(REPO), REPO, "main")
+        .await
+        .unwrap()
+        .expect("followed");
+
+    // A second process over the same data cannot start while A holds it.
+    let mut b = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(mirror_cx),
+        local_config(&data, "b"),
+    );
+    b.reconcile().await.unwrap();
+    assert!(b.running().is_empty());
+
+    // A stalls and its lease lapses; B takes it under a new epoch.
+    fake.lapse(REPO);
+    b.reconcile().await.unwrap();
+    assert_eq!(b.running(), vec![(REPO.to_owned(), 1, 2)]);
+    // The engine refuses a line move under A's epoch now.
+    let stale = api
+        .update_ref(
+            &mirror_cx(REPO),
+            UpdateRef {
+                repo: REPO.to_owned(),
+                name: "main".to_owned(),
+                expected: Some(tip1),
+                new: tip1,
+                kind: RefKind::Line,
+                lease_epoch: Some(1),
+            },
+        )
+        .await;
+    assert!(
+        matches!(stale, Err(ApiError::LeaseLost { .. })),
+        "{stale:?}"
+    );
+
+    // A notices at its next fenced call and stops without writing.
+    let exit = a.next_exit().await.unwrap();
+    assert_eq!(exit.reason, ExitReason::LeaseLost);
+    let c2 = commit(&work, "b");
+    eventually(|| {
+        fake.statuses()
+            .iter()
+            .any(|s| s.last_imported_sha.as_deref() == Some(c2.as_str()))
+    })
+    .await;
+    {
+        let st = fake.st();
+        assert_eq!(st.stale_status, 0, "A wrote nothing under its old epoch");
+        assert!(
+            st.statuses
+                .iter()
+                .filter(|s| s.last_imported_sha.as_deref() == Some(c2.as_str()))
+                .all(|s| s.lease_epoch == 2)
+        );
+    }
+    b.stop_all().await;
+}
+
+/// A tracing writer into a shared buffer.
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+    type Writer = Logs;
+    fn make_writer(&'a self) -> Logs {
+        self.clone()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forced_auth_failure_leaves_no_credential_in_logs_or_status() {
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let logs = Logs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // An upstream that refuses every credential.
+    let forge = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(
+            ResponseTemplate::new(401).insert_header("WWW-Authenticate", "Basic realm=\"x\""),
+        )
+        .mount(&forge)
+        .await;
+    let secret = "ghp_serveSECRETvalue42";
+    let tmp = tempfile::tempdir().unwrap();
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    let fake = Arc::new(Fake::with_store(store));
+    let upstream = format!("{}/o/r.git", forge.uri());
+    fake.set_row(row(REPO, &upstream, 0));
+    fake.st()
+        .credentials
+        .insert(REPO.to_owned(), secret.to_owned());
+
+    let mut service = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(mirror_cx),
+        local_config(tmp.path(), "a"),
+    );
+    service.reconcile().await.unwrap();
+    eventually(|| !fake.statuses().is_empty()).await;
+    service.stop_all().await;
+
+    // git asked, through the pipe, and sent the credential...
+    let basic = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{secret}"))
+    };
+    let sent = forge.received_requests().await.unwrap().iter().any(|r| {
+        r.headers
+            .get("authorization")
+            .is_some_and(|v| v.to_str().unwrap_or("").contains(&basic))
+    });
+    assert!(sent, "the credential reached git through the helper");
+    // ...and the failure is typed, with no trace of it.
+    let st = fake.statuses();
+    assert_eq!(st[0].error_code, MirrorErrorCode::AuthFailed as i32);
+    let status_text = format!("{st:?}");
+    assert!(!status_text.contains(secret));
+    assert!(!status_text.contains(&basic));
+    let log = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("mirror"), "logs were captured");
+    assert!(!log.contains(secret));
+    assert!(!log.contains(&basic));
+}

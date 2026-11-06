@@ -65,7 +65,7 @@ fn unavailable() -> ApiError {
     }
 }
 
-fn status_error(s: tonic::Status) -> ApiError {
+pub(crate) fn status_error(s: tonic::Status) -> ApiError {
     ApiError::from_status(&s).unwrap_or_else(|| match s.code() {
         tonic::Code::Unauthenticated => ApiError::Unauthenticated,
         tonic::Code::PermissionDenied => ApiError::PermissionDenied {
@@ -136,13 +136,13 @@ impl Server {
             .max_encoding_message_size(MAX_MESSAGE_BYTES)
     }
 
-    fn mirror(&self) -> MirrorServiceClient<Channel> {
+    pub(crate) fn mirror(&self) -> MirrorServiceClient<Channel> {
         MirrorServiceClient::new(self.admin.clone())
             .send_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Gzip)
     }
 
-    fn request<T>(&self, cx: &CallContext, msg: T) -> ApiResult<tonic::Request<T>> {
+    pub(crate) fn request<T>(&self, cx: &CallContext, msg: T) -> ApiResult<tonic::Request<T>> {
         let mut req = tonic::Request::new(msg);
         let md = req.metadata_mut();
         md.insert(
