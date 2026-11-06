@@ -200,6 +200,7 @@ applies only to a row that is already removed or disabled. It records a
 purge request, and the service deletes `<data>/<repo>/` (git cache and
 mirror SQLite, batch history included) and releases the repository's lease
 (§3.6). The graft repository, its lines and its history are untouched.
+Re-enabling a mirror cancels its pending purges.
 
 ### 3.3 The mirror service
 
