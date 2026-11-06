@@ -411,6 +411,7 @@ pub(crate) fn error_name(e: &ApiError) -> &'static str {
         ApiError::PermissionDenied { .. } => "permission_denied",
         ApiError::LeaseExpired { .. } => "lease_expired",
         ApiError::LeaseLost { .. } => "lease_lost",
+        ApiError::BatchOpen { .. } => "batch_open",
         ApiError::LimitExceeded { .. } => "limit_exceeded",
         ApiError::CorruptObject { .. } => "corrupt_object",
         ApiError::Obliterated { .. } => "obliterated",

@@ -25,6 +25,8 @@ const TABLES: &[&str] = &[
     "line_paths",
     "line_pos",
     "mirror_leases",
+    "mirror_line_slots",
+    "mirror_requests",
     "refs",
     "repo_mirrors",
     "repo_owners",

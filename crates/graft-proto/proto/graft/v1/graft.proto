@@ -984,6 +984,9 @@ message RemoveMirrorResult {
 message PurgeMirrorRequest {
   string repo = 1;
   string upstream = 2;
+  // The caller's idempotency key; a retry with the same key returns the
+  // request it recorded.
+  string client_request_id = 3;
 }
 
 // Status from the mirror service (`repo:*:mirror`).
@@ -1012,6 +1015,141 @@ message Lease {
   string repo = 1;
   uint64 epoch = 2;
   int64 expires_at_ms = 3;
+}
+
+// ---- mirror requests (D41 §3.5) ------------------------------------------
+
+enum MirrorRequestKind {
+  MIRROR_REQUEST_KIND_UNSPECIFIED = 0;
+  MIRROR_REQUEST_KIND_CUT_BATCH = 1;
+  MIRROR_REQUEST_KIND_SETTLE_BATCH = 2;
+  MIRROR_REQUEST_KIND_EXCLUDE = 3;
+  MIRROR_REQUEST_KIND_REWIND = 4;
+  MIRROR_REQUEST_KIND_PURGE = 5;
+}
+
+enum MirrorRequestState {
+  MIRROR_REQUEST_STATE_UNSPECIFIED = 0;
+  MIRROR_REQUEST_STATE_PENDING = 1;
+  MIRROR_REQUEST_STATE_CLAIMED = 2;
+  MIRROR_REQUEST_STATE_DONE = 3;
+  MIRROR_REQUEST_STATE_FAILED = 4;
+  MIRROR_REQUEST_STATE_EXPIRED = 5;
+}
+
+enum BatchState {
+  BATCH_STATE_UNSPECIFIED = 0;
+  BATCH_STATE_REQUESTED = 1;
+  BATCH_STATE_OPEN = 2;
+  BATCH_STATE_SEALED = 3;
+  BATCH_STATE_SETTLED = 4;
+}
+
+// What the service recorded: the PR, its branch and lands, or an error.
+message MirrorRequestOutcome {
+  optional uint64 pr_number = 1;
+  optional string pr_url = 2;
+  optional string branch = 3;
+  repeated bytes lands = 4;
+  optional string error_code = 5;
+}
+
+// One request. Its batch branch is `graft/batch-<id>`.
+message MirrorRequest {
+  string repo = 1;
+  uint64 id = 2;
+  string line = 3;
+  MirrorRequestKind kind = 4;
+  string client_request_id = 5;
+  optional bytes base = 6;
+  repeated bytes excludes = 7;
+  optional string upstream = 8;
+  MirrorRequestState state = 9;
+  BatchState batch_state = 10;
+  optional uint64 claimed_by_epoch = 11;
+  optional int64 claimed_at_ms = 12;
+  int64 deadline_ms = 13;
+  MirrorRequestOutcome result = 14;
+  string requested_by = 15;
+  int64 created_at_ms = 16;
+  int64 updated_at_ms = 17;
+}
+
+// `repo:<name>:admin`.
+message CutBatchRequest {
+  string repo = 1;
+  string line = 2;
+  optional bytes base = 3;
+  repeated bytes excludes = 4;
+  string client_request_id = 5;
+}
+
+// `mirror:bind`: discards history.
+message RewindFollowedRequest {
+  string repo = 1;
+  string line = 2;
+  string client_request_id = 3;
+}
+
+message BatchKey {
+  string repo = 1;
+  string line = 2;
+}
+
+// The line's open batch, if any.
+message BatchView {
+  optional MirrorRequest batch = 1;
+}
+
+message ListBatchesRequest {
+  string repo = 1;
+  optional string line = 2;
+  string page_token = 3;
+  uint32 limit = 4;
+}
+
+message BatchPage {
+  repeated MirrorRequest batches = 1;
+  string next_page_token = 2;
+}
+
+message MirrorRequestKey {
+  string repo = 1;
+  uint64 id = 2;
+}
+
+// The mirror service claims the oldest claimable request under its epoch.
+message ClaimRequestRequest {
+  string repo = 1;
+  uint64 epoch = 2;
+}
+
+message ClaimRequestResult {
+  optional MirrorRequest request = 1;
+}
+
+// Record (`done = false`) or finish (`done = true`) a claimed request.
+message CompleteRequestRequest {
+  string repo = 1;
+  uint64 id = 2;
+  uint64 epoch = 3;
+  MirrorRequestOutcome result = 4;
+  bool done = 5;
+}
+
+message FailRequestRequest {
+  string repo = 1;
+  uint64 id = 2;
+  uint64 epoch = 3;
+  string error_code = 4;
+}
+
+// Moves a batch `open → sealed → settled`; settling clears the pointer.
+message SetBatchStateRequest {
+  string repo = 1;
+  uint64 id = 2;
+  uint64 epoch = 3;
+  BatchState state = 4;
 }
 
 // ---- errors (docs/design.md §7.10) ----------------------------------------
@@ -1045,6 +1183,12 @@ message ApiError {
   message IncompatibleProtocol { string server = 1; }
   // The mirror authority lease is held under another epoch (D41 §3.6).
   message LeaseLost { string repo = 1; }
+  // A batch or rewind holds the line (D41 §3.5).
+  message BatchOpen {
+    string repo = 1;
+    string line = 2;
+    uint64 request = 3;
+  }
   // A LineMerge conflict (D29): `onto` is the target tip, `base` the merge
   // base, `source` the source changeset merged.
   message MergeConflict {
@@ -1081,6 +1225,7 @@ message ApiError {
     IncompatibleProtocol incompatible_protocol = 18;
     MergeConflict merge_conflict = 19;
     LeaseLost lease_lost = 21;
+    BatchOpen batch_open = 22;
   }
   optional StaleBase stale_base = 20;
 }
@@ -1155,11 +1300,21 @@ service MirrorService {
   rpc GetMirror(MirrorKey) returns (Mirror);
   rpc ListMirrors(ListMirrorsRequest) returns (MirrorPage);
   rpc RemoveMirror(RemoveMirrorRequest) returns (RemoveMirrorResult);
-  rpc PurgeMirror(PurgeMirrorRequest) returns (Empty);
+  rpc PurgeMirror(PurgeMirrorRequest) returns (MirrorRequest);
   rpc SetMirrorStatus(SetMirrorStatusRequest) returns (Empty);
   rpc AcquireLease(AcquireLeaseRequest) returns (Lease);
   rpc RenewLease(LeaseRequest) returns (Lease);
   rpc ReleaseLease(LeaseRequest) returns (Empty);
+  // Mirror requests (D41 §3.5).
+  rpc CutBatch(CutBatchRequest) returns (MirrorRequest);
+  rpc GetBatch(BatchKey) returns (BatchView);
+  rpc ListBatches(ListBatchesRequest) returns (BatchPage);
+  rpc RewindFollowed(RewindFollowedRequest) returns (MirrorRequest);
+  rpc GetRequest(MirrorRequestKey) returns (MirrorRequest);
+  rpc ClaimRequest(ClaimRequestRequest) returns (ClaimRequestResult);
+  rpc CompleteRequest(CompleteRequestRequest) returns (MirrorRequest);
+  rpc FailRequest(FailRequestRequest) returns (MirrorRequest);
+  rpc SetBatchState(SetBatchStateRequest) returns (MirrorRequest);
   rpc SetMirrorCredential(SetMirrorCredentialRequest) returns (Mirror);
   rpc GetMirrorCredential(GetMirrorCredentialRequest) returns (MirrorCredential);
 }
