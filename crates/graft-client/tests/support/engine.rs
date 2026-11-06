@@ -394,6 +394,46 @@ impl EngineRepo {
             .id
     }
 
+    /// A changeset on `parent` with `race` and `metadata`, imported as a
+    /// mirror imports one (the only way a changeset gets the reserved
+    /// `graft.` or `mirror.` keys), at the tip of a new line `mirrored`.
+    pub async fn import_with_metadata(
+        &self,
+        parent: ChangesetId,
+        race: Race,
+        metadata: Metadata,
+    ) -> ChangesetId {
+        let plain = self.write(vec![parent], race).await;
+        let mut cs = self.changeset(plain).await.expect("written").changeset;
+        cs.metadata = metadata;
+        let id = self
+            .engine
+            .import_changesets(
+                &self.admin(),
+                ImportChangesets {
+                    repo: self.name.clone(),
+                    changesets: vec![cs],
+                },
+            )
+            .await
+            .expect("import")
+            .pop()
+            .expect("imported")
+            .id;
+        self.engine
+            .create_line(
+                &self.admin(),
+                CreateLine {
+                    repo: self.name.clone(),
+                    name: "mirrored".to_owned(),
+                    from: id,
+                },
+            )
+            .await
+            .expect("create line");
+        id
+    }
+
     /// Lands `race` on `main` as another writer (attested, as D6 needs).
     pub async fn advance(&self, race: Race) -> ChangesetId {
         let tip = self.tip().await;

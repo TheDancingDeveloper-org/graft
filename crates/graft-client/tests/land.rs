@@ -479,6 +479,104 @@ async fn after_a_conflict_sync_writes_markers_and_an_edit_commit_and_land_succee
     env.assert_checked_out(&wc).await;
 }
 
+/// Writes a conflicted line merge of `source` (made on the root, with
+/// mirror metadata) into a working copy at the tip, where `main` changed
+/// `src/lib.rs` to `ours`.
+async fn mirror_merge_conflict(env: &Env, ours: &str) -> (WorkingCopy, ChangesetId) {
+    let root = env.repo.tip().await;
+    let mut metadata = graft_model::Metadata::new();
+    metadata.insert("mirror.git.commit".to_owned(), "abc123".to_owned());
+    metadata.insert("graft.landed".to_owned(), "x".to_owned());
+    metadata.insert("agent.session".to_owned(), "s1".to_owned());
+    let source = env
+        .repo
+        .import_with_metadata(
+            root,
+            put("src/lib.rs", "fn a() { theirs }\nfn b() {}\nfn c() {}\n"),
+            metadata,
+        )
+        .await;
+    env.repo.advance(put("src/lib.rs", ours)).await;
+    let mut wc = env.clone("a").await;
+    wc.begin(&*env.repo, &env.cx(), DEFAULT_LEASE_MS)
+        .await
+        .unwrap();
+    let cache = wc.open_cache(DEFAULT_CACHE_BYTES).unwrap();
+    let c = wc
+        .merge_conflicting(
+            &*env.repo,
+            &cache,
+            &env.cx(),
+            root,
+            source,
+            &FetchOptions::default(),
+        )
+        .await;
+    let c = match c {
+        Ok(c) => c,
+        Err(Error::Conflicted(c)) => *c,
+        Err(e) => panic!("expected conflicts: {e:?}"),
+    };
+    assert_eq!(c.files.len(), 1, "{c:?}");
+    (wc, source)
+}
+
+fn merged_from(source: ChangesetId) -> LandOptions {
+    LandOptions {
+        merged_from: Some(graft_proto::types::MergedFrom {
+            line: "mirrored".to_owned(),
+            changeset: source,
+        }),
+        ..quick()
+    }
+}
+
+#[tokio::test]
+async fn resolving_a_merge_of_a_mirrored_change_drops_its_reserved_metadata() {
+    let env = Env::direct().await;
+    let ours = "fn a() { ours }\nfn b() {}\nfn c() {}\n";
+    let (mut wc, source) = mirror_merge_conflict(&env, ours).await;
+    write(&wc, "src/lib.rs", "fn a() { both }\nfn b() {}\nfn c() {}\n");
+    let resolved = env.commit(&mut wc, Some("merge")).await.unwrap();
+    assert!(wc.conflicts().unwrap().is_none());
+    let meta = env
+        .repo
+        .changeset(resolved)
+        .await
+        .unwrap()
+        .changeset
+        .metadata;
+    assert!(
+        meta.keys()
+            .all(|k| !k.starts_with("mirror.") && !k.starts_with("graft.")),
+        "{meta:?}"
+    );
+    assert_eq!(meta.get("agent.session").map(String::as_str), Some("s1"));
+    env.land_with(&mut wc, &merged_from(source)).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_merge_resolved_to_the_snapshot_itself_commits_and_lands() {
+    let env = Env::direct().await;
+    let ours = "fn a() { ours }\nfn b() {}\nfn c() {}\n";
+    let (mut wc, source) = mirror_merge_conflict(&env, ours).await;
+    // Keep ours: the resolved tree is the snapshot's, and no file changed.
+    write(&wc, "src/lib.rs", ours);
+    let tip = env.repo.tip().await;
+    let resolved = env.commit(&mut wc, Some("merge")).await.unwrap();
+    assert!(wc.conflicts().unwrap().is_none());
+    assert_eq!(wc.state().head, Some(resolved));
+    let cs = env.repo.changeset(resolved).await.unwrap().changeset;
+    assert_eq!(cs.parents, [tip, source]);
+    assert!(cs.changes.is_empty(), "{:?}", cs.changes);
+    // Nothing is left unresolved: the land goes ahead.
+    env.land_with(&mut wc, &merged_from(source)).await.unwrap();
+    assert_eq!(
+        env.repo.files(env.repo.tip().await).await["src/lib.rs"],
+        ours.as_bytes()
+    );
+}
+
 #[tokio::test]
 async fn land_sync_writes_the_conflicts_itself_and_merges_what_is_clean() {
     let env = Env::direct().await;

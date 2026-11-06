@@ -35,7 +35,8 @@ use graft_model::{
 };
 use graft_proto::api::{ObjectApi, RepoApi, WorkspaceApi};
 use graft_proto::types::{
-    CreateChangeset, Diff, GetChangesets, HasObjects, Page, PutObjects, SetHead, WorkspaceRef,
+    CreateChangeset, Diff, DraftState, GetChangesets, HasObjects, Page, PutObjects, SetHead,
+    WorkspaceRef,
 };
 use graft_proto::{ApiError, CallContext, Frame};
 use graft_store::ObjectStore;
@@ -52,8 +53,13 @@ use crate::{Error, Result};
 const PENDING_FILE: &str = "pending";
 const PENDING_HEADER: &str = "graft-pending 1";
 
-/// Metadata keys the server reserves; an amend does not carry them over.
-const RESERVED_METADATA: &str = "graft.";
+/// Metadata key prefixes the server reserves (the engine's list); an amend
+/// or a conflict resolution does not carry them over.
+const RESERVED_METADATA: [&str; 2] = ["graft.", "mirror."];
+
+fn reserved_key(key: &str) -> bool {
+    RESERVED_METADATA.iter().any(|p| key.starts_with(p))
+}
 
 /// Limits on what one commit reads and sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,8 +221,21 @@ impl WorkingCopy {
         let (parents, changes, message, metadata, amend) = if opts.amend {
             self.amend_request(api, cx, &wc, opts).await?
         } else {
+            // A merge resolved to the snapshot's own tree changes no file:
+            // it is recorded as an empty changeset with the source as a
+            // second parent, the one empty shape the engine accepts.
+            // Anything else with no change has nothing to record.
+            let mut parents = vec![self.snapshot()];
             if wc.is_empty() {
-                return Err(Error::NothingToCommit);
+                match &conflicts {
+                    Some(c) if self.is_landed(api, cx, c.head).await? => parents.push(c.head),
+                    Some(_) => {
+                        // The stack's change is already on the tip.
+                        self.drop_conflicts()?;
+                        return Err(Error::NothingToCommit);
+                    }
+                    None => return Err(Error::NothingToCommit),
+                }
             }
             // Resolving a conflicting sync replaces the stack's head: keep
             // its message (unless given) and its tool metadata, such as
@@ -227,7 +246,7 @@ impl WorkingCopy {
                     let mut metadata: Metadata = old
                         .metadata
                         .into_iter()
-                        .filter(|(k, _)| !k.starts_with(RESERVED_METADATA))
+                        .filter(|(k, _)| !reserved_key(k))
                         .collect();
                     metadata.extend(opts.metadata.clone());
                     (opts.message.clone().unwrap_or(old.message), metadata)
@@ -248,7 +267,7 @@ impl WorkingCopy {
                     None => Change::Delete { path: path.clone() },
                 })
                 .collect();
-            (vec![self.snapshot()], changes, message, metadata, None)
+            (parents, changes, message, metadata, None)
         };
         if changes.len() > limits.max_changes {
             return Err(over_budget("max_changes", limits.max_changes as u64));
@@ -452,7 +471,7 @@ impl WorkingCopy {
         let mut metadata: Metadata = old
             .metadata
             .into_iter()
-            .filter(|(k, _)| !k.starts_with(RESERVED_METADATA))
+            .filter(|(k, _)| !reserved_key(k))
             .collect();
         metadata.extend(opts.metadata.clone());
         Ok((old.parents, changes, message, metadata, Some(head)))
@@ -722,6 +741,28 @@ impl WorkingCopy {
     }
 
     /// Changeset `id`.
+    /// Whether `id` is landed: a merge or pick source, not a stack head.
+    async fn is_landed<A: RepoApi>(
+        &self,
+        api: &A,
+        cx: &CallContext,
+        id: ChangesetId,
+    ) -> Result<bool> {
+        let got = api
+            .get_changesets(
+                cx,
+                GetChangesets {
+                    repo: self.config.repo.clone(),
+                    ids: vec![id],
+                },
+            )
+            .await?;
+        Ok(got
+            .found
+            .iter()
+            .any(|v| v.changeset.id() == id && v.state == DraftState::Landed))
+    }
+
     async fn changeset_of<A: RepoApi>(
         &self,
         api: &A,
