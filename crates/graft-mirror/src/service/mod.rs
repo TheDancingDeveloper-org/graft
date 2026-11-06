@@ -170,7 +170,7 @@ struct Running {
 }
 
 /// A repository name usable as one directory name.
-fn safe_dir_name(repo: &str) -> bool {
+pub(crate) fn safe_dir_name(repo: &str) -> bool {
     !repo.is_empty()
         && !repo.starts_with('.')
         && repo
@@ -337,7 +337,7 @@ impl<C: Control, S: Spawner<C>> Service<C, S> {
             }
         };
         let dir = self.config.data_dir.join(&repo);
-        if let Err(why) = prepare_dir(&dir) {
+        if let Err(why) = prepare_dir(&dir, &repo) {
             tracing::error!(repo = %repo, dir = %dir.display(), why, "mirror data directory refused");
             let status = pb::MirrorStatus {
                 error_code: MirrorErrorCode::Internal as i32,
@@ -542,19 +542,38 @@ impl<C: Control, S: Spawner<C>> Service<C, S> {
     }
 }
 
-/// Checks `dir`: an existing one must carry the migration marker; a new
-/// one is created with it.
-pub fn prepare_dir(dir: &Path) -> Result<(), &'static str> {
+/// Checks `dir`: an existing one must carry the migration marker, and a
+/// marker that names a repository must name `repo` (a directory copied
+/// under another repository's name is refused); a new one is created with
+/// a marker naming `repo`.
+pub fn prepare_dir(dir: &Path, repo: &str) -> Result<(), &'static str> {
     if dir.exists() {
-        if dir.join(MIGRATION_MARKER).is_file() {
-            return Ok(());
+        if !dir.join(MIGRATION_MARKER).is_file() {
+            return Err("the data directory has no migration marker; it was not adopted");
         }
-        return Err("the data directory has no migration marker; it was not adopted");
+        return match marker_repo(dir) {
+            Some(named) if named != repo => {
+                Err("the migration marker names another repository; it was not adopted")
+            }
+            _ => Ok(()),
+        };
     }
     std::fs::create_dir_all(dir).map_err(|_| "the data directory could not be created")?;
-    std::fs::write(dir.join(MIGRATION_MARKER), b"graft-mirror serve\n")
-        .map_err(|_| "the migration marker could not be written")?;
+    std::fs::write(
+        dir.join(MIGRATION_MARKER),
+        crate::migrate::marker_text("serve", repo),
+    )
+    .map_err(|_| "the migration marker could not be written")?;
     Ok(())
+}
+
+/// The repository `dir`'s migration marker names, if it names one (a
+/// marker written before markers named their repository does not).
+pub fn marker_repo(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(MIGRATION_MARKER)).ok()?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("repo="))
+        .map(|r| r.trim().to_owned())
 }
 
 // ---- the real tasks -------------------------------------------------------
@@ -657,13 +676,17 @@ mod tests {
     fn a_directory_without_the_marker_is_refused_and_a_new_one_marked() {
         let tmp = tempfile::tempdir().unwrap();
         let fresh = tmp.path().join("r");
-        prepare_dir(&fresh).expect("created");
+        prepare_dir(&fresh, "r").expect("created");
         assert!(fresh.join(MIGRATION_MARKER).is_file());
-        prepare_dir(&fresh).expect("adopted");
+        prepare_dir(&fresh, "r").expect("adopted");
+        assert!(
+            prepare_dir(&fresh, "other").is_err(),
+            "a copy under another name"
+        );
         let stray = tmp.path().join("old");
         std::fs::create_dir(&stray).unwrap();
         std::fs::write(stray.join(DB_FILE), b"").unwrap();
-        assert!(prepare_dir(&stray).is_err());
+        assert!(prepare_dir(&stray, "r").is_err());
     }
 
     #[test]
