@@ -19,7 +19,10 @@
 
 use graft_model::{Change, RepoPath};
 use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
-use graft_store::{MetaStore, MirrorQuery, ObjectStore};
+use graft_store::{
+    LineSlot, MetaStore, MirrorQuery, MirrorRequestKind, MirrorRequestQuery, MirrorRequestState,
+    ObjectStore,
+};
 
 use crate::{Engine, errors};
 
@@ -157,6 +160,94 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         } else {
             Err(denied)
         }
+    }
+
+    /// `checked`, a write check, unless it denied the mirror service running
+    /// a batch cut on `repo`: `repo` is bound to a mirror and holds a claimed
+    /// cut (D41 §3.5, WI-3426). A cut creates and rebases unlanded
+    /// changesets only; the line it then moves is checked by
+    /// [`Engine::cut_lease`]. Reads the store only after a denial.
+    pub(crate) async fn or_cut(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+        checked: Result<(), ApiError>,
+    ) -> Result<(), ApiError> {
+        let Err(denied) = checked else {
+            return Ok(());
+        };
+        if self.cut_claimed(cx, repo, None).await?.is_some() {
+            Ok(())
+        } else {
+            Err(denied)
+        }
+    }
+
+    /// The lease epoch of the claimed batch cut of `line` on `repo`, when
+    /// the caller is the mirror service and `repo` is bound to a mirror:
+    /// `line`'s batch slot names a cut that is claimed. The service may move
+    /// that line, and only under that epoch (D41 §3.5, WI-3426).
+    pub(crate) async fn cut_lease(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+        line: &str,
+    ) -> Result<Option<u64>, ApiError> {
+        self.cut_claimed(cx, repo, Some(line)).await
+    }
+
+    /// The claimer's epoch of a claimed cut on `repo` (of `line`, when
+    /// given), for the mirror service on a bound repository. Indexed reads.
+    async fn cut_claimed(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+        line: Option<&str>,
+    ) -> Result<Option<u64>, ApiError> {
+        if !self.is_bound_mirror(cx, repo).await? {
+            return Ok(None);
+        }
+        let Some(id) = self.meta.repo(repo).await.map_err(errors::store)? else {
+            return Ok(None);
+        };
+        let request = match line {
+            Some(line) => {
+                let Some(rid) = self
+                    .meta
+                    .line_slot(id, line, LineSlot::Batch)
+                    .await
+                    .map_err(errors::store)?
+                else {
+                    return Ok(None);
+                };
+                self.meta
+                    .get_mirror_request(id, rid)
+                    .await
+                    .map_err(errors::store)?
+            }
+            None => self
+                .meta
+                .list_mirror_requests(
+                    id,
+                    MirrorRequestQuery {
+                        kind: Some(MirrorRequestKind::CutBatch),
+                        states: vec![MirrorRequestState::Claimed],
+                        limit: 1,
+                        ..MirrorRequestQuery::default()
+                    },
+                )
+                .await
+                .map_err(errors::store)?
+                .into_iter()
+                .next(),
+        };
+        Ok(request.and_then(|r| {
+            (r.kind == MirrorRequestKind::CutBatch
+                && r.state == MirrorRequestState::Claimed
+                && line.is_none_or(|l| r.line == l))
+            .then_some(r.claimed_by_epoch)
+            .flatten()
+        }))
     }
 
     /// Whether the caller is the mirror service and `repo` is bound to a

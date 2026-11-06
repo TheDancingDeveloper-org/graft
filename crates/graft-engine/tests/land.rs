@@ -1152,6 +1152,185 @@ fn the_mirror_reads_only_bound_repositories<M: MetaStore>((f, _): (Fixture<M>, A
     assert_eq!(refs(&mirror, "r"), denied("repo:r:read"));
 }
 
+/// WI-3426: the mirror token (the `mirror` kind, only `repo:*:mirror`)
+/// cuts a batch on a bound repository: while the line's batch slot names a
+/// cut claimed under the lease, it may create and rebase changesets and
+/// move that line, fenced by the claimer's epoch. A line without a claimed
+/// cut, or a repository not bound to a mirror, is refused.
+fn the_mirror_cuts_only_a_claimed_batch_line<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+    use graft_store::{
+        BatchState, LineSlot, MirrorRequestKind, MirrorRequestRecord, MirrorRequestState,
+    };
+    let t = T::new(&f, &[("a", b"1")]);
+    let mut mirror = cx(&["repo:*:mirror"]);
+    mirror.principal.kind = PrincipalKind::Mirror;
+    let first = t.commit(t.root, &[("b", b"2")]);
+    t.r.update_ref("backlog", None, first, RefKind::Line)
+        .expect("line");
+    t.r.update_ref("other", None, first, RefKind::Line)
+        .expect("line");
+    let next = t.commit(first, &[("c", b"3")]);
+    let draft = t.commit(t.root, &[("d", b"4")]);
+    let meta = f.engine.stores().0;
+    let id = block_on(meta.repo("r")).expect("repo").expect("exists");
+    let commit = |preconditions, writes| {
+        assert!(matches!(
+            block_on(meta.commit(
+                id,
+                MetaTxn {
+                    preconditions,
+                    writes
+                }
+            )),
+            Ok(TxnOutcome::Committed(_))
+        ));
+    };
+    let now = f.clock.now().ms;
+    commit(
+        vec![Precondition::LeaseEpochIs { epoch: 0 }],
+        vec![Write::PutLease(LeaseRecord {
+            holder: Some("m/i".to_owned()),
+            epoch: 1,
+            expires_at_ms: now + 60_000,
+        })],
+    );
+    // A cut of `backlog`, claimed under epoch 1; `done` ends it.
+    let cut = |version: u64, done: bool| {
+        let record = MirrorRequestRecord {
+            id: 7,
+            line: "backlog".to_owned(),
+            kind: MirrorRequestKind::CutBatch,
+            client_request_id: "cut-7".to_owned(),
+            base: None,
+            excludes: Vec::new(),
+            upstream: None,
+            state: if done {
+                MirrorRequestState::Done
+            } else {
+                MirrorRequestState::Claimed
+            },
+            batch: Some(if done {
+                BatchState::Settled
+            } else {
+                BatchState::Requested
+            }),
+            claimed_by_epoch: Some(1),
+            claimed_at_ms: Some(now),
+            deadline_ms: now + 60_000,
+            result: Default::default(),
+            requested_by: "op".to_owned(),
+            created_at_ms: now,
+            updated_at_ms: now,
+            version,
+        };
+        commit(
+            vec![
+                Precondition::MirrorRequestVersionIs {
+                    id: 7,
+                    version: (version > 1).then(|| version - 1),
+                },
+                Precondition::LineSlotIs {
+                    line: "backlog".to_owned(),
+                    slot: LineSlot::Batch,
+                    request: (version > 1).then_some(7),
+                },
+            ],
+            vec![
+                Write::PutMirrorRequest(record),
+                Write::SetLineSlot {
+                    line: "backlog".to_owned(),
+                    slot: LineSlot::Batch,
+                    request: (!done).then_some(7),
+                },
+            ],
+        );
+    };
+    let move_from = |line: &str, from, to, lease_epoch| {
+        block_on(t.r.e().update_ref(
+            &mirror,
+            UpdateRef {
+                repo: "r".to_owned(),
+                name: line.to_owned(),
+                expected: Some(from),
+                new: to,
+                kind: RefKind::Line,
+                lease_epoch,
+            },
+        ))
+        .map(drop)
+    };
+    let move_at = |line: &str, lease_epoch| move_from(line, first, next, lease_epoch);
+    let rebase = || {
+        block_on(t.r.e().rebase(
+            &mirror,
+            Rebase {
+                repo: "r".to_owned(),
+                changeset: draft,
+                onto: first,
+                merge: MergeMode::Line,
+                dry_run: false,
+            },
+        ))
+        .map(drop)
+    };
+    let denied =
+        |r: ApiResult<()>| assert!(matches!(r, Err(ApiError::PermissionDenied { .. })), "{r:?}");
+
+    // A claimed cut on a repository not bound to a mirror: refused.
+    cut(1, false);
+    denied(move_at("backlog", Some(1)));
+    denied(rebase());
+
+    // Bound: the cut's line moves, under the claimer's epoch only; another
+    // line stays refused.
+    const UP: &str = "https://github.com/o/r.git";
+    commit(
+        vec![Precondition::MirrorVersionIs {
+            upstream: UP.to_owned(),
+            version: None,
+        }],
+        vec![Write::PutMirror(MirrorRecord {
+            upstream: UP.to_owned(),
+            lines: vec![MirrorLineRecord {
+                branch: "main".into(),
+                line: "main".into(),
+                direction: MirrorDirection::Follow,
+            }],
+            interval_s: 60,
+            enabled: true,
+            credential: None,
+            kek_id: None,
+            export: MirrorExportRecord {
+                default_author: None,
+                authors: Vec::new(),
+            },
+            version: 1,
+            status: None,
+            created_by: "op".into(),
+            updated_by: "op".into(),
+            updated_at_ms: 0,
+        })],
+    );
+    denied(move_at("other", Some(1)));
+    assert_eq!(t.tip("other").target, first);
+    let lost = Err(ApiError::LeaseLost {
+        repo: "r".to_owned(),
+    });
+    assert_eq!(move_at("backlog", None), lost);
+    assert_eq!(move_at("backlog", Some(2)), lost);
+    assert_eq!(t.tip("backlog").target, first);
+    rebase().expect("the cut rebases");
+    move_at("backlog", Some(1)).expect("the cut moves its line");
+    assert_eq!(t.tip("backlog").target, next);
+
+    // The cut is over: its line, and changeset writes, are refused again.
+    cut(2, true);
+    let after = t.commit(next, &[("e", b"5")]);
+    denied(move_from("backlog", next, after, Some(1)));
+    denied(rebase());
+    assert_eq!(t.tip("backlog").target, next);
+}
+
 fn refused_lands<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
     let t = T::new(&f, &[("a", b"1")]);
     let draft = t.commit(t.root, &[("b", b"2")]);
@@ -1217,6 +1396,7 @@ on_both![
     followed_lines_refuse_lands,
     the_mirror_moves_only_followed_lines,
     the_mirror_reads_only_bound_repositories,
+    the_mirror_cuts_only_a_claimed_batch_line,
 ];
 
 /// Decision D22: with the default config every line, `main` included, is

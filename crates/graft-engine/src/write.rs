@@ -133,7 +133,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: CreateChangeset,
     ) -> Result<Created, ApiError> {
-        require_changes(cx, &req.repo, &req.changes)?;
+        self.or_cut(cx, &req.repo, require_changes(cx, &req.repo, &req.changes))
+            .await?;
         let repo = self.repo_id(&req.repo).await?;
         let hold = match &req.workspace {
             None => None,
