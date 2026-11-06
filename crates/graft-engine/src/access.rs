@@ -130,11 +130,44 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             Ok(()) => return Ok(()),
             Err(denied) => denied,
         };
+        if self.is_bound_mirror(cx, repo).await? {
+            Ok(())
+        } else {
+            Err(denied)
+        }
+    }
+
+    /// Fails with `PermissionDenied` unless the caller holds `need` on
+    /// `repo`, or is the mirror service and `repo` is bound to a mirror.
+    /// For the writes a poll makes before it moves a line: uploading objects
+    /// and importing changesets add unlanded content only, and the line and
+    /// its marker still move by their own checked, fenced CAS (D41).
+    pub(crate) async fn require_or_bound_mirror(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+        need: Need<'_>,
+    ) -> Result<(), ApiError> {
+        let denied = match require(cx, repo, need) {
+            Ok(()) => return Ok(()),
+            Err(denied) => denied,
+        };
+        if self.is_bound_mirror(cx, repo).await? {
+            Ok(())
+        } else {
+            Err(denied)
+        }
+    }
+
+    /// Whether the caller is the mirror service and `repo` is bound to a
+    /// mirror (has a mirror row): one indexed read, and only for the mirror
+    /// kind. An unknown repository is not bound.
+    async fn is_bound_mirror(&self, cx: &CallContext, repo: &str) -> Result<bool, ApiError> {
         if !is_mirror(cx, repo) {
-            return Err(denied);
+            return Ok(false);
         }
         let Some(id) = self.meta.repo(repo).await.map_err(errors::store)? else {
-            return Err(denied);
+            return Ok(false);
         };
         let bound = self
             .meta
@@ -146,11 +179,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             })
             .await
             .map_err(errors::store)?;
-        if bound.is_empty() {
-            Err(denied)
-        } else {
-            Ok(())
-        }
+        Ok(!bound.is_empty())
     }
 }
 

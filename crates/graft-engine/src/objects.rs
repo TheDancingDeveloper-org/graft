@@ -8,7 +8,7 @@ use graft_proto::types::{GetObjects, HasObjects, Objects, PutObjects};
 use graft_proto::{ApiError, CallContext, Frame};
 use graft_store::{MetaStore, MetaTxn, ObjectStore, RepoId, Write};
 
-use crate::access::{Need, require};
+use crate::access::Need;
 use crate::protect::DELETE_WAIT_MS;
 use crate::write::put_concurrently;
 use crate::{Engine, errors};
@@ -62,7 +62,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         cx: &CallContext,
         req: PutObjects,
     ) -> Result<Vec<ObjectId>, ApiError> {
-        require(cx, &req.repo, Need::Write(None))?;
+        self.require_or_bound_mirror(cx, &req.repo, Need::Write(None))
+            .await?;
         let repo = self.repo_id(&req.repo).await?;
         if req.blobs.len() > self.config.max_ids as usize {
             return Err(errors::limit("ids", self.config.max_ids.into()));

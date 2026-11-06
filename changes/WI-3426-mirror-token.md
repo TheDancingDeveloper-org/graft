@@ -1,0 +1,1 @@
+- The mirror service's line poll works with a minted mirror token: on a repository bound to a mirror, the `mirror` kind may upload objects, import changesets and move an existing followed marker under its lease. Before, the first upstream change after a batch merge stopped the line with `PermissionDenied { scope: "repo:<r>:admin" }`.
