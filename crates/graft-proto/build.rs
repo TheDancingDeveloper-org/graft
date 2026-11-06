@@ -11,9 +11,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .skip_debug([
             "graft.v1.Token",
             "graft.v1.ExchangeCiTokenRequest",
-            "graft.v1.RevokeTokenRequest",
             "graft.v1.SetMirrorCredentialRequest",
             "graft.v1.MirrorCredential",
+            "graft.v1.RevokeTokenRequest",
         ])
         .compile_fds(fds)?;
     Ok(())
