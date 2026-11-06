@@ -756,6 +756,74 @@ async fn a_directory_without_the_migration_marker_is_not_adopted() {
     );
 }
 
+/// Writes the marker `import-config` leaves in `<data>/<repo>`.
+fn migrated_dir(data: &Path, repo: &str, named: &str) {
+    let dir = data.join(repo);
+    std::fs::create_dir_all(dir.join("mirror.git")).unwrap();
+    std::fs::write(
+        dir.join(MIGRATION_MARKER),
+        graft_mirror::migrate::marker_text("import-config", named),
+    )
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_directory_copied_under_another_repository_is_not_adopted() {
+    let tmp = tempfile::tempdir().unwrap();
+    migrated_dir(tmp.path(), REPO, "elsewhere");
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let mut service = fake_service(&fake, &script, tmp.path());
+    fake.set_row(row(REPO, GH, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+    assert!(service.running().is_empty());
+    assert!(script.started.lock().unwrap().is_empty());
+    assert_eq!(
+        fake.lease(REPO).unwrap().holder,
+        None,
+        "the lease is let go"
+    );
+    let st = fake.statuses();
+    assert!(
+        st[0]
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("another repository")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_copied_migrated_directory_runs_in_one_process_only() {
+    // The migrated directory is copied into a second service's volume: both
+    // adopt it, but the repository's lease lets only one of them run it.
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    migrated_dir(first.path(), REPO, REPO);
+    migrated_dir(second.path(), REPO, REPO);
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    fake.set_row(row(REPO, GH, 15));
+    let mut a = fake_service(&fake, &script, first.path());
+    let mut b_config = config(second.path());
+    b_config.instance = "b".to_owned();
+    let mut b = Service::with_resolver(
+        fake.clone(),
+        FakeSpawner(script.clone()),
+        b_config,
+        public(),
+    );
+    a.reconcile().await.unwrap();
+    b.reconcile().await.unwrap();
+    settle().await;
+    assert_eq!(a.running(), vec![(REPO.to_owned(), 1, 1)]);
+    assert!(b.running().is_empty(), "the copy is fenced by the lease");
+    assert_eq!(fake.lease(REPO).unwrap().holder.as_deref(), Some("a"));
+    let versions: Vec<u64> = script.started.lock().unwrap().iter().map(|s| s.0).collect();
+    assert_eq!(versions, [1], "one poll, from the lease holder");
+}
+
 // ---- leases ----------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]

@@ -46,6 +46,18 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
                                         (D41); the config names the server,
                                         token file, data dir, metrics
                                         address and limits, no repositories
+  import-config <toml>... --data-dir <dir> [--credential-dir <dir>]
+         [--server <url>] [--token-file <file>] [--dry-run]
+                                        migrate per-repository follow
+                                        configs to the server's mirror rows
+                                        (needs mirror:bind): create each
+                                        row, seed its credential from
+                                        <credential-dir>/<repo>, move the
+                                        old files in <data-dir>/<repo> to
+                                        the service's names and mark it.
+                                        A differing row is reported, never
+                                        overwritten; a rerun is a no-op.
+                                        --dry-run prints the plan only
   follow --config <file>                git-primary: follow GitHub main;
                                         with [[check_refs]], also keep one
                                         branch per unsettled land of each
@@ -112,6 +124,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         Some("init-config") => cmd_init_config(&args[1..]),
         Some("follow") => execute(cmd_follow(&args[1..])),
         Some("serve") => execute(cmd_serve(&args[1..])),
+        Some("import-config") => execute(cmd_import_config(&args[1..])),
         Some("export") => execute(cmd_export(&args[1..])),
         Some("reconcile") => execute(cmd_reconcile(&args[1..])),
         Some("pr-batch") => execute(cmd_pr_batch(&args[1..])),
@@ -524,6 +537,59 @@ async fn cmd_follow(args: &[String]) -> Result<(), CmdError> {
         },
     )
     .await
+}
+
+async fn cmd_import_config(args: &[String]) -> Result<(), CmdError> {
+    let mut configs = Vec::new();
+    let mut data_dir = None;
+    let mut credential_dir = None;
+    let mut server = std::env::var("GRAFT_ENDPOINT").ok();
+    let mut token_file = None;
+    let mut dry_run = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let mut value = |flag: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| CmdError::Usage(format!("{flag} needs a value")))
+        };
+        match arg.as_str() {
+            "--data-dir" => data_dir = Some(PathBuf::from(value(arg)?)),
+            "--credential-dir" => credential_dir = Some(PathBuf::from(value(arg)?)),
+            "--server" => server = Some(value(arg)?),
+            "--token-file" => token_file = Some(PathBuf::from(value(arg)?)),
+            "--dry-run" => dry_run = true,
+            flag if flag.starts_with("--") => {
+                return Err(CmdError::Usage(format!(
+                    "import-config: unknown flag {flag}"
+                )));
+            }
+            path => configs.push(PathBuf::from(path)),
+        }
+    }
+    if configs.is_empty() {
+        return Err(CmdError::Usage(
+            "import-config needs at least one config".into(),
+        ));
+    }
+    let data_dir =
+        data_dir.ok_or_else(|| CmdError::Usage("import-config needs --data-dir".into()))?;
+    let server = server
+        .ok_or_else(|| CmdError::Usage("import-config needs --server or GRAFT_ENDPOINT".into()))?;
+    let plans = crate::migrate::plan(&configs, &data_dir, credential_dir.as_deref())?;
+    let api = Server::connect(&server, token(token_file.as_deref())?).await?;
+    let reports = crate::migrate::import_config(&api, &plans, dry_run).await?;
+    for r in &reports {
+        println!("{}", r.line(dry_run));
+    }
+    let attention = reports.iter().filter(|r| r.needs_attention()).count();
+    if attention > 0 {
+        return Err(CmdError::Failed(MirrorError::Config(format!(
+            "{attention} of {} repositories need the operator; see above",
+            reports.len()
+        ))));
+    }
+    Ok(())
 }
 
 async fn cmd_serve(args: &[String]) -> Result<(), CmdError> {

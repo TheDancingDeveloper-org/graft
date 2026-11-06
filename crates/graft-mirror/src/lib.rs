@@ -33,6 +33,8 @@
 //!   and holding follow's, export's and batch's per-line state.
 //! - [`git`]: the git CLI for `ls-remote`, `fetch` and ancestry.
 //! - [`server`]: the graft API over gRPC, including the admin service.
+//! - [`migrate`]: `graft-mirror import-config`, moving per-repository
+//!   configs onto the server's mirror rows (D41 §6).
 //! - [`service`]: `graft-mirror serve`, the one mirror service that runs
 //!   every enabled repository mirror the server lists (D41).
 //!
@@ -65,6 +67,7 @@ pub mod github;
 pub mod import;
 pub mod import_pr;
 pub mod land;
+pub mod migrate;
 pub mod pulls;
 pub mod reconcile;
 pub mod server;
