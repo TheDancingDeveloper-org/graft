@@ -1024,7 +1024,26 @@ fn the_mirror_moves_only_followed_lines<M: MetaStore>((f, _): (Fixture<M>, Arc<R
     assert_eq!(t.tip("up").target, first);
     move_at(&mirror, "up", Some(first), Some(2)).expect("mirror moves the followed line");
     assert_eq!(t.tip("up").target, next);
-    // Nor can it move the marker, a tag or a tool ref.
+    // It moves the followed line's existing marker to the head it imported,
+    // fenced by the lease like the line (WI-3426).
+    let mark_at = |lease_epoch| {
+        block_on(t.r.e().update_ref(
+            &mirror,
+            UpdateRef {
+                repo: "r".to_owned(),
+                name: followed_ref("up"),
+                expected: Some(first),
+                new: next,
+                kind: RefKind::Tool,
+                lease_epoch,
+            },
+        ))
+    };
+    lost(mark_at(None));
+    lost(mark_at(Some(1)));
+    mark_at(Some(2)).expect("mirror moves the followed marker");
+    assert_eq!(t.tip(&followed_ref("up")).target, next);
+    // It cannot create a marker: that decides who may land.
     assert!(matches!(
         block_on(t.r.e().update_ref(
             &mirror,
