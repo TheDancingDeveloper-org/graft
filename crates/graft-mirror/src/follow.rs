@@ -316,6 +316,9 @@ where
         for (l, (_, upstream)) in self.config.lines.iter().zip(heads) {
             let outcome = match self.poll_line(l, upstream).await {
                 Ok(o) => o,
+                // A fenced move means another process holds the lease:
+                // stop the whole poll so the task stops, not just the line.
+                Err(e @ MirrorError::Api(ApiError::LeaseLost { .. })) => return Err(e),
                 Err(e) => {
                     tracing::warn!(
                         repo = %self.config.repo, line = %l.line, error = %e,

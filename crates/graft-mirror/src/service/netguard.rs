@@ -110,16 +110,29 @@ fn v6_blocked(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return v4_blocked(v4);
     }
-    let first = ip.segments()[0];
+    let seg = ip.segments();
+    let first = seg[0];
+    // The v4 address in bits `at..at + 32`.
+    let v4_at = |at: usize| Ipv4Addr::from(((seg[at] as u32) << 16) | seg[at + 1] as u32);
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
+        // IPv4-compatible ::a.b.c.d (deprecated), judged as its v4 address.
+        || (seg[..6] == [0; 6] && v4_blocked(v4_at(6)))
         // Unique local, fc00::/7.
         || (first & 0xfe00) == 0xfc00
-        // Link-local, fe80::/10.
+        // Link-local, fe80::/10, and site-local, fec0::/10 (deprecated).
         || (first & 0xffc0) == 0xfe80
-        // NAT64 well-known prefix 64:ff9b::/96 can reach any v4 address.
-        || (first == 0x0064 && ip.segments()[1] == 0xff9b)
+        || (first & 0xffc0) == 0xfec0
+        // NAT64 64:ff9b::/96 and the local-use 64:ff9b:1::/48 can reach
+        // any v4 address.
+        || (first == 0x0064 && seg[1] == 0xff9b)
+        // Documentation, 2001:db8::/32.
+        || (first == 0x2001 && seg[1] == 0x0db8)
+        // Teredo, 2001::/32: it tunnels to any v4 address.
+        || (first == 0x2001 && seg[1] == 0)
+        // 6to4, 2002::/16, judged as the v4 address it embeds.
+        || (first == 0x2002 && v4_blocked(v4_at(1)))
 }
 
 /// Whether `ip` is in a range the mirror never connects to.
@@ -248,5 +261,61 @@ mod tests {
             judge(&[]).unwrap_err().code,
             MirrorErrorCode::UpstreamUnreachable
         );
+    }
+
+    #[test]
+    fn every_special_purpose_v6_range_is_blocked() {
+        for ip in [
+            // IPv4-mapped, of loopback, private and the metadata address.
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:169.254.169.254",
+            // IPv4-compatible (deprecated) of the same.
+            "::127.0.0.1",
+            "::10.0.0.1",
+            // NAT64 to a private address, well-known and local-use.
+            "64:ff9b::10.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1::10.0.0.1",
+            // Unique local fc00::/7.
+            "fc00::1",
+            "fdff:ffff::1",
+            // Link-local fe80::/10.
+            "fe80::1",
+            "febf::1",
+            // Site-local fec0::/10 (deprecated).
+            "fec0::1",
+            "feff::1",
+            // Multicast, unspecified, loopback.
+            "ff02::1",
+            "ff0e::1",
+            "::",
+            "::1",
+            // Documentation 2001:db8::/32.
+            "2001:db8::1",
+            "2001:db8:ffff::1",
+            // 6to4 2002::/16 embedding a private or local v4.
+            "2002:0a00:0001::1",
+            "2002:7f00:0001::1",
+            "2002:a9fe:a9fe::1",
+            "2002:c0a8:0001::1",
+            // Teredo 2001::/32: tunnels to any v4 address.
+            "2001::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+        ] {
+            let addr: Ipv6Addr = ip.parse().expect(ip);
+            assert!(is_blocked(IpAddr::V6(addr)), "{ip} must be blocked");
+            let url = format!("https://[{ip}]/o/r");
+            assert_eq!(
+                target(&url).expect_err(&url).code,
+                MirrorErrorCode::UrlBlocked,
+                "{url}"
+            );
+        }
+        // Public v6, and 6to4 of a public v4, still pass.
+        for ip in ["2606:4700::1", "2a00:1450:4009::200e", "2002:8c52:7003::1"] {
+            let addr: Ipv6Addr = ip.parse().expect(ip);
+            assert!(!is_blocked(IpAddr::V6(addr)), "{ip} must pass");
+        }
     }
 }

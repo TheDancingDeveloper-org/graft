@@ -2431,4 +2431,53 @@ mod tests {
         let row = s.get_mirror(id, UP).await.expect("get").expect("row");
         assert_eq!(row.kek_id.as_deref(), Some("k2"));
     }
+
+    /// With no active KEK in the ring (only retired keys, or none), setting
+    /// and rewrapping are refused, typed, and write nothing; a read of a row
+    /// whose key is gone from the ring is refused and changes nothing.
+    #[tokio::test]
+    async fn a_missing_active_key_is_refused_and_writes_nothing() {
+        let s = with_row().await;
+        let bind = who(&["mirror:bind"]);
+        let id = s.repo("r").await.expect("repo").expect("r");
+        let v1 = ring(Some(("k1", 1)), &[]);
+        set_credential(&s, &bind, &v1, 2, cred(UP, PAT, 1))
+            .await
+            .expect("set");
+        let before = s.get_mirror(id, UP).await.expect("get").expect("row");
+        let unchanged = |row: &MirrorRecord| {
+            assert_eq!(row.version, before.version);
+            assert_eq!(row.kek_id, before.kek_id);
+            assert_eq!(row.credential, before.credential);
+            assert_eq!(row.updated_at_ms, before.updated_at_ms);
+        };
+        for no_active in [ring(None, &[("k1", 1)]), ring(None, &[])] {
+            rejected(
+                set_credential(
+                    &s,
+                    &bind,
+                    &no_active,
+                    9,
+                    cred(UP, b"ghp_new", before.version),
+                )
+                .await,
+                "mirror-credential",
+            );
+            unchanged(&s.get_mirror(id, UP).await.expect("get").expect("row"));
+            rejected(rewrap_all(&s, &no_active, 9).await, "mirror-credential");
+            unchanged(&s.get_mirror(id, UP).await.expect("get").expect("row"));
+        }
+        // A ring whose active key is not the row's, and without the row's
+        // key: the read is refused, and so is that row's rewrap.
+        let m = mirror_token("m");
+        let epoch = take(&s, &m, 1_000).await.expect("lease");
+        let other = ring(Some(("k9", 9)), &[]);
+        rejected(
+            get_credential(&s, &m, &other, 2_000, fetch(UP, epoch)).await,
+            "mirror-credential",
+        );
+        let report = rewrap_all(&s, &other, 9).await.expect("rewrap");
+        assert_eq!(report.failed, vec![("r".to_owned(), UP.to_owned())]);
+        unchanged(&s.get_mirror(id, UP).await.expect("get").expect("row"));
+    }
 }
