@@ -398,3 +398,136 @@ fn mark_followed_requires_repository_admin() {
         printed(&refused)
     );
 }
+
+/// Binds `r` to `UP` following each of `lines` (`main=main` style).
+fn follow(site: &Site, lines: &[&str]) {
+    let operator = site.mint("op", "human", &["mirror:bind", "repo:*:read"]);
+    let mut args = vec!["repo", "mirror", "add", "r", UP];
+    for l in lines {
+        args.push("--follow");
+        args.push(l);
+    }
+    let added = site.run(&operator, &args, None);
+    assert!(added.status.success(), "{}", printed(&added));
+}
+
+/// Imports a one-commit git repository into `r` (line `main`) and returns the
+/// line's tip changeset.
+fn land_changeset(site: &Site) -> ChangesetId {
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {}", printed(&out));
+    };
+    let src = site.path().join("src");
+    std::fs::create_dir(&src).expect("src dir");
+    git(&src, &["init", "-q", "-b", "main"]);
+    std::fs::write(src.join("a.txt"), "a\n").expect("write");
+    git(&src, &["add", "a.txt"]);
+    git(&src, &["commit", "-q", "-m", "first"]);
+    let writer = site.mint("writer", "agent", &["repos:admin", "repo:r:admin"]);
+    let db = site.path().join("import.sqlite");
+    let imported = site.run(
+        &writer,
+        &[
+            "import",
+            &format!("file://{}", src.display()),
+            "--repo",
+            "r",
+            "--line",
+            "main",
+            "--db",
+            db.to_str().expect("utf8"),
+        ],
+        None,
+    );
+    assert!(imported.status.success(), "{}", printed(&imported));
+    let app = site.path().join("app");
+    let cloned = site.run(&writer, &["clone", "r", app.to_str().expect("utf8")], None);
+    assert!(cloned.status.success(), "{}", printed(&cloned));
+    let log = site.run(
+        &writer,
+        &[
+            "--json",
+            "-C",
+            app.to_str().expect("utf8"),
+            "log",
+            "--limit",
+            "1",
+        ],
+        None,
+    );
+    assert!(log.status.success(), "{}", printed(&log));
+    let text = String::from_utf8_lossy(&log.stdout).into_owned();
+    let hex = text
+        .split('"')
+        .find(|t| ChangesetId::parse(t).is_ok())
+        .expect("a changeset id in the log");
+    ChangesetId::parse(hex).expect("id")
+}
+
+/// Records `id` as the mirror's `last_changeset`, as the mirror service would.
+fn set_last_changeset(site: &Site, id: &ChangesetId) {
+    let db = rusqlite::Connection::open(site.dir.path().join("meta/meta.db")).expect("meta db");
+    let n = db
+        .execute(
+            "UPDATE repo_mirrors SET status_set = 1, status_changeset = ?1 WHERE upstream = ?2",
+            rusqlite::params![id.0.0.to_vec(), UP],
+        )
+        .expect("set status");
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn mark_followed_without_changeset_refuses_a_multi_line_mirror() {
+    let site = Site::start();
+    let admin = site.mint("admin", "agent", &["repos:admin"]);
+    let made = site.run(&admin, &["repo", "create", "r"], None);
+    assert!(made.status.success(), "{}", printed(&made));
+    follow(&site, &["main=main", "dev=dev"]);
+    set_last_changeset(&site, &ChangesetId::hash(b"target"));
+    let agent = site.mint("agent", "agent", &["repo:r:admin"]);
+    let refused = site.run(
+        &agent,
+        &["repo", "mirror", "mark-followed", "r", "--line", "main"],
+        None,
+    );
+    assert!(!refused.status.success(), "{}", printed(&refused));
+    assert!(
+        printed(&refused)
+            .contains("--changeset is required when the mirror follows more than one line"),
+        "{}",
+        printed(&refused)
+    );
+}
+
+#[test]
+fn mark_followed_without_changeset_uses_a_single_line_mirrors_last_changeset() {
+    let site = Site::start();
+    let admin = site.mint("admin", "agent", &["repos:admin"]);
+    let made = site.run(&admin, &["repo", "create", "r"], None);
+    assert!(made.status.success(), "{}", printed(&made));
+    follow(&site, &["main=main"]);
+    let target = land_changeset(&site);
+    set_last_changeset(&site, &target);
+    let agent = site.mint("agent", "agent", &["repo:r:admin"]);
+    let marked = site.run(
+        &agent,
+        &[
+            "--json",
+            "repo",
+            "mirror",
+            "mark-followed",
+            "r",
+            "--line",
+            "main",
+        ],
+        None,
+    );
+    assert!(marked.status.success(), "{}", printed(&marked));
+    assert_eq!(json(&marked)["target"], target.to_string());
+}

@@ -310,11 +310,33 @@ async fn mirror(
                         )
                         .await
                         .map_err(refused)?;
-                    let status = page.mirrors.iter().find_map(|mirror| {
-                        mirror.lines.iter().any(|l| l.line == *line && l.direction == "follow")
-                            .then(|| mirror.status.as_ref().and_then(|s| s.last_changeset.clone()))
-                            .flatten()
-                    }).ok_or_else(|| Failure::usage(
+                    // last_changeset is kept per mirror, not per line, so it is
+                    // only this line's head when the mirror follows just this line.
+                    let mirror = page
+                        .mirrors
+                        .iter()
+                        .find(|m| {
+                            m.lines
+                                .iter()
+                                .any(|l| l.line == *line && l.direction == "follow")
+                        })
+                        .ok_or_else(|| Failure::usage("no mirror follows this line"))?;
+                    if mirror
+                        .lines
+                        .iter()
+                        .filter(|l| l.direction == "follow")
+                        .count()
+                        != 1
+                    {
+                        return Err(Failure::usage(
+                            "--changeset is required when the mirror follows more than one line",
+                        ));
+                    }
+                    let status = mirror
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.last_changeset.clone())
+                        .ok_or_else(|| Failure::usage(
                         "--changeset is required when mirror status has no last imported changeset",
                     ))?;
                     let bytes: [u8; 32] = status.try_into().map_err(|_| {
