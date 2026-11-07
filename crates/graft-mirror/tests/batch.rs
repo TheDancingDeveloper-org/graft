@@ -3343,6 +3343,7 @@ impl World {
             Mirror::new(&self.mirror_dir, self.upstream.to_str().unwrap()),
             follow,
         )
+        .with_clock(clock)
         .poll_once()
         .await
         .unwrap();
@@ -3715,7 +3716,10 @@ mod request_cut {
             kind: MirrorRequestKind::Rewind as i32,
             ..Default::default()
         };
-        assert_eq!(runner(&w).run(&rewind).await, Err(batch_task::REWIND_DELETE_REF));
+        assert_eq!(
+            runner(&w).run(&rewind).await,
+            Err(batch_task::REWIND_DELETE_REF)
+        );
     }
 
     /// A settled batch numbered `number` on another line, as a database

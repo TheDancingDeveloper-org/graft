@@ -1644,7 +1644,10 @@ async fn a_forced_auth_failure_leaves_no_credential_in_logs_or_status() {
     assert!(!status_text.contains(secret));
     assert!(!status_text.contains(&basic));
     let log = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-    assert!(!log.is_empty(), "logs were captured");
+    assert!(
+        log.contains("mirror task starting"),
+        "task logs were captured"
+    );
     assert!(!log.contains(secret));
     assert!(!log.contains(&basic));
 }
