@@ -3676,6 +3676,52 @@ mod request_cut {
         assert!(w.github.prs().is_empty());
     }
 
+    #[tokio::test]
+    async fn settle_exclude_and_rewind_run_through_the_real_batch_runner() {
+        let w = World::new().await;
+        w.start().await;
+        w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+        let new = runner(&w)
+            .prepare_batch(&cut(20))
+            .await
+            .expect("the batch is cut");
+        PullDesk::create(&w.github, &new).await.unwrap();
+        let opened = w.batcher().track().await.unwrap().unwrap();
+        assert_eq!(opened.state, BatchState::Open);
+        w.github.squash_merge(opened.pr_number.unwrap());
+
+        let settle = pb::MirrorRequest {
+            repo: REPO.to_owned(),
+            id: 20,
+            line: LINE.to_owned(),
+            kind: MirrorRequestKind::SettleBatch as i32,
+            ..Default::default()
+        };
+        let settled = runner(&w).run(&settle).await.unwrap();
+        assert!(settled.branch.is_none() || settled.branch.as_deref() == Some("graft/batch-1"));
+
+        let exclude = pb::MirrorRequest {
+            repo: REPO.to_owned(),
+            id: 21,
+            line: LINE.to_owned(),
+            kind: MirrorRequestKind::Exclude as i32,
+            ..Default::default()
+        };
+        assert!(runner(&w).run(&exclude).await.is_ok());
+
+        let rewind = pb::MirrorRequest {
+            repo: REPO.to_owned(),
+            id: 22,
+            line: LINE.to_owned(),
+            kind: MirrorRequestKind::Rewind as i32,
+            ..Default::default()
+        };
+        assert_eq!(
+            runner(&w).run(&rewind).await,
+            Err(batch_task::REWIND_DELETE_REF)
+        );
+    }
+
     /// A settled batch numbered `number` on another line, as a database
     /// carried over from a follower holds.
     fn settled(number: u64) -> BatchRecord {

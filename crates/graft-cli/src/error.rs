@@ -194,6 +194,11 @@ impl From<ClientError> for Failure {
         match e {
             ClientError::Api(api) => api.into(),
             ClientError::Endpoint(what) => Failure::new(Exit::Usage, "endpoint", what),
+            ClientError::Connect { endpoint, cause } => Failure::new(
+                Exit::Unavailable,
+                "connect",
+                format!("could not connect to {endpoint}: {cause}"),
+            ),
             ClientError::Dirty(paths) => Failure::new(
                 Exit::Conflict,
                 "dirty",
@@ -381,5 +386,13 @@ mod tests {
         assert_eq!(dirty.exit, Exit::Conflict);
         let usage: Failure = ClientError::Endpoint("nope".into()).into();
         assert_eq!(usage.exit, Exit::Usage);
+        let connect: Failure = ClientError::Connect {
+            endpoint: "http://127.0.0.1:1".into(),
+            cause: "connection refused".into(),
+        }
+        .into();
+        assert_eq!(connect.exit, Exit::Unavailable);
+        assert_eq!(connect.kind, "connect");
+        assert!(connect.message.contains("connection refused"));
     }
 }

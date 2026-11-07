@@ -666,7 +666,8 @@ fn an_unreachable_endpoint_is_unavailable() {
     graft(dir.path())
         .args(["--endpoint", "http://127.0.0.1:9", "--repo", REPO, "log"])
         .assert()
-        .code(7);
+        .code(7)
+        .stderr(contains("could not connect to http://127.0.0.1:9"));
 }
 
 #[test]

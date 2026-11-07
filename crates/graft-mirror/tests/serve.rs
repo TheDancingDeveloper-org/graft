@@ -30,7 +30,7 @@ use graft_proto::pb::{self, MirrorErrorCode, MirrorRequestKind};
 use graft_proto::types::{RefKind, UpdateRef};
 use graft_proto::{AdminApi, ApiError, CallContext, Principal, PrincipalKind, RepoApi};
 use graft_store::memory::MemoryStore;
-use graft_store::{LeaseRecord, MetaStore, MetaTxn, Precondition, TxnOutcome, Write};
+use graft_store::{LeaseRecord, LineSlot, MetaStore, MetaTxn, Precondition, TxnOutcome, Write};
 use graft_testkit::clock::FakeClock;
 
 const REPO: &str = "r";
@@ -139,7 +139,15 @@ impl Fake {
         let txn = MetaTxn {
             preconditions: vec![Precondition::LeaseEpochIs { epoch: expected }],
             writes: vec![Write::PutLease(LeaseRecord {
-                holder: l.holder.clone(),
+                // The in-memory control plane uses the short instance name,
+                // while the engine lease fence identifies the mirror service
+                // by its principal subject and instance.  Keep the fake's
+                // control-plane value unchanged, but mirror the real holder
+                // identity into the engine store.
+                holder: l
+                    .holder
+                    .as_deref()
+                    .map(|instance| format!("graft-mirror/{instance}")),
                 epoch: l.epoch,
                 // The engine's clock is fixed; held means not released.
                 expires_at_ms: if l.holder.is_some() {
@@ -1179,6 +1187,7 @@ impl PullDesk for Desk {
 #[derive(Default)]
 struct Runner {
     prepared: AtomicUsize,
+    ran: AtomicUsize,
 }
 
 impl RequestRunner for Runner {
@@ -1198,9 +1207,20 @@ impl RequestRunner for Runner {
 
     async fn run(
         &self,
-        _req: &pb::MirrorRequest,
+        req: &pb::MirrorRequest,
     ) -> Result<pb::MirrorRequestOutcome, RequestFailure> {
-        Err(requests::UNSUPPORTED)
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        match MirrorRequestKind::try_from(req.kind).unwrap() {
+            MirrorRequestKind::SettleBatch | MirrorRequestKind::Exclude => {
+                Ok(pb::MirrorRequestOutcome {
+                    branch: Some(format!("graft/batch-{}", req.id)),
+                    lands: req.excludes.clone(),
+                    ..Default::default()
+                })
+            }
+            MirrorRequestKind::Rewind => Err(RequestFailure("rewind_requires_delete_ref")),
+            _ => Err(requests::UNSUPPORTED),
+        }
     }
 }
 
@@ -1268,7 +1288,10 @@ async fn unwired_kinds_fail_typed_and_a_purge_deletes_only_an_idle_directory() {
         .unwrap();
     assert_eq!(
         fake.st().failed,
-        [(1, "unsupported".to_owned()), (2, "bad_request".to_owned())]
+        [
+            (1, "rewind_requires_delete_ref".to_owned()),
+            (2, "bad_request".to_owned())
+        ]
     );
 
     let dir = tmp.path().join(REPO);
@@ -1280,6 +1303,45 @@ async fn unwired_kinds_fail_typed_and_a_purge_deletes_only_an_idle_directory() {
     assert!(requests::purge(&fake, REPO, epoch, &dir).await.unwrap());
     assert!(!dir.exists());
     assert_eq!(fake.st().completed.len(), 1);
+}
+
+#[tokio::test]
+async fn settle_and_exclude_requests_run_through_the_claimed_service_runner() {
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    let fake = Fake::with_store(store.clone());
+    let epoch = fake.acquire_lease(REPO, "a").await.unwrap().epoch;
+    let mut settle = request(10, MirrorRequestKind::SettleBatch);
+    settle.excludes = vec![vec![7; 32]];
+    fake.st().pending.push_back(settle);
+    fake.st()
+        .pending
+        .push_back(request(11, MirrorRequestKind::Exclude));
+    let runner = Runner::default();
+    requests::run_turn(&fake, &Desk::default(), &runner, REPO, epoch)
+        .await
+        .unwrap();
+    assert_eq!(runner.ran.load(Ordering::SeqCst), 2);
+    let completed = fake.st().completed.clone();
+    assert_eq!(completed.len(), 2);
+    assert_eq!(completed[0].0, 10);
+    assert_eq!(completed[0].1.branch.as_deref(), Some("graft/batch-10"));
+    assert_eq!(completed[0].1.lands, vec![vec![7; 32]]);
+    assert_eq!(completed[1].0, 11);
+    assert_eq!(
+        store
+            .line_slot(
+                store.repo(REPO).await.unwrap().unwrap(),
+                "main",
+                LineSlot::Batch,
+            )
+            .await
+            .unwrap(),
+        None,
+        "settling the request frees the batch slot"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1508,17 +1570,31 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
     }
 }
 
+static GLOBAL_LOGS: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+
+fn global_logs() -> Arc<Mutex<Vec<u8>>> {
+    let logs = GLOBAL_LOGS
+        .get_or_init(|| {
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(Logs(logs.clone()))
+                .with_max_level(tracing::Level::TRACE)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("serve tests must be the first global tracing subscriber");
+            logs
+        })
+        .clone();
+    logs.lock().unwrap().clear();
+    logs
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_forced_auth_failure_leaves_no_credential_in_logs_or_status() {
     use wiremock::matchers::any;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    let logs = Logs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(logs.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let logs = global_logs();
 
     // An upstream that refuses every credential.
     let forge = MockServer::start().await;
@@ -1567,8 +1643,11 @@ async fn a_forced_auth_failure_leaves_no_credential_in_logs_or_status() {
     let status_text = format!("{st:?}");
     assert!(!status_text.contains(secret));
     assert!(!status_text.contains(&basic));
-    let log = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-    assert!(log.contains("mirror"), "logs were captured");
+    let log = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("mirror task starting"),
+        "task logs were captured"
+    );
     assert!(!log.contains(secret));
     assert!(!log.contains(&basic));
 }
