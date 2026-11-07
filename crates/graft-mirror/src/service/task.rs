@@ -303,7 +303,8 @@ impl<C: Control> TaskCtx<C> {
             step.pin("", 0, None);
             "local".to_owned()
         } else {
-            match netguard::check(upstream, &self.shared.resolve).await {
+            let private = &self.config.private_hosts_allowed;
+            match netguard::check(upstream, &self.shared.resolve, private).await {
                 Ok((t, addr)) => {
                     step.pin(&t.host, t.port, Some(addr));
                     t.host

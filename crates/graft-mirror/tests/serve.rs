@@ -1101,6 +1101,43 @@ async fn an_upstream_resolving_to_a_blocked_address_is_refused_before_any_fetch(
     assert_eq!(st[0].error_code, MirrorErrorCode::UrlBlocked as i32);
 }
 
+/// Runs one reconcile of a single row on `upstream`, with every name
+/// resolving to a LAN address and `allowed` as `private_hosts_allowed`;
+/// returns the polls started and the row's first status code.
+async fn poll_on_lan(upstream: &str, allowed: &[&str]) -> (usize, i32) {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default());
+    let script = Arc::new(Script::default());
+    let lan: netguard::Resolve = Arc::new(|_, port| {
+        Box::pin(async move { Ok(vec![std::net::SocketAddr::from(([192, 168, 1, 75], port))]) })
+    });
+    let mut c = config(tmp.path());
+    c.private_hosts_allowed = allowed.iter().map(|h| (*h).to_owned()).collect();
+    let mut service = Service::with_resolver(fake.clone(), FakeSpawner(script.clone()), c, lan);
+    fake.set_row(row(REPO, upstream, 15));
+    service.reconcile().await.unwrap();
+    settle().await;
+    let polls = script.started.lock().unwrap().len();
+    (polls, fake.statuses()[0].error_code)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_host_in_private_hosts_allowed_is_polled_on_its_private_address_and_no_other() {
+    let allowed = ["repo.example.net"];
+    // The named host is polled.
+    let (polls, code) = poll_on_lan("https://repo.example.net/o/r.git", &allowed).await;
+    assert_eq!(polls, 1);
+    assert_eq!(code, MirrorErrorCode::Unspecified as i32);
+    // Another host on a private address is refused before any fetch.
+    let (polls, code) = poll_on_lan("https://git.example.net/o/r.git", &allowed).await;
+    assert_eq!(polls, 0);
+    assert_eq!(code, MirrorErrorCode::UrlBlocked as i32);
+    // The default, an empty list, refuses the named host too.
+    let (polls, code) = poll_on_lan("https://repo.example.net/o/r.git", &[]).await;
+    assert_eq!(polls, 0);
+    assert_eq!(code, MirrorErrorCode::UrlBlocked as i32);
+}
+
 // ---- requests ----------------------------------------------------------------
 
 #[derive(Default)]
