@@ -13,14 +13,15 @@ use graft_engine::policy::{
     RevertRequest, Verdict,
 };
 use graft_engine::{EngineConfig, LandHooks, LineConfig, REBASED_FROM};
-use graft_model::{ChangesetId, Clock as _};
+use graft_model::{ChangesetId, Clock as _, ObjectKind};
 use graft_proto::error::ApiResult;
 use graft_proto::types::*;
-use graft_proto::{ApiError, CallContext, ObjectApi, PrincipalKind, RepoApi, WorkspaceApi};
+use graft_proto::{ApiError, CallContext, Frame, ObjectApi, PrincipalKind, RepoApi, WorkspaceApi};
 use graft_store::memory::MemoryStore;
 use graft_store::{
     ChangesetRecord, LeaseRecord, MetaStore, MetaTxn, MirrorDirection, MirrorExportRecord,
-    MirrorLineRecord, MirrorRecord, Precondition, RecordState, TxnOutcome, Write,
+    MirrorLineRecord, MirrorRecord, Precondition, RecordState, RefKind as StoreRefKind, RefRecord,
+    TxnOutcome, Write,
 };
 
 const LINES: &[&str] = &["main", "trunk", "rel", "gp"];
@@ -1152,6 +1153,114 @@ fn the_mirror_reads_only_bound_repositories<M: MetaStore>((f, _): (Fixture<M>, A
     assert_eq!(refs(&mirror, "r"), denied("repo:r:read"));
 }
 
+/// WI-3528: rebinding the upstream keeps the followed marker, but the new
+/// mirror must reacquire the repository lease before it may upload objects.
+fn rebound_mirror_imports_under_the_new_lease<M: MetaStore>((f, _): (Fixture<M>, Arc<Recorder>)) {
+    let t = T::new(&f, &[("a", b"1")]);
+    let mut mirror = cx(&["repo:*:mirror"]);
+    mirror.principal.kind = PrincipalKind::Mirror;
+    mirror.principal.subject = "mirror".into();
+    let meta = f.engine.stores().0;
+    let id = block_on(meta.repo("r")).expect("repo").expect("exists");
+    let marker = followed_ref("main");
+    let add = |upstream: &str, version| {
+        let txn = MetaTxn {
+            preconditions: vec![Precondition::MirrorVersionIs {
+                upstream: upstream.into(),
+                version,
+            }],
+            writes: vec![Write::PutMirror(MirrorRecord {
+                upstream: upstream.into(),
+                lines: vec![MirrorLineRecord {
+                    branch: "main".into(),
+                    line: "main".into(),
+                    direction: MirrorDirection::Follow,
+                }],
+                interval_s: 60,
+                enabled: true,
+                credential: None,
+                kek_id: None,
+                export: MirrorExportRecord {
+                    default_author: None,
+                    authors: Vec::new(),
+                },
+                version: version.unwrap_or(0) + 1,
+                status: None,
+                created_by: "op".into(),
+                updated_by: "op".into(),
+                updated_at_ms: 0,
+            })],
+        };
+        assert!(matches!(
+            block_on(meta.commit(id, txn)),
+            Ok(TxnOutcome::Committed(_))
+        ));
+    };
+    add("https://old.example/r.git", None);
+    assert!(matches!(
+        block_on(meta.commit(
+            id,
+            MetaTxn {
+                preconditions: vec![Precondition::RefIs {
+                    name: marker.clone(),
+                    expected: None
+                }],
+                writes: vec![Write::SetRef(RefRecord {
+                    name: marker.clone(),
+                    target: t.root,
+                    version: 1,
+                    kind: StoreRefKind::Tool,
+                })],
+            }
+        )),
+        Ok(TxnOutcome::Committed(_))
+    ));
+    assert!(matches!(
+        block_on(meta.commit(
+            id,
+            MetaTxn {
+                preconditions: vec![Precondition::MirrorVersionIs {
+                    upstream: "https://old.example/r.git".into(),
+                    version: Some(1)
+                }],
+                writes: vec![Write::DeleteMirror("https://old.example/r.git".into())],
+            }
+        )),
+        Ok(TxnOutcome::Committed(_))
+    ));
+    add("https://new.example/r.git", None);
+    let denied = block_on(t.r.e().put_objects(
+        &mirror,
+        PutObjects {
+            repo: "r".into(),
+            blobs: vec![Frame::encode(ObjectKind::Blob, b"before-lease")],
+        },
+    ));
+    assert!(denied.is_err(), "rebound import allowed without the lease");
+    assert!(matches!(
+        block_on(meta.commit(
+            id,
+            MetaTxn {
+                preconditions: vec![Precondition::LeaseEpochIs { epoch: 0 }],
+                writes: vec![Write::PutLease(LeaseRecord {
+                    holder: Some("mirror/i".into()),
+                    epoch: 1,
+                    expires_at_ms: f.clock.now().ms + 60_000
+                })],
+            }
+        )),
+        Ok(TxnOutcome::Committed(_))
+    ));
+    let result = block_on(t.r.e().put_objects(
+        &mirror,
+        PutObjects {
+            repo: "r".into(),
+            blobs: vec![Frame::encode(ObjectKind::Blob, b"rebound")],
+        },
+    ));
+    assert!(result.is_ok(), "rebound import denied: {result:?}");
+}
+
 /// WI-3426: the mirror token (the `mirror` kind, only `repo:*:mirror`)
 /// cuts a batch on a bound repository: while the line's batch slot names a
 /// cut claimed under the lease, it may create and rebase changesets and
@@ -1414,6 +1523,7 @@ on_both![
     followed_lines_refuse_lands,
     the_mirror_moves_only_followed_lines,
     the_mirror_reads_only_bound_repositories,
+    rebound_mirror_imports_under_the_new_lease,
     the_mirror_cuts_only_a_claimed_batch_line,
 ];
 

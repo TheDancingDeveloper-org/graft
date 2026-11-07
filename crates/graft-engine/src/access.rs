@@ -18,6 +18,7 @@
 //! text form until `graft_auth::authorize` (G1.9) replaces it.
 
 use graft_model::{Change, RepoPath};
+use graft_proto::types::followed_ref;
 use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
 use graft_store::{
     LineSlot, MetaStore, MirrorQuery, MirrorRequestKind, MirrorRequestQuery, MirrorRequestRecord,
@@ -160,11 +161,80 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             Ok(()) => return Ok(()),
             Err(denied) => denied,
         };
-        if self.is_bound_mirror(cx, repo).await? {
+        if self.is_bound_mirror_with_lease(cx, repo).await? {
             Ok(())
         } else {
             Err(denied)
         }
+    }
+
+    /// The mirror's unscoped write grant is valid only while the service owns
+    /// the repository's live authority lease. The followed-line marker and
+    /// lease epoch fence the subsequent line move; object uploads and
+    /// changeset imports happen before that move and cannot inspect a line
+    /// from their transport request.
+    async fn is_bound_mirror_with_lease(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+    ) -> Result<bool, ApiError> {
+        if !is_mirror(cx, repo) {
+            return Ok(false);
+        }
+        let Some(id) = self.meta.repo(repo).await.map_err(errors::store)? else {
+            return Ok(false);
+        };
+        let Some(lease) = self
+            .meta
+            .get_lease(id)
+            .await
+            .map_err(errors::store)?
+            .filter(|lease| lease.held(lease.epoch, self.clock.now().ms))
+        else {
+            return Ok(false);
+        };
+        let Some(holder) = lease.holder.as_deref() else {
+            return Ok(false);
+        };
+        let Some(suffix) = holder.strip_prefix(&cx.principal.subject) else {
+            return Ok(false);
+        };
+        if !suffix.starts_with('/') || suffix[1..].contains('/') {
+            return Ok(false);
+        }
+        let mirrors = self
+            .meta
+            .list_mirrors(MirrorQuery {
+                repo: Some(id),
+                enabled: None,
+                after: None,
+                limit: 16,
+            })
+            .await
+            .map_err(errors::store)?;
+        for mirror in mirrors {
+            if !mirror.record.enabled {
+                continue;
+            }
+            for line in mirror.record.lines {
+                if !matches!(
+                    line.direction,
+                    graft_store::MirrorDirection::Follow | graft_store::MirrorDirection::Both
+                ) {
+                    continue;
+                }
+                if self
+                    .meta
+                    .get_ref(id, &followed_ref(&line.line))
+                    .await
+                    .map_err(errors::store)?
+                    .is_some()
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// `checked`, a write check, unless it denied the mirror service running
