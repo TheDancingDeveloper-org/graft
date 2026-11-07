@@ -70,6 +70,16 @@ token_file = "/path/to/token"
 # installation_id = 0
 # private_key_file = "/path/to/github-app.pem"
 
+# A Forgejo repository instead of [github] (never both): pr-batch opens the
+# batch PR there and land-batch rebase-merges it once every required status
+# context is success. Forgejo has no merge queue.
+# [forgejo]
+# api = "https://forgejo.example/api/v1"
+# owner = "example-org"
+# repo = "example-repo"
+# token_file = "/path/to/forgejo-token"
+# required_contexts = ["ci/woodpecker/pr/test"]
+
 # Graft-primary export (`graft-mirror export --config`).
 [export]
 # Import open GitHub pull requests as drafts. Needs the [github] section.

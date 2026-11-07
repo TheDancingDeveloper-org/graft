@@ -22,7 +22,7 @@ use crate::credentials::{CredentialProvider, SecretToken};
 use crate::text::clean_text;
 
 /// How many characters of a GitHub message are kept.
-const MESSAGE_CHARS: usize = 200;
+pub(crate) const MESSAGE_CHARS: usize = 200;
 
 /// Connect and read timeout for one request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -206,6 +206,16 @@ fn check_slug(what: &str, s: &str) -> Result<(), MirrorError> {
     }
 }
 
+/// Which forge's REST conventions a request follows: the headers it sends.
+/// The retry, rate-limit and error handling are the same for both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flavor {
+    /// GitHub: `Bearer` auth, GitHub's media type and API version header.
+    GitHub,
+    /// Forgejo (and Gitea): `token` auth and plain JSON.
+    Forgejo,
+}
+
 /// [`Forge`] over GitHub's REST and GraphQL APIs, authenticated by a
 /// [`CredentialProvider`] (a static token or a GitHub App).
 pub struct HttpForge<C> {
@@ -215,6 +225,7 @@ pub struct HttpForge<C> {
     repo: String,
     credentials: C,
     retry: RetryPolicy,
+    flavor: Flavor,
 }
 
 impl<C> fmt::Debug for HttpForge<C> {
@@ -223,6 +234,13 @@ impl<C> fmt::Debug for HttpForge<C> {
             .field("api", &self.api)
             .field("repo", &format_args!("{}/{}", self.owner, self.repo))
             .finish_non_exhaustive()
+    }
+}
+
+impl<C> HttpForge<C> {
+    /// The repository's owner and name.
+    pub(crate) fn owner_repo(&self) -> (&str, &str) {
+        (&self.owner, &self.repo)
     }
 }
 
@@ -260,15 +278,22 @@ impl<C: CredentialProvider> HttpForge<C> {
                 attempts: retry.attempts.max(1),
                 ..retry
             },
+            flavor: Flavor::GitHub,
         })
     }
 
-    fn repo_path(&self) -> String {
+    /// The same client speaking `flavor`'s conventions.
+    pub(crate) fn with_flavor(mut self, flavor: Flavor) -> Self {
+        self.flavor = flavor;
+        self
+    }
+
+    pub(crate) fn repo_path(&self) -> String {
         format!("/repos/{}/{}", self.owner, self.repo)
     }
 
     /// One request, retried while the answer is transient.
-    async fn send(
+    pub(crate) async fn send(
         &self,
         method: reqwest::Method,
         path: &str,
@@ -306,8 +331,12 @@ impl<C: CredentialProvider> HttpForge<C> {
             Err(ForgeError::Transient(what)) => return Answer::Transient(None, what),
             Err(ForgeError::Refused(what)) => return Answer::Refused(what),
         };
+        let scheme = match self.flavor {
+            Flavor::GitHub => "Bearer",
+            Flavor::Forgejo => "token",
+        };
         let mut auth =
-            match reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.expose())) {
+            match reqwest::header::HeaderValue::from_str(&format!("{scheme} {}", token.expose())) {
                 Ok(v) => v,
                 Err(_) => {
                     return Answer::Refused("the token is not a valid header value".to_owned());
@@ -318,9 +347,13 @@ impl<C: CredentialProvider> HttpForge<C> {
             .client
             .request(method.clone(), url)
             .query(query)
-            .header(reqwest::header::AUTHORIZATION, auth)
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28");
+            .header(reqwest::header::AUTHORIZATION, auth);
+        req = match self.flavor {
+            Flavor::GitHub => req
+                .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28"),
+            Flavor::Forgejo => req.header(reqwest::header::ACCEPT, "application/json"),
+        };
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -514,7 +547,7 @@ fn kind(e: &reqwest::Error) -> &'static str {
 }
 
 /// Cleans text GitHub sent back (see [`clean_text`]).
-fn clean(text: &str, max: usize) -> String {
+pub(crate) fn clean(text: &str, max: usize) -> String {
     clean_text(text, max, false)
 }
 
@@ -558,7 +591,7 @@ struct RawCheck {
     html_url: String,
 }
 
-fn is_sha(s: &str) -> bool {
+pub(crate) fn is_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -590,7 +623,7 @@ fn pull_from(v: Value) -> Result<Pull, ForgeError> {
 
 /// Parses GitHub's `YYYY-MM-DDTHH:MM:SSZ` timestamp to Unix ms; anything
 /// else is `None`.
-fn parse_utc_ms(s: &str) -> Option<i64> {
+pub(crate) fn parse_utc_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     if b.len() != 20
         || b[4] != b'-'

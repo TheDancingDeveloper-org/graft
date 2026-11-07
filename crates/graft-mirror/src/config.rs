@@ -82,6 +82,11 @@ pub struct FileConfig {
     /// only.
     #[serde(default)]
     pub github: Option<GithubFile>,
+    /// The Forgejo repository, token and required status contexts for batch
+    /// PRs and `land-batch` (WI-3492). Optional, and exclusive with
+    /// `[github]`: a mirror's batches go to one forge.
+    #[serde(default)]
+    pub forgejo: Option<ForgejoFile>,
     /// Graft-primary export settings (`graft-mirror export --config`).
     #[serde(default)]
     pub export: Option<ExportFile>,
@@ -279,6 +284,34 @@ impl GithubFile {
     }
 }
 
+/// The mirror's Forgejo repository, how it authenticates, and which commit
+/// status contexts must pass before `land-batch` merges a batch.
+///
+/// ```toml
+/// [forgejo]
+/// api = "https://forgejo.example/api/v1"
+/// owner = "indexarr"
+/// repo = "rusttorrent"
+/// token_file = "/run/secrets/forgejo-token"
+/// required_contexts = ["ci/woodpecker/pr/test", "ci / test (pull_request)"]
+/// ```
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgejoFile {
+    /// The API root, ending in `/api/v1`.
+    pub api: String,
+    /// The owner (user or organisation).
+    pub owner: String,
+    /// The repository name.
+    pub repo: String,
+    /// A file holding the token (a mounted secret). It is never in this file.
+    pub token_file: PathBuf,
+    /// Status contexts (Forgejo Actions, Woodpecker) that must all be
+    /// `success` on the batch head before `land-batch` merges it.
+    #[serde(default)]
+    pub required_contexts: Vec<String>,
+}
+
 /// One followed branch.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -347,6 +380,24 @@ impl FileConfig {
             github.auth()?;
             if github.owner.is_empty() || github.repo.is_empty() {
                 return Err(bad("[github] needs an owner and a repo"));
+            }
+        }
+        if let Some(forgejo) = &config.forgejo {
+            if config.github.is_some() {
+                return Err(bad("configure one forge: [github] or [forgejo], not both"));
+            }
+            if forgejo.owner.is_empty() || forgejo.repo.is_empty() {
+                return Err(bad("[forgejo] needs an owner and a repo"));
+            }
+            if !(forgejo.api.starts_with("https://") || forgejo.api.starts_with("http://")) {
+                return Err(bad("[forgejo] api must be an http(s) URL"));
+            }
+            if forgejo
+                .required_contexts
+                .iter()
+                .any(|c| c.trim().is_empty())
+            {
+                return Err(bad("[forgejo] required_contexts holds an empty context"));
             }
         }
         if config.export.as_ref().is_some_and(|e| e.import_pulls) && config.github.is_none() {
@@ -582,6 +633,55 @@ upstream = "/srv/upstream.git"
 mirror_dir = "/var/lib/m.git"
 db = "/var/lib/m.sqlite"
 "#;
+
+    const FORGEJO: &str = r#"
+[forgejo]
+api = "https://forgejo.example/api/v1"
+owner = "o"
+repo = "r"
+token_file = "/run/secrets/forgejo-token"
+required_contexts = ["ci/woodpecker/pr/test"]
+"#;
+
+    const GITHUB: &str = r#"
+[github]
+owner = "o"
+repo = "r"
+token_file = "/run/secrets/github-token"
+"#;
+
+    #[test]
+    fn a_forgejo_table_parses_and_github_is_unchanged() {
+        let lines = "[[lines]]\nbranch = \"main\"\n";
+        let fj = FileConfig::parse(&format!("{BASE}{lines}{FORGEJO}")).unwrap();
+        let f = fj.forgejo.as_ref().unwrap();
+        assert_eq!(f.api, "https://forgejo.example/api/v1");
+        assert_eq!(
+            f.required_contexts,
+            vec!["ci/woodpecker/pr/test".to_owned()]
+        );
+        assert!(fj.github.is_none());
+        let gh = FileConfig::parse(&format!("{BASE}{lines}{GITHUB}")).unwrap();
+        assert!(gh.forgejo.is_none());
+        assert_eq!(
+            gh.github.unwrap().auth().unwrap(),
+            AuthChoice::TokenFile(PathBuf::from("/run/secrets/github-token"))
+        );
+    }
+
+    #[test]
+    fn a_bad_forgejo_table_is_refused() {
+        let lines = "[[lines]]\nbranch = \"main\"\n";
+        assert!(FileConfig::parse(&format!("{BASE}{lines}{FORGEJO}{GITHUB}")).is_err());
+        let no_token = FORGEJO.replace("token_file = \"/run/secrets/forgejo-token\"\n", "");
+        assert!(FileConfig::parse(&format!("{BASE}{lines}{no_token}")).is_err());
+        let bad_api = FORGEJO.replace("https://forgejo.example/api/v1", "forgejo.example");
+        assert!(FileConfig::parse(&format!("{BASE}{lines}{bad_api}")).is_err());
+        let empty_ctx = FORGEJO.replace("[\"ci/woodpecker/pr/test\"]", "[\" \"]");
+        assert!(FileConfig::parse(&format!("{BASE}{lines}{empty_ctx}")).is_err());
+        let token_inline = format!("{FORGEJO}token = \"x\"\n");
+        assert!(FileConfig::parse(&format!("{BASE}{lines}{token_inline}")).is_err());
+    }
 
     #[test]
     fn claimed_author_domains_parse_with_default() {

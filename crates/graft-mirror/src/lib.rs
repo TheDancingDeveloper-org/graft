@@ -62,6 +62,7 @@ pub mod credentials;
 pub mod db;
 pub mod export;
 pub mod follow;
+pub mod forgejo;
 pub mod git;
 pub mod github;
 pub mod import;
