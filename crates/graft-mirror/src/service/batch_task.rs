@@ -10,7 +10,7 @@ use std::sync::Arc;
 use graft_model::{ChangesetId, ObjectId};
 use graft_proto::CallContext;
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
-use graft_proto::pb;
+use graft_proto::pb::{self, MirrorRequestKind};
 
 use super::control::Control;
 use super::requests::{BAD_REQUEST, INTERNAL, RequestFailure, RequestRunner, UNSUPPORTED};
@@ -36,6 +36,8 @@ pub const NOT_DUE: RequestFailure = RequestFailure("not_due");
 pub const NO_CREDENTIAL: RequestFailure = RequestFailure("no_credential");
 /// Code: the batch branch holds commits this batch did not push.
 pub const BRANCH_TAKEN: RequestFailure = RequestFailure("branch_taken");
+/// Rewind remains deferred until the server exposes a fenced DeleteRef API.
+pub const REWIND_DELETE_REF: RequestFailure = RequestFailure("rewind_requires_delete_ref");
 
 /// The GitHub `owner/repo` of an `https://github.com/<owner>/<repo>(.git)`
 /// upstream; `None` for any other upstream (no forge, no batches).
@@ -190,6 +192,55 @@ where
     A: AdminApi + ObjectApi + RepoApi + Send + Sync,
     F: Forge,
 {
+    async fn run_request(
+        &self,
+        req: &pb::MirrorRequest,
+    ) -> Result<pb::MirrorRequestOutcome, RequestFailure> {
+        let exclude = req
+            .excludes
+            .iter()
+            .map(|b| change_id(b))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(BAD_REQUEST)?;
+        let mut config = BatchConfig::new(req.line.clone(), self.base.clone(), self.follow.clone());
+        config.exclude = exclude;
+        let mut batcher = Batcher::new(
+            self.api,
+            self.cx.clone(),
+            self.db,
+            self.mirror.clone(),
+            self.forge,
+            config,
+        )
+        .map_err(|e| failure(&e))?;
+        if let Some(log) = self.exports {
+            batcher = batcher.with_export_log(log);
+        }
+        if let Some(epoch) = self.epoch {
+            batcher = batcher.with_lease_epoch(epoch);
+        }
+        let kind = MirrorRequestKind::try_from(req.kind).unwrap_or(MirrorRequestKind::Unspecified);
+        let settled = if kind == MirrorRequestKind::SettleBatch {
+            batcher
+                .track()
+                .await
+                .map_err(|e| failure(&e))?
+                .filter(|r| r.state.is_terminal())
+        } else {
+            batcher.run().await.map_err(|e| failure(&e))?.settled
+        };
+        let Some(rec) = settled else {
+            return Ok(pb::MirrorRequestOutcome::default());
+        };
+        Ok(pb::MirrorRequestOutcome {
+            pr_number: rec.pr_number,
+            pr_url: rec.pr_url,
+            branch: Some(rec.branch),
+            lands: req.excludes.clone(),
+            error_code: None,
+        })
+    }
+
     async fn cut(&self, req: &pb::MirrorRequest) -> Result<NewPull, RequestFailure> {
         // A cut at a chosen base changeset is not supported: the batch is
         // cut against the base line's tip, as `pr-batch` cuts it.
@@ -280,8 +331,21 @@ where
 
     async fn run(
         &self,
-        _req: &pb::MirrorRequest,
+        req: &pb::MirrorRequest,
     ) -> Result<pb::MirrorRequestOutcome, RequestFailure> {
-        Err(UNSUPPORTED)
+        match MirrorRequestKind::try_from(req.kind).unwrap_or(MirrorRequestKind::Unspecified) {
+            MirrorRequestKind::SettleBatch | MirrorRequestKind::Exclude => {
+                self.run_request(req).await
+            }
+            MirrorRequestKind::Rewind => {
+                tracing::warn!(
+                    repo = %req.repo,
+                    line = %req.line,
+                    "RewindFollowed unsupported: server-side DeleteRef is required"
+                );
+                Err(REWIND_DELETE_REF)
+            }
+            _ => Err(BAD_REQUEST),
+        }
     }
 }
