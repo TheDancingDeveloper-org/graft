@@ -1570,17 +1570,31 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
     }
 }
 
+static GLOBAL_LOGS: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+
+fn global_logs() -> Arc<Mutex<Vec<u8>>> {
+    let logs = GLOBAL_LOGS
+        .get_or_init(|| {
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(Logs(logs.clone()))
+                .with_max_level(tracing::Level::TRACE)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("serve tests must be the first global tracing subscriber");
+            logs
+        })
+        .clone();
+    logs.lock().unwrap().clear();
+    logs
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_forced_auth_failure_leaves_no_credential_in_logs_or_status() {
     use wiremock::matchers::any;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    let logs = Logs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(logs.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let logs = global_logs();
 
     // An upstream that refuses every credential.
     let forge = MockServer::start().await;
@@ -1629,9 +1643,8 @@ async fn a_forced_auth_failure_leaves_no_credential_in_logs_or_status() {
     let status_text = format!("{st:?}");
     assert!(!status_text.contains(secret));
     assert!(!status_text.contains(&basic));
-    let log = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-    // Another test may own the process-wide tracing subscriber while this
-    // test runs; an empty capture is still a valid no-leak result.
+    let log = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    assert!(!log.is_empty(), "logs were captured");
     assert!(!log.contains(secret));
     assert!(!log.contains(&basic));
 }
