@@ -9,6 +9,7 @@ use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
 
+use graft_model::ChangesetId;
 use serde_json::Value;
 use support::{graft, scratch};
 
@@ -366,4 +367,34 @@ fn credential_needs_a_file_or_stdin_and_never_an_argument() {
         .output()
         .expect("graft");
     assert!(!out.status.success(), "a credential argument is refused");
+}
+
+#[test]
+fn mark_followed_requires_repository_admin() {
+    let site = Site::start();
+    let admin = site.mint("admin", "agent", &["repos:admin"]);
+    let made = site.run(&admin, &["repo", "create", "r"], None);
+    assert!(made.status.success(), "{}", printed(&made));
+    let token = site.mint("reader", "agent", &["repo:r:read"]);
+    let target = ChangesetId::hash(b"target").to_string();
+    let refused = site.run(
+        &token,
+        &[
+            "repo",
+            "mirror",
+            "mark-followed",
+            "r",
+            "--line",
+            "main",
+            "--changeset",
+            &target,
+        ],
+        None,
+    );
+    assert!(!refused.status.success(), "{}", printed(&refused));
+    assert!(
+        printed(&refused).contains("permission denied"),
+        "{}",
+        printed(&refused)
+    );
 }

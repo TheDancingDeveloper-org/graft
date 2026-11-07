@@ -323,13 +323,29 @@ async fn mirror(
                     graft_model::ChangesetId(graft_model::ObjectId(bytes))
                 }
             };
+            let marker_name = followed_ref(line);
+            let current = conn
+                .remote
+                .resolve_ref(
+                    &cx,
+                    graft_proto::types::ResolveRef {
+                        repo: name.clone(),
+                        name: marker_name.clone(),
+                    },
+                )
+                .await;
+            if current.is_ok() && force.is_none() {
+                return Err(Failure::usage(format!(
+                    "followed marker {marker_name} already exists; pass --force <old-id> to replace it"
+                )));
+            }
             let view = conn
                 .remote
                 .update_ref(
                     &cx,
                     UpdateRef {
                         repo: name.clone(),
-                        name: followed_ref(line),
+                        name: marker_name,
                         expected: old,
                         new: target,
                         kind: RefKind::Tool,
