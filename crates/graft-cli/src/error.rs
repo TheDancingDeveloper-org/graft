@@ -195,7 +195,7 @@ impl From<ClientError> for Failure {
             ClientError::Api(api) => api.into(),
             ClientError::Endpoint(what) => Failure::new(Exit::Usage, "endpoint", what),
             ClientError::Connect { endpoint, cause } => Failure::new(
-                Exit::Failure,
+                Exit::Unavailable,
                 "connect",
                 format!("could not connect to {endpoint}: {cause}"),
             ),
