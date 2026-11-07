@@ -486,19 +486,22 @@ impl Services {
     }
 
     /// What the engine will check for `PutObjects`, done before a byte is
-    /// buffered: an unprefixed write scope on the repository (scope first,
-    /// so a caller without one learns nothing), then that it exists.
+    /// buffered: an unprefixed write scope on the repository, or the bound
+    /// mirror under its lease (scope first, so a caller without one learns
+    /// nothing), then that it exists.
     async fn check_put(&self, cx: &Caller, repo: &str) -> Result<(), Status> {
         let refuse = |e: ApiError| {
             self.app.refused("PutObjects", &e);
             Status::from(e)
         };
         self.app.check_not_revoked(&cx.jti).await.map_err(refuse)?;
-        let scope = Scope::Write {
-            repo: repo.to_owned(),
-            prefix: None,
-        };
-        graft_auth::authorize(&cx.principal, &scope, None).map_err(|e| refuse(e.into()))?;
+        // The engine's own check: the write scope, or the mirror service
+        // under its live lease on a followed repository (WI-3591).
+        self.app
+            .engine
+            .authorize_put_objects(cx, repo)
+            .await
+            .map_err(refuse)?;
         let (meta, _) = self.app.engine.stores();
         match meta.repo(repo).await {
             Ok(Some(_)) => Ok(()),
