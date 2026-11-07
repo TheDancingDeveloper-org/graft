@@ -94,7 +94,10 @@ impl Remote {
                 .tcp_nodelay(true)
                 .connect()
                 .await
-                .map_err(|_| Error::Api(unavailable()))?,
+                .map_err(|e| Error::Connect {
+                    endpoint: endpoint.to_string(),
+                    cause: e.to_string(),
+                })?,
             Endpoint::NodeSocket(path) => {
                 let path: PathBuf = path.clone();
                 // The URI is required by the API and unused by the connector.
@@ -108,7 +111,10 @@ impl Remote {
                         }
                     }))
                     .await
-                    .map_err(|_| Error::Api(unavailable()))?
+                    .map_err(|e| Error::Connect {
+                        endpoint: endpoint.to_string(),
+                        cause: e.to_string(),
+                    })?
             }
         };
         Ok(Self {
