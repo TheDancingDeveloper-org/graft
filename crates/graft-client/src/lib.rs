@@ -218,6 +218,15 @@ pub enum Error {
     Store(StoreError),
     /// An endpoint that can't be used, described.
     Endpoint(String),
+    /// The endpoint could not be reached. This is distinct from an API
+    /// `Unavailable` response, which means the server asked the caller to
+    /// retry.
+    Connect {
+        /// The endpoint that could not be reached.
+        endpoint: String,
+        /// The transport's sanitized connection error.
+        cause: String,
+    },
     /// Another process holds this local repository's lock.
     Busy,
     /// Local state (`.graft/`) is malformed, described.
@@ -284,6 +293,9 @@ impl fmt::Display for Error {
             Error::Io(e) => e.fmt(f),
             Error::Store(e) => write!(f, "object cache: {e:?}"),
             Error::Endpoint(what) => write!(f, "endpoint: {what}"),
+            Error::Connect { endpoint, cause } => {
+                write!(f, "could not connect to {endpoint}: {cause}")
+            }
             Error::Busy => f.write_str("repository is in use by another process"),
             Error::State(what) => write!(f, "working copy state: {what}"),
             Error::Dirty(paths) => write!(f, "{} paths have local changes", paths.len()),
