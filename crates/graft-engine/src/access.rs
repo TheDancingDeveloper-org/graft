@@ -168,6 +168,19 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
     }
 
+    /// The `PutObjects` access check, for a transport to run before it
+    /// buffers an upload: the unprefixed write scope on `repo`, or the
+    /// mirror service holding the repository's live lease with a followed
+    /// line (WI-3591). The same check `PutObjects` itself makes.
+    pub async fn authorize_put_objects(
+        &self,
+        cx: &CallContext,
+        repo: &str,
+    ) -> Result<(), ApiError> {
+        self.require_or_bound_mirror(cx, repo, Need::Write(None))
+            .await
+    }
+
     /// The mirror's unscoped write grant is valid only while the service owns
     /// the repository's live authority lease. The followed-line marker and
     /// lease epoch fence the subsequent line move; object uploads and
