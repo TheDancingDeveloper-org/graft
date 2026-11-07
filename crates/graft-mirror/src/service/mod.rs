@@ -102,6 +102,11 @@ pub struct ServeConfig {
     /// Poll an upstream that is a local path (tests only: the server never
     /// accepts one).
     pub allow_local_upstreams: bool,
+    /// Hosts that may resolve to a private address (RFC 1918, CGNAT,
+    /// unique-local), lowercase, matched exactly: a self-hosted forge on
+    /// the LAN or tailnet. Empty, the default, allows none
+    /// ([`netguard::private_hosts`]).
+    pub private_hosts_allowed: Vec<String>,
 }
 
 impl ServeConfig {
@@ -121,6 +126,7 @@ impl ServeConfig {
             min_interval: Duration::from_secs(15),
             claim_requests: false,
             allow_local_upstreams: false,
+            private_hosts_allowed: Vec::new(),
         }
     }
 }
@@ -610,6 +616,11 @@ pub struct ServeFile {
     /// batches through that host's API (WI-3492).
     #[serde(default)]
     pub forgejo: Vec<ForgejoHostFile>,
+    /// Upstream hosts allowed to resolve to a private address (RFC 1918,
+    /// CGNAT, unique-local): exact names, no wildcards. Loopback and
+    /// link-local stay refused. Empty by default.
+    #[serde(default)]
+    pub private_hosts_allowed: Vec<String>,
 }
 
 /// One `[[forgejo]]` host.
@@ -736,6 +747,8 @@ impl ServeFile {
         c.server_backoff_cap = secs(l.server_backoff_cap_s, c.server_backoff_cap);
         c.min_interval = secs(l.min_interval_s, c.min_interval);
         c.claim_requests = self.claim_requests;
+        c.private_hosts_allowed =
+            netguard::private_hosts(&self.private_hosts_allowed).map_err(MirrorError::Config)?;
         if c.reconcile.is_zero()
             || c.poll_timeout.is_zero()
             || c.max_fetches == 0
@@ -790,6 +803,21 @@ mod tests {
         assert_eq!(c.reconcile, Duration::from_secs(15));
         assert_eq!(c.max_fetches, 4);
         assert!(!c.claim_requests);
+        assert!(c.private_hosts_allowed.is_empty(), "no host by default");
+        let f: ServeFile = toml::from_str(
+            "server = \"http://s:1\"\ndata_dir = \"/d\"\n\
+             private_hosts_allowed = [\"Repo.Example.net\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            f.config().unwrap().private_hosts_allowed,
+            vec!["repo.example.net"]
+        );
+        let f: ServeFile = toml::from_str(
+            "server = \"http://s:1\"\ndata_dir = \"/d\"\nprivate_hosts_allowed = [\"*.example.net\"]\n",
+        )
+        .unwrap();
+        assert!(f.config().is_err(), "no wildcards");
         let f: ServeFile = toml::from_str(
             "server = \"http://s:1\"\ndata_dir = \"/d\"\n[limits]\nmax_fetches = 0\n",
         )

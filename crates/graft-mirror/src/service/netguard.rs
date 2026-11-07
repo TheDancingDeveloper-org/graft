@@ -2,6 +2,15 @@
 //! server's URL rules again, then the host resolved and every address it
 //! resolves to refused if it is in a blocked range. This closes the
 //! DNS-rebinding route round the server's string check.
+//!
+//! An operator may name hosts that are allowed a private address
+//! (`private_hosts_allowed` in the serve config): a self-hosted forge on
+//! the LAN or the tailnet. The name must match exactly, and only RFC 1918,
+//! CGNAT (100.64.0.0/10) and unique-local (fc00::/7) addresses are excused
+//! for it; loopback, link-local (the metadata address), and the other
+//! reserved ranges stay refused, and only an `https://` upstream is
+//! excused (ssh is not pinned). git is pinned to the vetted address and
+//! follows no redirect, so the exemption reaches that host's address only.
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -143,6 +152,62 @@ pub fn is_blocked(ip: IpAddr) -> bool {
     }
 }
 
+/// Whether `ip` is in a private range a named host may be allowed to use:
+/// RFC 1918, CGNAT 100.64.0.0/10 and unique-local fc00::/7 (an IPv4-mapped
+/// address judged as its v4 address). Nothing else is ever excused.
+fn excusable(ip: IpAddr) -> bool {
+    let v4 = |v4: Ipv4Addr| {
+        let [a, b, ..] = v4.octets();
+        v4.is_private() || (a == 100 && (64..128).contains(&b))
+    };
+    match ip {
+        IpAddr::V4(a) => v4(a),
+        IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(m) => v4(m),
+            None => (a.segments()[0] & 0xfe00) == 0xfc00,
+        },
+    }
+}
+
+/// Checks a `private_hosts_allowed` list: each entry a DNS name (no
+/// wildcard, address, port or path), returned lowercase without a trailing
+/// dot. An empty list, the default, allows no host a private address.
+pub fn private_hosts(names: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::with_capacity(names.len());
+    for n in names {
+        let h = n.trim_end_matches('.').to_ascii_lowercase();
+        let label_ok = |l: &str| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        };
+        let tld = h.rsplit('.').next().unwrap_or("");
+        if h.is_empty()
+            || h.len() > 253
+            || !h.split('.').all(label_ok)
+            || !(tld.starts_with("xn--") || tld.bytes().all(|b| b.is_ascii_alphabetic()))
+        {
+            return Err(format!(
+                "private_hosts_allowed: {n:?} is not a host name (no wildcards, addresses or ports)"
+            ));
+        }
+        if check_name(Target {
+            host: h.clone(),
+            port: 443,
+        })
+        .is_err()
+        {
+            return Err(format!(
+                "private_hosts_allowed: {n:?} is a local or cluster name"
+            ));
+        }
+        if !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    Ok(out)
+}
+
 /// Resolves a host and port to its addresses.
 pub type Resolve = std::sync::Arc<
     dyn Fn(String, u16) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send>>
@@ -157,15 +222,20 @@ pub fn system_resolver() -> Resolve {
     })
 }
 
-/// Refuses `addrs` if any is blocked; none is unreachable.
-pub fn judge(addrs: &[SocketAddr]) -> Result<(), PollFailure> {
+/// Refuses `addrs` if any is blocked; none is unreachable. With `private`
+/// set (the host is in `private_hosts_allowed`), an address in a private
+/// range ([`excusable`]) is let through; every other blocked range is not.
+pub fn judge(addrs: &[SocketAddr], private: bool) -> Result<(), PollFailure> {
     if addrs.is_empty() {
         return Err(PollFailure::new(
             MirrorErrorCode::UpstreamUnreachable,
             "the upstream host did not resolve",
         ));
     }
-    if addrs.iter().any(|a| is_blocked(a.ip())) {
+    if addrs
+        .iter()
+        .any(|a| is_blocked(a.ip()) && !(private && excusable(a.ip())))
+    {
         return Err(blocked("it resolves to a private or local address"));
     }
     Ok(())
@@ -176,15 +246,29 @@ pub fn judge(addrs: &[SocketAddr]) -> Result<(), PollFailure> {
 /// vetted address git must connect to: the caller pins git to it
 /// ([`crate::git::Mirror::set_resolve_pin`]) so git does not resolve the
 /// name again and reach another address (DNS rebinding).
-pub async fn check(upstream: &str, resolve: &Resolve) -> Result<(Target, IpAddr), PollFailure> {
+///
+/// `private_hosts` ([`private_hosts`], checked) names the hosts that may
+/// resolve to a private address; the upstream's host must equal one
+/// exactly (case and a trailing dot aside), and the upstream must be
+/// `https://`: only HTTP(S) git is pinned to the vetted address, while ssh
+/// resolves the name again, which would reopen DNS rebinding.
+pub async fn check(
+    upstream: &str,
+    resolve: &Resolve,
+    private_hosts: &[String],
+) -> Result<(Target, IpAddr), PollFailure> {
     let t = target(upstream)?;
+    let name = t.host.trim_end_matches('.').to_ascii_lowercase();
+    let private = upstream.starts_with("https://")
+        && name.parse::<IpAddr>().is_err()
+        && private_hosts.contains(&name);
     let addrs = resolve(t.host.clone(), t.port).await.map_err(|_| {
         PollFailure::new(
             MirrorErrorCode::UpstreamUnreachable,
             "the upstream host did not resolve",
         )
     })?;
-    judge(&addrs)?;
+    judge(&addrs, private)?;
     let addr = addrs[0].ip();
     Ok((t, addr))
 }
@@ -244,23 +328,127 @@ mod tests {
                 ])
             })
         });
-        let e = check("https://github.com/o/r", &rebinding)
+        let e = check("https://github.com/o/r", &rebinding, &[])
             .await
             .expect_err("blocked");
         assert_eq!(e.code, MirrorErrorCode::UrlBlocked);
         let public: Resolve = std::sync::Arc::new(|_, port| {
             Box::pin(async move { Ok(vec![SocketAddr::from(([140, 82, 112, 3], port))]) })
         });
-        let (t, addr) = check("https://github.com/o/r", &public)
+        let (t, addr) = check("https://github.com/o/r", &public, &[])
             .await
             .expect("public");
         assert_eq!(t.host, "github.com");
         // The vetted address is returned, for git to be pinned to.
         assert_eq!(addr, IpAddr::from([140, 82, 112, 3]));
         assert_eq!(
-            judge(&[]).unwrap_err().code,
+            judge(&[], false).unwrap_err().code,
             MirrorErrorCode::UpstreamUnreachable
         );
+    }
+
+    fn resolving_to(ips: &'static [[u8; 4]]) -> Resolve {
+        std::sync::Arc::new(move |_, port| {
+            Box::pin(
+                async move { Ok(ips.iter().map(|ip| SocketAddr::from((*ip, port))).collect()) },
+            )
+        })
+    }
+
+    #[tokio::test]
+    async fn only_a_named_host_may_resolve_to_a_private_address() {
+        let allow = private_hosts(&["Repo.Example.NET.".to_owned()]).unwrap();
+        assert_eq!(allow, vec!["repo.example.net"]);
+        let lan = resolving_to(&[[192, 168, 1, 75]]);
+        // The named host is let through, pinned to the address it resolved to.
+        let (t, addr) = check("https://repo.example.net/o/r.git", &lan, &allow)
+            .await
+            .expect("allowed");
+        assert_eq!(t.host, "repo.example.net");
+        assert_eq!(addr, IpAddr::from([192, 168, 1, 75]));
+        let tailnet = resolving_to(&[[100, 92, 54, 45]]);
+        check("https://REPO.example.net./o/r", &tailnet, &allow)
+            .await
+            .expect("case and a trailing dot aside");
+        // ssh is not pinned to the vetted address, so it gets no exemption.
+        for url in ["ssh://git@repo.example.net/o/r", "git@repo.example.net:o/r"] {
+            let e = check(url, &tailnet, &allow).await.expect_err(url);
+            assert_eq!(e.code, MirrorErrorCode::UrlBlocked, "{url}");
+        }
+        // Any other host on a private address is refused, a redirect target
+        // included (and git follows no redirect: see git.rs).
+        for url in [
+            "https://other.example.net/o/r",
+            "https://sub.repo.example.net/o/r",
+            "https://repo.example.net.evil.org/o/r",
+        ] {
+            let e = check(url, &lan, &allow).await.expect_err(url);
+            assert_eq!(e.code, MirrorErrorCode::UrlBlocked, "{url}");
+        }
+        // The default, no list, is today's behaviour.
+        let e = check("https://repo.example.net/o/r", &lan, &[])
+            .await
+            .expect_err("default");
+        assert_eq!(e.code, MirrorErrorCode::UrlBlocked);
+    }
+
+    #[tokio::test]
+    async fn a_named_host_is_still_refused_loopback_link_local_and_reserved() {
+        let allow = private_hosts(&["repo.example.net".to_owned()]).unwrap();
+        static BAD: [[[u8; 4]; 2]; 5] = [
+            [[192, 168, 1, 75], [127, 0, 0, 1]],
+            [[192, 168, 1, 75], [169, 254, 169, 254]],
+            [[10, 0, 0, 1], [0, 0, 0, 0]],
+            [[10, 0, 0, 1], [240, 0, 0, 1]],
+            [[172, 16, 0, 1], [198, 18, 0, 1]],
+        ];
+        for ips in &BAD {
+            let e = check("https://repo.example.net/o/r", &resolving_to(ips), &allow)
+                .await
+                .expect_err("never excused");
+            assert_eq!(e.code, MirrorErrorCode::UrlBlocked, "{ips:?}");
+        }
+        // Unique-local v6 and a mapped private v4 are excused; loopback and
+        // link-local v6 are not.
+        for (ip, ok) in [
+            ("fd00::1", true),
+            ("::ffff:10.1.2.3", true),
+            ("::1", false),
+            ("fe80::1", false),
+            ("::ffff:127.0.0.1", false),
+        ] {
+            let addr = SocketAddr::new(ip.parse().unwrap(), 443);
+            assert_eq!(judge(&[addr], true).is_ok(), ok, "{ip}");
+            assert!(judge(&[addr], false).is_err(), "{ip} blocked by default");
+        }
+        // A literal address in the URL is never excused, whatever the list.
+        let e = check(
+            "https://192.168.1.75/o/r",
+            &resolving_to(&[[192, 168, 1, 75]]),
+            &allow,
+        )
+        .await
+        .expect_err("literal");
+        assert_eq!(e.code, MirrorErrorCode::UrlBlocked);
+    }
+
+    #[test]
+    fn the_list_takes_exact_host_names_only() {
+        for bad in [
+            "*.example.net",
+            "*",
+            "192.168.1.75",
+            "repo.example.net:443",
+            "https://repo.example.net",
+            "repo.example.net/o",
+            "",
+            "localhost",
+            "git.internal",
+            "api.default.svc",
+        ] {
+            assert!(private_hosts(&[bad.to_owned()]).is_err(), "{bad}");
+        }
+        assert_eq!(private_hosts(&[]).unwrap(), Vec::<String>::new());
     }
 
     #[test]

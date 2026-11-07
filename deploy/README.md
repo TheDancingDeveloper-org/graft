@@ -142,6 +142,26 @@ attempt, a rebase merge only once every required context is `success` (exit
 with `[forgejo]` sends that table's token to git for its own host, and
 `land-batch --config` reads it the same way.
 
+`serve` refuses an upstream whose name resolves to a private address
+(RFC 1918, the tailnet's 100.64.0.0/10, unique-local v6), as well as loopback
+and link-local. For a forge on the LAN or the tailnet, name its host in the
+serve config:
+
+```toml
+private_hosts_allowed = ["repo.indexarr.net"]  # exact names; empty by default
+```
+
+Only those names, on an `https://` upstream, are excused, and only for the
+private ranges (ssh resolves the name again, so it is not excused): loopback,
+link-local (the cloud metadata address) and reserved addresses stay refused,
+and an address written in the URL is never excused. The service resolves the
+name once, judges every address it returns, and pins git to the vetted one
+(`http.curloptResolve`), so a DNS change between the check and the fetch
+cannot swap in another address. git follows no redirect
+(`http.followRedirects=false`), so a redirect to another host is not followed.
+graft-server needs no setting: it checks only the URL text and
+`[mirror] allowed_hosts`, which must still list the host.
+
 Check that the service has caught up (lag 0 for every repository):
 
 ```sh
