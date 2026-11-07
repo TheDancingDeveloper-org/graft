@@ -3816,4 +3816,27 @@ mod request_cut {
             assert_eq!(batch_task::github_repo(bad), None, "{bad}");
         }
     }
+
+    #[test]
+    fn a_forgejo_upstream_is_read_on_its_own_host_only() {
+        assert_eq!(
+            batch_task::forge_repo("https://git.example/acme/widget.git", "git.example"),
+            Some(("acme".to_owned(), "widget".to_owned()))
+        );
+        assert_eq!(
+            batch_task::forge_repo("https://GIT.example:3000/acme/widget", "git.example:3000"),
+            Some(("acme".to_owned(), "widget".to_owned()))
+        );
+        for bad in [
+            "https://git.example.evil/acme/widget.git",
+            "https://user@git.example/acme/widget.git",
+            "https://git.example:3000/acme/widget.git",
+            "http://git.example/acme/widget.git",
+            "https://git.example/acme",
+            "https://git.example/../widget",
+        ] {
+            assert_eq!(batch_task::forge_repo(bad, "git.example"), None, "{bad}");
+        }
+        assert_eq!(batch_task::forge_repo("https://x/a/b", ""), None);
+    }
 }

@@ -40,7 +40,18 @@ pub const BRANCH_TAKEN: RequestFailure = RequestFailure("branch_taken");
 /// The GitHub `owner/repo` of an `https://github.com/<owner>/<repo>(.git)`
 /// upstream; `None` for any other upstream (no forge, no batches).
 pub fn github_repo(upstream: &str) -> Option<(String, String)> {
-    let rest = upstream.strip_prefix("https://github.com/")?;
+    forge_repo(upstream, "github.com")
+}
+
+/// The `owner/repo` of an `https://<host>/<owner>/<repo>(.git)` upstream
+/// (`host` with its port, if any, matched without regard to case); `None`
+/// for an upstream on any other host or of any other shape.
+pub fn forge_repo(upstream: &str, host: &str) -> Option<(String, String)> {
+    let rest = upstream.strip_prefix("https://")?;
+    let (authority, rest) = rest.split_once('/')?;
+    if host.is_empty() || !authority.eq_ignore_ascii_case(host) {
+        return None;
+    }
     let rest = rest.trim_end_matches('/');
     let rest = rest.strip_suffix(".git").unwrap_or(rest);
     let (owner, repo) = rest.split_once('/')?;

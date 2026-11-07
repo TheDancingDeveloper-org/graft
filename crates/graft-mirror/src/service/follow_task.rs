@@ -10,17 +10,20 @@ use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::pb::MirrorErrorCode;
 use graft_proto::{CallContext, Principal, PrincipalKind};
 
-use super::batch_task::{BatchRunner, LeaseCredential, github_repo};
+use super::batch_task::{BatchRunner, LeaseCredential, forge_repo, github_repo};
 use super::status::{PollFailure, classify};
 use super::task::{PollReport, PollStep, TaskCtx};
 use super::{Control, DB_FILE, GIT_DIR, Spawner};
 use crate::ExportLog;
 use crate::MirrorError;
-use crate::credentials::{CredentialPipe, SecretToken};
+use crate::credentials::{CredentialPipe, CredentialProvider, SecretToken};
 use crate::db::MirrorDb;
 use crate::follow::{Divergence, FollowConfig, FollowLine, Follower, LineOutcome, POLL_INTERVAL};
+use crate::forgejo::ForgejoForge;
 use crate::git::Mirror;
-use crate::github::{Forge, GITHUB_API, HttpForge, RetryPolicy};
+use crate::github::{
+    CheckRun, Forge, ForgeError, GITHUB_API, HttpForge, NewPull, Pull, RetryPolicy,
+};
 
 /// Changesets per `ImportChangesets` call: the bound on one import step.
 pub const IMPORT_BATCH: usize = 256;
@@ -57,6 +60,143 @@ impl Forges for GitHubForges {
             credential,
             RetryPolicy::default(),
         ))
+    }
+}
+
+/// A Forgejo host `serve` opens batch PRs on (`[[forgejo]]`, WI-3492).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgejoHost {
+    /// The host, with its port if any, as the upstream URLs name it.
+    pub host: String,
+    /// The API root, ending in `/api/v1`.
+    pub api: String,
+}
+
+/// The forges of `serve`: GitHub's API for an `https://github.com/` upstream,
+/// Forgejo's for an upstream on one of `forgejo`'s hosts, and none (no
+/// batches) for any other. Either reads its token through the row's
+/// credential, the one git fetches and pushes with.
+#[derive(Clone, Debug, Default)]
+pub struct ServeForges {
+    forgejo: Vec<ForgejoHost>,
+    retry: RetryPolicy,
+}
+
+impl ServeForges {
+    /// GitHub, and Forgejo on `forgejo`'s hosts.
+    pub fn new(forgejo: Vec<ForgejoHost>) -> Self {
+        ServeForges {
+            forgejo,
+            retry: RetryPolicy::default(),
+        }
+    }
+
+    /// Forge calls retry by `retry`.
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// The Forgejo host of `upstream` and its `owner/repo`, if it is on one.
+    pub fn forgejo_for(&self, upstream: &str) -> Option<(&ForgejoHost, String, String)> {
+        self.forgejo
+            .iter()
+            .find_map(|h| forge_repo(upstream, &h.host).map(|(owner, repo)| (h, owner, repo)))
+    }
+}
+
+impl Forges for ServeForges {
+    type Forge<C: Control> = AnyForge<LeaseCredential<C>>;
+
+    fn forge<C: Control>(
+        &self,
+        upstream: &str,
+        credential: LeaseCredential<C>,
+    ) -> Option<Result<Self::Forge<C>, MirrorError>> {
+        if let Some((owner, name)) = github_repo(upstream) {
+            return Some(
+                HttpForge::new(GITHUB_API, &owner, &name, credential, self.retry)
+                    .map(AnyForge::GitHub),
+            );
+        }
+        let (host, owner, name) = self.forgejo_for(upstream)?;
+        Some(
+            ForgejoForge::new(&host.api, &owner, &name, credential, self.retry)
+                .map(AnyForge::Forgejo),
+        )
+    }
+}
+
+/// GitHub's forge or Forgejo's, chosen per repository by its upstream.
+pub enum AnyForge<C> {
+    /// GitHub's REST and GraphQL API.
+    GitHub(HttpForge<C>),
+    /// Forgejo's REST API.
+    Forgejo(ForgejoForge<C>),
+}
+
+impl<C: CredentialProvider> Forge for AnyForge<C> {
+    async fn find_pull(&self, branch: &str) -> Result<Option<Pull>, ForgeError> {
+        match self {
+            AnyForge::GitHub(f) => f.find_pull(branch).await,
+            AnyForge::Forgejo(f) => f.find_pull(branch).await,
+        }
+    }
+
+    async fn create_pull(&self, new: &NewPull) -> Result<Pull, ForgeError> {
+        match self {
+            AnyForge::GitHub(f) => f.create_pull(new).await,
+            AnyForge::Forgejo(f) => f.create_pull(new).await,
+        }
+    }
+
+    async fn get_pull(&self, number: u64) -> Result<Pull, ForgeError> {
+        match self {
+            AnyForge::GitHub(f) => f.get_pull(number).await,
+            AnyForge::Forgejo(f) => f.get_pull(number).await,
+        }
+    }
+
+    async fn update_pull(&self, number: u64, body: &str) -> Result<(), ForgeError> {
+        match self {
+            AnyForge::GitHub(f) => f.update_pull(number, body).await,
+            AnyForge::Forgejo(f) => f.update_pull(number, body).await,
+        }
+    }
+
+    async fn enqueue(&self, node_id: &str) -> Result<(), ForgeError> {
+        match self {
+            AnyForge::GitHub(f) => f.enqueue(node_id).await,
+            AnyForge::Forgejo(f) => f.enqueue(node_id).await,
+        }
+    }
+
+    async fn check_runs(&self, sha: &str) -> Result<Vec<CheckRun>, ForgeError> {
+        match self {
+            AnyForge::GitHub(f) => f.check_runs(sha).await,
+            AnyForge::Forgejo(f) => f.check_runs(sha).await,
+        }
+    }
+
+    async fn token(&self) -> Result<SecretToken, ForgeError> {
+        match self {
+            AnyForge::GitHub(f) => f.token().await,
+            AnyForge::Forgejo(f) => f.token().await,
+        }
+    }
+
+    async fn merging(&self, node_id: &str) -> Result<bool, ForgeError> {
+        match self {
+            AnyForge::GitHub(f) => f.merging(node_id).await,
+            AnyForge::Forgejo(f) => f.merging(node_id).await,
+        }
+    }
+
+    async fn close_pr(&self, number: u64, comment: &str) -> Result<(), ForgeError> {
+        match self {
+            AnyForge::GitHub(f) => f.close_pr(number, comment).await,
+            AnyForge::Forgejo(f) => f.close_pr(number, comment).await,
+        }
     }
 }
 

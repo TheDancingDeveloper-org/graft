@@ -92,9 +92,13 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
                                         settled that long ago; otherwise the
                                         run is deferred. --force cuts anyway.
   land-batch <pr> --config <file>       Forgejo only ([forgejo]): rebase-merge
+  land-batch <pr> --serve-config <file> --upstream <url>
                                         batch PR <pr> once every
                                         required_contexts status on its head
-                                        is success. One attempt, no waiting:
+                                        is success. With --serve-config, the
+                                        [[forgejo]] host of <url> gives the
+                                        API, token_file and contexts.
+                                        One attempt, no waiting:
                                         exit 0 merged (or already merged),
                                         75 statuses pending (run again
                                         later), 1 a required status failed,
@@ -649,7 +653,9 @@ async fn cmd_serve(args: &[String]) -> Result<(), CmdError> {
             .map_err(|e| MirrorError::Config(e.to_string()))?;
     let service = crate::service::Service::new(
         api.clone(),
-        crate::service::FollowSpawner::new(api.clone()).with_export_log(api),
+        crate::service::FollowSpawner::new(api.clone())
+            .with_export_log(api)
+            .with_forges(crate::service::ServeForges::new(file.forgejo_hosts()?)),
         config,
     )
     .with_metrics(metrics);
@@ -1221,15 +1227,19 @@ const EXIT_FAILED: u8 = 1;
 async fn cmd_land_batch(args: &[String]) -> Result<ExitCode, CmdError> {
     let mut number = None;
     let mut config = None;
+    let mut serve_config = None;
+    let mut upstream = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
+        let mut value = |flag: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| CmdError::Usage(format!("{flag} needs a value")))
+        };
         match a.as_str() {
-            "--config" => {
-                config =
-                    Some(PathBuf::from(it.next().ok_or_else(|| {
-                        CmdError::Usage("--config needs a value".into())
-                    })?))
-            }
+            "--config" => config = Some(PathBuf::from(value("--config")?)),
+            "--serve-config" => serve_config = Some(PathBuf::from(value("--serve-config")?)),
+            "--upstream" => upstream = Some(value("--upstream")?),
             s if s.starts_with('-') => return Err(CmdError::Usage(format!("unknown flag {s}"))),
             s if number.is_none() => {
                 number =
@@ -1241,18 +1251,51 @@ async fn cmd_land_batch(args: &[String]) -> Result<ExitCode, CmdError> {
         }
     }
     let number = number.ok_or_else(|| CmdError::Usage("land-batch needs <pr>".into()))?;
-    let config = config.ok_or_else(|| CmdError::Usage("land-batch needs --config".into()))?;
-    let file = FileConfig::load(&config)?;
-    let Some(fj) = &file.forgejo else {
-        return Err(MirrorError::Config(
-            "land-batch lands on Forgejo: configure [forgejo] (GitHub batches land with land-pr)"
-                .into(),
-        )
-        .into());
+    let (forge, required) = match (config, serve_config, upstream) {
+        (Some(config), None, None) => {
+            let file = FileConfig::load(&config)?;
+            let Some(fj) = &file.forgejo else {
+                return Err(MirrorError::Config(
+                    "land-batch lands on Forgejo: configure [forgejo] (GitHub batches land with land-pr)"
+                        .into(),
+                )
+                .into());
+            };
+            (forgejo_forge(fj)?, fj.required_contexts.clone())
+        }
+        (None, Some(serve), Some(upstream)) => serve_forgejo_forge(&serve, &upstream)?,
+        _ => {
+            return Err(CmdError::Usage(
+                "land-batch needs --config, or --serve-config with --upstream".into(),
+            ));
+        }
     };
-    let forge = forgejo_forge(fj)?;
-    let outcome = land_once(&forge, number, &fj.required_contexts).await?;
+    let outcome = land_once(&forge, number, &required).await?;
     Ok(report_land(number, &outcome))
+}
+
+/// The Forgejo forge and required contexts for `upstream` from the
+/// `[[forgejo]]` host it is on in the serve config at `path`.
+fn serve_forgejo_forge(
+    path: &Path,
+    upstream: &str,
+) -> Result<(ForgejoForge<StaticToken>, Vec<String>), MirrorError> {
+    let file = crate::service::ServeFile::load(path)?;
+    let Some((host, owner, repo)) = file.forgejo_for(upstream) else {
+        return Err(MirrorError::Config(
+            "land-batch: the upstream is not on a [[forgejo]] host of the serve config (GitHub batches land with land-pr)"
+                .into(),
+        ));
+    };
+    let Some(token_file) = &host.token_file else {
+        return Err(MirrorError::Config(format!(
+            "land-batch: [[forgejo]] {} has no token_file",
+            host.host
+        )));
+    };
+    let token = StaticToken::load(token_file)?;
+    let forge = ForgejoForge::new(&host.api(), &owner, &repo, token, RetryPolicy::default())?;
+    Ok((forge, host.required_contexts.clone()))
 }
 
 /// Prints one landing attempt's outcome and returns its exit status.

@@ -119,6 +119,29 @@ graft-mirror pr-batch <line> --base <branch> --config <file>
 This is a known gap of the retirement, not a design choice; it ends when
 batches become server requests.
 
+### A Forgejo upstream (WI-3492)
+
+A repository whose upstream is on Forgejo is onboarded the same way, with
+its Forgejo URL and a Forgejo token as the row's credential; the Forgejo host
+must be in `[mirror] allowed_hosts`. git fetches and pushes with that
+credential. Name the host in the serve config so batch cuts open their PRs
+through Forgejo's API, with the same row credential:
+
+```toml
+[[forgejo]]
+host = "git.example"                          # as the upstream URLs name it
+# api = "https://git.example/api/v1"          # the default
+required_contexts = ["ci/woodpecker/pr/test"] # land-batch only
+token_file = "/run/secrets/forgejo-token"     # land-batch only
+```
+
+Forgejo has no merge queue. Merge a batch PR with
+`graft-mirror land-batch <pr> --serve-config <file> --upstream <url>`: one
+attempt, a rebase merge only once every required context is `success` (exit
+0 merged, 75 pending, 1 failed, 3 closed unmerged). A per-repository config
+with `[forgejo]` sends that table's token to git for its own host, and
+`land-batch --config` reads it the same way.
+
 Check that the service has caught up (lag 0 for every repository):
 
 ```sh

@@ -335,3 +335,120 @@ async fn a_server_error_is_retried_then_transient_and_merging_is_never_true() {
     assert!(!f.merging("3").await.unwrap());
     assert!(matches!(f.enqueue("3").await, Err(ForgeError::Refused(_))));
 }
+
+/// Runs `graft-mirror land-batch` with `args`, returning its exit code and
+/// its output.
+fn land_batch_cli(args: &[&str]) -> (Option<i32>, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_graft-mirror"))
+        .arg("land-batch")
+        .args(args)
+        .env_remove("GRAFT_TOKEN")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code(), text)
+}
+
+/// A serve config whose one `[[forgejo]]` host is `git.example`, its API
+/// the mock server.
+fn serve_config(dir: &std::path::Path, server: &MockServer, token_file: bool) -> String {
+    let token = dir.join("forgejo-token");
+    std::fs::write(&token, format!("{TOKEN}\n")).unwrap();
+    let token_line = if token_file {
+        format!("token_file = \"{}\"\n", token.display())
+    } else {
+        String::new()
+    };
+    let file = dir.join("serve.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "server = \"http://graft:7878\"\ndata_dir = \"{}\"\n\
+             [[forgejo]]\nhost = \"git.example\"\napi = \"{}\"\n\
+             required_contexts = [\"ci/woodpecker/pr/test\", \"ci / build (pull_request)\"]\n\
+             {token_line}",
+            dir.join("data").display(),
+            server.uri(),
+        ),
+    )
+    .unwrap();
+    file.display().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn land_batch_lands_a_serve_mirrored_repo_from_its_forgejo_host() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = serve_config(tmp.path(), &server, true);
+    serve_pull(&server, 9, pull(9, "open", false, "graft/batch-9", "o/r")).await;
+    serve_statuses(
+        &server,
+        json!([
+            { "context": "ci/woodpecker/pr/test", "status": "success", "target_url": "" },
+            { "context": "ci / build (pull_request)", "status": "success", "target_url": "" },
+        ]),
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/o/r/pulls/9/merge"))
+        .and(header("authorization", format!("token {TOKEN}").as_str()))
+        .and(body_json(json!({
+            "Do": "rebase",
+            "head_commit_id": head(),
+            "delete_branch_after_merge": false,
+        })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (code, out) = tokio::task::spawn_blocking(move || {
+        land_batch_cli(&[
+            "9",
+            "--serve-config",
+            &config,
+            "--upstream",
+            "https://git.example/o/r.git",
+        ])
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("merged (rebase)"), "{out}");
+    assert!(!out.contains(TOKEN), "the token printed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn land_batch_refuses_an_upstream_off_its_hosts_or_a_host_with_no_token() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let with_token = serve_config(tmp.path(), &server, true);
+    let (code, out) = land_batch_cli(&[
+        "9",
+        "--serve-config",
+        &with_token,
+        "--upstream",
+        "https://github.com/o/r.git",
+    ]);
+    assert_ne!(code, Some(0), "{out}");
+    assert!(out.contains("not on a [[forgejo]] host"), "{out}");
+
+    let no_token = serve_config(tmp.path(), &server, false);
+    let (code, out) = land_batch_cli(&[
+        "9",
+        "--serve-config",
+        &no_token,
+        "--upstream",
+        "https://git.example/o/r.git",
+    ]);
+    assert_ne!(code, Some(0), "{out}");
+    assert!(out.contains("no token_file"), "{out}");
+
+    // --serve-config without --upstream is a usage error.
+    let (code, out) = land_batch_cli(&["9", "--serve-config", &no_token]);
+    assert_eq!(code, Some(64), "{out}");
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
