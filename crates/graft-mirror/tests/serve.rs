@@ -1179,6 +1179,7 @@ impl PullDesk for Desk {
 #[derive(Default)]
 struct Runner {
     prepared: AtomicUsize,
+    ran: AtomicUsize,
 }
 
 impl RequestRunner for Runner {
@@ -1198,9 +1199,20 @@ impl RequestRunner for Runner {
 
     async fn run(
         &self,
-        _req: &pb::MirrorRequest,
+        req: &pb::MirrorRequest,
     ) -> Result<pb::MirrorRequestOutcome, RequestFailure> {
-        Err(requests::UNSUPPORTED)
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        match MirrorRequestKind::try_from(req.kind).unwrap() {
+            MirrorRequestKind::SettleBatch | MirrorRequestKind::Exclude => {
+                Ok(pb::MirrorRequestOutcome {
+                    branch: Some(format!("graft/batch-{}", req.id)),
+                    lands: req.excludes.clone(),
+                    ..Default::default()
+                })
+            }
+            MirrorRequestKind::Rewind => Err(RequestFailure("rewind_requires_delete_ref")),
+            _ => Err(requests::UNSUPPORTED),
+        }
     }
 }
 
@@ -1268,7 +1280,10 @@ async fn unwired_kinds_fail_typed_and_a_purge_deletes_only_an_idle_directory() {
         .unwrap();
     assert_eq!(
         fake.st().failed,
-        [(1, "unsupported".to_owned()), (2, "bad_request".to_owned())]
+        [
+            (1, "rewind_requires_delete_ref".to_owned()),
+            (2, "bad_request".to_owned())
+        ]
     );
 
     let dir = tmp.path().join(REPO);
@@ -1280,6 +1295,29 @@ async fn unwired_kinds_fail_typed_and_a_purge_deletes_only_an_idle_directory() {
     assert!(requests::purge(&fake, REPO, epoch, &dir).await.unwrap());
     assert!(!dir.exists());
     assert_eq!(fake.st().completed.len(), 1);
+}
+
+#[tokio::test]
+async fn settle_and_exclude_requests_run_through_the_claimed_service_runner() {
+    let fake = Fake::default();
+    let epoch = fake.acquire_lease(REPO, "a").await.unwrap().epoch;
+    let mut settle = request(10, MirrorRequestKind::SettleBatch);
+    settle.excludes = vec![vec![7; 32]];
+    fake.st().pending.push_back(settle);
+    fake.st()
+        .pending
+        .push_back(request(11, MirrorRequestKind::Exclude));
+    let runner = Runner::default();
+    requests::run_turn(&fake, &Desk::default(), &runner, REPO, epoch)
+        .await
+        .unwrap();
+    assert_eq!(runner.ran.load(Ordering::SeqCst), 2);
+    let completed = fake.st().completed.clone();
+    assert_eq!(completed.len(), 2);
+    assert_eq!(completed[0].0, 10);
+    assert_eq!(completed[0].1.branch.as_deref(), Some("graft/batch-10"));
+    assert_eq!(completed[0].1.lands, vec![vec![7; 32]]);
+    assert_eq!(completed[1].0, 11);
 }
 
 #[tokio::test(start_paused = true)]
