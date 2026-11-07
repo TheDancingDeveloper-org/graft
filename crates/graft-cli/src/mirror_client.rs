@@ -45,10 +45,12 @@ impl MirrorClient {
             .tcp_nodelay(true)
             .connect()
             .await
-            .map_err(|_| {
-                Failure::from(ApiError::Unavailable {
-                    retry_after_ms: 1_000,
-                })
+            .map_err(|e| {
+                Failure::new(
+                    crate::Exit::Failure,
+                    "connect",
+                    format!("could not connect to {url}: {e}"),
+                )
             })?;
         Ok(Self { channel, token })
     }
