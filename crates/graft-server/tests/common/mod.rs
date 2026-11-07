@@ -39,6 +39,46 @@ pub fn bin() -> PathBuf {
         })
 }
 
+/// `cargo test -p graft-server` rebuilds this crate but not the `graft`
+/// binary these tests spawn (it belongs to `graft-cli`), so a binary left
+/// over from an older build serves old code and fails, or passes, for the
+/// wrong reason. Refuse a binary older than any workspace crate's source.
+fn assert_fresh(bin: &Path) {
+    fn newest(dir: &Path, best: &mut Option<std::time::SystemTime>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                newest(&path, best);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && let Ok(modified) = entry.metadata().and_then(|meta| meta.modified())
+            {
+                *best = (*best).max(Some(modified));
+            }
+        }
+    }
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut source = None;
+    for krate in std::fs::read_dir(&crates)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+    {
+        newest(&krate.path().join("src"), &mut source);
+    }
+    let binary = std::fs::metadata(bin).and_then(|meta| meta.modified()).ok();
+    if let (Some(source), Some(binary)) = (source, binary) {
+        assert!(
+            binary >= source,
+            "the graft binary at {} is older than the workspace source; \
+             run `cargo build -p graft-cli` first, or set GRAFT_TEST_GRAFT_BIN",
+            bin.display()
+        );
+    }
+}
+
 pub fn command() -> Command {
     let bin = bin();
     assert!(
@@ -46,6 +86,9 @@ pub fn command() -> Command {
         "unified graft binary not found at {}; build graft-cli first or set GRAFT_TEST_GRAFT_BIN",
         bin.display()
     );
+    if std::env::var_os("GRAFT_TEST_GRAFT_BIN").is_none() {
+        assert_fresh(&bin);
+    }
     let mut command = Command::new(bin);
     command.arg("serve");
     command
