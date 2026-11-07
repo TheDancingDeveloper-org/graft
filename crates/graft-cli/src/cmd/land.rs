@@ -137,7 +137,7 @@ pub(crate) fn run(g: &Global, args: &LandArgs) -> Result<(), Failure> {
                         "nothing changed: run `graft sync` (or `graft land --sync`) to write the conflicts into the files",
                     ),
                     "contended" => Some("retryable: run `graft land` again, or wait longer with --wait"),
-                    "unavailable" => Some("retryable: land is idempotent, so run `graft land` again"),
+                    "unavailable" | "connect" => Some("retryable: land is idempotent, so run `graft land` again"),
                     _ => None,
                 };
                 let failure = match note {

@@ -285,6 +285,10 @@ fn classify_probe(failure: &Failure, endpoint: &str, checks: &mut Vec<Check>) ->
         );
         return false;
     }
+    if failure.kind() == "connect" {
+        push(checks, "endpoint", Status::Fail, failure.to_string());
+        return false;
+    }
     if failure.kind() == "incompatible_protocol" {
         push(
             checks,
@@ -578,18 +582,22 @@ async fn node_check(checks: &mut Vec<Check>) {
         ),
         Err(failure) => {
             let failure = Failure::from(failure);
-            // `unavailable` is a transport failure: the socket did not
-            // answer. Any other typed API error means the daemon did answer.
-            if failure.kind() == "unavailable" {
-                push(
-                    checks,
-                    "node",
-                    Status::Fail,
+            // `unavailable` and `connect` are transport failures: the
+            // socket did not answer. Any other typed API error means the
+            // daemon did answer.
+            if matches!(failure.kind(), "unavailable" | "connect") {
+                let detail = if failure.kind() == "connect" {
+                    format!(
+                        "socket present at {} but it does not answer: {failure}",
+                        path.display()
+                    )
+                } else {
                     format!(
                         "socket present at {} but it does not answer",
                         path.display()
-                    ),
-                );
+                    )
+                };
+                push(checks, "node", Status::Fail, detail);
             } else {
                 push(
                     checks,

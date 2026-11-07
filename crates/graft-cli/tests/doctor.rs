@@ -101,9 +101,7 @@ fn stopped_server_names_the_endpoint() {
         .code(1);
     let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(
-        text.contains(&format!(
-            "fail  endpoint  server down or unreachable at {url}"
-        )),
+        text.contains(&format!("fail  endpoint  could not connect to {url}:")),
         "{text}"
     );
     assert!(text.contains("skip  protocol"), "{text}");
@@ -373,6 +371,12 @@ fn help_lists_exit_status_and_json_status() {
     let endpoint = row("endpoint");
     assert_eq!(endpoint["ok"], false);
     assert_eq!(endpoint["status"], "fail");
+    assert!(
+        endpoint["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with(&format!("could not connect to {url}: "))),
+        "{endpoint}"
+    );
     assert_eq!(row("protocol")["status"], "skip");
     assert_eq!(row("token")["status"], "skip");
     assert_eq!(row("config")["status"], "pass");
