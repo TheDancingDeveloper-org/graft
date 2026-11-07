@@ -1229,6 +1229,22 @@ fn rebound_mirror_imports_under_the_new_lease<M: MetaStore>((f, _): (Fixture<M>,
         Ok(TxnOutcome::Committed(_))
     ));
     add("https://new.example/r.git", None);
+    // A repair can leave the rebound row in place while its followed marker
+    // has been cleared.  The mirror must remain fenced until an admin
+    // explicitly recreates that marker.
+    assert!(matches!(
+        block_on(meta.commit(
+            id,
+            MetaTxn {
+                preconditions: vec![Precondition::RefIs {
+                    name: marker.clone(),
+                    expected: Some((t.root, 1)),
+                }],
+                writes: vec![Write::DeleteRef(marker.clone())],
+            }
+        )),
+        Ok(TxnOutcome::Committed(_))
+    ));
     let denied = block_on(t.r.e().put_objects(
         &mirror,
         PutObjects {
@@ -1251,6 +1267,64 @@ fn rebound_mirror_imports_under_the_new_lease<M: MetaStore>((f, _): (Fixture<M>,
         )),
         Ok(TxnOutcome::Committed(_))
     ));
+    let still_denied = block_on(t.r.e().put_objects(
+        &mirror,
+        PutObjects {
+            repo: "r".into(),
+            blobs: vec![Frame::encode(ObjectKind::Blob, b"still-rebound")],
+        },
+    ));
+    assert!(
+        still_denied.is_err(),
+        "rebound import allowed without marker"
+    );
+
+    let non_admin = block_on(t.r.e().update_ref(
+        &cx(&["repo:r:write"]),
+        UpdateRef {
+            repo: "r".into(),
+            name: followed_ref("main"),
+            expected: None,
+            new: t.root,
+            kind: RefKind::Tool,
+            lease_epoch: None,
+        },
+    ));
+    assert!(matches!(non_admin, Err(ApiError::PermissionDenied { .. })));
+
+    // The admin repair command uses this same UpdateRef path.  Once the
+    // marker is restored, the mirror's next import passes the fence.
+    let admin_result = block_on(t.r.e().update_ref(
+        &admin("r"),
+        UpdateRef {
+            repo: "r".into(),
+            name: marker,
+            expected: None,
+            new: t.root,
+            kind: RefKind::Tool,
+            lease_epoch: None,
+        },
+    ));
+    assert!(
+        admin_result.is_ok(),
+        "admin marker repair refused: {admin_result:?}"
+    );
+    let other = t.r.commit(vec![t.root], &[("b", b"2")], &[]).id;
+    let wrong_expected = block_on(t.r.e().update_ref(
+        &admin("r"),
+        UpdateRef {
+            repo: "r".into(),
+            name: followed_ref("main"),
+            expected: Some(ChangesetId::hash(b"wrong")),
+            new: other,
+            kind: RefKind::Tool,
+            lease_epoch: None,
+        },
+    ));
+    assert!(
+        matches!(wrong_expected, Err(ApiError::RefConflict { .. })),
+        "{wrong_expected:?}"
+    );
     let result = block_on(t.r.e().put_objects(
         &mirror,
         PutObjects {
@@ -1258,7 +1332,10 @@ fn rebound_mirror_imports_under_the_new_lease<M: MetaStore>((f, _): (Fixture<M>,
             blobs: vec![Frame::encode(ObjectKind::Blob, b"rebound")],
         },
     ));
-    assert!(result.is_ok(), "rebound import denied: {result:?}");
+    assert!(
+        result.is_ok(),
+        "rebound import denied after marker repair: {result:?}"
+    );
 }
 
 /// WI-3426: the mirror token (the `mirror` kind, only `repo:*:mirror`)
