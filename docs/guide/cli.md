@@ -48,6 +48,7 @@ Generated from `graft --help`. Hidden commands are left out.
 - [`graft repo mirror credential`](#repo-mirror-credential)
 - [`graft repo mirror remove`](#repo-mirror-remove)
 - [`graft repo mirror purge`](#repo-mirror-purge)
+- [`graft repo mirror mark-followed`](#repo-mirror-mark-followed)
 - [`graft repo mirror status`](#repo-mirror-status)
 - [`graft repo batch`](#repo-batch)
 - [`graft repo batch cut`](#repo-batch-cut)
@@ -927,13 +928,14 @@ Bind, change, credential, remove, purge or show a repository's git mirrors
 Usage: graft repo mirror [OPTIONS] <COMMAND>
 
 Commands:
-  add         Bind a repository to an upstream; needs mirror:bind (and mirror:export for export lines), operator-only grants
-  set         Enable, disable or change a mirror; needs the repository's admin (mirror:export to change export lines)
-  credential  Seal a credential into a mirror; needs mirror:bind and read access. Read from a file or standard input, never an argument
-  remove      Remove a mirror; its lines stay closed to lands unless --clear-followed. Needs mirror:bind
-  purge       Request deletion of a removed or disabled mirror's local data; needs mirror:bind
-  status      Show mirrors and their poll status; never a credential
-  help        Print this message or the help of the given subcommand(s)
+  add            Bind a repository to an upstream; needs mirror:bind (and mirror:export for export lines), operator-only grants
+  set            Enable, disable or change a mirror; needs the repository's admin (mirror:export to change export lines)
+  credential     Seal a credential into a mirror; needs mirror:bind and read access. Read from a file or standard input, never an argument
+  remove         Remove a mirror; its lines stay closed to lands unless --clear-followed. Needs mirror:bind
+  purge          Request deletion of a removed or disabled mirror's local data; needs mirror:bind
+  mark-followed  Create a followed-line marker after repairing a mirror; needs repository admin
+  status         Show mirrors and their poll status; never a credential
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
       --json               Print stable JSON; its schema is published with the release
@@ -1056,6 +1058,29 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --request-id <ID>    Idempotency key: pass the one a failed attempt printed to retry it
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --repo <NAME>        Repository name (default: the working copy's)
+      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
+  -C, --directory <DIR>    Run as if started in this directory, like `git -C`
+  -h, --help               Print help
+```
+
+## `graft repo mirror mark-followed`
+
+```text
+Create a followed-line marker after repairing a mirror; needs repository admin
+
+Usage: graft repo mirror mark-followed [OPTIONS] --line <LINE> <REPO>
+
+Arguments:
+  <REPO>  The graft repository
+
+Options:
+      --json               Print stable JSON; its schema is published with the release
+      --line <LINE>        The line followed from the upstream
+      --changeset <ID>     The last imported changeset (defaults to the mirror status when available)
+      --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
+      --force <ID>         Replace an existing marker; the value is its expected old target
       --repo <NAME>        Repository name (default: the working copy's)
       --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument

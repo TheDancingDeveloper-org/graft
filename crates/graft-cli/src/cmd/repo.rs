@@ -16,6 +16,8 @@ use graft_mcp::{
     MirrorAdmin, changeset_bytes, join_lines, mirror_json, new_client_request_id, parse_lines,
     request_json, with_retry,
 };
+use graft_proto::api::RepoApi;
+use graft_proto::types::{RefKind, UpdateRef, followed_ref};
 use graft_proto::{ApiError, pb};
 use serde_json::{Value, json};
 
@@ -23,7 +25,7 @@ use crate::cli::{BatchAction, Global, MirrorAction, RepoAction, RepoArgs};
 use crate::conn::{call_context, connect, resolve_settings, runtime, working_copy_info};
 use crate::error::Failure;
 use crate::mirror_client::MirrorClient;
-use crate::render::print_json;
+use crate::render::{print_json, short};
 use graft_client::workcopy::WorkingCopy;
 
 /// Largest credential accepted, in bytes.
@@ -275,6 +277,72 @@ async fn mirror(
                 .await
                 .map_err(|e| retryable(refused(e), &req.client_request_id))?;
             print_request(g, "purge requested", &r)
+        }
+        MirrorAction::MarkFollowed {
+            name,
+            line,
+            changeset,
+            force,
+        } => {
+            if force.is_some() && changeset.is_none() {
+                return Err(Failure::usage("--force requires --changeset"));
+            }
+            let old = force
+                .as_deref()
+                .map(graft_model::ChangesetId::parse)
+                .transpose()
+                .map_err(|_| Failure::usage("--force is not a changeset id"))?;
+            let mut target_global = g.clone();
+            target_global.repo = Some(name.clone());
+            let conn = connect(&target_global, None::<&WorkingCopy>).await?;
+            let target = match changeset {
+                Some(id) => conn.resolve(&cx, id).await?,
+                None => {
+                    let page = client
+                        .list_mirrors(
+                            &cx,
+                            pb::ListMirrorsRequest {
+                                repo: name.clone(),
+                                enabled: None,
+                                limit: 100,
+                                page_token: String::new(),
+                            },
+                        )
+                        .await
+                        .map_err(refused)?;
+                    let status = page.mirrors.iter().find_map(|mirror| {
+                        mirror.lines.iter().any(|l| l.line == *line && l.direction == "follow")
+                            .then(|| mirror.status.as_ref().and_then(|s| s.last_changeset.clone()))
+                            .flatten()
+                    }).ok_or_else(|| Failure::usage(
+                        "--changeset is required when mirror status has no last imported changeset",
+                    ))?;
+                    let bytes: [u8; 32] = status.try_into().map_err(|_| {
+                        Failure::usage("mirror status has an invalid last changeset")
+                    })?;
+                    graft_model::ChangesetId(graft_model::ObjectId(bytes))
+                }
+            };
+            let view = conn
+                .remote
+                .update_ref(
+                    &cx,
+                    UpdateRef {
+                        repo: name.clone(),
+                        name: followed_ref(line),
+                        expected: old,
+                        new: target,
+                        kind: RefKind::Tool,
+                        lease_epoch: None,
+                    },
+                )
+                .await?;
+            if g.json {
+                return print_json(&json!({"repo": name, "line": line, "ref": view.name,
+                    "target": view.target.to_string()}));
+            }
+            outln!("marked {name} {line} followed at {}", short(view.target));
+            Ok(())
         }
         MirrorAction::Status {
             name,

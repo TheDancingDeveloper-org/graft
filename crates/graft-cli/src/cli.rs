@@ -730,6 +730,21 @@ pub(crate) enum MirrorAction {
         #[arg(long, value_name = "ID")]
         request_id: Option<String>,
     },
+    /// Create a followed-line marker after repairing a mirror; needs repository admin
+    MarkFollowed {
+        /// The graft repository
+        #[arg(value_name = "REPO")]
+        name: String,
+        /// The line followed from the upstream
+        #[arg(long, value_name = "LINE")]
+        line: String,
+        /// The last imported changeset (defaults to the mirror status when available)
+        #[arg(long, value_name = "ID")]
+        changeset: Option<String>,
+        /// Replace an existing marker; the value is its expected old target
+        #[arg(long, value_name = "ID")]
+        force: Option<String>,
+    },
     /// Show mirrors and their poll status; never a credential
     Status {
         /// One repository (default: every repository you can read)
