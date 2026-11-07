@@ -386,5 +386,13 @@ mod tests {
         assert_eq!(dirty.exit, Exit::Conflict);
         let usage: Failure = ClientError::Endpoint("nope".into()).into();
         assert_eq!(usage.exit, Exit::Usage);
+        let connect: Failure = ClientError::Connect {
+            endpoint: "http://127.0.0.1:1".into(),
+            cause: "connection refused".into(),
+        }
+        .into();
+        assert_eq!(connect.exit, Exit::Unavailable);
+        assert_eq!(connect.kind, "connect");
+        assert!(connect.message.contains("connection refused"));
     }
 }
