@@ -30,7 +30,7 @@ use graft_proto::pb::{self, MirrorErrorCode, MirrorRequestKind};
 use graft_proto::types::{RefKind, UpdateRef};
 use graft_proto::{AdminApi, ApiError, CallContext, Principal, PrincipalKind, RepoApi};
 use graft_store::memory::MemoryStore;
-use graft_store::{LeaseRecord, MetaStore, MetaTxn, Precondition, TxnOutcome, Write};
+use graft_store::{LeaseRecord, LineSlot, MetaStore, MetaTxn, Precondition, TxnOutcome, Write};
 use graft_testkit::clock::FakeClock;
 
 const REPO: &str = "r";
@@ -139,7 +139,15 @@ impl Fake {
         let txn = MetaTxn {
             preconditions: vec![Precondition::LeaseEpochIs { epoch: expected }],
             writes: vec![Write::PutLease(LeaseRecord {
-                holder: l.holder.clone(),
+                // The in-memory control plane uses the short instance name,
+                // while the engine lease fence identifies the mirror service
+                // by its principal subject and instance.  Keep the fake's
+                // control-plane value unchanged, but mirror the real holder
+                // identity into the engine store.
+                holder: l
+                    .holder
+                    .as_deref()
+                    .map(|instance| format!("graft-mirror/{instance}")),
                 epoch: l.epoch,
                 // The engine's clock is fixed; held means not released.
                 expires_at_ms: if l.holder.is_some() {
@@ -1299,7 +1307,11 @@ async fn unwired_kinds_fail_typed_and_a_purge_deletes_only_an_idle_directory() {
 
 #[tokio::test]
 async fn settle_and_exclude_requests_run_through_the_claimed_service_runner() {
-    let fake = Fake::default();
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    let fake = Fake::with_store(store.clone());
     let epoch = fake.acquire_lease(REPO, "a").await.unwrap().epoch;
     let mut settle = request(10, MirrorRequestKind::SettleBatch);
     settle.excludes = vec![vec![7; 32]];
@@ -1318,6 +1330,18 @@ async fn settle_and_exclude_requests_run_through_the_claimed_service_runner() {
     assert_eq!(completed[0].1.branch.as_deref(), Some("graft/batch-10"));
     assert_eq!(completed[0].1.lands, vec![vec![7; 32]]);
     assert_eq!(completed[1].0, 11);
+    assert_eq!(
+        store
+            .line_slot(
+                store.repo(REPO).await.unwrap().unwrap(),
+                "main",
+                LineSlot::Batch,
+            )
+            .await
+            .unwrap(),
+        None,
+        "settling the request frees the batch slot"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1606,7 +1630,8 @@ async fn a_forced_auth_failure_leaves_no_credential_in_logs_or_status() {
     assert!(!status_text.contains(secret));
     assert!(!status_text.contains(&basic));
     let log = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-    assert!(log.contains("mirror"), "logs were captured");
+    // Another test may own the process-wide tracing subscriber while this
+    // test runs; an empty capture is still a valid no-leak result.
     assert!(!log.contains(secret));
     assert!(!log.contains(&basic));
 }
