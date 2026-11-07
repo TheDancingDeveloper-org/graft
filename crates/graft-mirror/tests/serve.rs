@@ -2200,3 +2200,92 @@ async fn a_minted_mirror_token_follows_a_merged_batch() {
     .unwrap();
     assert_eq!(marker, Some(tip));
 }
+
+// ---- serve's forges: GitHub or Forgejo by upstream (WI-3492) ---------------
+
+/// A Forgejo PR as the API returns it.
+fn forgejo_pull(number: u64, branch: &str) -> serde_json::Value {
+    serde_json::json!({
+        "number": number,
+        "html_url": format!("https://git.example/o/r/pulls/{number}"),
+        "state": "open",
+        "merged": false,
+        "merge_commit_sha": null,
+        "merged_at": null,
+        "closed_at": null,
+        "body": "batch body",
+        "head": { "sha": "a".repeat(40), "ref": branch, "repo": { "full_name": "o/r" } },
+        "base": { "ref": "main" },
+    })
+}
+
+#[tokio::test]
+async fn serve_picks_the_forge_by_upstream_and_forgejo_uses_the_row_credential() {
+    use graft_mirror::github::{Forge, RetryPolicy};
+    use graft_mirror::service::{AnyForge, ForgejoHost, ServeForges};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ROW_TOKEN: &str = "row-credential-for-tests-only";
+    let server = MockServer::start().await;
+    let fake = Arc::new(Fake::default());
+    fake.st()
+        .credentials
+        .insert(REPO.to_owned(), ROW_TOKEN.to_owned());
+    let epoch = fake.acquire_lease(REPO, "i").await.unwrap().epoch;
+    let forges = ServeForges::new(vec![ForgejoHost {
+        host: "git.example".to_owned(),
+        api: server.uri(),
+    }])
+    .with_retry(RetryPolicy {
+        attempts: 1,
+        ..RetryPolicy::default()
+    });
+    let cred = |upstream: &str| LeaseCredential::new(fake.clone(), REPO, upstream, epoch);
+
+    // GitHub stays GitHub; a local path or another host has no forge.
+    let gh = "https://github.com/o/r.git";
+    assert!(matches!(
+        forges.forge(gh, cred(gh)),
+        Some(Ok(AnyForge::GitHub(_)))
+    ));
+    for none in ["/srv/git/r.git", "https://elsewhere.example/o/r.git"] {
+        assert!(forges.forge(none, cred(none)).is_none(), "{none}");
+    }
+
+    // An upstream on the Forgejo host opens its batch PR through Forgejo's
+    // API with the row's credential, the one git fetches and pushes with.
+    let fj = "https://git.example/o/r.git";
+    let Some(Ok(forge @ AnyForge::Forgejo(_))) = forges.forge(fj, cred(fj)) else {
+        panic!("a Forgejo upstream gets the Forgejo forge");
+    };
+    Mock::given(method("POST"))
+        .and(path("/repos/o/r/pulls"))
+        .and(header(
+            "authorization",
+            format!("token {ROW_TOKEN}").as_str(),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(forgejo_pull(3, "graft/batch-3")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let pull = forge
+        .create_pull(&NewPull {
+            title: "batch 3".to_owned(),
+            body: "b".to_owned(),
+            head: "graft/batch-3".to_owned(),
+            base: "main".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!((pull.number, pull.head_ref.as_str()), (3, "graft/batch-3"));
+    assert!(
+        !forge.merging(&pull.node_id).await.unwrap(),
+        "nothing merges a Forgejo batch but land-batch"
+    );
+    assert_eq!(forge.token().await.unwrap().expose(), ROW_TOKEN);
+
+    // The lease gone, the credential is not read.
+    fake.st().leases.remove(REPO);
+    assert!(forge.token().await.is_err());
+}

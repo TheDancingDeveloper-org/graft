@@ -540,15 +540,15 @@ impl FileConfig {
     /// token file that cannot be read or is empty logs one warning and the
     /// mirror reaches upstream without a credential.
     pub fn mirror(&self) -> Mirror {
-        let credential = self
-            .upstream_token_file()
-            .and_then(|path| match StaticToken::load(path) {
-                Ok(token) => Some(token.into_secret()),
-                Err(e) => {
-                    tracing::warn!(error = %e, "git reaches upstream without a credential");
-                    None
-                }
-            });
+        let credential =
+            self.upstream_token_file()
+                .and_then(|path| match StaticToken::load(path) {
+                    Ok(token) => Some(token.into_secret()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "git reaches upstream without a credential");
+                        None
+                    }
+                });
         Mirror::new(&self.mirror_dir, &self.upstream).with_credential(credential)
     }
 

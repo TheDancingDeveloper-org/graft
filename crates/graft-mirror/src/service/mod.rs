@@ -47,6 +47,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 pub use control::Control;
+pub use follow_task::{AnyForge, ForgejoHost, ServeForges};
 use limits::{Backoff, FetchSlots, RateBudget};
 pub use metrics::ServiceMetrics;
 pub use task::{ExitReason, PollReport, PollStep, TaskCtl, TaskCtx, TaskExit};
@@ -605,6 +606,47 @@ pub struct ServeFile {
     /// Claim batch and rewind requests (off until the batcher runs them).
     #[serde(default)]
     pub claim_requests: bool,
+    /// Forgejo hosts: a repository whose upstream is on one cuts its
+    /// batches through that host's API (WI-3492).
+    #[serde(default)]
+    pub forgejo: Vec<ForgejoHostFile>,
+}
+
+/// One `[[forgejo]]` host.
+///
+/// ```toml
+/// [[forgejo]]
+/// host = "git.example"                       # as upstream URLs name it
+/// api = "https://git.example/api/v1"         # default: https://<host>/api/v1
+/// required_contexts = ["ci/woodpecker/pr/test"]  # land-batch only
+/// token_file = "/run/secrets/forgejo-token"  # land-batch only
+/// ```
+///
+/// The service itself reads each repository's token from its mirror row,
+/// the credential git uses; `token_file` and `required_contexts` serve
+/// `land-batch --serve-config`, which merges a batch PR outside the service.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgejoHostFile {
+    /// The host, with its port if any.
+    pub host: String,
+    /// The API root, ending in `/api/v1`.
+    pub api: Option<String>,
+    /// Status contexts that must all be `success` before `land-batch`
+    /// merges a batch.
+    #[serde(default)]
+    pub required_contexts: Vec<String>,
+    /// A file holding a token for `land-batch` (a mounted secret).
+    pub token_file: Option<PathBuf>,
+}
+
+impl ForgejoHostFile {
+    /// The API root: `api`, else `https://<host>/api/v1`.
+    pub fn api(&self) -> String {
+        self.api
+            .clone()
+            .unwrap_or_else(|| format!("https://{}/api/v1", self.host))
+    }
 }
 
 /// `[limits]`: every field optional, defaulting to §4.
@@ -640,8 +682,48 @@ impl ServeFile {
         Ok(file)
     }
 
+    /// The `[[forgejo]]` hosts, checked: each a bare host (no scheme, path
+    /// or userinfo), named once, never GitHub's, with an http(s) API.
+    pub fn forgejo_hosts(&self) -> Result<Vec<ForgejoHost>, MirrorError> {
+        let bad = |what: String| Err(MirrorError::Config(format!("[[forgejo]]: {what}")));
+        let mut hosts: Vec<ForgejoHost> = Vec::new();
+        for f in &self.forgejo {
+            let h = f.host.as_str();
+            if h.is_empty() || h.contains(['/', '@', '?', '#', ' ']) || h.contains("://") {
+                return bad(format!("host must be a bare host name: {h:?}"));
+            }
+            if h.eq_ignore_ascii_case("github.com") {
+                return bad("github.com is GitHub's".to_owned());
+            }
+            if hosts.iter().any(|x| x.host.eq_ignore_ascii_case(h)) {
+                return bad(format!("host {h} is named twice"));
+            }
+            let api = f.api();
+            if !(api.starts_with("https://") || api.starts_with("http://")) {
+                return bad(format!("api must be an http(s) URL: {api:?}"));
+            }
+            if f.required_contexts.iter().any(|c| c.trim().is_empty()) {
+                return bad(format!("{h}: required_contexts holds an empty context"));
+            }
+            hosts.push(ForgejoHost {
+                host: h.to_owned(),
+                api,
+            });
+        }
+        Ok(hosts)
+    }
+
+    /// The `[[forgejo]]` entry whose host `upstream` is on, with the
+    /// upstream's `owner/repo`.
+    pub fn forgejo_for(&self, upstream: &str) -> Option<(&ForgejoHostFile, String, String)> {
+        self.forgejo.iter().find_map(|f| {
+            batch_task::forge_repo(upstream, &f.host).map(|(owner, repo)| (f, owner, repo))
+        })
+    }
+
     /// The service settings it gives.
     pub fn config(&self) -> Result<ServeConfig, MirrorError> {
+        self.forgejo_hosts()?;
         let l = &self.limits;
         let mut c = ServeConfig::new(&self.data_dir);
         let secs = |v: Option<u64>, d: Duration| v.map_or(d, Duration::from_secs);
@@ -715,6 +797,59 @@ mod tests {
         assert!(f.config().is_err());
         assert!(
             toml::from_str::<ServeFile>("server = \"x\"\ndata_dir = \"/d\"\nrepos = []\n").is_err()
+        );
+    }
+
+    #[test]
+    fn forgejo_hosts_parse_default_their_api_and_refuse_bad_entries() {
+        let base = "server = \"http://s:1\"\ndata_dir = \"/d\"\n";
+        let f: ServeFile = toml::from_str(&format!(
+            "{base}[[forgejo]]\nhost = \"git.example\"\nrequired_contexts = [\"ci/test\"]\n\
+             token_file = \"/run/secrets/fj\"\n\
+             [[forgejo]]\nhost = \"other:3000\"\napi = \"http://other:3000/api/v1\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            f.forgejo_hosts().unwrap(),
+            vec![
+                ForgejoHost {
+                    host: "git.example".into(),
+                    api: "https://git.example/api/v1".into()
+                },
+                ForgejoHost {
+                    host: "other:3000".into(),
+                    api: "http://other:3000/api/v1".into()
+                },
+            ]
+        );
+        let (h, owner, repo) = f.forgejo_for("https://git.example/o/r.git").unwrap();
+        assert_eq!(
+            (h.host.as_str(), owner.as_str(), repo.as_str()),
+            ("git.example", "o", "r")
+        );
+        assert_eq!(h.required_contexts, vec!["ci/test".to_owned()]);
+        assert!(f.forgejo_for("https://github.com/o/r.git").is_none());
+        // No [[forgejo]]: none, as before.
+        let none: ServeFile = toml::from_str(base).unwrap();
+        assert!(none.forgejo_hosts().unwrap().is_empty());
+        for bad in [
+            "host = \"https://git.example\"\n",
+            "host = \"git.example/x\"\n",
+            "host = \"\"\n",
+            "host = \"github.com\"\n",
+            "host = \"git.example\"\napi = \"git.example/api\"\n",
+            "host = \"git.example\"\nrequired_contexts = [\" \"]\n",
+            "host = \"git.example\"\n[[forgejo]]\nhost = \"GIT.example\"\n",
+        ] {
+            let f: ServeFile = toml::from_str(&format!("{base}[[forgejo]]\n{bad}")).unwrap();
+            assert!(f.config().is_err(), "{bad}");
+        }
+        assert!(
+            toml::from_str::<ServeFile>(&format!(
+                "{base}[[forgejo]]\nhost = \"g\"\ntoken = \"x\"\n"
+            ))
+            .is_err(),
+            "no inline token"
         );
     }
 }
