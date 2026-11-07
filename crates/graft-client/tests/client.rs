@@ -260,18 +260,54 @@ async fn remote_speaks_the_api_over_tcp_and_unix() {
         newer.has_objects(&cx(), HasObjects::default()).await,
         Err(ApiError::IncompatibleProtocol { .. })
     ));
+
+    // A server-side 503 remains the retryable API error, unlike a failed
+    // connection established before any request can be sent.
+    tcp.set_protocol_version(graft_proto::PROTOCOL_VERSION);
+    repo.fail_next(
+        "HasObjects",
+        ApiError::Unavailable {
+            retry_after_ms: 1_000,
+        },
+    );
+    let remote = Remote::connect(Endpoint::parse(tcp.url())).await.unwrap();
+    assert_eq!(
+        remote
+            .has_objects(&cx(), HasObjects::default())
+            .await
+            .unwrap_err(),
+        ApiError::Unavailable {
+            retry_after_ms: 1_000
+        }
+    );
 }
 
 #[tokio::test]
-async fn unreachable_endpoints_are_unavailable() {
+async fn unreachable_endpoints_are_connection_errors() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let err = Remote::connect(Endpoint::parse(&endpoint))
+        .await
+        .unwrap_err();
+    match err {
+        Error::Connect {
+            endpoint: got,
+            cause,
+        } => {
+            assert_eq!(got, endpoint);
+            assert!(!cause.is_empty());
+            assert!(!cause.contains("authorization"));
+            assert!(!cause.contains("Bearer"));
+        }
+        other => panic!("expected a connection error, got {other:?}"),
+    }
+
     let dir = tempfile::tempdir().unwrap();
     let err = Remote::connect(Endpoint::NodeSocket(dir.path().join("none.sock")))
         .await
         .unwrap_err();
-    assert!(
-        matches!(err, Error::Api(ApiError::Unavailable { .. })),
-        "{err:?}"
-    );
+    assert!(matches!(err, Error::Connect { .. }), "{err:?}");
     let err = Remote::connect(Endpoint::Server("not a url".into()))
         .await
         .unwrap_err();

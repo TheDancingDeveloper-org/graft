@@ -194,6 +194,11 @@ impl From<ClientError> for Failure {
         match e {
             ClientError::Api(api) => api.into(),
             ClientError::Endpoint(what) => Failure::new(Exit::Usage, "endpoint", what),
+            ClientError::Connect { endpoint, cause } => Failure::new(
+                Exit::Failure,
+                "connect",
+                format!("could not connect to {endpoint}: {cause}"),
+            ),
             ClientError::Dirty(paths) => Failure::new(
                 Exit::Conflict,
                 "dirty",
