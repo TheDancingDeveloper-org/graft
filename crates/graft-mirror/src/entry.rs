@@ -14,12 +14,13 @@ use crate::authority::{
 };
 use crate::batch::{BatchConfig, BatchOutcome, BatchRecord, Batcher};
 use crate::check_refs::CheckRefs;
-use crate::config::{AuthChoice, FileConfig, GithubFile, parse_shas};
+use crate::config::{AuthChoice, FileConfig, ForgejoFile, GithubFile, parse_shas};
 use crate::credentials::{CredentialProvider, GithubApp, NoCredentials, StaticToken};
 use crate::export::{Export, export_all};
 use crate::follow::Follower;
+use crate::forgejo::{ForgejoForge, LandOutcome, land_once};
 use crate::git::Mirror;
-use crate::github::{HttpForge, RetryPolicy};
+use crate::github::{Forge, HttpForge, RetryPolicy};
 use crate::import::import_repo;
 use crate::import_pr::{PrSpec, import_pr};
 use crate::land::NativeLand;
@@ -90,6 +91,15 @@ const USAGE: &str = "usage: graft-mirror <command> [args]
                                         many lands wait or the previous batch
                                         settled that long ago; otherwise the
                                         run is deferred. --force cuts anyway.
+  land-batch <pr> --config <file>       Forgejo only ([forgejo]): rebase-merge
+                                        batch PR <pr> once every
+                                        required_contexts status on its head
+                                        is success. One attempt, no waiting:
+                                        exit 0 merged (or already merged),
+                                        75 statuses pending (run again
+                                        later), 1 a required status failed,
+                                        3 the PR was closed unmerged.
+                                        GitHub batches land with land-pr.
   import-pr <owner>/<repo>#<n> --github-token-file <file>
            [--dir <working-copy>] [--message-out <file>] [--api <url>]
                                         apply an outside GitHub PR's net
@@ -128,6 +138,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
         Some("export") => execute(cmd_export(&args[1..])),
         Some("reconcile") => execute(cmd_reconcile(&args[1..])),
         Some("pr-batch") => execute(cmd_pr_batch(&args[1..])),
+        Some("land-batch") => execute_code(cmd_land_batch(&args[1..])),
         Some("import-pr") => execute(cmd_import_pr(&args[1..])),
         Some("verify") => execute(cmd_authority(Step::Verify, &args[1..])),
         Some("authority") => match args.get(1).map(String::as_str).and_then(Step::parse) {
@@ -161,6 +172,20 @@ fn execute(f: impl Future<Output = Result<(), CmdError>>) -> ExitCode {
             eprintln!("graft-mirror: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Like [`execute`], for a command that chooses its own exit status.
+fn execute_code(f: impl Future<Output = Result<ExitCode, CmdError>>) -> ExitCode {
+    let mut code = ExitCode::SUCCESS;
+    let status = execute(async {
+        code = f.await?;
+        Ok(())
+    });
+    if status == ExitCode::SUCCESS {
+        code
+    } else {
+        status
     }
 }
 
@@ -1141,8 +1166,11 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
         .into_iter()
         .find(|l| l.branch == base)
         .ok_or_else(|| CmdError::Usage(format!("branch {base} is not a followed line")))?;
-    if file.github.is_none() {
-        return Err(MirrorError::Config("pr-batch opens PRs: configure [github]".into()).into());
+    if file.github.is_none() && file.forgejo.is_none() {
+        return Err(MirrorError::Config(
+            "pr-batch opens PRs: configure [github] or [forgejo]".into(),
+        )
+        .into());
     }
     let api = Server::connect(&file.server, token(file.token_file.as_deref())?).await?;
     let db = MirrorDb::open(&file.db).map_err(MirrorError::from)?;
@@ -1162,17 +1190,102 @@ async fn cmd_pr_batch(args: &[String]) -> Result<(), CmdError> {
     batch.checked = checked;
     (batch.min_lands, batch.min_age_ms) = cut_thresholds(min_lands, min_age_mins, file.batch_cut());
     batch.force = force;
-    with_credentials(
-        file.github.as_ref(),
-        RunBatch {
-            file: &file,
-            api: &api,
-            db: &db,
-            batch,
-            track,
-        },
-    )
-    .await
+    let run = RunBatch {
+        file: &file,
+        api: &api,
+        db: &db,
+        batch,
+        track,
+    };
+    if let Some(fj) = &file.forgejo {
+        let forge = forgejo_forge(fj)?;
+        return run.with_forge(&forge).await;
+    }
+    with_credentials(file.github.as_ref(), run).await
+}
+
+/// The Forgejo forge `[forgejo]` names, with its token file read now.
+fn forgejo_forge(fj: &ForgejoFile) -> Result<ForgejoForge<StaticToken>, MirrorError> {
+    let token = StaticToken::load(&fj.token_file)?;
+    ForgejoForge::new(&fj.api, &fj.owner, &fj.repo, token, RetryPolicy::default())
+}
+
+/// `land-batch` exit status: required statuses are not settled yet; run it
+/// again later (`EX_TEMPFAIL`).
+const EXIT_PENDING: u8 = 75;
+/// `land-batch` exit status: the PR was closed unmerged (rejected).
+const EXIT_CLOSED: u8 = 3;
+/// `land-batch` exit status: a required status failed; nothing merged.
+const EXIT_FAILED: u8 = 1;
+
+async fn cmd_land_batch(args: &[String]) -> Result<ExitCode, CmdError> {
+    let mut number = None;
+    let mut config = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--config" => {
+                config =
+                    Some(PathBuf::from(it.next().ok_or_else(|| {
+                        CmdError::Usage("--config needs a value".into())
+                    })?))
+            }
+            s if s.starts_with('-') => return Err(CmdError::Usage(format!("unknown flag {s}"))),
+            s if number.is_none() => {
+                number =
+                    Some(s.trim_start_matches('#').parse::<u64>().map_err(|_| {
+                        CmdError::Usage(format!("land-batch: not a PR number: {s}"))
+                    })?)
+            }
+            s => return Err(CmdError::Usage(format!("unexpected argument {s}"))),
+        }
+    }
+    let number = number.ok_or_else(|| CmdError::Usage("land-batch needs <pr>".into()))?;
+    let config = config.ok_or_else(|| CmdError::Usage("land-batch needs --config".into()))?;
+    let file = FileConfig::load(&config)?;
+    let Some(fj) = &file.forgejo else {
+        return Err(MirrorError::Config(
+            "land-batch lands on Forgejo: configure [forgejo] (GitHub batches land with land-pr)"
+                .into(),
+        )
+        .into());
+    };
+    let forge = forgejo_forge(fj)?;
+    let outcome = land_once(&forge, number, &fj.required_contexts).await?;
+    Ok(report_land(number, &outcome))
+}
+
+/// Prints one landing attempt's outcome and returns its exit status.
+fn report_land(number: u64, outcome: &LandOutcome) -> ExitCode {
+    match outcome {
+        LandOutcome::Merged => {
+            println!("PR #{number}: merged (rebase)");
+            ExitCode::SUCCESS
+        }
+        LandOutcome::AlreadyMerged => {
+            println!("PR #{number}: already merged");
+            ExitCode::SUCCESS
+        }
+        LandOutcome::Closed => {
+            println!("PR #{number}: closed unmerged (rejected); nothing merged");
+            ExitCode::from(EXIT_CLOSED)
+        }
+        LandOutcome::Pending(waiting) => {
+            println!(
+                "PR #{number}: waiting on required statuses: {}",
+                waiting.join(", ")
+            );
+            ExitCode::from(EXIT_PENDING)
+        }
+        LandOutcome::Failed(failed) => {
+            let list: Vec<String> = failed.iter().map(|(c, s)| format!("{c} ({s})")).collect();
+            println!(
+                "PR #{number}: required statuses failed: {}; nothing merged",
+                list.join(", ")
+            );
+            ExitCode::from(EXIT_FAILED)
+        }
+    }
 }
 
 struct RunBatch<'a> {
@@ -1185,11 +1298,10 @@ struct RunBatch<'a> {
 
 impl AsyncCredentialFn<()> for RunBatch<'_> {
     async fn call<C: CredentialProvider>(self, credentials: &C) -> Result<(), CmdError> {
-        let file = self.file;
-        let gh = file
-            .github
-            .as_ref()
-            .ok_or_else(|| MirrorError::Config("pr-batch opens PRs: configure [github]".into()))?;
+        let gh =
+            self.file.github.as_ref().ok_or_else(|| {
+                MirrorError::Config("pr-batch opens PRs: configure [github]".into())
+            })?;
         let forge = HttpForge::new(
             gh.api.as_deref().unwrap_or(GITHUB_API),
             &gh.owner,
@@ -1197,13 +1309,21 @@ impl AsyncCredentialFn<()> for RunBatch<'_> {
             credentials,
             RetryPolicy::default(),
         )?;
+        self.with_forge(&forge).await
+    }
+}
+
+impl RunBatch<'_> {
+    /// Runs the batch against `forge`, whichever forge the config chose.
+    async fn with_forge<F: Forge>(self, forge: &F) -> Result<(), CmdError> {
+        let file = self.file;
         let line = self.batch.line.clone();
         let mut batcher = Batcher::new(
             self.api,
             mirror_cx(&file.repo),
             self.db,
             file.mirror(),
-            &forge,
+            forge,
             self.batch,
         )?
         .with_export_log(self.api);
