@@ -1,7 +1,9 @@
 //! WI-2571: with `[github] token_file` set, every git network command the
 //! mirror runs (ls-remote, fetch and push, as pr-batch and follow run them)
 //! carries the token as an `http.extraHeader` in the environment, never in
-//! argv. Without it, git runs with no credential, as before.
+//! argv. Without it, git runs with no credential, as before. WI-3492: a
+//! `[forgejo] token_file` goes the same way, only to an upstream on the
+//! Forgejo API's host.
 //!
 //! A fake `git` on `PATH` records each call's argv and header. The test
 //! re-runs itself in a child process with that `PATH`, since this crate
@@ -16,18 +18,32 @@ use graft_mirror::config::FileConfig;
 const TOKEN: &str = "ghs_wi2571_fake_token_value";
 
 fn config(dir: &Path, token_file: Option<&Path>) -> FileConfig {
-    let github = token_file
+    config_at(dir, "https://github.com/o/r.git", &github_table(token_file))
+}
+
+fn github_table(token_file: Option<&Path>) -> String {
+    token_file
         .map(|p| {
             format!(
                 "[github]\nowner = \"o\"\nrepo = \"r\"\ntoken_file = \"{}\"\n",
                 p.display()
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn forgejo_table(api: &str, token_file: &Path) -> String {
+    format!(
+        "[forgejo]\napi = \"{api}\"\nowner = \"o\"\nrepo = \"r\"\ntoken_file = \"{}\"\n",
+        token_file.display()
+    )
+}
+
+fn config_at(dir: &Path, upstream: &str, forge: &str) -> FileConfig {
     FileConfig::parse(&format!(
         "server = \"http://graft:7878\"\nrepo = \"r\"\n\
-         upstream = \"https://github.com/o/r.git\"\n\
-         mirror_dir = \"{}\"\ndb = \"{}\"\n{github}\
+         upstream = \"{upstream}\"\n\
+         mirror_dir = \"{}\"\ndb = \"{}\"\n{forge}\
          [[lines]]\nbranch = \"main\"\nline = \"main\"\n",
         dir.join("m.git").display(),
         dir.join("m.sqlite").display(),
@@ -120,6 +136,36 @@ async fn check(tmp: &Path) {
 
     // No [github]: the same calls run with no credential (public upstreams).
     let calls = network_calls(&config(tmp, None), &log).await;
+    assert_eq!(calls.lines().count(), 3, "{calls}");
+    assert!(
+        calls.lines().all(|l| l.ends_with(" header=none")),
+        "{calls}"
+    );
+
+    // [forgejo] alone: its token goes to an upstream on the API's host,
+    // header for header as GitHub's, never in argv.
+    let fj_token = tmp.join("forgejo-token");
+    std::fs::write(&fj_token, format!("{TOKEN}\n")).unwrap();
+    let fj = config_at(
+        tmp,
+        "https://git.example/o/r.git",
+        &forgejo_table("https://git.example/api/v1", &fj_token),
+    );
+    let calls = network_calls(&fj, &log).await;
+    assert_eq!(calls.lines().count(), 3, "{calls}");
+    for line in calls.lines() {
+        let (argv, got) = line.split_once(" header=").unwrap();
+        assert_eq!(got, header, "forgejo: {line} lacked the credential");
+        assert!(!argv.contains(TOKEN) && !argv.contains(&basic), "{line}");
+    }
+
+    // An upstream on another host never gets the Forgejo token.
+    let elsewhere = config_at(
+        tmp,
+        "https://elsewhere.example/o/r.git",
+        &forgejo_table("https://git.example/api/v1", &fj_token),
+    );
+    let calls = network_calls(&elsewhere, &log).await;
     assert_eq!(calls.lines().count(), 3, "{calls}");
     assert!(
         calls.lines().all(|l| l.ends_with(" header=none")),

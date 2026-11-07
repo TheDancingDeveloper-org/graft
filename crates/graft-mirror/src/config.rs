@@ -323,6 +323,13 @@ pub struct LineConfig {
     pub line: Option<String>,
 }
 
+/// The authority (`host[:port]`, no userinfo) of a URL with its scheme
+/// already stripped.
+fn url_authority(rest: &str) -> &str {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority.rsplit('@').next().unwrap_or("")
+}
+
 fn bad(what: impl Into<String>) -> MirrorError {
     MirrorError::Config(what.into())
 }
@@ -528,13 +535,13 @@ impl FileConfig {
     /// The local mirror of upstream. With `[github] token_file` set, that
     /// token goes with every git network command the mirror runs (follow's
     /// polls, export, pr-batch), so each works however it is launched
-    /// (WI-2571). A token file that cannot be read or is empty logs one
-    /// warning and the mirror reaches upstream without a credential.
+    /// (WI-2571). With `[forgejo]` instead, its token goes the same way, but
+    /// only to an HTTPS upstream on the Forgejo API's own host (WI-3492). A
+    /// token file that cannot be read or is empty logs one warning and the
+    /// mirror reaches upstream without a credential.
     pub fn mirror(&self) -> Mirror {
         let credential = self
-            .github
-            .as_ref()
-            .and_then(|gh| gh.token_file.as_deref())
+            .upstream_token_file()
             .and_then(|path| match StaticToken::load(path) {
                 Ok(token) => Some(token.into_secret()),
                 Err(e) => {
@@ -543,6 +550,34 @@ impl FileConfig {
                 }
             });
         Mirror::new(&self.mirror_dir, &self.upstream).with_credential(credential)
+    }
+
+    /// The token file git sends upstream: `[github]`'s, or `[forgejo]`'s
+    /// when the upstream is HTTPS on the API's host. A Forgejo token is
+    /// never sent to another host.
+    fn upstream_token_file(&self) -> Option<&Path> {
+        if let Some(gh) = &self.github {
+            return gh.token_file.as_deref();
+        }
+        let fj = self.forgejo.as_ref()?;
+        let upstream = self.upstream.strip_prefix("https://").map(url_authority);
+        let api = fj
+            .api
+            .strip_prefix("https://")
+            .or_else(|| fj.api.strip_prefix("http://"))
+            .map(url_authority);
+        match (upstream, api) {
+            (Some(u), Some(a)) if !u.is_empty() && u.eq_ignore_ascii_case(a) => {
+                Some(fj.token_file.as_path())
+            }
+            (Some(_), _) => {
+                tracing::warn!(
+                    "the upstream is not on the [forgejo] api host: git reaches it without a credential"
+                );
+                None
+            }
+            (None, _) => None,
+        }
     }
 
     /// The `[[check_refs]]` lines, each with its prefix.
