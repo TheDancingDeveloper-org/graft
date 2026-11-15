@@ -31,23 +31,38 @@ macro_rules! kind {
 
 kind!(
     /// `1 + max(parent generations)`.
-    Generation, "generation", ParentScope::All, Mode::Eager
+    Generation,
+    "generation",
+    ParentScope::All,
+    Mode::Eager
 );
 kind!(
     /// First-parent ancestors at distance 2^k.
-    SkipList, "skiplist", ParentScope::First, Mode::Eager
+    SkipList,
+    "skiplist",
+    ParentScope::First,
+    Mode::Eager
 );
 kind!(
     /// `(line, pos)` of landed changesets.
-    LinePos, "linepos", ParentScope::First, Mode::Eager
+    LinePos,
+    "linepos",
+    ParentScope::First,
+    Mode::Eager
 );
 kind!(
     /// `(line, path-or-prefix, pos)` rows per changed path.
-    LinePaths, "linepaths", ParentScope::First, Mode::Eager
+    LinePaths,
+    "linepaths",
+    ParentScope::First,
+    Mode::Eager
 );
 kind!(
     /// Line → origin per `(changeset, path)`.
-    Blame, "blame", ParentScope::First, Mode::Lazy
+    Blame,
+    "blame",
+    ParentScope::First,
+    Mode::Lazy
 );
 
 impl ValueKind for Generation {
