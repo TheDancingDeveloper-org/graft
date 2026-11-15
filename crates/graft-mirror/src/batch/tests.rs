@@ -50,6 +50,7 @@ fn header(capped: bool) -> BatchHeader {
         checked: false,
         fallback: Some("test".to_owned()),
         appended: std::collections::HashSet::new(),
+        applied: Vec::new(),
         forced: false,
     }
 }

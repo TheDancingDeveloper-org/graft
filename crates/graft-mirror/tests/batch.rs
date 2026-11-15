@@ -3886,3 +3886,65 @@ mod request_cut {
         assert_eq!(batch_task::forge_repo("https://x/a/b", ""), None);
     }
 }
+
+#[tokio::test]
+async fn a_land_already_on_the_base_is_skipped_not_a_conflict() {
+    let w = World::new().await;
+    w.start().await;
+    let a = w
+        .land(&[("shared.txt", "one\nTWO\nthree\n")], "line two", 1)
+        .await;
+    // The same change reaches main by another route (WI-4272), and the line
+    // then edits next to it: the line's net change overlaps main's hunk.
+    let main = w.push_main(&[("shared.txt", "one\nTWO\nthree\n")], "line two, by hand");
+    let b = w
+        .land(&[("shared.txt", "one\nTWO\nTHREE\n")], "line three", 2)
+        .await;
+
+    let rec = opened(w.batcher().run().await.unwrap().outcome);
+    assert_eq!(rec.lands, 2, "the batch still names both lands");
+    let commits = w.db.batch_commits(rec.number).unwrap();
+    assert_eq!(
+        commits.iter().map(|c| c.land).collect::<Vec<_>>(),
+        [b],
+        "per-land commits, with none for the land main already holds"
+    );
+    let chain = chain_of(&w, &main, &rec.squash_sha.to_hex());
+    assert_eq!(chain.len(), 1);
+    assert_eq!(w.show(&chain[0], "shared.txt"), "one\nTWO\nTHREE");
+    assert_eq!(w.changed(&main, &chain[0]), ["shared.txt"]);
+    let body = &w.github.prs()[0].new.body;
+    assert!(body.contains("Already on the base"), "{body}");
+    assert!(body.contains(&format!("`{}`", short(a))), "{body}");
+}
+
+#[tokio::test]
+async fn a_land_next_to_an_unrelated_base_edit_still_conflicts() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(
+        &[("shared.txt", "one\nTWO (graft)\nthree\n")],
+        "line two",
+        1,
+    )
+    .await;
+    w.land(
+        &[("shared.txt", "one\nTWO (graft)\nTHREE\n")],
+        "line three",
+        2,
+    )
+    .await;
+    w.push_main(
+        &[("shared.txt", "one\nTWO (github)\nthree\n")],
+        "line two upstream",
+    );
+    let tip = w.tip(LINE).await;
+
+    let run = w.batcher().run().await.unwrap();
+    match run.outcome {
+        BatchOutcome::Conflict { paths, .. } => assert_eq!(paths, ["shared.txt"]),
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    assert_eq!(w.tip(LINE).await, tip, "nothing moved");
+    assert!(w.github.prs().is_empty());
+}
