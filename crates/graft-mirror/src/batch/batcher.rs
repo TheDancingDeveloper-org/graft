@@ -6,7 +6,7 @@ use graft_git::GitSha;
 use graft_git::export::commit_object;
 use graft_git::exporter::{Exporter, MERGED_FROM_KEY};
 use graft_git::map::{ImportedCommit, MirrorMap};
-use graft_model::{Author, AuthorKind, Change, ChangesetId, Metadata, Timestamp};
+use graft_model::{Author, AuthorKind, Change, ChangesetId, Metadata, RepoPath, Timestamp};
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::types::{
     ChangesetView, CreateChangeset, Diff, GetChangesets, GetLandChecks, GetLineConfig, LandCheck,
@@ -40,6 +40,10 @@ const NOTHING_NEW: &str = "waiting for review; no new lands to append";
 
 /// How many taken batch numbers a new batch skips before it gives up.
 const MAX_TAKEN_PROBES: u64 = 32;
+
+/// Paths per filtered `Diff`, within the engine's default cap on the paths
+/// one diff names.
+const DIFF_PATHS: usize = 64;
 
 /// Batches one integration line into squashed GitHub PRs.
 pub struct Batcher<'a, A, F> {
@@ -426,6 +430,17 @@ where
         from: ChangesetId,
         to: ChangesetId,
     ) -> Result<Vec<Change>, MirrorError> {
+        self.diff_in(from, to, Vec::new()).await
+    }
+
+    /// The changes from `from` to `to` under `paths` (every path when
+    /// empty), page by page.
+    async fn diff_in(
+        &mut self,
+        from: ChangesetId,
+        to: ChangesetId,
+        paths: Vec<RepoPath>,
+    ) -> Result<Vec<Change>, MirrorError> {
         let mut out = Vec::new();
         let mut token = None;
         loop {
@@ -438,7 +453,7 @@ where
                         repo: self.config.repo.clone(),
                         from,
                         to,
-                        paths: Vec::new(),
+                        paths: paths.clone(),
                         patch: None,
                         page: Page {
                             limit: PAGE,
@@ -453,6 +468,87 @@ where
                 None => return Ok(out),
             }
         }
+    }
+
+    /// Whether snapshot `onto` already holds `land`'s own change (its diff
+    /// from `parent`): every path the land changed has the land's entry in
+    /// `onto`. Such a land reached the base by another route under another
+    /// id, as `git rebase` finds a patch already applied, and replaying it
+    /// would only repeat the base's edit (WI-4272). One diff of the land and
+    /// one per [`DIFF_PATHS`] of its paths.
+    async fn already_applied(
+        &mut self,
+        parent: ChangesetId,
+        land: ChangesetId,
+        onto: ChangesetId,
+    ) -> Result<bool, MirrorError> {
+        let own = self.diff(parent, land).await?;
+        for chunk in own.chunks(DIFF_PATHS) {
+            let paths = chunk.iter().map(|c| c.path().clone()).collect();
+            if !self.diff_in(onto, land, paths).await?.is_empty() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The line's lands after `start` replayed one by one onto `base_tip`,
+    /// oldest first, each by line merge onto the replay before it, skipping
+    /// sync changesets and every land the replay already holds. `None` when
+    /// a land conflicts or the lands pass [`MAX_LANDS`]. The sync's
+    /// fallback when the line's net change does not rebase as one: a land
+    /// the base already holds under another id makes the net change overlap
+    /// the base's own edit of the same lines (WI-4272).
+    async fn replay_lands(
+        &mut self,
+        tip: ChangesetId,
+        start: ChangesetId,
+        base_tip: ChangesetId,
+    ) -> Result<Option<ChangesetId>, MirrorError> {
+        let (ids, capped) = self.lands(tip, start).await?;
+        if capped {
+            return Ok(None);
+        }
+        let views = self.views(&ids).await?;
+        let mut prev = base_tip;
+        for id in ids.iter().rev() {
+            let view = views
+                .get(id)
+                .ok_or_else(|| config_err(format!("changeset {id} is not in graft")))?;
+            if is_sync(&view.changeset.metadata) {
+                continue;
+            }
+            let Some(parent) = view.changeset.parents.first().copied() else {
+                return Ok(None);
+            };
+            if self.already_applied(parent, *id, prev).await? {
+                tracing::info!(
+                    repo = %self.config.repo, line = %self.config.line, land = %id,
+                    "mirror batch: land already on the base; skipped in the sync"
+                );
+                continue;
+            }
+            let cx = self.call("replay-sync");
+            prev = match self
+                .api
+                .rebase(
+                    &cx,
+                    Rebase {
+                        repo: self.config.repo.clone(),
+                        changeset: *id,
+                        onto: prev,
+                        merge: MergeMode::Line,
+                        dry_run: false,
+                    },
+                )
+                .await
+            {
+                Ok(next) => next,
+                Err(ApiError::Conflict { .. }) => return Ok(None),
+                Err(e) => return Err(e.into()),
+            };
+        }
+        Ok(Some(prev))
     }
 
     /// A sync changeset on `parents` with `changes`, by the mirror.
@@ -573,16 +669,20 @@ where
             {
                 Ok(id) => id,
                 Err(ApiError::Conflict { paths, onto }) => {
-                    let paths: Vec<String> = paths
-                        .into_iter()
-                        .map(|p| clean_text(&p.path, 300, false))
-                        .collect();
-                    tracing::warn!(
-                        repo = %self.config.repo, line = %self.config.line, onto = %onto,
-                        conflicts = paths.len(),
-                        "mirror batch: the line does not rebase onto the moved base; nothing moved"
-                    );
-                    return Ok(Err(BatchOutcome::Conflict { onto, paths }));
+                    if let Some(id) = self.replay_lands(tip, state.start, base_tip).await? {
+                        id
+                    } else {
+                        let paths: Vec<String> = paths
+                            .into_iter()
+                            .map(|p| clean_text(&p.path, 300, false))
+                            .collect();
+                        tracing::warn!(
+                            repo = %self.config.repo, line = %self.config.line, onto = %onto,
+                            conflicts = paths.len(),
+                            "mirror batch: the line does not rebase onto the moved base; nothing moved"
+                        );
+                        return Ok(Err(BatchOutcome::Conflict { onto, paths }));
+                    }
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -1375,17 +1475,17 @@ where
             let tip_sha = exporter.export_changeset(cut).await?;
             self.mirror.commit_tree(tip_sha).await?
         };
-        let (fallback, commits) = match self
+        let (fallback, commits, applied) = match self
             .chain(number, base, base_sha, tree, created_ms, &lands)
             .await?
         {
-            Ok(commits) => (None, commits),
+            Ok((commits, applied)) => (None, commits, applied),
             Err(why) => {
                 tracing::warn!(
                     repo = %self.config.repo, line = %self.config.line, batch = number,
                     "mirror batch: exported squashed: {why}"
                 );
-                (Some(why), Vec::new())
+                (Some(why), Vec::new(), Vec::new())
             }
         };
         let (body, message_body) = render(
@@ -1406,6 +1506,7 @@ where
                 checked: self.config.checked,
                 fallback: fallback.clone(),
                 appended: HashSet::new(),
+                applied,
                 forced: self.config.force,
             },
             &lands,
@@ -1473,9 +1574,11 @@ where
     /// The batch's per-land commits on `base_sha`, oldest first, written to
     /// the mirror (D26). Each land's own change is replayed onto the base as
     /// an unlanded changeset, and its tree is the land's commit's tree; the
-    /// last tree must be `tree`, the cut tip's. `Ok(Err(why))` when the
-    /// batch is to be squashed instead. One diff, one create and one export
-    /// per land, at most [`MAX_COMMITS`].
+    /// last tree must be `tree`, the cut tip's. A land the replay before it
+    /// already holds (its change reached the base under another id) gets no
+    /// commit and is returned as skipped (WI-4272). `Ok(Err(why))` when the
+    /// batch is to be squashed instead. One replay and one export per land,
+    /// at most [`MAX_COMMITS`].
     async fn chain(
         &mut self,
         number: u64,
@@ -1484,7 +1587,7 @@ where
         tree: GitSha,
         created_ms: i64,
         lands: &[LandLine],
-    ) -> Result<Result<Vec<BatchCommit>, String>, MirrorError> {
+    ) -> Result<Result<(Vec<BatchCommit>, Vec<ChangesetId>), String>, MirrorError> {
         if lands.len() > MAX_COMMITS {
             return Ok(Err(format!(
                 "the batch has {} lands, more than the {MAX_COMMITS} per-land commits a \
@@ -1497,10 +1600,16 @@ where
         // a cherry-pick of its own change that keeps whatever the base
         // changed in the same files, never a whole-file overwrite.
         let mut replays = Vec::with_capacity(lands.len());
+        let mut replayed = Vec::with_capacity(lands.len());
+        let mut skipped = Vec::new();
         let mut prev = base;
         for land in lands.iter().rev() {
-            if land.parent.is_none() {
+            let Some(parent) = land.parent else {
                 return Ok(Err(format!("land {} has no parent", short(land.id))));
+            };
+            if self.already_applied(parent, land.id, prev).await? {
+                skipped.push(land.id);
+                continue;
             }
             let cx = self.call("replay");
             prev = match self
@@ -1530,6 +1639,7 @@ where
                 Err(e) => return Err(e.into()),
             };
             replays.push(prev);
+            replayed.push(land);
         }
         let mut trees = Vec::with_capacity(replays.len());
         {
@@ -1559,7 +1669,7 @@ where
         }
         let mut parent = base_sha;
         let mut out = Vec::with_capacity(trees.len());
-        for (seq, (land, tree)) in lands.iter().rev().zip(&trees).enumerate() {
+        for (seq, (land, tree)) in replayed.into_iter().zip(&trees).enumerate() {
             let raw = land_commit(number, land, *tree, parent, &self.config.committer);
             let sha = self.mirror.write_commit(&raw).await?;
             out.push(BatchCommit {
@@ -1570,7 +1680,7 @@ where
             });
             parent = sha;
         }
-        Ok(Ok(out))
+        Ok(Ok((out, skipped)))
     }
 
     /// Where each of batch `rec`'s per-land commits reached the base
@@ -1830,7 +1940,7 @@ where
             let tip_sha = exporter.export_changeset(tip).await?;
             self.mirror.commit_tree(tip_sha).await?
         };
-        let mut appended = match self
+        let (mut appended, _) = match self
             .chain(
                 rec.number,
                 rec.tip,
@@ -1853,14 +1963,20 @@ where
             commit.seq += offset;
         }
 
+        if appended.is_empty() {
+            return self.skip(
+                rec,
+                "not appended: every new land is already on the base; the next land carries them",
+            );
+        }
         let old_head = rec.squash_sha;
         rec.tip = tip;
-        rec.lands += appended.len() as u64;
+        rec.lands += new_lands.len() as u64;
         rec.squash_sha = appended
             .last()
             .map(|commit| commit.sha)
             .ok_or_else(|| config_err("an append built no commits"))?;
-        rec.body = self.body_for(rec).await?;
+        rec.body = self.body_for(rec, &appended).await?;
         rec.detail = format!("recorded {} appended land(s)", appended.len());
         self.db.extend_batch(rec, &appended)?;
         self.record_exports(&appended).await?;
@@ -1914,7 +2030,7 @@ where
         number: u64,
         remote_body: &str,
     ) -> Result<(), MirrorError> {
-        let body = self.body_for(rec).await?;
+        let body = self.body_for(rec, &[]).await?;
         if rec.body != body {
             rec.body = body.clone();
             self.db.put_batch(rec)?;
@@ -1926,11 +2042,33 @@ where
     }
 
     /// The PR body for the lands the database already records, through
-    /// `rec.tip`.
-    async fn body_for(&mut self, rec: &BatchRecord) -> Result<String, MirrorError> {
+    /// `rec.tip`, and `pending` commits not yet recorded. A land of a
+    /// per-land batch with no commit was already on the base (WI-4272).
+    async fn body_for(
+        &mut self,
+        rec: &BatchRecord,
+        pending: &[BatchCommit],
+    ) -> Result<String, MirrorError> {
         let (ids, capped) = self.lands(rec.tip, rec.start).await?;
         let views = self.views(&ids).await?;
         let (lands, truncated) = self.describe(&ids, &views).await?;
+        let committed: HashSet<ChangesetId> = self
+            .db
+            .batch_commits(rec.number)?
+            .iter()
+            .chain(pending)
+            .map(|commit| commit.land)
+            .collect();
+        let applied: Vec<ChangesetId> = if committed.is_empty() {
+            Vec::new()
+        } else {
+            lands
+                .iter()
+                .rev()
+                .map(|land| land.id)
+                .filter(|id| !committed.contains(id))
+                .collect()
+        };
         let appended_count = lands.len().saturating_sub(rec.initial_lands as usize);
         let appended: HashSet<ChangesetId> = lands
             .iter()
@@ -1961,6 +2099,7 @@ where
                 checked: self.config.checked,
                 fallback: None,
                 appended,
+                applied,
                 forced: rec.body.contains(FORCED_LINE),
             },
             &lands,
