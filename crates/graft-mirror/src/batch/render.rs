@@ -42,6 +42,9 @@ pub(crate) struct BatchHeader {
     pub(crate) fallback: Option<String>,
     /// Lands added after the PR opened.
     pub(crate) appended: HashSet<ChangesetId>,
+    /// Lands with no commit of their own, oldest first: the base already
+    /// held their change under another id (WI-4272).
+    pub(crate) applied: Vec<ChangesetId>,
     /// Cut with `--force`, past the batch thresholds (WI-2719).
     pub(crate) forced: bool,
 }
@@ -407,6 +410,28 @@ pub(crate) fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
             head.push_str(&format!(
                 "  - and {} more\n",
                 h.drops.len() - MAX_DROPS_LISTED
+            ));
+        }
+    }
+    if !h.applied.is_empty() {
+        head.push_str(&format!(
+            "- Already on the base: {} land{} whose change the base already holds under \
+             another id, skipped with no commit of {}\n",
+            h.applied.len(),
+            if h.applied.len() == 1 { "" } else { "s" },
+            if h.applied.len() == 1 {
+                "its own"
+            } else {
+                "their own"
+            }
+        ));
+        for id in h.applied.iter().take(MAX_DROPS_LISTED) {
+            head.push_str(&format!("  - `{}`\n", short(*id)));
+        }
+        if h.applied.len() > MAX_DROPS_LISTED {
+            head.push_str(&format!(
+                "  - and {} more\n",
+                h.applied.len() - MAX_DROPS_LISTED
             ));
         }
     }
