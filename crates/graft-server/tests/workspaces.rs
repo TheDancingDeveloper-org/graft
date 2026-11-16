@@ -61,12 +61,11 @@ async fn setup(tag: &str) -> (Site, common::Server, [String; 3]) {
 /// "needs admin": the refusal a real client sees from the server's gate.
 fn assert_not_owner(e: tonic::Status, owner: &str) {
     match api(e) {
-        ApiError::Rejected { policy, detail } => {
-            assert_eq!(policy, "workspace-owner");
+        ApiError::PermissionDenied { scope: detail, .. } => {
             assert!(detail.contains(&format!("leased by {owner}")), "{detail}");
             assert!(detail.contains("clone a fresh working copy"), "{detail}");
         }
-        other => panic!("expected the workspace-owner refusal, got {other:?}"),
+        other => panic!("expected the ownership refusal, got {other:?}"),
     }
 }
 
@@ -84,7 +83,7 @@ async fn a_workspace_belongs_to_its_owner() {
 
     let mut bo = server.clients(Some(&bob)).await;
     let refused = |e: tonic::Status| {
-        assert_eq!(e.code(), tonic::Code::FailedPrecondition, "{e:?}");
+        assert_eq!(e.code(), tonic::Code::PermissionDenied, "{e:?}");
         assert!(
             e.metadata().get(VERSION_HEADER).is_some(),
             "errors carry the protocol version too"
