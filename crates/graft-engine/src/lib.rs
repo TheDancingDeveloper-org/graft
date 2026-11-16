@@ -105,7 +105,7 @@ pub use revert::{REVERT_CHECK, REVERTS};
 pub use review_queue::{
     LAND_SUMMARY, LINES_UNAVAILABLE, MAX_JOURNAL_PROBE, MAX_REVIEW_SCAN, PATHS_UNAVAILABLE,
 };
-pub use workspace::{Gauges, MAX_WORKSPACE_NAME};
+pub use workspace::{Gauges, MAX_WORKSPACE_NAME, workspace_not_owner};
 pub use write::MAX_REPO_NAME;
 
 /// Engine limits and defaults (`docs/design.md` §4, §7, §8).

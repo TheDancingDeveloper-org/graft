@@ -356,7 +356,7 @@ async fn revert_into_a_workspace_is_for_its_owner_only() {
         json!({"repo": "r", "changeset": tip, "workspace": "wa", "onto": tip}),
     ] {
         let e = b.err("graft_revert", args);
-        assert_eq!(e["kind"], "permission_denied", "{e}");
+        assert_eq!(e["kind"], "rejected", "{e}");
     }
     // Nor over gRPC.
     let mut cb = server.clients(Some(&token_b)).await;
@@ -375,7 +375,7 @@ async fn revert_into_a_workspace_is_for_its_owner_only() {
     assert!(
         matches!(
             common::api(e),
-            graft_proto::ApiError::PermissionDenied { .. }
+            graft_proto::ApiError::Rejected { ref policy, .. } if policy == "workspace-owner"
         ),
         "gRPC refuses too"
     );

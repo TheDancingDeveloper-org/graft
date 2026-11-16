@@ -700,12 +700,18 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 /// earlier session is the usual cause and "needs admin" misleads. An admin
 /// may still take over. It travels as `Rejected`, so it needs no wire change.
 fn not_owner(ws: &WorkspaceRecord) -> ApiError {
+    workspace_not_owner(&ws.owner)
+}
+
+/// [`not_owner`] from the owner's subject alone, for the server's own
+/// ownership gate, so engine and server refuse with one message.
+pub fn workspace_not_owner(owner: &str) -> ApiError {
     ApiError::Rejected {
         policy: "workspace-owner".to_owned(),
         detail: format!(
             "this working copy is leased by {owner}, not by you; clone a fresh working copy \
              into a new directory (do not reuse another session's clone)",
-            owner = ws.owner
+            owner = owner
         ),
     }
 }

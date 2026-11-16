@@ -57,6 +57,19 @@ async fn setup(tag: &str) -> (Site, common::Server, [String; 3]) {
     (site, server, [alice, bob, reader])
 }
 
+/// A non-owner is told who holds the lease and what to do, not that it
+/// "needs admin": the refusal a real client sees from the server's gate.
+fn assert_not_owner(e: tonic::Status, owner: &str) {
+    match api(e) {
+        ApiError::Rejected { policy, detail } => {
+            assert_eq!(policy, "workspace-owner");
+            assert!(detail.contains(&format!("leased by {owner}")), "{detail}");
+            assert!(detail.contains("clone a fresh working copy"), "{detail}");
+        }
+        other => panic!("expected the workspace-owner refusal, got {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_workspace_belongs_to_its_owner() {
     let (_site, server, [alice, bob, reader]) = setup("server-ws-owner").await;
@@ -71,12 +84,12 @@ async fn a_workspace_belongs_to_its_owner() {
 
     let mut bo = server.clients(Some(&bob)).await;
     let refused = |e: tonic::Status| {
-        assert_eq!(e.code(), tonic::Code::PermissionDenied, "{e:?}");
+        assert_eq!(e.code(), tonic::Code::FailedPrecondition, "{e:?}");
         assert!(
             e.metadata().get(VERSION_HEADER).is_some(),
             "errors carry the protocol version too"
         );
-        assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
+        assert_not_owner(e, "alice");
     };
     refused(
         bo.workspaces
@@ -330,7 +343,7 @@ async fn a_writer_cannot_mint_its_way_into_another_workspace() {
             .await
             .expect_err("not bob's"),
     ] {
-        assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
+        assert_not_owner(e, "alice");
     }
     let view = b2
         .workspaces
@@ -376,7 +389,7 @@ async fn vogt_delegates_a_session_that_owns_its_workspaces() {
         .get_workspace(ws("ws-a"))
         .await
         .expect_err("not the session's");
-    assert!(matches!(api(e), ApiError::PermissionDenied { .. }));
+    assert_not_owner(e, "alice");
 
     // The session token is an agent's: it delegates no further.
     let e = s
