@@ -135,7 +135,9 @@ async fn a_conflict_resolves_over_grpc_and_lands() {
         .get_conflicts(pb::GetConflictsRequest::from(req.clone()))
         .await
         .expect_err("not bob's");
-    assert!(matches!(api(refused), ApiError::PermissionDenied { .. }));
+    assert!(
+        matches!(api(refused), ApiError::Rejected { policy, .. } if policy == "workspace-owner")
+    );
 
     let got = al
         .workspaces

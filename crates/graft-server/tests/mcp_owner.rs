@@ -3,7 +3,7 @@
 //!
 //! Each test has agent A open two workspaces with one draft each. Agent B,
 //! with the same repository scopes, is refused every operation on A's
-//! workspace with `permission_denied`, learns nothing of it, and leaves it
+//! workspace with `rejected` (the `workspace-owner` refusal naming the lease owner and the remedy), learns nothing of it, and leaves it
 //! as it was. A may act on its own workspace, and an admin on A's other.
 
 mod common;
@@ -110,10 +110,17 @@ impl Fixture {
         for (ws, draft) in ["wa", "wb"].into_iter().zip(&self.drafts) {
             let before = self.view(ws);
             let e = self.b.err(tool, args(ws));
-            assert_eq!(e["kind"], "permission_denied", "{tool}: {e}");
+            assert_eq!(e["kind"], "rejected", "{tool}: {e}");
             let text = e.to_string();
             assert!(!text.contains(draft.as_str()), "{tool} leaks: {text}");
-            assert!(!text.contains("agent-a"), "{tool} leaks: {text}");
+            // The owner is already visible to a reader; the refusal names it
+            // and the remedy instead of "needs admin".
+            assert!(text.contains("leased by agent-a"), "{tool}: {text}");
+            assert!(
+                text.contains("clone a fresh working copy"),
+                "{tool}: {text}"
+            );
+            assert!(!text.contains(":admin"), "{tool}: {text}");
             assert_eq!(self.view(ws), before, "{tool}: A's workspace moved");
         }
     }
@@ -247,9 +254,14 @@ async fn grpc_commit_into_a_foreign_workspace_is_refused() {
         .create_changeset(pb::CreateChangesetRequest::from(req))
         .await
         .expect_err("foreign commit");
-    assert!(
-        matches!(common::api(e), ApiError::PermissionDenied { .. }),
-        "gRPC refuses"
-    );
+    assert_eq!(e.code(), tonic::Code::FailedPrecondition, "{e:?}");
+    match common::api(e) {
+        ApiError::Rejected { policy, detail } => {
+            assert_eq!(policy, "workspace-owner");
+            assert!(detail.contains("leased by agent-a"), "{detail}");
+            assert!(detail.contains("clone a fresh working copy"), "{detail}");
+        }
+        other => panic!("gRPC must give the workspace-owner refusal, got {other:?}"),
+    }
     assert_eq!(f.view("wa"), before, "A's workspace is untouched");
 }
