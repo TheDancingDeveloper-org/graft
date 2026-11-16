@@ -29,14 +29,7 @@ pub use graft_testkit::synth::{SynthSpec, generate};
 pub fn bin() -> PathBuf {
     std::env::var_os("GRAFT_TEST_GRAFT_BIN")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::current_exe()
-                .expect("current test executable")
-                .parent()
-                .and_then(Path::parent)
-                .expect("workspace target profile directory")
-                .join("graft")
-        })
+        .unwrap_or_else(|| graft_testkit::target::profile_dir().join("graft"))
 }
 
 /// `cargo test -p graft-server` rebuilds this crate but not the `graft`

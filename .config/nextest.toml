@@ -1,0 +1,11 @@
+# A hung test fails fast instead of holding the CI `test` job until its
+# 45-minute timeout (WI-4283). A test is reported slow every 120 s and killed
+# at the 5th period (10 min). The slowest tests on a green run take about
+# 6 min (review_queue sqlite) and 2.5 min (export of 1000 lands), so they get
+# a longer cap rather than a timing-dependent pass.
+[profile.default]
+slow-timeout = { period = "120s", terminate-after = 5 }
+
+[[profile.default.overrides]]
+filter = 'test(=cost_follows_the_page_not_the_line_sqlite) | test(=a_thousand_random_lands_export_in_order_with_deterministic_shas)'
+slow-timeout = { period = "120s", terminate-after = 10 }
