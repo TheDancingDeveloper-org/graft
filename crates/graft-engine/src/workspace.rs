@@ -247,10 +247,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     ) -> Result<WorkspaceRecord, ApiError> {
         let ws = self.load_workspace(repo, name).await?;
         if ws.owner != cx.principal.subject && !is_admin(cx, repo_name) {
-            return Err(ApiError::PermissionDenied {
-                scope: format!("repo:{repo_name}:admin"),
-                path: None,
-            });
+            return Err(not_owner(&ws));
         }
         if self.lapsed(&ws) {
             // A concurrent change to the record means someone else ended
@@ -632,10 +629,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 return Ok(());
             };
             if ws.owner != cx.principal.subject && !is_admin(cx, &req.repo) {
-                return Err(ApiError::PermissionDenied {
-                    scope: format!("repo:{}:admin", req.repo),
-                    path: None,
-                });
+                return Err(not_owner(&ws));
             }
             let reason = if self.lapsed(&ws) {
                 "lease-expired"
@@ -698,6 +692,21 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             active: total.saturating_sub(lapsed),
             lapsed,
         })
+    }
+}
+
+/// The refusal for a caller that holds write but does not own the workspace.
+/// It names the owner and the remedy, because a working copy left by an
+/// earlier session is the usual cause and "needs admin" misleads. An admin
+/// may still take over. It travels as `Rejected`, so it needs no wire change.
+fn not_owner(ws: &WorkspaceRecord) -> ApiError {
+    ApiError::Rejected {
+        policy: "workspace-owner".to_owned(),
+        detail: format!(
+            "this working copy is leased by {owner}, not by you; clone a fresh working copy \
+             into a new directory (do not reuse another session's clone)",
+            owner = ws.owner
+        ),
     }
 }
 

@@ -425,7 +425,7 @@ fn expired_lease_abandons_drafts<M: MetaStore>(f: &Fixture<M>) {
     let alice = as_subject("tester", &["repo:r:write"]);
     assert!(matches!(
         w.commit_in_as(&alice, "z", w.root, b"5"),
-        Err(ApiError::PermissionDenied { .. })
+        Err(ApiError::Rejected { .. })
     ));
 }
 
@@ -437,16 +437,25 @@ fn only_the_owner_or_an_admin_changes_a_workspace<M: MetaStore>(f: &Fixture<M>) 
     let wref = w.wref("bobs");
     assert!(matches!(
         block_on(w.e().renew_lease(&mallory, wref.clone(), HOUR)),
-        Err(ApiError::PermissionDenied { .. })
+        Err(ApiError::Rejected { .. })
     ));
     assert!(matches!(
         block_on(w.e().close_workspace(&mallory, wref.clone(), false)),
-        Err(ApiError::PermissionDenied { .. })
+        Err(ApiError::Rejected { .. })
     ));
     assert!(matches!(
         w.commit_in_as(&mallory, "bobs", w.root, b"1"),
-        Err(ApiError::PermissionDenied { .. })
+        Err(ApiError::Rejected { .. })
     ));
+    // The refusal names the lease owner and the remedy, not a missing scope.
+    let Err(ApiError::Rejected { policy, detail }) =
+        block_on(w.e().renew_lease(&mallory, wref.clone(), HOUR))
+    else {
+        panic!("expected a rejection");
+    };
+    assert_eq!(policy, "workspace-owner");
+    assert!(detail.contains("leased by bob"), "{detail}");
+    assert!(detail.contains("clone a fresh working copy"), "{detail}");
     // An admin (Vogt renewing for a session) may.
     w.renew("bobs", HOUR).expect("admin renews");
     w.close("bobs").expect("admin closes");
