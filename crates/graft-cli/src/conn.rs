@@ -28,6 +28,9 @@ use crate::error::Failure;
 /// The environment variable that carries the bearer token.
 pub(crate) const TOKEN_ENV: &str = "GRAFT_TOKEN";
 
+/// The environment variable that names a file carrying the bearer token.
+pub(crate) const TOKEN_FILE_ENV: &str = "GRAFT_TOKEN_FILE";
+
 /// A connected session: the remote, the repository, and the working copy
 /// when the current directory is inside one.
 pub(crate) struct Conn {
@@ -360,16 +363,36 @@ pub(crate) fn resolve_connection_from_sources(
     Ok((endpoint, server))
 }
 
-/// The bearer token from `--token-file`, else `GRAFT_TOKEN`. Surrounding
-/// whitespace is dropped; the value is never echoed.
+/// The bearer token from `--token-file`, else `GRAFT_TOKEN`, else the file
+/// named by `GRAFT_TOKEN_FILE`. A named server's token file is consulted only
+/// when none of those supplies a token. Surrounding whitespace is dropped;
+/// the value is never echoed.
 pub(crate) fn read_token(g: &Global) -> Result<Option<String>, Failure> {
-    if let Some(path) = &g.token_file {
+    let file_from_env = env::var(TOKEN_FILE_ENV).ok();
+    read_token_from(
+        g.token_file.as_deref(),
+        env::var(TOKEN_ENV).ok().as_deref(),
+        file_from_env.as_deref(),
+    )
+}
+
+/// [`read_token`] with its environment already read, so precedence is
+/// testable without touching the process environment.
+fn read_token_from(
+    flag: Option<&Path>,
+    env_token: Option<&str>,
+    env_file: Option<&str>,
+) -> Result<Option<String>, Failure> {
+    if let Some(path) = flag {
         return token_from_file(path).map(Some);
     }
-    Ok(env::var(TOKEN_ENV)
-        .ok()
-        .map(|t| t.trim().to_owned())
-        .filter(|t| !t.is_empty()))
+    if let Some(token) = env_token.map(str::trim).filter(|token| !token.is_empty()) {
+        return Ok(Some(token.to_owned()));
+    }
+    match env_file.map(str::trim).filter(|path| !path.is_empty()) {
+        Some(path) => token_from_file(Path::new(path)).map(Some),
+        None => Ok(None),
+    }
 }
 
 pub(crate) fn token_from_file(path: &Path) -> Result<String, Failure> {
@@ -637,6 +660,60 @@ mod tests {
         assert_eq!(token_from_file(&file).unwrap(), "abc123");
         fs::write(&file, " \n").unwrap();
         assert!(token_from_file(&file).is_err());
+    }
+
+    #[test]
+    fn token_sources_follow_the_documented_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("flag-token");
+        let env_file = dir.path().join("env-token");
+        fs::write(&flag, "flag-secret\n").unwrap();
+        fs::write(&env_file, "file-secret\n").unwrap();
+        let env_file = env_file.to_str().unwrap();
+
+        assert_eq!(
+            read_token_from(Some(&flag), Some("env-secret"), Some(env_file))
+                .unwrap()
+                .as_deref(),
+            Some("flag-secret")
+        );
+        assert_eq!(
+            read_token_from(None, Some("env-secret"), Some(env_file))
+                .unwrap()
+                .as_deref(),
+            Some("env-secret")
+        );
+        assert_eq!(
+            read_token_from(None, Some("  "), Some(env_file))
+                .unwrap()
+                .as_deref(),
+            Some("file-secret")
+        );
+        assert_eq!(
+            read_token_from(None, None, Some(env_file))
+                .unwrap()
+                .as_deref(),
+            Some("file-secret")
+        );
+        assert_eq!(read_token_from(None, None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_token_file_from_the_environment_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        fs::write(&file, " \n").unwrap();
+
+        let failure = read_token_from(None, None, file.to_str()).unwrap_err();
+        assert_eq!(failure.exit, crate::Exit::Failure);
+        assert_eq!(failure.kind, "token");
+        assert!(failure.message.contains("is empty"));
+
+        let missing = dir.path().join("missing");
+        let failure = read_token_from(None, None, missing.to_str()).unwrap_err();
+        assert_eq!(failure.exit, crate::Exit::Failure);
+        assert_eq!(failure.kind, "token");
+        assert!(failure.message.contains("cannot read the token file"));
     }
 
     #[test]

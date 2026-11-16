@@ -87,7 +87,7 @@ Options:
       --list               List configured servers without changing them
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -107,7 +107,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -128,7 +128,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -145,7 +145,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -173,7 +173,7 @@ Options:
           Repository name (default: the working copy's)
 
       --token-file <PATH>
-          File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+          File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
 
       --server <NAME>
           Named server in the user config. Its endpoint and token file are used; the token is never an argument
@@ -201,7 +201,7 @@ Options:
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --line <NAME>        Graft line the default git branch lands on [default: main]
       --db <FILE>          Mirror database file. A URL import needs one; a path defaults to `<source>/graft-mirror.sqlite`
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -221,7 +221,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --repo <NAME>        Repository name (default: the directory name)
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -245,7 +245,7 @@ Options:
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --path <PREFIX>      Include only this path prefix (repeatable; default: the whole snapshot)
       --root-files         With `--path`, also include the files at the repository root
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -291,7 +291,7 @@ Options:
           Also list other live workspaces with open drafts on your changed files (read-only; contacts the server)
 
       --token-file <PATH>
-          File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+          File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
 
       --ignored
           Also list the untracked entries that `.gitignore` and `.graftignore` ignore (an ignored directory is one entry)
@@ -325,7 +325,7 @@ Options:
       --cursor <TOKEN>     Resume token from a previous page
       --repo <NAME>        Repository name (default: the working copy's)
       --stat               Per-file added and removed line counts, and a summary
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --name-only          Print only the changed paths
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
@@ -347,7 +347,7 @@ Options:
       --limit <LIMIT>      Changesets per page [default: 50]
       --repo <NAME>        Repository name (default: the working copy's)
       --cursor <TOKEN>     Resume token from a previous page
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -369,7 +369,7 @@ Options:
       --cursor <TOKEN>     Resume token from a previous page of files
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -391,7 +391,7 @@ Options:
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --lines <START:END>  Only lines `START:END` (0-based, END exclusive)
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -412,7 +412,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -436,7 +436,7 @@ Options:
       --limit <LIMIT>      Entries per page [default: 100]
       --repo <NAME>        Repository name (default: the working copy's)
       --cursor <TOKEN>     Resume token from a previous page
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -459,7 +459,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -476,7 +476,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -496,7 +496,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -516,7 +516,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -537,7 +537,7 @@ Options:
       --author <AUTHOR>     The author as `Name <email>` (default: GRAFT_AUTHOR_NAME and GRAFT_AUTHOR_EMAIL, else $USER with no email)
       --repo <NAME>         Repository name (default: the working copy's)
       --author-kind <KIND>  What kind of author this is: human, agent, bot or ci (default: GRAFT_AUTHOR_KIND, else human)
-      --token-file <PATH>   File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>   File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --meta <KEY=VALUE>    Metadata `KEY=VALUE` for tools (repeatable)
       --server <NAME>       Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>     Run as if started in this directory, like `git -C`
@@ -563,7 +563,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -583,7 +583,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -602,7 +602,7 @@ Options:
       --cursor <TOKEN>     Resume token from a previous page
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -623,7 +623,7 @@ Options:
       --line <LINE>        Outside a working copy, the line to track [default: main]
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -644,7 +644,7 @@ Options:
       --lease <SECONDS>    Lease length in seconds (default: 2 hours)
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -665,7 +665,7 @@ Options:
       --keep-drafts        Ask the server to keep the drafts
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -689,7 +689,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -710,7 +710,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -756,7 +756,7 @@ Options:
           [default: line]
 
       --token-file <PATH>
-          File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+          File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
 
       --server <NAME>
           Named server in the user config. Its endpoint and token file are used; the token is never an argument
@@ -788,7 +788,7 @@ Options:
       --limit <LIMIT>      Merge points per page [default: 100]
       --cursor <TOKEN>     Resume token from a previous page
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -808,7 +808,7 @@ Options:
       --limit <LIMIT>      Lines per page [default: 100]
       --cursor <TOKEN>     Resume token from a previous page
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -830,7 +830,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -851,7 +851,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -871,7 +871,7 @@ Options:
       --limit <LIMIT>      Refs per page [default: 100]
       --cursor <TOKEN>     Resume token from a previous page
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -894,7 +894,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -914,7 +914,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -941,7 +941,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -966,7 +966,7 @@ Options:
       --interval <SECONDS>    Poll interval in seconds (default: the server's)
       --repo <NAME>           Repository name (default: the working copy's)
       --disabled              Add the mirror disabled
-      --token-file <PATH>     File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>     File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>         Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>       Run as if started in this directory, like `git -C`
   -h, --help                  Print help
@@ -991,7 +991,7 @@ Options:
       --follow <BRANCH=LINE>  Replace the lines: follow BRANCH=LINE; repeatable
       --repo <NAME>           Repository name (default: the working copy's)
       --export <BRANCH=LINE>  Replace the lines: export BRANCH=LINE; repeatable
-      --token-file <PATH>     File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>     File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --interval <SECONDS>    Poll interval in seconds
       --server <NAME>         Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>       Run as if started in this directory, like `git -C`
@@ -1015,7 +1015,7 @@ Options:
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --stdin              Read the credential from standard input
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1037,7 +1037,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1059,7 +1059,7 @@ Options:
       --request-id <ID>    Idempotency key: pass the one a failed attempt printed to retry it
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1082,7 +1082,7 @@ Options:
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --force <ID>         Replace an existing marker; the value is its expected old target
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1105,7 +1105,7 @@ Options:
       --limit <LIMIT>      Most mirrors to show [default: 20]
       --cursor <TOKEN>     Resume token from a previous page
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1129,7 +1129,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1153,7 +1153,7 @@ Options:
       --exclude <CHANGESET>  Full id of a changeset to leave out; repeatable
       --repo <NAME>          Repository name (default: the working copy's)
       --request-id <ID>      Idempotency key: pass the one a failed attempt printed to retry it
-      --token-file <PATH>    File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>    File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>        Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>      Run as if started in this directory, like `git -C`
   -h, --help                 Print help
@@ -1174,7 +1174,7 @@ Options:
       --line <LINE>        The line [default: main]
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1195,7 +1195,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1218,7 +1218,7 @@ Options:
       --limit <LIMIT>      Most batches to show [default: 20]
       --cursor <TOKEN>     Resume token from a previous page
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1243,7 +1243,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1260,7 +1260,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1280,7 +1280,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1300,7 +1300,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1321,7 +1321,7 @@ Options:
       --part <PATHS>       The paths (or directories) of one part, comma-separated (repeatable)
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1341,7 +1341,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1358,7 +1358,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1400,7 +1400,7 @@ Options:
           [default: line]
 
       --token-file <PATH>
-          File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+          File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
 
       --no-check
           Skip the pre-land check (the dry-run rebase that stops a land on a real conflict, and the draft-overlap report)
@@ -1432,7 +1432,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1469,7 +1469,7 @@ Options:
           Repository name (default: the working copy's)
 
       --token-file <PATH>
-          File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+          File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
 
       --server <NAME>
           Named server in the user config. Its endpoint and token file are used; the token is never an argument
@@ -1497,7 +1497,7 @@ Options:
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --input <FILE>       JSON request from a file, or `-` for standard input (default: standard input, when it is not a terminal)
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1514,7 +1514,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1548,7 +1548,7 @@ Options:
           Repository name (default: the working copy's)
 
       --token-file <PATH>
-          File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+          File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
 
       --server <NAME>
           Named server in the user config. Its endpoint and token file are used; the token is never an argument
@@ -1574,7 +1574,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1594,7 +1594,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
@@ -1614,7 +1614,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help

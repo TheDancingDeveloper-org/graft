@@ -13,7 +13,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
-      --token-file <PATH>  File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument
+      --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>      Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>    Run as if started in this directory, like `git -C`
   -h, --help               Print help
