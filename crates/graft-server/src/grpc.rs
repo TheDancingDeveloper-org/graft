@@ -107,7 +107,8 @@ fn req_cid(b: Vec<u8>, field: &'static str) -> Result<ChangesetId, Status> {
 
 /// A workspace is its owner's (`docs/design.md` §7.2): a caller that neither
 /// owns `ws` nor administers its repository is refused before the operation
-/// runs, and learns nothing of it. A workspace that does not exist is left
+/// runs. The refusal names the owner (already visible to a reader) and the
+/// remedy, the same `workspace-owner` refusal the engine gives. A workspace that does not exist is left
 /// to the operation to answer.
 pub(crate) async fn own_workspace(
     e: &ServerEngine,
@@ -125,10 +126,7 @@ pub(crate) async fn own_workspace(
     if view.owner != cx.principal.subject
         && graft_auth::authorize(&cx.principal, &admin, None).is_err()
     {
-        return Err(ApiError::PermissionDenied {
-            scope: admin.to_string(),
-            path: None,
-        });
+        return Err(graft_engine::workspace_not_owner(&view.owner));
     }
     Ok(())
 }
