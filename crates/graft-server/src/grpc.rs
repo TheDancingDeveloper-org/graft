@@ -108,8 +108,8 @@ fn req_cid(b: Vec<u8>, field: &'static str) -> Result<ChangesetId, Status> {
 /// A workspace is its owner's (`docs/design.md` §7.2): a caller that neither
 /// owns `ws` nor administers its repository is refused before the operation
 /// runs. The refusal names the owner (already visible to a reader) and the
-/// remedy, the same `workspace-owner` refusal the engine gives. A workspace that does not exist is left
-/// to the operation to answer.
+/// remedy, in the same `PermissionDenied` the engine gives. A workspace that
+/// does not exist is left to the operation to answer.
 pub(crate) async fn own_workspace(
     e: &ServerEngine,
     cx: &CallContext,

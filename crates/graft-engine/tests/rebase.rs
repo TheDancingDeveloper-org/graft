@@ -659,7 +659,7 @@ fn sync_is_the_owners<M: MetaStore>(f: &Fixture<M>) {
     bob.principal.subject = "bob".to_owned();
     assert!(matches!(
         r.sync_as(&bob, "w", None),
-        Err(ApiError::Rejected { .. })
+        Err(ApiError::PermissionDenied { .. })
     ));
     let reader = cx(&["repo:r:read"]);
     assert!(matches!(

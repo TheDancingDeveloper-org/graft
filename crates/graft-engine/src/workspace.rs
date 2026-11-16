@@ -698,7 +698,8 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
 /// The refusal for a caller that holds write but does not own the workspace.
 /// It names the owner and the remedy, because a working copy left by an
 /// earlier session is the usual cause and "needs admin" misleads. An admin
-/// may still take over. It travels as `Rejected`, so it needs no wire change.
+/// may still take over. It stays `PermissionDenied`, the class clients rely
+/// on, and carries the message in `scope`, so it needs no wire change.
 fn not_owner(ws: &WorkspaceRecord) -> ApiError {
     workspace_not_owner(&ws.owner)
 }
@@ -706,13 +707,12 @@ fn not_owner(ws: &WorkspaceRecord) -> ApiError {
 /// [`not_owner`] from the owner's subject alone, for the server's own
 /// ownership gate, so engine and server refuse with one message.
 pub fn workspace_not_owner(owner: &str) -> ApiError {
-    ApiError::Rejected {
-        policy: "workspace-owner".to_owned(),
-        detail: format!(
-            "this working copy is leased by {owner}, not by you; clone a fresh working copy \
-             into a new directory (do not reuse another session's clone)",
-            owner = owner
+    ApiError::PermissionDenied {
+        scope: format!(
+            "ownership of this workspace: it is leased by {owner}, not by you; clone a fresh \
+             working copy into a new directory (do not reuse another session's clone)"
         ),
+        path: None,
     }
 }
 

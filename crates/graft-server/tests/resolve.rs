@@ -136,7 +136,7 @@ async fn a_conflict_resolves_over_grpc_and_lands() {
         .await
         .expect_err("not bob's");
     assert!(
-        matches!(api(refused), ApiError::Rejected { policy, .. } if policy == "workspace-owner")
+        matches!(api(refused), ApiError::PermissionDenied { scope, .. } if scope.contains("leased by"))
     );
 
     let got = al
