@@ -4,7 +4,7 @@
 mod common;
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -14,10 +14,15 @@ fn bin() -> PathBuf {
     std::env::var_os("GRAFT_TEST_GRAFT_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            std::env::current_exe()
-                .expect("current test executable")
-                .parent()
-                .and_then(Path::parent)
+            // target/<profile>/deps/<test>, or with the build-dir layout
+            // (Rust 1.100+) target/<profile>/build/<pkg>/<hash>/out/<test>.
+            let exe = std::env::current_exe().expect("current test executable");
+            exe.ancestors()
+                .skip(1)
+                .find_map(|dir| match dir.file_name()?.to_str()? {
+                    "deps" | "build" => dir.parent(),
+                    _ => None,
+                })
                 .expect("workspace target profile directory")
                 .join("graft")
         })

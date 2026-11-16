@@ -10,3 +10,4 @@ pub mod fake_api;
 pub mod pilot;
 pub mod server;
 pub mod synth;
+pub mod target;

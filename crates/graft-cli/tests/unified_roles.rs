@@ -18,14 +18,7 @@ fn bin() -> &'static str {
 fn server_bin() -> PathBuf {
     std::env::var_os("GRAFT_TEST_SERVER_BIN")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::current_exe()
-                .expect("current test executable")
-                .parent()
-                .and_then(Path::parent)
-                .expect("workspace target profile directory")
-                .join("graft-server")
-        })
+        .unwrap_or_else(|| graft_testkit::target::profile_dir().join("graft-server"))
 }
 
 struct Running {

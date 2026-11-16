@@ -166,11 +166,7 @@ impl Bins {
         }
         let exe =
             std::env::current_exe().map_err(|e| PilotError::Step(format!("current_exe: {e}")))?;
-        // target/<profile>/deps/<test> or target/<profile>/<bin>.
-        let mut dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
-        if dir.file_name() == Some(OsStr::new("deps")) {
-            dir.pop();
-        }
+        let dir = crate::target::profile_dir_of(&exe).unwrap_or_default();
         if std::env::var_os("GRAFT_PILOT_NO_BUILD").is_none() {
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
             let mut cmd = Command::new(cargo);
