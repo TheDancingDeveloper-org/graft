@@ -11,7 +11,7 @@ graft login dev --endpoint http://HOST:PORT < "$HOME/.config/graft/token"
 export GRAFT_AUTHOR_NAME="Name" GRAFT_AUTHOR_EMAIL="name@example"
 ```
 
-The token is a bearer credential. Never print it, never pass it as an argument, never copy it into the checkout or a prompt. `graft login` copies it into a private token file and stores only that file's path in the user config. For command overrides, endpoint and token resolve independently in this order: `--endpoint` / `--token-file`, `GRAFT_ENDPOINT` / `GRAFT_TOKEN`, the working copy's named server, then the user's `default_server`.
+The token is a bearer credential. Never print it, never pass it as an argument, never copy it into the checkout or a prompt. `graft login` copies it into a private token file and stores only that file's path in the user config. For command overrides, endpoint and token resolve independently. The endpoint comes from `--endpoint`, `GRAFT_ENDPOINT`, the working copy's named server, then the user's `default_server`. The token comes from `--token-file`, `GRAFT_TOKEN`, the file named by `GRAFT_TOKEN_FILE`, then the resolved server's token file.
 
 `graft serve --dev` starts a local server with a dev token.
 

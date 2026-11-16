@@ -40,7 +40,7 @@ pub(crate) struct Global {
     /// Repository name (default: the working copy's)
     #[arg(long, global = true, value_name = "NAME")]
     pub(crate) repo: Option<String>,
-    /// File holding the bearer token. `GRAFT_TOKEN` is the other source. A token is never taken from an argument.
+    /// File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument.
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) token_file: Option<PathBuf>,
     /// Named server in the user config. Its endpoint and token file are used; the token is never an argument.

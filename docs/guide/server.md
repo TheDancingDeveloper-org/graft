@@ -151,8 +151,10 @@ whenever both sides changed a matching path.
 
 ## Tokens and scopes
 
-Tokens are signed bearer tokens. Clients read them from a token file or from
-`GRAFT_TOKEN`; command-line token values are not accepted. Each scope is one of:
+Tokens are signed bearer tokens. Clients read them from a token file
+(`--token-file`, a server stored with `graft login`, or the file named by
+`GRAFT_TOKEN_FILE`) or from `GRAFT_TOKEN`; command-line token values are not
+accepted. Each scope is one of:
 
 | Scope | Grants |
 | --- | --- |

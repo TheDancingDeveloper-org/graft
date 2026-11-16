@@ -728,6 +728,94 @@ fn the_token_comes_from_a_file_or_the_environment_and_is_never_printed() {
 }
 
 #[test]
+fn graft_token_file_supplies_a_token_below_graft_token_and_above_the_config() {
+    let s = serve();
+    let dir = scratch();
+    let config_path = dir.path().join("config.toml");
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .args(["login", "dev", "--endpoint", &s.url])
+        .write_stdin("config-secret")
+        .assert()
+        .success();
+
+    let token = dir.path().join("token");
+    fs::write(&token, "  file-secret\n").unwrap();
+    let out = graft(dir.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .env("GRAFT_TOKEN_FILE", &token)
+        .args(["--endpoint", &s.url, "--repo", REPO, "log"])
+        .assert()
+        .success();
+    assert!(!text(out.get_output()).contains("file-secret"));
+
+    // The environment file is above the configured server's token file: an
+    // unreadable one fails instead of falling back to the login token.
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .env("GRAFT_TOKEN_FILE", dir.path().join("missing"))
+        .args(["--endpoint", &s.url, "--repo", REPO, "log"])
+        .assert()
+        .code(1)
+        .stderr(contains("cannot read the token file"));
+
+    // An explicit --token-file wins over the environment file.
+    let flag = dir.path().join("flag-token");
+    fs::write(&flag, "flag-secret\n").unwrap();
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .env("GRAFT_TOKEN_FILE", dir.path().join("missing"))
+        .args(["--endpoint", &s.url, "--repo", REPO, "--token-file"])
+        .arg(&flag)
+        .arg("log")
+        .assert()
+        .success();
+
+    // GRAFT_TOKEN wins over the file: this file cannot be read, and the run
+    // still succeeds.
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .env("GRAFT_TOKEN", "env-secret")
+        .env("GRAFT_TOKEN_FILE", dir.path().join("missing"))
+        .args(["--endpoint", &s.url, "--repo", REPO, "log"])
+        .assert()
+        .success();
+
+    // With no GRAFT_TOKEN the environment file is read, so an empty one fails.
+    let empty = dir.path().join("empty");
+    fs::write(&empty, "\n").unwrap();
+    graft(dir.path())
+        .env("GRAFT_CONFIG", &config_path)
+        .env("GRAFT_TOKEN_FILE", &empty)
+        .args(["--endpoint", &s.url, "--repo", REPO, "log"])
+        .assert()
+        .code(1)
+        .stderr(contains("is empty"));
+}
+
+#[test]
+fn an_unreachable_endpoint_names_it_and_hints_at_a_sandbox() {
+    let dir = scratch();
+    let endpoint = "http://127.0.0.1:1";
+    graft(dir.path())
+        .args(["--endpoint", endpoint, "--repo", REPO, "log"])
+        .assert()
+        .code(7)
+        .stderr(contains(endpoint))
+        .stderr(contains("sandbox or network policy"));
+
+    let out = graft(dir.path())
+        .args(["--json", "--endpoint", endpoint, "--repo", REPO, "log"])
+        .assert()
+        .code(7);
+    let value = json_out(out.get_output());
+    assert_eq!(value["error"]["kind"], json!("connect"));
+    let message = value["error"]["message"].as_str().expect("message");
+    assert!(message.contains(endpoint), "{message}");
+    assert!(message.contains("sandbox or network policy"), "{message}");
+}
+
+#[test]
 fn unknown_commands_say_so() {
     let dir = scratch();
     graft(dir.path())

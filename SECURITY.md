@@ -33,8 +33,9 @@ identity service. Content is verified by hash at every tier, so a corrupted or s
 
 - Never put a token in a command argument, a log, or command output. graft
   takes no token argument: it reads a token only from a file
-  (`--token-file`, or the token file of a server stored with `graft login`)
-  or from the `GRAFT_TOKEN` environment variable.
+  (`--token-file`, the token file of a server stored with `graft login`, or
+  the file named by `GRAFT_TOKEN_FILE`) or from the `GRAFT_TOKEN` environment
+  variable.
 - Keep a token file private (mode `0600`). `graft login` reads the token on
   standard input and stores it with mode `0600`; `graft ci exchange` writes
   its token file with mode `0600`; `graft import` hands the token to the

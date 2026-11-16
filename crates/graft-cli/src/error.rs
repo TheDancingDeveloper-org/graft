@@ -197,7 +197,9 @@ impl From<ClientError> for Failure {
             ClientError::Connect { endpoint, cause } => Failure::new(
                 Exit::Unavailable,
                 "connect",
-                format!("could not connect to {endpoint}: {cause}"),
+                format!(
+                    "could not connect to {endpoint}: {cause}; check the endpoint, and whether a sandbox or network policy blocks outbound connections"
+                ),
             ),
             ClientError::Dirty(paths) => Failure::new(
                 Exit::Conflict,
@@ -394,5 +396,7 @@ mod tests {
         assert_eq!(connect.exit, Exit::Unavailable);
         assert_eq!(connect.kind, "connect");
         assert!(connect.message.contains("connection refused"));
+        assert!(connect.message.contains("http://127.0.0.1:1"));
+        assert!(connect.message.contains("sandbox or network policy"));
     }
 }
