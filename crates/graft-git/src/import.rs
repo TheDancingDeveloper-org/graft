@@ -47,6 +47,14 @@ use crate::{BadPath, GitError, GitSha, NonCommitTag, Unrepresentable};
 /// as a rebased copy, would map to one changeset.
 pub const SHA_KEY: &str = "mirror.git-commit";
 
+/// The metadata key on a changeset whose git parents lie before the
+/// mirror's start point: the start commit's sha (WI-4332).
+pub const START_AT_KEY: &str = "mirror.start-at";
+
+/// The metadata key listing, comma-separated, the git parents a changeset
+/// dropped because they lie before the mirror's start point (WI-4332).
+pub const CUT_PARENTS_KEY: &str = "mirror.cut-parents";
+
 /// Blobs per `PutObjects` call: small enough that a queue spreads over
 /// several calls in flight.
 const PUT_BLOBS_PER_CALL: usize = 32;
@@ -75,6 +83,12 @@ pub struct ImportConfig {
     pub allow_lossy: Vec<GitSha>,
     /// Changesets per `ImportChangesets` batch.
     pub batch: usize,
+    /// The mirror's start point (WI-4332): this commit imports as a
+    /// parentless root and its ancestors are never walked, checked or
+    /// imported. A later commit whose first parent is one of those
+    /// ancestors also imports as a root; other parents among them are
+    /// dropped. Every imported changeset still passes the path rules (D11).
+    pub start_at: Option<GitSha>,
 }
 
 impl ImportConfig {
@@ -87,6 +101,7 @@ impl ImportConfig {
             tags: true,
             allow_lossy: Vec::new(),
             batch: 256,
+            start_at: None,
         }
     }
 }
@@ -147,13 +162,67 @@ where
             }
         }
     }
+    // History before the start point: the start commit's ancestors, read
+    // (commit objects only) the first time the walk meets an unknown commit.
+    let mut before: Option<HashSet<GitSha>> = None;
+    let mut before_start = |repo: &Repo, sha: GitSha| -> Result<bool, GitError> {
+        let Some(start) = config.start_at else {
+            return Ok(false);
+        };
+        if before.is_none() {
+            let raw = parse_commit(&repo.read(start, Kind::Commit)?).ok_or_else(|| {
+                GitError::Read(format!("start commit {start} has an unexpected shape"))
+            })?;
+            let walk = topo(repo, &raw.parents, |_| Ok(false))?;
+            before = Some(walk.order.into_iter().chain(walk.misshapen).collect());
+        }
+        Ok(before.as_ref().is_some_and(|b| b.contains(&sha)))
+    };
+    for (line, sha) in &line_tips {
+        if map.changeset_of(*sha)?.is_none() && before_start(&repo, *sha)? {
+            return Err(GitError::Config(format!(
+                "line {line} names {sha}, which is before the start point"
+            )));
+        }
+    }
+    let mut kept_tags = Vec::new();
+    for (tag, sha, objects) in tag_tips {
+        if map.changeset_of(sha)?.is_none() && before_start(&repo, sha)? {
+            non_commit.push(NonCommitTag {
+                name: tag,
+                kind: "before-start",
+            });
+        } else {
+            kept_tags.push((tag, sha, objects));
+        }
+    }
+    let tag_tips = kept_tags;
     let tips: Vec<GitSha> = line_tips
         .iter()
         .map(|(_, s)| *s)
         .chain(tag_tips.iter().map(|(_, s, _)| *s))
         .collect();
-    let walk = topo(&repo, &tips, |sha| Ok(map.changeset_of(sha)?.is_some()))?;
+    let mut cut = HashSet::new();
+    let walk = topo(&repo, &tips, |sha| {
+        if map.changeset_of(sha)?.is_some() {
+            return Ok(true);
+        }
+        if before_start(&repo, sha)? {
+            cut.insert(sha);
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
+    if let Some(start) = config.start_at
+        && map.changeset_of(start)?.is_none()
+        && !walk.order.contains(&start)
+    {
+        return Err(GitError::Config(format!(
+            "start commit {start} is not reachable from the imported refs"
+        )));
+    }
     let mut importer = Importer::new(api, cx, map, config, repo);
+    importer.cut = cut;
     importer.precheck(&walk.order, walk.misshapen)?;
     for sha in &walk.order {
         importer.import_commit(*sha).await?;
@@ -259,6 +328,11 @@ struct Importer<'a, A, M> {
     failed: Vec<GitSha>,
     indistinct: Vec<(GitSha, GitSha)>,
     report: ImportReport,
+    /// Commits before the start point the walk stopped at.
+    cut: HashSet<GitSha>,
+    /// The git parents of each commit imported with cut parents, for the
+    /// fidelity check.
+    git_parents: HashMap<GitSha, Vec<GitSha>>,
 }
 
 /// Graft trees for [`apply_changes_with`]: those this import derived, then
@@ -368,6 +442,21 @@ where
             failed: Vec::new(),
             indistinct: Vec::new(),
             report: ImportReport::default(),
+            cut: HashSet::new(),
+            git_parents: HashMap::new(),
+        }
+    }
+
+    /// The parents a commit imports with: none when its first parent is
+    /// before the start point, else those not before it.
+    fn kept_parents(&self, parents: &[GitSha]) -> Vec<GitSha> {
+        match parents.first() {
+            Some(first) if self.cut.contains(first) => Vec::new(),
+            _ => parents
+                .iter()
+                .filter(|p| !self.cut.contains(p))
+                .copied()
+                .collect(),
         }
     }
 
@@ -407,7 +496,8 @@ where
             if raw.parents.first().is_some_and(|p| skip.contains(p)) {
                 continue;
             }
-            let parent_tree = raw.parents.first().map(|p| self.tree_of(*p)).transpose()?;
+            let kept = self.kept_parents(&raw.parents);
+            let parent_tree = kept.first().map(|p| self.tree_of(*p)).transpose()?;
             let dirs = changed_dirs(&mut self.repo, parent_tree, Some(raw.tree))?;
             let offences = check_paths(&mut self.repo, &dirs)?;
             if offences.is_empty() {
@@ -501,7 +591,8 @@ where
     /// Step 3 for one commit.
     async fn import_commit(&mut self, sha: GitSha) -> Result<(), GitError> {
         let raw = self.commit(sha)?;
-        let parent_tree = raw.parents.first().map(|p| self.tree_of(*p)).transpose()?;
+        let kept = self.kept_parents(&raw.parents);
+        let parent_tree = kept.first().map(|p| self.tree_of(*p)).transpose()?;
         let dirs = changed_dirs(&mut self.repo, parent_tree, Some(raw.tree))?;
         let mut changes = Vec::new();
         for c in git_changes(&mut self.repo, &dirs)? {
@@ -522,11 +613,11 @@ where
         if self.blob_queue_bytes >= PUT_BYTES_MAX && self.writing() {
             self.upload_blobs().await?;
         }
-        let mut parents = Vec::with_capacity(raw.parents.len());
-        for p in &raw.parents {
+        let mut parents = Vec::with_capacity(kept.len());
+        for p in &kept {
             parents.push(self.ids.changeset(self.map, *p)?);
         }
-        let base = match raw.parents.first() {
+        let base = match kept.first() {
             Some(p) => Some(self.root_of(*p).await?).filter(|r| *r != empty_root()),
             None => None,
         };
@@ -546,7 +637,7 @@ where
             .extend(applied.new_trees);
         let (name, email, secs, offset_min) = author(&raw.headers);
         let message = String::from_utf8_lossy(&raw.message).into_owned();
-        let changeset = Changeset {
+        let mut changeset = Changeset {
             parents,
             root,
             changes,
@@ -562,6 +653,22 @@ where
             message,
             metadata: Metadata::from([(SHA_KEY.to_owned(), sha.to_hex())]),
         };
+        let cut: Vec<String> = raw
+            .parents
+            .iter()
+            .filter(|p| !kept.contains(p))
+            .map(GitSha::to_hex)
+            .collect();
+        if !cut.is_empty() || (raw.parents.is_empty() && self.config.start_at == Some(sha)) {
+            let start = self.config.start_at.map(|s| s.to_hex()).unwrap_or_default();
+            changeset.metadata.insert(START_AT_KEY.to_owned(), start);
+            if !cut.is_empty() {
+                changeset
+                    .metadata
+                    .insert(CUT_PARENTS_KEY.to_owned(), cut.join(","));
+                self.git_parents.insert(sha, raw.parents.clone());
+            }
+        }
         changeset
             .check(&CheckOptions {
                 allow_root: true,
@@ -646,10 +753,17 @@ where
             &changeset.changes,
             &record.raw_trees,
         )?;
-        let mut parents = Vec::with_capacity(changeset.parents.len());
-        for p in &changeset.parents {
-            parents.push(self.ids.sha(self.map, *p)?);
-        }
+        let parents = match self.git_parents.get(&record.sha) {
+            // Cut parents: the commit's own sha needs its git parents.
+            Some(git) => git.clone(),
+            None => {
+                let mut parents = Vec::with_capacity(changeset.parents.len());
+                for p in &changeset.parents {
+                    parents.push(self.ids.sha(self.map, *p)?);
+                }
+                parents
+            }
+        };
         if commit_sha(tree, &parents, record, &changeset.message) != record.sha {
             return Ok(false);
         }
