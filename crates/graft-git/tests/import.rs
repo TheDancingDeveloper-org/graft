@@ -6,7 +6,9 @@ mod common;
 use std::process::Command;
 
 use common::{EMPTY_TREE, Git, TempDir, check_every_commit, varied_repo};
-use graft_git::import::{ImportConfig, ImportReport, SHA_KEY, import};
+use graft_git::import::{
+    CUT_PARENTS_KEY, ImportConfig, ImportReport, SHA_KEY, START_AT_KEY, import,
+};
 use graft_git::map::{MemoryMirrorMap, MirrorMap};
 use graft_git::{GitError, GitSha};
 use graft_testkit::fake_api::{Call, FakeApi, admin_cx, block_on};
@@ -605,4 +607,139 @@ fn one_oversize_blob_at_two_paths_reports_both() {
     let got: Vec<&str> = list.iter().map(|b| b.path.as_str()).collect();
     assert_eq!(got, vec!["one", "two"]);
     assert!(map.is_empty(), "nothing imported");
+}
+
+/// History whose middle commit adds `codex-cli/>` (breaks D11) and whose
+/// next commit removes it again: (`c1`, `bad`, `tip`).
+fn history_with_a_bad_path(git: &mut Git) -> (String, String, String) {
+    let a = git.blob(b"a\n");
+    let b = git.blob(b"b\n");
+    let good = git.raw_tree(&[("100644", b"a.txt", &a)]);
+    let dir = git.raw_tree(&[("100644", b">", &b)]);
+    let bad_tree = git.raw_tree(&[("100644", b"a.txt", &a), ("40000", b"codex-cli", &dir)]);
+    let c1 = git.commit_tree(&good, &[], "first");
+    let bad = git.commit_tree(&bad_tree, &[&c1], "adds codex-cli/>");
+    let tip_tree = git.raw_tree(&[("100644", b"a.txt", &a), ("100644", b"b.txt", &b)]);
+    let tip = git.commit_tree(&tip_tree, &[&bad], "drops codex-cli/>");
+    (c1, bad, tip)
+}
+
+fn sha(hex: &str) -> GitSha {
+    GitSha::from_hex(hex).unwrap()
+}
+
+fn changeset_of(api: &FakeApi, map: &MemoryMirrorMap, hex: &str) -> Option<graft_model::Changeset> {
+    let id = map.changeset_of(sha(hex)).unwrap()?;
+    api.changeset(id)
+}
+
+#[test]
+fn start_at_imports_from_a_root_and_then_follows() {
+    let mut git = Git::init("start-at");
+    let (c1, bad, tip) = history_with_a_bad_path(&mut git);
+    git.set_ref("refs/heads/main", &tip);
+    let api = FakeApi::new();
+    let map = MemoryMirrorMap::new();
+    let mut c = config(&git, &["main"]);
+    c.tags = false;
+    c.start_at = Some(sha(&tip));
+    let first = run(&api, &map, &c).expect("imports from the start point");
+    assert_eq!(first.commits, 1);
+    assert_eq!(first.verified, 1, "the start commit keeps its sha");
+    assert!(map.changeset_of(sha(&c1)).unwrap().is_none());
+    assert!(map.changeset_of(sha(&bad)).unwrap().is_none());
+    let root = changeset_of(&api, &map, &tip).expect("start commit imported");
+    assert!(root.parents.is_empty(), "the start commit is a root");
+    assert_eq!(api.snapshot(root.root), git.ls_tree(&tip));
+    assert_eq!(root.metadata[SHA_KEY], tip);
+    assert_eq!(root.metadata[START_AT_KEY], tip);
+    assert_eq!(root.metadata[CUT_PARENTS_KEY], bad);
+
+    // Upstream moves on: a commit on the tip, and a side branch off the bad
+    // commit (fixed there too) merged in, as an upstream sync would be.
+    let a = git.blob(b"a\n");
+    let c = git.blob(b"c\n");
+    let next_tree = git.raw_tree(&[("100644", b"a.txt", &a), ("100644", b"c.txt", &c)]);
+    let next = git.commit_tree(&next_tree, &[&tip], "next");
+    let side_tree = git.raw_tree(&[("100644", b"a.txt", &a)]);
+    let side = git.commit_tree(&side_tree, &[&bad], "side fix");
+    let merge = git.commit_tree(&next_tree, &[&next, &side], "sync");
+    git.set_ref("refs/heads/main", &merge);
+    let mut c2 = config(&git, &["main"]);
+    c2.tags = false;
+    c2.start_at = Some(sha(&tip));
+    let second = run(&api, &map, &c2).expect("follows on");
+    assert_eq!(second.commits, 3);
+    assert_eq!(second.verified, 3);
+    assert!(map.changeset_of(sha(&bad)).unwrap().is_none());
+    let next_cs = changeset_of(&api, &map, &next).unwrap();
+    assert_eq!(next_cs.parents, vec![root.id()]);
+    assert!(!next_cs.metadata.contains_key(START_AT_KEY));
+    let side_cs = changeset_of(&api, &map, &side).unwrap();
+    assert!(side_cs.parents.is_empty(), "first parent before the start");
+    assert_eq!(side_cs.metadata[CUT_PARENTS_KEY], bad);
+    let merge_cs = changeset_of(&api, &map, &merge).unwrap();
+    assert_eq!(merge_cs.parents, vec![next_cs.id(), side_cs.id()]);
+    assert_eq!(api.snapshot(merge_cs.root), git.ls_tree(&merge));
+    assert_eq!(second.lines, vec![("main".to_owned(), merge_cs.id())]);
+}
+
+#[test]
+fn without_start_at_the_bad_history_is_still_rejected() {
+    let mut git = Git::init("no-start-at");
+    let (_, bad, tip) = history_with_a_bad_path(&mut git);
+    git.set_ref("refs/heads/main", &tip);
+    let api = FakeApi::new();
+    let map = MemoryMirrorMap::new();
+    let err = run(&api, &map, &config(&git, &["main"])).unwrap_err();
+    assert_eq!(
+        err,
+        GitError::BadPaths(vec![graft_git::BadPath {
+            path: "codex-cli/>".into(),
+            reason: "portability (reserved-char)".into(),
+            commit: sha(&bad),
+        }])
+    );
+    assert_eq!(err.to_string(), "1 paths break graft's path rules");
+    assert!(api.calls().is_empty());
+    assert!(map.is_empty());
+}
+
+#[test]
+fn a_start_commit_that_breaks_the_path_rules_is_rejected() {
+    let mut git = Git::init("bad-start");
+    let (_, bad, tip) = history_with_a_bad_path(&mut git);
+    git.set_ref("refs/heads/main", &tip);
+    let api = FakeApi::new();
+    let map = MemoryMirrorMap::new();
+    let mut c = config(&git, &["main"]);
+    c.start_at = Some(sha(&bad));
+    let err = run(&api, &map, &c).unwrap_err();
+    assert_eq!(
+        err,
+        GitError::BadPaths(vec![graft_git::BadPath {
+            path: "codex-cli/>".into(),
+            reason: "portability (reserved-char)".into(),
+            commit: sha(&bad),
+        }])
+    );
+    assert!(api.calls().is_empty());
+    assert!(map.is_empty());
+}
+
+#[test]
+fn a_start_commit_off_the_imported_refs_is_an_error() {
+    let mut git = Git::init("stray-start");
+    let (_, _, tip) = history_with_a_bad_path(&mut git);
+    let a = git.blob(b"a\n");
+    let other = git.raw_tree(&[("100644", b"z.txt", &a)]);
+    let stray = git.commit_tree(&other, &[], "unrelated");
+    git.set_ref("refs/heads/main", &tip);
+    let api = FakeApi::new();
+    let map = MemoryMirrorMap::new();
+    let mut c = config(&git, &["main"]);
+    c.start_at = Some(sha(&stray));
+    let err = run(&api, &map, &c).unwrap_err();
+    assert!(matches!(err, GitError::Config(_)), "{err:?}");
+    assert!(api.calls().is_empty());
 }
