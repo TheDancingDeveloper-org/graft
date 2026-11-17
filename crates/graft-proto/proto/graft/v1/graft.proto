@@ -913,6 +913,9 @@ message Mirror {
   string created_by = 11;
   string updated_by = 12;
   int64 updated_at_ms = 13;
+  // The import start point (WI-4332): a 40-hex git commit sha. Absent:
+  // the import walks the whole history.
+  optional string start_at = 14;
 }
 
 // Creates (`expected_version` absent) or replaces a row's settings. A
@@ -927,6 +930,10 @@ message SetMirrorRequest {
   bool enabled = 5;
   MirrorExport export = 6;
   optional uint64 expected_version = 7;
+  // The import start point (WI-4332), a 40-hex git commit sha. Absent keeps
+  // the stored one. It is set once: changing a stored start point is
+  // `Rejected { policy: "mirror-start-at" }`.
+  optional string start_at = 8;
 }
 
 // `SetMirrorCredential` (D41 §3.4): write-only, `mirror:bind`. The server

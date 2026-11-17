@@ -78,6 +78,7 @@ async fn credentials_seal_open_only_for_the_lease_holder_and_survive_rotation() 
             enabled: true,
             export: None,
             expected_version: None,
+            start_at: None,
         })
         .await
         .expect("row")
@@ -239,6 +240,7 @@ async fn only_the_exact_lease_holder_renews_releases_reports_or_reads() {
             enabled: true,
             export: None,
             expected_version: None,
+            start_at: None,
         })
         .await
         .expect("row")

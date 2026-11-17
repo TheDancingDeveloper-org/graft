@@ -147,6 +147,7 @@ async fn mirror(
             export,
             interval,
             disabled,
+            start_at,
         } => {
             let lines = lines(follow, export)?;
             if lines.is_empty() {
@@ -165,6 +166,7 @@ async fn mirror(
                         enabled: !disabled,
                         export: None,
                         expected_version: None,
+                        start_at: start_at.clone(),
                     },
                 )
                 .await
@@ -179,6 +181,7 @@ async fn mirror(
             follow,
             export,
             interval,
+            start_at,
         } => {
             let old = client
                 .get_mirror(&cx, key(name, upstream))
@@ -205,6 +208,7 @@ async fn mirror(
                         enabled,
                         export: old.export,
                         expected_version: Some(old.version),
+                        start_at: start_at.clone(),
                     },
                 )
                 .await
@@ -585,7 +589,11 @@ fn mirror_line(m: &pb::Mirror) -> String {
             lines.join(",")
         },
         status
-    )
+    ) + &m
+        .start_at
+        .as_ref()
+        .map(|s| format!(" start_at:{s}"))
+        .unwrap_or_default()
 }
 
 /// One line for a request, from its JSON form.

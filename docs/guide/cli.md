@@ -968,6 +968,7 @@ Options:
       --disabled              Add the mirror disabled
       --token-file <PATH>     File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument
       --server <NAME>         Named server in the user config. Its endpoint and token file are used; the token is never an argument
+      --start-at <SHA>        Import start point (a 40-hex commit sha): it imports as a root and history before it is never walked; set once
   -C, --directory <DIR>       Run as if started in this directory, like `git -C`
   -h, --help                  Print help
 ```
@@ -995,6 +996,7 @@ Options:
       --interval <SECONDS>    Poll interval in seconds
       --server <NAME>         Named server in the user config. Its endpoint and token file are used; the token is never an argument
   -C, --directory <DIR>       Run as if started in this directory, like `git -C`
+      --start-at <SHA>        Import start point (a 40-hex commit sha): it imports as a root and history before it is never walked; set once
   -h, --help                  Print help
 ```
 

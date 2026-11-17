@@ -17,7 +17,7 @@ const COLUMNS: &str = "m.upstream, m.lines, m.interval_s, m.enabled, m.credentia
      m.export_default_author, m.export_authors, m.version, m.created_by, m.updated_by,
      m.updated_at, m.status_set, m.status_poll_at, m.status_success_at, m.status_sha,
      m.status_changeset, m.status_lag_changesets, m.status_lag_s, m.status_error_code,
-     m.status_error_message, m.status_backoff_until, m.status_lease_epoch";
+     m.status_error_message, m.status_backoff_until, m.status_lease_epoch, m.start_at";
 
 fn field(s: &str) -> StoreResult<&str> {
     if s.contains(['\t', '\n']) {
@@ -108,6 +108,7 @@ fn record(r: &Row<'_>, o: usize) -> rusqlite::Result<StoreResult<MirrorRecord>> 
     let created_by: String = r.get(o + 9)?;
     let updated_by: String = r.get(o + 10)?;
     let updated_at_ms: i64 = r.get(o + 11)?;
+    let start_at: Option<String> = r.get(o + 23)?;
     Ok((|| {
         let status = if status_set {
             Some(MirrorStatusRecord {
@@ -142,6 +143,7 @@ fn record(r: &Row<'_>, o: usize) -> rusqlite::Result<StoreResult<MirrorRecord>> 
             created_by,
             updated_by,
             updated_at_ms,
+            start_at,
         })
     })())
 }
@@ -226,15 +228,16 @@ pub(crate) fn put(conn: &Connection, repo: i64, m: &MirrorRecord) -> StoreResult
         "INSERT INTO repo_mirrors
              (repo, upstream, lines, interval_s, enabled, credential, kek_id,
               export_default_author, export_authors, version, created_by, updated_by,
-              updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+              updated_at, start_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT (repo, upstream) DO UPDATE SET
              lines = excluded.lines, interval_s = excluded.interval_s,
              enabled = excluded.enabled, credential = excluded.credential,
              kek_id = excluded.kek_id,
              export_default_author = excluded.export_default_author,
              export_authors = excluded.export_authors, version = excluded.version,
-             updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+             updated_by = excluded.updated_by, updated_at = excluded.updated_at,
+             start_at = excluded.start_at",
     )
     .and_then(|mut s| {
         s.execute(params![
@@ -251,6 +254,7 @@ pub(crate) fn put(conn: &Connection, repo: i64, m: &MirrorRecord) -> StoreResult
             m.created_by,
             m.updated_by,
             m.updated_at_ms,
+            m.start_at,
         ])
     })
     .map_err(sql_err)?;

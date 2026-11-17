@@ -533,7 +533,7 @@ fn rows_of(conn: &Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
     rows
 }
 
-/// The mirror tables (versions 9 to 12) on a populated version 8 database:
+/// The mirror tables (versions 9 to 13) on a populated version 8 database:
 /// every existing row of every table survives, column for column, and still
 /// reads through the store; the new tables exist and are empty.
 #[test]
@@ -605,7 +605,7 @@ fn a_populated_version_8_database_migrates_to_the_mirror_tables_intact() {
     let store = SqliteMetaStore::open(SqliteConfig::new(dir.db())).expect("open");
     let conn = Connection::open(dir.db()).expect("inspect");
     assert_eq!(migrations::version(&conn).expect("version"), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 12);
+    assert_eq!(SCHEMA_VERSION, 13);
     assert_eq!(tables(&conn), TABLES);
     for (t, rows) in &before {
         assert_eq!(&rows_of(&conn, t), rows, "{t} survives intact");

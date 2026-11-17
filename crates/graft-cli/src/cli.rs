@@ -665,6 +665,9 @@ pub(crate) enum MirrorAction {
         /// Add the mirror disabled
         #[arg(long)]
         disabled: bool,
+        /// Import start point (a 40-hex commit sha): it imports as a root and history before it is never walked; set once
+        #[arg(long, value_name = "SHA")]
+        start_at: Option<String>,
     },
     /// Enable, disable or change a mirror; needs the repository's admin (mirror:export to change export lines)
     Set {
@@ -688,6 +691,9 @@ pub(crate) enum MirrorAction {
         /// Poll interval in seconds
         #[arg(long, value_name = "SECONDS")]
         interval: Option<u32>,
+        /// Import start point (a 40-hex commit sha): it imports as a root and history before it is never walked; set once
+        #[arg(long, value_name = "SHA")]
+        start_at: Option<String>,
     },
     /// Seal a credential into a mirror; needs mirror:bind and read access. Read from a file or standard input, never an argument
     Credential {

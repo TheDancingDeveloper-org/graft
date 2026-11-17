@@ -150,6 +150,7 @@ impl World {
             &self.db,
             self.mirror(),
             FollowConfig {
+                start_at: None,
                 repo: REPO.to_owned(),
                 lines: vec![main_line()],
                 allow_lossy: Vec::new(),

@@ -82,6 +82,9 @@ pub struct FollowConfig {
     pub lines: Vec<FollowLine>,
     /// Commits allowed to fail the fidelity check.
     pub allow_lossy: Vec<GitSha>,
+    /// The import start point (WI-4332); see
+    /// [`graft_git::import::ImportConfig::start_at`].
+    pub start_at: Option<GitSha>,
     /// Changesets per `ImportChangesets` batch.
     pub batch: usize,
     /// Time between polls.
@@ -577,6 +580,7 @@ where
             tags: false,
             allow_lossy: self.config.allow_lossy.clone(),
             batch: self.config.batch,
+            start_at: self.config.start_at,
         };
         let report = import(self.api, &cx, self.db, &import_config).await?;
         let to = report

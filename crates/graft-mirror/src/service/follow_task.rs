@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use graft_git::GitSha;
 use graft_git::map::MirrorMap;
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::pb::MirrorErrorCode;
@@ -290,10 +291,16 @@ where
             let lines = follow_lines(&task.row);
             let first = lines.first().map(|l| l.line.clone());
             let base = lines.first().cloned();
+            let start_at = match task.row.start_at.as_deref().map(GitSha::from_hex) {
+                None => None,
+                Some(Some(sha)) => Some(sha),
+                Some(None) => return task.broken("the mirror's start_at is not a commit sha"),
+            };
             let config = FollowConfig {
                 repo: task.row.repo.clone(),
                 lines,
                 allow_lossy: Vec::new(),
+                start_at,
                 batch: IMPORT_BATCH,
                 interval: POLL_INTERVAL,
                 tags: None,
