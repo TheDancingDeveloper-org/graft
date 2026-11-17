@@ -142,6 +142,7 @@ A new meta table, `repo_mirrors`, one row per `(repo, upstream)`:
 | `version` | monotonic counter, bumped by every `SetMirror`, `SetMirrorCredential` and enable/disable; also the etag on `SetMirror` (CAS) |
 | `status` | written by the mirror service (§3.3), not part of `version` |
 | `created_by`, `updated_by`, `updated_at` | audit |
+| `start_at` | nullable: the import start point, a 40-hex commit sha (WI-4332; see below) |
 
 `graft-proto` gets the typed `Mirror`, `MirrorLine` and `MirrorStatus`
 messages. `RepoService` gets `SetMirror`, `GetMirror`, `ListMirrors`,
@@ -186,6 +187,33 @@ and no response carries a credential.
 Branch names and an upstream URL are stored as strings. The server doesn't
 fetch them or hold any git type, which keeps rule 6 (git stays in
 `graft-git` and `graft-mirror`). The design PR states this as the boundary.
+
+**Import start point (WI-4332).** `start_at` is opt-in and set once:
+`graft repo mirror add|set --start-at <sha>`, `start_at` in an
+`import-config` TOML, or the `start_at` field of `SetMirror` (absent keeps
+the stored value; changing a stored value is
+`Rejected { policy: "mirror-start-at" }`). The importer then treats the
+start commit as a root:
+
+- the start commit's tree imports as one parentless changeset, checked in
+  full against the path rules (D11). A start commit that breaks them is
+  rejected with the usual `BadPaths` report;
+- the start commit's ancestors are never imported or path-checked. Line or
+  tag refs that point into them are an error (lines) or skipped (tags,
+  reported as `before-start`);
+- later polls follow normally. A new commit whose first parent is an
+  ancestor of the start commit (an upstream side branch reached through a
+  sync merge) also imports as a root; other parents among those ancestors
+  are dropped;
+- each such changeset carries `mirror.start-at = <start sha>` and, when it
+  dropped parents, `mirror.cut-parents = <sha>,<sha>`. Import still checks
+  that each commit reproduces its git sha, using its real git parents.
+
+The export does not rebuild these commits: it reuses them from the mirror's
+git cache, which holds the upstream history. A fresh export into an empty
+repository fails the fidelity check at the first cut changeset.
+
+Without `start_at`, import is unchanged and walks the whole history.
 
 **Mirror removal.** `RemoveMirror` deletes the row. The service stops the
 task at its next reconcile (§3.3). By default the `graft.followed/<line>`

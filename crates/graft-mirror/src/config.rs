@@ -11,6 +11,9 @@
 //! metrics_addr = "127.0.0.1:9465"      # serves /metrics; optional
 //! tags = "*"                           # upstream tags to follow; default
 //!                                      # "*" (all), "" turns tags off
+//! start_at = "<40-hex sha>"            # optional import start point
+//!                                      # (WI-4332); history before it is
+//!                                      # never imported
 //!
 //! [[lines]]
 //! branch = "main"                      # upstream refs/heads/main
@@ -71,6 +74,10 @@ pub struct FileConfig {
     /// Commits allowed to fail the fidelity check (40-hex shas).
     #[serde(default)]
     pub allow_lossy: Vec<String>,
+    /// The import start point (WI-4332), a 40-hex commit sha: it imports as
+    /// a root and history before it is never walked. Optional.
+    #[serde(default)]
+    pub start_at: Option<String>,
     /// The upstream tags follow imports, as a pattern under `refs/tags/`.
     /// Default `*`; empty: none.
     #[serde(default)]
@@ -383,6 +390,7 @@ impl FileConfig {
             return Err(bad("poll_interval_secs must be at least 1"));
         }
         parse_shas(&config.allow_lossy)?;
+        parse_shas(config.start_at.as_slice())?;
         if let Some(github) = &config.github {
             github.auth()?;
             if github.owner.is_empty() || github.repo.is_empty() {
@@ -615,6 +623,7 @@ impl FileConfig {
             repo: self.repo.clone(),
             lines: self.lines(),
             allow_lossy: parse_shas(&self.allow_lossy)?,
+            start_at: parse_shas(self.start_at.as_slice())?.into_iter().next(),
             batch: match &self.batch {
                 Some(BatchKey::Size(n)) => Some(*n),
                 Some(BatchKey::Table(t)) => t.import_size,
@@ -795,6 +804,17 @@ token_file = "/run/secrets/github-token"
         assert_eq!(set.batch_cut(), Some((3, 15)));
         assert_eq!(set.follow().unwrap().batch, 32);
         assert!(FileConfig::parse(&format!("{BASE}{lines}[batch]\nmin_lands = 0\n")).is_err());
+    }
+
+    #[test]
+    fn start_at_is_an_optional_commit_sha() {
+        let lines = "[[lines]]\nbranch = \"main\"\n";
+        let unset = FileConfig::parse(&format!("{BASE}{lines}")).unwrap();
+        assert_eq!(unset.follow().unwrap().start_at, None);
+        let sha = "ab".repeat(20);
+        let set = FileConfig::parse(&format!("{BASE}start_at = \"{sha}\"\n{lines}")).unwrap();
+        assert_eq!(set.follow().unwrap().start_at, GitSha::from_hex(&sha));
+        assert!(FileConfig::parse(&format!("{BASE}start_at = \"abc\"\n{lines}")).is_err());
     }
 
     #[test]

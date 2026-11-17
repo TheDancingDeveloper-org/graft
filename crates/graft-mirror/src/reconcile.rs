@@ -211,6 +211,7 @@ where
         tags: false,
         allow_lossy: Vec::new(),
         batch: 256,
+        start_at: None,
     };
     let report = import(api, cx, db, &config).await?;
     let head = report

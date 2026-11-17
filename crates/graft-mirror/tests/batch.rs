@@ -395,6 +395,7 @@ impl World {
             line: "main".to_owned(),
         };
         let follow = FollowConfig {
+            start_at: None,
             repo: REPO.to_owned(),
             lines: vec![base.clone()],
             allow_lossy: Vec::new(),
@@ -1073,6 +1074,7 @@ async fn the_base_line_cannot_be_batched() {
         line: "main".to_owned(),
     };
     let follow = FollowConfig {
+        start_at: None,
         repo: REPO.to_owned(),
         lines: vec![base.clone()],
         allow_lossy: Vec::new(),
@@ -3326,6 +3328,7 @@ impl World {
     /// does between batcher runs.
     async fn follow_main(&self) -> ChangesetId {
         let follow = FollowConfig {
+            start_at: None,
             repo: REPO.to_owned(),
             lines: vec![FollowLine {
                 branch: "main".to_owned(),
@@ -3558,6 +3561,7 @@ mod request_cut {
             line: "main".to_owned(),
         };
         let follow = FollowConfig {
+            start_at: None,
             repo: REPO.to_owned(),
             lines: vec![base.clone()],
             allow_lossy: Vec::new(),
@@ -3820,6 +3824,7 @@ mod request_cut {
             line: "main".to_owned(),
         };
         let follow = FollowConfig {
+            start_at: None,
             repo: REPO.to_owned(),
             lines: vec![base.clone()],
             allow_lossy: Vec::new(),

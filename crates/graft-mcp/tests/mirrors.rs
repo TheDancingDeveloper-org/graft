@@ -74,6 +74,7 @@ impl MirrorAdmin for Service {
                 created_by: cx.principal.subject.clone(),
                 updated_by: cx.principal.subject.clone(),
                 updated_at_ms: 1,
+                start_at: None,
             };
             rows.insert(key, row.clone());
             Ok(row)

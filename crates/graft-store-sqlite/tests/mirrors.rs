@@ -39,6 +39,7 @@ fn row(upstream: &str, version: u64) -> MirrorRecord {
         created_by: "op".into(),
         updated_by: "op".into(),
         updated_at_ms: 1_000,
+        start_at: Some("ab".repeat(20)),
     }
 }
 

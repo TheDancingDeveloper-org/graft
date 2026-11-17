@@ -139,6 +139,7 @@ pub fn plan(
                 enabled: true,
                 export,
                 expected_version: None,
+                start_at: file.start_at,
             },
         });
     }
@@ -283,6 +284,10 @@ pub fn differences(want: &pb::SetMirrorRequest, existing: &pb::Mirror) -> Vec<&'
     };
     if export(want.export.as_ref()) != export(existing.export.as_ref()) {
         out.push("export");
+    }
+    let sha = |s: Option<&String>| s.map(|s| s.to_ascii_lowercase());
+    if want.start_at.is_some() && sha(want.start_at.as_ref()) != sha(existing.start_at.as_ref()) {
+        out.push("start_at");
     }
     out
 }

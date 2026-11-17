@@ -1141,6 +1141,7 @@ fn the_mirror_reads_only_bound_repositories<M: MetaStore>((f, _): (Fixture<M>, A
             created_by: "op".into(),
             updated_by: "op".into(),
             updated_at_ms: 0,
+            start_at: None,
         }),
     );
     assert_eq!(refs(&mirror, "r"), Ok(()));
@@ -1189,6 +1190,7 @@ fn rebound_mirror_imports_under_the_new_lease<M: MetaStore>((f, _): (Fixture<M>,
                 created_by: "op".into(),
                 updated_by: "op".into(),
                 updated_at_ms: 0,
+                start_at: None,
             })],
         };
         assert!(matches!(
@@ -1495,6 +1497,7 @@ fn the_mirror_cuts_only_a_claimed_batch_line<M: MetaStore>((f, _): (Fixture<M>, 
             created_by: "op".into(),
             updated_by: "op".into(),
             updated_at_ms: 0,
+            start_at: None,
         })],
     );
     denied(move_at("other", Some(1)));

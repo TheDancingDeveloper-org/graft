@@ -2237,6 +2237,7 @@ async fn bind(store: &MemoryStore, repo: &str, upstream: &str) {
             created_by: "op".into(),
             updated_by: "op".into(),
             updated_at_ms: 0,
+            start_at: None,
         })],
     };
     assert!(matches!(

@@ -236,6 +236,8 @@ pub struct MirrorRecord {
     pub updated_by: String,
     /// When its settings last changed, ms since the epoch.
     pub updated_at_ms: i64,
+    /// The import start point (WI-4332), a 40-hex git commit sha.
+    pub start_at: Option<String>,
 }
 
 /// The per-repository mirror authority lease (D41 §3.6), one

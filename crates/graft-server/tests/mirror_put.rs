@@ -55,6 +55,7 @@ async fn the_mirror_uploads_objects_only_under_its_lease_on_a_followed_repositor
             enabled: true,
             export: None,
             expected_version: None,
+            start_at: None,
         })
         .await
         .expect("bind");

@@ -12,7 +12,7 @@ use crate::codec::sql_err;
 use graft_store::{StoreError, StoreResult};
 
 /// The migrations, in order. `MIGRATIONS[i]` moves version `i` to `i + 1`.
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
 
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -364,6 +364,11 @@ CREATE TABLE mirror_line_slots (
     request INTEGER NOT NULL,
     PRIMARY KEY (repo, line, slot)
 ) WITHOUT ROWID;
+";
+
+/// Version 13: the mirror's import start point (WI-4332).
+const V13: &str = "
+ALTER TABLE repo_mirrors ADD COLUMN start_at TEXT;
 ";
 
 /// The database's schema version.

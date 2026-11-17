@@ -46,6 +46,7 @@ async fn the_mirror_token_reads_only_bound_repositories() {
             enabled: true,
             export: None,
             expected_version: None,
+            start_at: None,
         })
         .await
         .expect("bind r");

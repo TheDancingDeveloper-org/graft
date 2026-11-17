@@ -162,6 +162,7 @@ impl World {
 
     fn follower<'a>(&'a self, db: &'a MirrorDb, metrics: &Metrics) -> Follower<'a, Api> {
         let config = FollowConfig {
+            start_at: None,
             repo: REPO.to_owned(),
             lines: vec![FollowLine {
                 branch: "main".to_owned(),
@@ -584,6 +585,7 @@ fn follower_of<'a>(
     upstream: &str,
 ) -> Follower<'a, Api> {
     let config = FollowConfig {
+        start_at: None,
         repo: REPO.to_owned(),
         lines: vec![FollowLine {
             branch: "main".to_owned(),
@@ -685,6 +687,7 @@ async fn tag_listing_failure_is_a_typed_fetch_error() {
     let dead = w.mirror_dir.parent().unwrap().join("not-a-tag-remote");
     std::fs::write(&dead, b"not a git repository\n").unwrap();
     let config = FollowConfig {
+        start_at: None,
         repo: REPO.to_owned(),
         lines: vec![FollowLine {
             branch: "main".to_owned(),

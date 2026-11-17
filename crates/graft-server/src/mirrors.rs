@@ -424,6 +424,7 @@ pub(crate) fn view(repo: &str, r: MirrorRecord) -> pb::Mirror {
         created_by: r.created_by,
         updated_by: r.updated_by,
         updated_at_ms: r.updated_at_ms,
+        start_at: r.start_at,
     }
 }
 
@@ -494,6 +495,7 @@ pub(crate) async fn set<M: MetaStore>(
     if req.expected_version != current {
         return Err(version_conflict(req.expected_version, current));
     }
+    let start_at = start_at(old.as_ref(), req.start_at)?;
     let record = MirrorRecord {
         upstream: req.upstream.clone(),
         lines,
@@ -509,6 +511,7 @@ pub(crate) async fn set<M: MetaStore>(
             .map_or_else(|| p.subject.clone(), |o| o.created_by.clone()),
         updated_by: p.subject.clone(),
         updated_at_ms: now_ms,
+        start_at,
     };
     // A re-enable cancels any live purge in the same transaction. A purge
     // that moves under us is a race to retry; the row's version is not.
@@ -539,6 +542,29 @@ pub(crate) async fn set<M: MetaStore>(
         }
     }
     Err(crate::mirror_requests::busy())
+}
+
+/// The start point a write keeps (WI-4332): absent keeps the stored one; a
+/// new one must be a 40-hex sha, and a stored one never changes.
+fn start_at(old: Option<&MirrorRecord>, wire: Option<String>) -> Result<Option<String>, ApiError> {
+    let stored = old.and_then(|o| o.start_at.clone());
+    let Some(sha) = wire else {
+        return Ok(stored);
+    };
+    let sha = sha.to_ascii_lowercase();
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(refused(
+            "mirror-start-at",
+            "start_at must be a 40-hex git commit sha",
+        ));
+    }
+    match stored {
+        Some(s) if s != sha => Err(refused(
+            "mirror-start-at",
+            format!("the start point is already {s} and does not change"),
+        )),
+        _ => Ok(Some(sha)),
+    }
 }
 
 /// The read grant on one repository's rows.
@@ -1266,6 +1292,7 @@ mod tests {
             enabled: true,
             export: None,
             expected_version: expected,
+            start_at: None,
         }
     }
 
@@ -1501,6 +1528,47 @@ mod tests {
         assert_eq!((updated.version, updated.enabled), (2, false));
         // The same etag again is now stale.
         rejected(set(&s, &bind, &policy(), 4, r).await, "mirror-version");
+    }
+
+    #[tokio::test]
+    async fn the_start_point_is_set_once_and_kept() {
+        let s = store().await;
+        let bind = who(&["mirror:bind"]);
+        let sha = "AB".repeat(20);
+        let mut r = req(UP, None, vec![line("main", "follow")]);
+        r.start_at = Some("abc".into());
+        rejected(
+            set(&s, &bind, &policy(), 1, r.clone()).await,
+            "mirror-start-at",
+        );
+        r.start_at = Some(sha.clone());
+        let row = set(&s, &bind, &policy(), 1, r).await.expect("create");
+        assert_eq!(row.start_at, Some(sha.to_ascii_lowercase()));
+        // Absent keeps it; the same sha is accepted; another is refused.
+        let row = set(
+            &s,
+            &bind,
+            &policy(),
+            2,
+            req(UP, Some(1), vec![line("main", "follow")]),
+        )
+        .await
+        .expect("update");
+        assert_eq!(row.start_at, Some(sha.to_ascii_lowercase()));
+        let mut r = req(UP, Some(2), vec![line("main", "follow")]);
+        r.start_at = Some(sha.clone());
+        let row = set(&s, &bind, &policy(), 3, r).await.expect("same sha");
+        let mut r = req(UP, Some(row.version), vec![line("main", "follow")]);
+        r.start_at = Some("cd".repeat(20));
+        rejected(set(&s, &bind, &policy(), 4, r).await, "mirror-start-at");
+        let key = pb::MirrorKey {
+            repo: "r".into(),
+            upstream: UP.into(),
+        };
+        let got = get(&s, &who(&["repo:r:read"]), key)
+            .await
+            .expect("read back");
+        assert_eq!(got.start_at, Some(sha.to_ascii_lowercase()));
     }
 
     #[tokio::test]

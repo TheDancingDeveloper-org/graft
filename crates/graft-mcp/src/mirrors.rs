@@ -200,6 +200,7 @@ pub fn mirror_json(m: &pb::Mirror) -> Value {
         "created_by": m.created_by,
         "updated_by": m.updated_by,
         "updated_at_ms": m.updated_at_ms,
+        "start_at": m.start_at,
     })
 }
 
@@ -534,6 +535,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             enabled: !a.disabled,
             export: None,
             expected_version: None,
+            start_at: None,
         };
         let row = admin.set_mirror(cx, req).await.map_err(ToolError::Api)?;
         bounded(json!({ "mirror": mirror_json(&row) }))
@@ -563,6 +565,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             enabled: a.enabled.unwrap_or(old.enabled),
             export: old.export,
             expected_version: Some(old.version),
+            start_at: None,
         };
         let row = admin.set_mirror(cx, req).await.map_err(ToolError::Api)?;
         bounded(json!({ "mirror": mirror_json(&row) }))

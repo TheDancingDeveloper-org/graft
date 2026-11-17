@@ -1462,3 +1462,18 @@ Rejected:
 - **A dedicated `repo:<r>:revert:<line>` scope.** Finer grained, but a scope
   grammar and mint change for a principal nobody needs yet. Kept as a later
   refinement if a revert-only principal appears.
+
+## Note on D11: the mirror start point (WI-4332, 2026-11-17)
+
+D11 is unchanged: every changeset graft imports passes the path rules, and
+a bad path stops the import with the full list. An upstream whose old
+history holds a path D11 rejects (the codex mirror: `codex-cli/>` in
+upstream commit `cabf83f2ed`) couldn't be mirrored at all, even when the
+current tree is clean.
+
+A mirror may now set an opt-in, set-once `start_at` commit. That commit
+imports as a parentless root and its ancestors are never walked. D11 still
+applies in full to the start commit's tree and to everything after it. The
+cut is auditable on each affected changeset (`mirror.start-at`,
+`mirror.cut-parents`). Mirrors without `start_at` behave as before. The
+details are in `docs/notes/mirror-service.md` §3.2.
