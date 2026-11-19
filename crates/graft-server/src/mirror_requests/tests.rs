@@ -848,3 +848,50 @@ async fn only_the_exact_holder_renews_or_releases_a_lease() {
 async fn oversight_with_export_cuts_and_a_worker_does_not() {
     both!(an_oversight_export_grant_cuts_a_batch);
 }
+
+async fn mirror_numbered_batch(s: &impl MetaStore) {
+    // The mirror's batch counter is past the request id (pre-D41 batch
+    // history): request 1 opens its PR on graft/batch-70 and settles.
+    let r = cut_batch(s, &admin(), 0, cut("main", "k1"))
+        .await
+        .expect("cut");
+    let epoch = take(s, "i1", 0).await;
+    claim(s, &service(), 0, claim_req(epoch))
+        .await
+        .expect("claim");
+    let on = |branch: &str, done: bool| {
+        let mut req = with_pr(r.id, epoch, done);
+        if let Some(o) = req.result.as_mut() {
+            o.branch = Some(branch.into());
+        }
+        req
+    };
+    assert_ne!(batch_branch(r.id), "graft/batch-70");
+    complete(s, &service(), 0, on("graft/batch-70", false))
+        .await
+        .expect("the mirror's own batch number is accepted");
+    // Once recorded, the branch is fixed for the request.
+    rejected(
+        complete(s, &service(), 0, on("graft/batch-71", true)).await,
+        "mirror-field",
+    );
+    for bad in ["graft/batch-0", "graft/batch-07", "graft/batch-", "main"] {
+        rejected(
+            complete(s, &service(), 0, on(bad, true)).await,
+            "mirror-field",
+        );
+    }
+    let done = complete(s, &service(), 0, on("graft/batch-70", true))
+        .await
+        .expect("settle");
+    assert_eq!(batch(&done), pb::BatchState::Open);
+    assert_eq!(
+        done.result.and_then(|o| o.branch).as_deref(),
+        Some("graft/batch-70")
+    );
+}
+
+#[tokio::test]
+async fn a_cut_settles_on_the_mirrors_own_batch_number() {
+    both!(mirror_numbered_batch);
+}
