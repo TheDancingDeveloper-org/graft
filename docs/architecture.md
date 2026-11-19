@@ -301,11 +301,13 @@ flowchart TB
 ### 3c. Batch mode: an integration line, one batch PR with one commit per land (D21, D26, D28)
 
 The near-term way of working. `main` stays git-primary and graft follows it.
-Agents land on a graft integration line forked from graft's `main`.
-`graft-mirror pr-batch <line> --base main` sends the line's lands to GitHub
-as one batch PR carrying one commit per land (D26). Oversight reviews the PR
-as a whole and `land-pr` rebase-merges it once GitHub's required checks pass
-(D28). GitHub CI runs once per batch.
+Agents land on a graft integration line forked from graft's `main`. Oversight
+records a batch request (`graft repo batch cut <repo> --line <line>`, or
+`CutBatch`); the mirror service claims it and sends the line's lands to GitHub
+as one batch PR carrying one commit per land (D26). The service cuts at the
+base line's tip, so no base is chosen. Oversight reviews the PR as a whole and
+`land-pr` rebase-merges it once GitHub's required checks pass (D28). GitHub CI
+runs once per batch.
 
 ```mermaid
 sequenceDiagram
