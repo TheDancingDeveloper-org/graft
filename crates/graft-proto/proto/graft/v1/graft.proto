@@ -835,12 +835,18 @@ message ExportedCommit {
   string commit = 2;
 }
 
-// Records exports of changesets in `repo` (admin scope). Every changeset
-// must be stored in `repo`. At most 256 per call; recording one twice is
-// fine.
+// Records exports of changesets in `repo`. Every changeset must be stored
+// in `repo`. At most 256 per call; recording one twice is fine.
+//
+// Two callers: an admin (`repo:<name>:admin`) with no `epoch`, and the
+// mirror service holding `repo:*:mirror` with the lease `epoch` it holds
+// (D41 §3.1, §3.6). An `epoch` names the lease the caller claims; the
+// server refuses one the caller does not hold, so a mirror token cannot
+// record exports for a repository another instance is serving.
 message RecordExportsRequest {
   string repo = 1;
   repeated ExportedCommit exports = 2;
+  optional uint64 epoch = 3;
 }
 
 // ---- mirror settings (D41, docs/notes/mirror-service.md §3.2) -------------

@@ -161,6 +161,7 @@ async fn record_export_raw(
             changeset: changeset.0.0.to_vec(),
             commit: commit.into(),
         }],
+        epoch: None,
     })
     .await
     .map(|_| ())

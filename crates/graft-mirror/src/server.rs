@@ -222,6 +222,7 @@ impl ExportLog for Server {
         cx: &'s CallContext,
         repo: &'s str,
         exports: &'s [(ChangesetId, GitSha)],
+        epoch: Option<u64>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApiResult<()>> + Send + 's>> {
         Box::pin(async move {
             for chunk in exports.chunks(crate::MAX_RECORD_EXPORTS) {
@@ -236,6 +237,7 @@ impl ExportLog for Server {
                                 commit: sha.to_hex(),
                             })
                             .collect(),
+                        epoch,
                     },
                 )?;
                 self.mirror()
@@ -347,9 +349,10 @@ impl ExportLog for Api {
         cx: &'s CallContext,
         repo: &'s str,
         exports: &'s [(ChangesetId, graft_git::GitSha)],
+        epoch: Option<u64>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApiResult<()>> + Send + 's>> {
         match self {
-            Api::Remote(server) => server.record_exports(cx, repo, exports),
+            Api::Remote(server) => server.record_exports(cx, repo, exports, epoch),
             Api::Local(_) => Box::pin(async { Ok(()) }),
         }
     }

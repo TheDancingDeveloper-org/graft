@@ -106,7 +106,11 @@ changes what is fetched from or pushed to.
   `graft.followed/<line>` for that mirror row, and only by CAS;
 - importing objects and changesets into such a line;
 - acquiring, renewing and releasing the mirror authority lease (§3.6);
-- claiming, completing and failing batch and rewind requests (§3.5).
+- claiming, completing and failing batch and rewind requests (§3.5);
+- recording exports (`RecordExports`) under the lease it holds (§3.6): the
+  batcher records each commit before it pushes, so a CI run on the commit can
+  exchange its token for that land (D40). An admin may also record, without a
+  lease; a mirror-kind token may not record without the epoch it holds.
 
 It does not include `DeleteRepo`, token administration, `SetMirror`, moving
 an unfollowed line, or any `repos:*` call. The `mirror` token kind may carry
