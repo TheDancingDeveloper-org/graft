@@ -492,15 +492,19 @@ pub(crate) async fn cut_batch<M: MetaStore>(
             Scope::MirrorExport,
         ],
     )?;
+    // The service always cuts at the base line's tip, so a chosen base is
+    // refused here, before a request row records a predictable failure.
+    if req.base.is_some() {
+        return Err(refused(
+            "mirror-base-unsupported",
+            "a chosen base is not supported: a batch is always cut at the base line's tip",
+        ));
+    }
     let draft = Draft {
         kind: MirrorRequestKind::CutBatch,
         line: name("line", &req.line)?,
         client_request_id: client_id(&req.client_request_id)?,
-        base: req
-            .base
-            .as_deref()
-            .map(|b| change_id("base", b))
-            .transpose()?,
+        base: None,
         excludes: change_ids("excludes", &req.excludes, MAX_EXCLUDES)?,
         upstream: None,
         row: None,
