@@ -242,6 +242,11 @@ pub struct McpServer<A> {
     pub(crate) repo_admin: Option<Arc<dyn RepoAdmin>>,
     /// Serves the mirror and batch tools, when the launcher provides them.
     pub(crate) mirror_admin: Option<Arc<dyn MirrorAdmin>>,
+    /// Whether `graft_mirror_credential` may read a file from this process's
+    /// filesystem. True over stdio, where the file is the user's; false on the
+    /// server's own `/mcp` mount, where the filesystem holds the server's
+    /// keys and the caller cannot put a file there anyway (WI-4387 review).
+    pub(crate) credential_files: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -254,6 +259,7 @@ impl<A> Clone for McpServer<A> {
             endpoint: self.endpoint.clone(),
             repo_admin: self.repo_admin.clone(),
             mirror_admin: self.mirror_admin.clone(),
+            credential_files: self.credential_files,
             tool_router: self.tool_router.clone(),
         }
     }
@@ -269,7 +275,21 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
 
     /// Wraps an API for HTTP: every call runs as its request's [`Caller`].
     pub fn for_http(api: Arc<A>) -> Self {
-        Self::build(api, None)
+        let mut server = Self::build(api, None);
+        // The in-process `/mcp` mount runs in the server's own filesystem.
+        // `graft_mirror_credential` reads a path from it, so it must not be a
+        // way to turn a server key into an upstream credential.
+        server.credential_files = false;
+        server
+    }
+
+    /// Whether `graft_mirror_credential` may read a file in this process's
+    /// filesystem. On by default (stdio, where the file is the user's); the
+    /// HTTP mount turns it off.
+    #[must_use]
+    pub fn with_credential_files(mut self, allowed: bool) -> Self {
+        self.credential_files = allowed;
+        self
     }
 
     fn build(api: Arc<A>, principal: Option<Principal>) -> Self {
@@ -292,6 +312,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             endpoint: None,
             repo_admin: None,
             mirror_admin: None,
+            credential_files: true,
             tool_router,
         }
     }
