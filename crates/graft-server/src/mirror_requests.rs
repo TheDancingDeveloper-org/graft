@@ -15,8 +15,10 @@
 //! - **Expiry is lazy.** A live request past its deadline becomes
 //!   `expired` when it is next read. An expired or failed cut releases the
 //!   batch slot only if no PR was recorded, so expiry never orphans a PR.
-//!   The PR branch is `graft/batch-<id>`, so the service can find a PR it
-//!   created but never recorded.
+//!   The PR branch is `graft/batch-<n>`, numbered by the mirror (its own
+//!   batch counter may be past the request id on a repo with older batch
+//!   history). The first result that names a branch fixes it for the
+//!   request, so a service that reclaims it looks for the PR there.
 
 use graft_auth::Scope;
 use graft_model::{ChangesetId, ObjectId};
@@ -55,8 +57,9 @@ const CLAIM_SCAN: u32 = 64;
 /// How often a write retries after losing a race it can retry.
 pub(crate) const MAX_TRIES: usize = 8;
 
-/// The deterministic branch of a batch: the service looks for a PR on it
-/// before creating one.
+/// The branch a fresh mirror gives batch `id`: the service looks for a PR
+/// on it before creating one.
+#[cfg(test)]
 pub(crate) fn batch_branch(id: u64) -> String {
     format!("graft/batch-{id}")
 }
@@ -851,19 +854,39 @@ fn claimed_by(r: &MirrorRequestRecord, epoch: u64) -> Result<(), ApiError> {
     }
 }
 
+/// Whether `b` is a batch branch, `graft/batch-<n>` with `n >= 1`.
+fn is_batch_branch(b: &str) -> bool {
+    b.strip_prefix("graft/batch-")
+        .and_then(|n| {
+            n.parse::<u64>()
+                .ok()
+                .filter(|v| *v >= 1 && v.to_string() == n)
+        })
+        .is_some()
+}
+
+/// The result a claimed request records. A cut's branch is the mirror's
+/// own `graft/batch-<n>`; once recorded it never changes.
 fn outcome(
-    id: u64,
-    kind: MirrorRequestKind,
+    r: &MirrorRequestRecord,
     wire: pb::MirrorRequestOutcome,
 ) -> Result<MirrorRequestResult, ApiError> {
     let branch = bounded("result.branch", wire.branch, 256)?;
-    if kind == MirrorRequestKind::CutBatch
-        && branch.as_ref().is_some_and(|b| *b != batch_branch(id))
+    if r.kind == MirrorRequestKind::CutBatch
+        && let Some(b) = &branch
     {
-        return Err(refused(
-            "mirror-field",
-            format!("a batch's branch is {}", batch_branch(id)),
-        ));
+        if !is_batch_branch(b) {
+            return Err(refused(
+                "mirror-field",
+                "a batch's branch is graft/batch-<n>".to_owned(),
+            ));
+        }
+        if let Some(was) = r.result.branch.as_ref().filter(|was| *was != b) {
+            return Err(refused(
+                "mirror-field",
+                format!("request {}'s batch branch is {was}", r.id),
+            ));
+        }
     }
     Ok(MirrorRequestResult {
         pr_number: wire.pr_number,
@@ -888,7 +911,7 @@ pub(crate) async fn complete<M: MetaStore>(
     apply(meta, p, now_ms, &req.repo, req.id, req.epoch, |r| {
         claimed_by(r, req.epoch)?;
         let mut next = r.clone();
-        next.result = outcome(r.id, r.kind, wire.clone())?;
+        next.result = outcome(r, wire.clone())?;
         if done {
             next.state = MirrorRequestState::Done;
             next.batch = batch_after(&next);
