@@ -7,13 +7,16 @@ an issue to discuss a change to the design first.
 ## How changes land
 
 graft lands through its own mirror, batched. Workers `g land` on graft line
-`backlog-1`. Oversight cuts one batch PR from the line (`graft-mirror
-pr-batch`) and merges it with `land-pr --method rebase`, so each land keeps
-its own commit (D28). When a backlog of work is under way, all of it goes into
-a single batch PR. Batch rules: workspace `.claude/rules/delivery-process.md`
-("Landing").
+`backlog-1`. Oversight cuts one batch PR from the line (`graft repo batch cut
+graft --line backlog-1`, no `--base`) and merges it with `land-pr --method
+rebase`, so each land keeps its own commit (D28). The graft-dev mirror service
+claims the request and opens the PR; do not run `graft-mirror pr-batch` or the
+retired per-repository batch container. When a backlog of work is under way,
+all of it goes into a single batch PR. Batch rules: workspace
+`.claude/rules/delivery-process.md` ("Landing").
 
-- Graft line: `backlog-1`; mirror: `graft-dev-mirror-graft`
+- Graft line: `backlog-1`; mirror: the `graft` row in the graft-dev
+  `graft-mirror-service`
 - Required checks: `fmt`, `clippy`, `test` (`.github/workflows/ci.yml`)
 - Review: every batch gets a review from a different model than the author
   where an agent wrote it. Blockers go back to the author.
