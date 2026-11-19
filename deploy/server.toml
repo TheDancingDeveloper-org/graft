@@ -81,7 +81,8 @@ authority = "git-primary"
 # post_land = { checks = ["ci/build", "ci/test"], auto_revert = true }
 
 # The WI-2270 trial line (decision D21): agents land here directly (D22). The
-# operator merges the batch PR that `graft-mirror pr-batch trial-1` opens.
+# operator merges the batch PR that `graft repo batch cut <repo> --line trial-1`
+# opens (the mirror service claims it; no `--base`).
 # Create the line with trial/create-trial-line.sh. Phase 2 gates it on the
 # attester's checks again: policy = "attested",
 # checks = ["ci/fmt", "ci/clippy", "ci/test"], attest_merged = false.
