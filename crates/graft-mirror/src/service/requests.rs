@@ -25,6 +25,10 @@ pub struct RequestFailure(pub &'static str);
 pub const UNSUPPORTED: RequestFailure = RequestFailure("unsupported");
 /// Code: the forge refused.
 pub const FORGE_REFUSED: RequestFailure = RequestFailure("forge_refused");
+/// Code: the forge refused the repository's stored credential (status 401,
+/// or git's authentication failure). The server marks the credential's last
+/// authentication failed (gh#357).
+pub const AUTH_FAILED: RequestFailure = RequestFailure("auth_failed");
 /// Code: the repository's mirror is disabled or removed.
 pub const MIRROR_DISABLED: RequestFailure = RequestFailure("mirror_disabled");
 /// Code: the request is malformed.
@@ -130,9 +134,15 @@ async fn cut<D: PullDesk, R: RequestRunner>(
         Ok(b) => b,
         Err(f) => return Ok(Err(f)),
     };
-    if let Some(branch) = earlier
-        && let Some(p) = desk.find_open(&branch).await?
-    {
+    let open = match &earlier {
+        Some(branch) => match desk.find_open(branch).await {
+            Ok(p) => p,
+            Err(e) if e.unauthorized() => return Ok(Err(AUTH_FAILED)),
+            Err(e) => return Err(e),
+        },
+        None => None,
+    };
+    if let (Some(branch), Some(p)) = (earlier, open) {
         tracing::info!(
             repo = %req.repo, request = req.id, pr = p.number,
             "mirror request: adopted the PR an earlier attempt opened"
@@ -145,6 +155,7 @@ async fn cut<D: PullDesk, R: RequestRunner>(
     };
     match desk.create(&new).await {
         Ok(p) => Ok(Ok(pr_outcome(&p, &new.head))),
+        Err(e) if e.unauthorized() => Ok(Err(AUTH_FAILED)),
         Err(ForgeError::Refused(_)) => Ok(Err(FORGE_REFUSED)),
         Err(e) => Err(e),
     }
@@ -211,6 +222,17 @@ async fn finish<C: Control>(
         Ok(outcome) => {
             control
                 .complete_request(repo, req.id, epoch, outcome, true)
+                .await
+        }
+        Err(AUTH_FAILED) => {
+            tracing::warn!(
+                repo,
+                request = req.id,
+                code = AUTH_FAILED.0,
+                "mirror request failed: the forge refused the repository's stored mirror credential; reseal it"
+            );
+            control
+                .fail_request(repo, req.id, epoch, AUTH_FAILED.0)
                 .await
         }
         Err(RequestFailure(code)) => {

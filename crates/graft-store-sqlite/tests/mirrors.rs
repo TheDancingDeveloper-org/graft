@@ -8,9 +8,9 @@ use common::{TempDir, block_on};
 use graft_model::{ChangesetId, ObjectId};
 use graft_store::memory::MemoryStore;
 use graft_store::{
-    LeaseRecord, MetaStore, MetaTxn, MirrorDirection, MirrorExportRecord, MirrorLineRecord,
-    MirrorQuery, MirrorRecord, MirrorStatusRecord, Precondition, RefKind, RefRecord, RepoId,
-    StoreError, TxnOutcome, Write,
+    LeaseRecord, MetaStore, MetaTxn, MirrorAuthRecord, MirrorDirection, MirrorExportRecord,
+    MirrorLineRecord, MirrorQuery, MirrorRecord, MirrorStatusRecord, Precondition, RefKind,
+    RefRecord, RepoId, StoreError, TxnOutcome, Write,
 };
 use graft_store_sqlite::migrations;
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
@@ -40,6 +40,7 @@ fn row(upstream: &str, version: u64) -> MirrorRecord {
         updated_by: "op".into(),
         updated_at_ms: 1_000,
         start_at: Some("ab".repeat(20)),
+        auth: None,
     }
 }
 
@@ -205,6 +206,36 @@ fn status_is_kept_across_settings_writes_and_never_creates_a_row() {
         let got = s.get(repo, UP).expect("row");
         assert_eq!(got.version, 2);
         assert_eq!(got.status, Some(status.clone()));
+    });
+}
+
+#[test]
+fn credential_auth_is_kept_across_settings_writes_and_clears() {
+    with_both(|make| {
+        let s = make();
+        let repo = s.create("r");
+        let set = |auth: Option<MirrorAuthRecord>| MetaTxn {
+            preconditions: vec![],
+            writes: vec![Write::SetMirrorAuth {
+                upstream: UP.to_owned(),
+                auth,
+            }],
+        };
+        let failed = Some(MirrorAuthRecord {
+            at_ms: 7,
+            ok: false,
+        });
+        s.commit(repo, set(failed)).expect("auth on no row");
+        assert_eq!(s.get(repo, UP), None);
+
+        s.commit(repo, put(None, row(UP, 1))).expect("create");
+        assert_eq!(s.get(repo, UP).expect("row").auth, None, "never");
+        s.commit(repo, set(failed)).expect("auth");
+        // A settings write carries no auth and keeps the stored one.
+        s.commit(repo, put(Some(1), row(UP, 2))).expect("update");
+        assert_eq!(s.get(repo, UP).expect("row").auth, failed);
+        s.commit(repo, set(None)).expect("clear");
+        assert_eq!(s.get(repo, UP).expect("row").auth, None);
     });
 }
 

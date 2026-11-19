@@ -75,6 +75,8 @@ impl MirrorAdmin for Service {
                 updated_by: cx.principal.subject.clone(),
                 updated_at_ms: 1,
                 start_at: req.start_at,
+                credential_auth_at_ms: None,
+                credential_auth_ok: None,
             };
             rows.insert(key, row.clone());
             Ok(row)
@@ -452,12 +454,51 @@ async fn status_and_list_say_a_credential_is_set_but_never_carry_it() {
     .await;
     let row = &status.structured_content.as_ref().unwrap()["mirror"];
     assert_eq!(row["credential_set"], true);
+    assert_eq!(row["credential_auth"], json!({"state": "never"}));
     assert_eq!(row["kek_id"], "k1");
     let list = call(&client, "graft_mirror_list", json!({"repo": "r"})).await;
     for result in [&status, &list] {
         let body = text(result);
         assert!(!body.contains("\"credential\""), "{body}");
     }
+}
+
+#[tokio::test]
+async fn status_reports_the_credential_s_last_authentication() {
+    let service = Arc::new(Service::default());
+    for (n, (ok, set)) in [(Some(false), true), (Some(true), true), (None, false)]
+        .into_iter()
+        .enumerate()
+    {
+        let up = format!("https://github.com/o/r{n}.git");
+        service.rows.lock().unwrap().insert(
+            ("r".into(), up.clone()),
+            pb::Mirror {
+                repo: "r".into(),
+                upstream: up,
+                credential_set: set,
+                credential_auth_at_ms: ok.map(|_| 7),
+                credential_auth_ok: ok,
+                ..Default::default()
+            },
+        );
+    }
+    let client = serve(&["repo:r:read"], Some(service)).await;
+    let list = call(&client, "graft_mirror_list", json!({"repo": "r"})).await;
+    let rows = list.structured_content.as_ref().unwrap()["mirrors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["credential_auth"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![
+            json!({"state": "failed", "at_ms": 7}),
+            json!({"state": "ok", "at_ms": 7}),
+            serde_json::Value::Null,
+        ]
+    );
 }
 
 #[tokio::test]

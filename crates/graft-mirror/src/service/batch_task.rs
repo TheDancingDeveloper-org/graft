@@ -13,7 +13,10 @@ use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
 use graft_proto::pb::{self, MirrorRequestKind};
 
 use super::control::Control;
-use super::requests::{BAD_REQUEST, INTERNAL, RequestFailure, RequestRunner, UNSUPPORTED};
+use super::requests::{
+    AUTH_FAILED, BAD_REQUEST, INTERNAL, RequestFailure, RequestRunner, UNSUPPORTED,
+};
+use super::status::is_auth_failure;
 use crate::batch::{BatchConfig, BatchOutcome, BatchRecord, BatchState, Batcher};
 use crate::credentials::{CredentialPipe, CredentialProvider, SecretToken};
 use crate::db::MirrorDb;
@@ -181,6 +184,9 @@ fn credential_failure(e: &ForgeError) -> RequestFailure {
 }
 
 fn failure(e: &MirrorError) -> RequestFailure {
+    if is_auth_failure(e) {
+        return AUTH_FAILED;
+    }
     match e {
         MirrorError::Config(_) | MirrorError::Unmapped { .. } => BAD_REQUEST,
         _ => INTERNAL,

@@ -238,6 +238,20 @@ pub struct MirrorRecord {
     pub updated_at_ms: i64,
     /// The import start point (WI-4332), a 40-hex git commit sha.
     pub start_at: Option<String>,
+    /// The stored credential's last authentication with the forge (gh#357);
+    /// `None` while it has never authenticated. Written only by
+    /// `SetMirrorAuth`: `PutMirror` keeps the stored value.
+    pub auth: Option<MirrorAuthRecord>,
+}
+
+/// The last time a mirror's stored credential was used against the forge,
+/// and whether the forge accepted it (gh#357).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MirrorAuthRecord {
+    /// When, ms since the epoch.
+    pub at_ms: i64,
+    /// Whether the forge accepted the credential.
+    pub ok: bool,
 }
 
 /// The per-repository mirror authority lease (D41 §3.6), one
@@ -882,6 +896,14 @@ pub enum Write {
         upstream: String,
         /// The new status.
         status: MirrorStatusRecord,
+    },
+    /// Replace, or clear with `None`, a mirror row's credential
+    /// authentication result. A row that does not exist is left absent.
+    SetMirrorAuth {
+        /// Upstream URL.
+        upstream: String,
+        /// The result.
+        auth: Option<MirrorAuthRecord>,
     },
     /// Insert or replace a mirror request. Needs a `MirrorRequestVersionIs`
     /// precondition on its id, and `version` must be one more than stored.

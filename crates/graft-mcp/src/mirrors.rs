@@ -195,6 +195,22 @@ fn enum_name(full: &str, prefix: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// The stored credential's last use against the forge (gh#357): `null`
+/// with no credential; `{"state": "never"}` while a sealed credential has
+/// never authenticated; else `{"state": "ok" | "failed", "at_ms": …}`.
+fn credential_auth_json(m: &pb::Mirror) -> Value {
+    if !m.credential_set {
+        return Value::Null;
+    }
+    match (m.credential_auth_at_ms, m.credential_auth_ok) {
+        (Some(at_ms), Some(ok)) => json!({
+            "state": if ok { "ok" } else { "failed" },
+            "at_ms": at_ms,
+        }),
+        _ => json!({ "state": "never" }),
+    }
+}
+
 /// The JSON form of a mirror row. It carries whether a credential is set
 /// and the key id that sealed it, never the credential.
 #[must_use]
@@ -211,6 +227,7 @@ pub fn mirror_json(m: &pb::Mirror) -> Value {
         "interval_s": m.interval_s,
         "enabled": m.enabled,
         "credential_set": m.credential_set,
+        "credential_auth": credential_auth_json(m),
         "kek_id": m.kek_id,
         "export": {
             "default_author": export.default_author,

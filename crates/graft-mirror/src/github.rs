@@ -71,6 +71,14 @@ impl fmt::Display for ForgeError {
 
 impl std::error::Error for ForgeError {}
 
+impl ForgeError {
+    /// GitHub refused the credential itself (status 401): the token is
+    /// unknown, expired or revoked, as opposed to lacking a permission.
+    pub fn unauthorized(&self) -> bool {
+        matches!(self, ForgeError::Refused(what) if what.starts_with("status 401"))
+    }
+}
+
 /// A pull request as the mirror reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pull {
