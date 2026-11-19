@@ -1484,14 +1484,16 @@ D41's second point is amended: `mirror:bind` (and `mirror:export`, which an
 export mirror needs alongside it) may be held by a token of the `oversight`
 kind, and by nothing else. Vogt mints an `oversight` token only for a
 session a person started to supervise other sessions; a worker or review
-token is an `Agent`, and the server refuses it the grants at mint and at
-call.
+token is an `Agent`, and the server refuses it the grants at mint.
 
 The guard D41 chose for the exfiltration risk — an agent repointing a
-repository at an attacker's upstream — becomes a pair: `MintToken` refuses
-`kind: "oversight"` from any caller that is not itself oversight (and
-refuses `mirror:bind` on a token minted for another subject), and `upstream`
-stays bounded by `mirror.allowed_hosts`. Nothing else opens: the
+repository at an attacker's upstream — becomes a pair: `MintToken` mints
+`kind: "oversight"` only for the engine's `service` token — the one
+deployment secret that already mints every session token — or for an
+oversight token minting for itself; an oversight token cannot name another
+subject. A `service` token may hold `mirror:bind` and `mirror:export` only
+so it can pass them into an oversight token. `upstream` stays bounded by
+`mirror.allowed_hosts`. Nothing else opens: the
 `oversight` kind behaves as an agent everywhere else (its author kind is
 `Agent`, `Attest` is refused), and the `mirror` kind is unchanged.
 

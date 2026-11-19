@@ -96,10 +96,13 @@ exfiltration risk. Export decides what it *pushes*, which is the write risk
 on an upstream the holder may have no rights on. Neither is implied by
 `repo:<name>:admin`, and neither is implied by `repos:admin`. The server
 refuses to mint either grant into a worker token kind. Only the operator
-token kind and the `oversight` kind may hold them: Vogt mints an `oversight`
-token only for a session a person started to supervise other sessions, and
-`MintToken` refuses that kind from any caller that is not itself oversight.
-Workers and reviewers are `Agent` tokens and never hold either grant.
+token kind, the `oversight` kind and the engine's `service` token may hold
+them: Vogt mints an `oversight` token only for a session a person started to
+supervise other sessions, and `MintToken` mints that kind only for the
+engine's service token (the minter of every session token) or for an oversight
+token minting for itself; an oversight token cannot name another subject.
+`service` may hold the grants only so it can pass them into an oversight
+token. Workers and reviewers are `Agent` tokens and never hold either grant.
 Agents can create repositories (if given `repos:admin`), read mirror status
 and request batches. They can't choose an upstream, point a credential at
 one, or turn on export; an oversight session can (still under
