@@ -196,7 +196,7 @@ sequenceDiagram
   else conflict
     S-->>A: Conflict {paths, tip}, nothing moves; the client syncs and resolves, as with git
   end
-  Note over M: pr-batch sends the line to GitHub as a batch PR, one commit per land (D26); land-pr rebase-merges it (D28)
+  Note over M: the mirror service claims a batch cut and sends the line to GitHub as a batch PR, one commit per land (D26); land-pr rebase-merges it (D28)
 ```
 
 ### One land with an attested policy (phase 2, off by default)
@@ -313,7 +313,7 @@ runs once per batch.
 sequenceDiagram
   participant A as agents
   participant S as graft-server
-  participant M as graft-mirror pr-batch
+  participant M as graft-mirror service
   participant G as GitHub
   participant O as oversight (land-pr)
   A->>S: land on integration (many times)
