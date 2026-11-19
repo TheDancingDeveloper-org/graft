@@ -488,6 +488,10 @@ async fn every_registered_tool_result_fits_and_an_oversized_status_is_typed() {
             json!({"repo": "r", "upstream": "https://github.com/o/r.git"}),
         ),
         (
+            "graft_mirror_credential",
+            json!({"repo": "r", "upstream": "https://github.com/o/r.git", "credential_file": "/nonexistent"}),
+        ),
+        (
             "graft_mirror_status",
             json!({"repo": "r", "upstream": "https://github.com/o/r.git"}),
         ),

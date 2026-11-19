@@ -74,7 +74,7 @@ impl MirrorAdmin for Service {
                 created_by: cx.principal.subject.clone(),
                 updated_by: cx.principal.subject.clone(),
                 updated_at_ms: 1,
-                start_at: None,
+                start_at: req.start_at,
             };
             rows.insert(key, row.clone());
             Ok(row)
@@ -148,10 +148,30 @@ impl MirrorAdmin for Service {
     }
     fn set_mirror_credential<'a>(
         &'a self,
-        _cx: &'a CallContext,
-        _req: pb::SetMirrorCredentialRequest,
+        cx: &'a CallContext,
+        req: pb::SetMirrorCredentialRequest,
     ) -> MirrorFuture<'a, pb::Mirror> {
-        Box::pin(async { Err(denied("mirror:bind")) })
+        Box::pin(async move {
+            if !holds(cx, "mirror:bind") {
+                return Err(denied("mirror:bind"));
+            }
+            let key = (req.repo.clone(), req.upstream.clone());
+            let mut rows = self.rows.lock().unwrap();
+            let mut row = rows.get(&key).cloned().ok_or(ApiError::NotFound {
+                what: "mirror".into(),
+            })?;
+            if req.expected_version != row.version {
+                return Err(ApiError::Rejected {
+                    policy: "mirror-version".into(),
+                    detail: "stale".into(),
+                });
+            }
+            row.credential_set = !req.credential.is_empty();
+            row.kek_id = row.credential_set.then(|| "k1".to_owned());
+            row.version += 1;
+            rows.insert(key, row.clone());
+            Ok(row)
+        })
     }
     fn cut_batch<'a>(
         &'a self,
@@ -473,4 +493,96 @@ async fn the_tools_are_unavailable_without_a_mirror_admin() {
     .await;
     assert_eq!(result.is_error, Some(true));
     assert!(text(&result).contains("not available"));
+}
+
+#[tokio::test]
+async fn start_at_crosses_the_tool_boundary_on_add_and_set() {
+    let service = Arc::new(Service::default());
+    let operator = serve(&["mirror:bind"], Some(service.clone())).await;
+    let start = "0123456789abcdef0123456789abcdef01234567";
+    let added = call(
+        &operator,
+        "graft_mirror_add",
+        json!({
+            "repo": "r", "upstream": UP, "start_at": start,
+            "lines": [{"branch": "main", "line": "main"}],
+        }),
+    )
+    .await;
+    assert_ne!(added.is_error, Some(true), "{added:?}");
+    let row = &added.structured_content.as_ref().unwrap()["mirror"];
+    assert_eq!(row["start_at"], start);
+
+    let moved = call(
+        &operator,
+        "graft_mirror_set",
+        json!({
+            "repo": "r", "upstream": UP,
+            "start_at": "fedcba9876543210fedcba9876543210fedcba98",
+        }),
+    )
+    .await;
+    assert_ne!(moved.is_error, Some(true), "{moved:?}");
+    assert_eq!(
+        moved.structured_content.as_ref().unwrap()["mirror"]["start_at"],
+        "fedcba9876543210fedcba9876543210fedcba98"
+    );
+}
+
+#[tokio::test]
+async fn a_credential_is_read_from_a_file_and_never_returned() {
+    let service = Arc::new(Service::default());
+    let operator = serve(&["mirror:bind"], Some(service.clone())).await;
+    let added = call(
+        &operator,
+        "graft_mirror_add",
+        json!({"repo": "r", "upstream": UP, "lines": [{"branch": "main", "line": "main"}]}),
+    )
+    .await;
+    assert_ne!(added.is_error, Some(true), "{added:?}");
+
+    let dir = std::env::temp_dir().join(format!("graft-mcp-cred-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let file = dir.join("credential");
+    let secret = "ghp_neverInAToolResult0123456789";
+    std::fs::write(&file, secret).expect("credential");
+
+    let out = call(
+        &operator,
+        "graft_mirror_credential",
+        json!({"repo": "r", "upstream": UP, "credential_file": file.display().to_string()}),
+    )
+    .await;
+    assert_ne!(out.is_error, Some(true), "{out:?}");
+    assert_eq!(
+        out.structured_content.as_ref().unwrap()["mirror"]["credential_set"],
+        true
+    );
+    assert!(!text(&out).contains(secret), "the credential leaked");
+
+    // An empty file clears it, and a file over the cap is refused by name.
+    std::fs::write(&file, b"").expect("empty");
+    let cleared = call(
+        &operator,
+        "graft_mirror_credential",
+        json!({"repo": "r", "upstream": UP, "credential_file": file.display().to_string()}),
+    )
+    .await;
+    assert_ne!(cleared.is_error, Some(true), "{cleared:?}");
+    assert_eq!(
+        cleared.structured_content.as_ref().unwrap()["mirror"]["credential_set"],
+        false
+    );
+
+    std::fs::write(&file, vec![b'x'; 8 * 1024 + 1]).expect("oversize");
+    let over = call(
+        &operator,
+        "graft_mirror_credential",
+        json!({"repo": "r", "upstream": UP, "credential_file": file.display().to_string()}),
+    )
+    .await;
+    assert_eq!(over.is_error, Some(true));
+    assert!(text(&over).contains("larger than"), "{over:?}");
+    assert!(!text(&over).contains(&"x".repeat(64)));
+    std::fs::remove_dir_all(&dir).expect("clean up");
 }

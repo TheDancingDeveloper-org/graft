@@ -1093,6 +1093,8 @@ pub struct MintToken {
     pub session: Option<String>,
     /// Work item (set by the caller's orchestrator, if any).
     pub work_item: Option<String>,
+    /// Token kind asked for (D41 amendment): `"oversight"`, or absent.
+    pub kind: Option<String>,
 }
 
 // ---- conflict resolution (WI-2312) ----------------------------------------

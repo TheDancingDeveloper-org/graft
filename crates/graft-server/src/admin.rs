@@ -98,9 +98,10 @@ fn token_mint(config: &ServerConfig, args: &[&str]) -> Result<(), Failure> {
                     "ci" => PrincipalKind::Ci,
                     "service" => PrincipalKind::Service,
                     "mirror" => PrincipalKind::Mirror,
+                    "oversight" => PrincipalKind::Oversight,
                     _ => {
                         return Err(Failure::usage(
-                            "--kind is human, agent, ci, service or mirror",
+                            "--kind is human, agent, ci, service, mirror or oversight",
                         ));
                     }
                 }

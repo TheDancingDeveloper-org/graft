@@ -17,6 +17,7 @@ fn mint_req(scopes: &[&str], ttl_s: u64) -> pb::MintTokenRequest {
         ttl_s,
         session: Some("ses_child".into()),
         work_item: Some("WI-2198".into()),
+        kind: None,
     }
 }
 

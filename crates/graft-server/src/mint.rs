@@ -65,7 +65,8 @@ pub(crate) fn mint(key: &SigningKey, req: MintRequest, now_s: i64) -> Result<Tok
 /// - The mirror permission set (`repo:*:mirror`) only the `mirror` kind, and
 ///   the `mirror` kind nothing else.
 fn check_kind(req: &MintRequest, scope: &Scope) -> Result<(), ApiError> {
-    let operator = req.kind == PrincipalKind::Human && req.session.is_none();
+    let operator = (req.kind == PrincipalKind::Human && req.session.is_none())
+        || req.kind == PrincipalKind::Oversight;
     let mirror_set = matches!(scope, Scope::Mirror { .. });
     let allowed = if req.kind == PrincipalKind::Mirror {
         mirror_set
@@ -124,8 +125,9 @@ pub(crate) fn mint_for(
     }
     // Identity before lifetime: a refused delegation is always a denial,
     // not a ttl error that depends on how much life the caller has left.
+    let want = requested_kind(caller, req.kind.as_deref())?;
     let (subject, kind, session, work_item) =
-        identity(caller, req.subject, req.session, req.work_item)?;
+        identity(caller, req.subject, req.session, req.work_item, want)?;
     let remaining = u64::try_from(caller_exp_s.saturating_sub(now_s)).unwrap_or(0);
     let limit = max_ttl_s.min(remaining);
     if req.ttl_s > limit {
@@ -150,12 +152,33 @@ pub(crate) fn mint_for(
 
 type Identity = (String, PrincipalKind, Option<String>, Option<String>);
 
+/// The kind a mint asks for (D41 amendment, WI-4387). Absent keeps the
+/// delegation kind; `oversight` is an oversight session token, which only an
+/// oversight-kind caller may ask for. Anything else is refused.
+fn requested_kind(
+    caller: &Principal,
+    asked: Option<&str>,
+) -> Result<Option<PrincipalKind>, ApiError> {
+    match asked {
+        None => Ok(None),
+        Some("oversight") if caller.kind == PrincipalKind::Oversight => {
+            Ok(Some(PrincipalKind::Oversight))
+        }
+        Some("oversight") => Err(ApiError::PermissionDenied {
+            scope: "delegate".into(),
+            path: None,
+        }),
+        Some(_) => Err(invalid("kind")),
+    }
+}
+
 /// Who a token minted by `caller` is: see [`mint_for`].
 fn identity(
     caller: &Principal,
     subject: String,
     session: Option<String>,
     work_item: Option<String>,
+    want: Option<PrincipalKind>,
 ) -> Result<Identity, ApiError> {
     for (rule, field) in [
         ("subject", Some(&subject)),
@@ -168,16 +191,19 @@ fn identity(
             return Err(invalid(rule));
         }
     }
-    if caller.kind == PrincipalKind::Service {
+    if matches!(
+        caller.kind,
+        PrincipalKind::Service | PrincipalKind::Oversight
+    ) {
         let subject = if subject.is_empty() {
             caller.subject.clone()
         } else {
             subject
         };
-        let kind = if subject != caller.subject || session.is_some() {
-            PrincipalKind::Agent
-        } else {
-            caller.kind
+        let kind = match want {
+            Some(PrincipalKind::Oversight) => PrincipalKind::Oversight,
+            _ if subject != caller.subject || session.is_some() => PrincipalKind::Agent,
+            _ => caller.kind,
         };
         return Ok((subject, kind, session, work_item));
     }
@@ -226,6 +252,7 @@ mod tests {
             ttl_s,
             session: Some("ses_1".into()),
             work_item: Some("WI-1".into()),
+            kind: None,
         }
     }
 
@@ -348,6 +375,7 @@ mod tests {
             ttl_s: 60,
             session: session.map(Into::into),
             work_item: work_item.map(Into::into),
+            kind: None,
         };
         for req in [
             as_bob("alice", None, None),

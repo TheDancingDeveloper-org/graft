@@ -70,6 +70,7 @@ enum Kind {
     Ci,
     Service,
     Mirror,
+    Oversight,
 }
 
 impl From<PrincipalKind> for Kind {
@@ -80,6 +81,7 @@ impl From<PrincipalKind> for Kind {
             PrincipalKind::Ci => Self::Ci,
             PrincipalKind::Service => Self::Service,
             PrincipalKind::Mirror => Self::Mirror,
+            PrincipalKind::Oversight => Self::Oversight,
         }
     }
 }
@@ -92,6 +94,7 @@ impl From<Kind> for PrincipalKind {
             Kind::Ci => Self::Ci,
             Kind::Service => Self::Service,
             Kind::Mirror => Self::Mirror,
+            Kind::Oversight => Self::Oversight,
         }
     }
 }

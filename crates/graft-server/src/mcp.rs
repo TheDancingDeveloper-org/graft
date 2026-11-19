@@ -19,11 +19,13 @@ use axum::response::{IntoResponse, Response};
 use graft_mcp::Auth;
 use graft_model::ChangesetId;
 use graft_proto::error::ApiResult;
+use graft_proto::pb;
 use graft_proto::types::*;
 use graft_proto::{ApiError, CallContext, RepoApi, WorkspaceApi};
 
 use crate::app::{App, CallError, Caller, ServerEngine};
 use crate::grpc::own_workspace;
+use crate::{mirror_requests, mirrors};
 
 /// The `/mcp` route, behind bearer-token authentication.
 pub(crate) fn router(app: Arc<App>) -> Router {
@@ -31,7 +33,9 @@ pub(crate) fn router(app: Arc<App>) -> Router {
     // reached by whatever name its proxy gives it, so rmcp's loopback-only
     // Host check is off.
     let config = graft_mcp::http_config().disable_allowed_hosts();
-    let service = graft_mcp::streamable_http_service(Arc::new(McpApi(app.clone())), config);
+    let api = Arc::new(McpApi(app.clone()));
+    let mirrors: Arc<dyn graft_mcp::MirrorAdmin> = api.clone();
+    let service = graft_mcp::streamable_http_service_with_mirror_admin(api, config, Some(mirrors));
     Router::new()
         .nest_service("/mcp", service)
         .layer(middleware::from_fn_with_state(app, authenticate))
@@ -351,6 +355,167 @@ impl WorkspaceApi for McpApi {
         via!(self, "Resolve", req.workspace.repo, cx, true, |e, c| {
             own_workspace(&e, &c, &req.workspace).await?;
             e.resolve(&c, req).await
+        })
+    }
+}
+
+/// The mirror service over [`App::call`], so `/mcp` carries `graft_mirror_*`
+/// and `graft_batch_*` with the same scopes, metrics and spans as gRPC
+/// (D41 §3.2, WI-4387). The server's own grant checks are the authority: an
+/// oversight-kind token holds `mirror:bind`, a worker's is refused there.
+impl graft_mcp::MirrorAdmin for McpApi {
+    fn set_mirror<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::SetMirrorRequest,
+    ) -> graft_mcp::MirrorFuture<'a, pb::Mirror> {
+        let policy = self.0.mirror.clone();
+        let now_ms = self.0.now_s().saturating_mul(1000);
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run("SetMirror", &repo, cx, true, move |e, c| async move {
+                mirrors::set(e.stores().0, &c.principal, &policy, now_ms, req).await
+            })
+            .await
+        })
+    }
+
+    fn get_mirror<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::MirrorKey,
+    ) -> graft_mcp::MirrorFuture<'a, pb::Mirror> {
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run("GetMirror", &repo, cx, false, move |e, c| async move {
+                mirrors::get(e.stores().0, &c.principal, req).await
+            })
+            .await
+        })
+    }
+
+    fn list_mirrors<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::ListMirrorsRequest,
+    ) -> graft_mcp::MirrorFuture<'a, pb::MirrorPage> {
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run("ListMirrors", &repo, cx, false, move |e, c| async move {
+                mirrors::list(e.stores().0, &c.principal, req).await
+            })
+            .await
+        })
+    }
+
+    fn remove_mirror<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::RemoveMirrorRequest,
+    ) -> graft_mcp::MirrorFuture<'a, pb::RemoveMirrorResult> {
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run("RemoveMirror", &repo, cx, true, move |e, c| async move {
+                mirrors::remove(e.stores().0, &c.principal, req).await
+            })
+            .await
+        })
+    }
+
+    fn purge_mirror<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::PurgeMirrorRequest,
+    ) -> graft_mcp::MirrorFuture<'a, pb::MirrorRequest> {
+        let now_ms = self.0.now_s().saturating_mul(1000);
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run("PurgeMirror", &repo, cx, true, move |e, c| async move {
+                mirrors::purge(e.stores().0, &c.principal, now_ms, req).await
+            })
+            .await
+        })
+    }
+
+    fn set_mirror_credential<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::SetMirrorCredentialRequest,
+    ) -> graft_mcp::MirrorFuture<'a, pb::Mirror> {
+        let ring = self.0.keks.clone();
+        let now_ms = self.0.now_s().saturating_mul(1000);
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run(
+                "SetMirrorCredential",
+                &repo,
+                cx,
+                true,
+                move |e, c| async move {
+                    mirrors::set_credential(e.stores().0, &c.principal, &ring, now_ms, req).await
+                },
+            )
+            .await
+        })
+    }
+
+    fn cut_batch<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::CutBatchRequest,
+    ) -> graft_mcp::MirrorFuture<'a, pb::MirrorRequest> {
+        let now_ms = self.0.now_s().saturating_mul(1000);
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run("CutBatch", &repo, cx, true, move |e, c| async move {
+                mirror_requests::cut_batch(e.stores().0, &c.principal, now_ms, req).await
+            })
+            .await
+        })
+    }
+
+    fn get_batch<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::BatchKey,
+    ) -> graft_mcp::MirrorFuture<'a, pb::BatchView> {
+        let now_ms = self.0.now_s().saturating_mul(1000);
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run("GetBatch", &repo, cx, true, move |e, c| async move {
+                mirror_requests::get_batch(e.stores().0, &c.principal, now_ms, req).await
+            })
+            .await
+        })
+    }
+
+    fn list_batches<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::ListBatchesRequest,
+    ) -> graft_mcp::MirrorFuture<'a, pb::BatchPage> {
+        let now_ms = self.0.now_s().saturating_mul(1000);
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run("ListBatches", &repo, cx, true, move |e, c| async move {
+                mirror_requests::list_batches(e.stores().0, &c.principal, now_ms, req).await
+            })
+            .await
+        })
+    }
+
+    fn cancel_request<'a>(
+        &'a self,
+        cx: &'a CallContext,
+        req: pb::CancelRequestRequest,
+    ) -> graft_mcp::MirrorFuture<'a, pb::MirrorRequest> {
+        let now_ms = self.0.now_s().saturating_mul(1000);
+        Box::pin(async move {
+            let repo = req.repo.clone();
+            self.run("CancelRequest", &repo, cx, true, move |e, c| async move {
+                mirror_requests::cancel(e.stores().0, &c.principal, now_ms, req).await
+            })
+            .await
         })
     }
 }

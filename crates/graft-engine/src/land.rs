@@ -261,7 +261,7 @@ struct Attestation {
 fn kind_byte(kind: PrincipalKind) -> u8 {
     match kind {
         PrincipalKind::Human => 0,
-        PrincipalKind::Agent => 1,
+        PrincipalKind::Agent | PrincipalKind::Oversight => 1,
         PrincipalKind::Ci => 2,
         PrincipalKind::Service => 3,
         PrincipalKind::Mirror => 4,

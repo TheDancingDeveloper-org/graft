@@ -18,9 +18,9 @@ mod write;
 pub use drafts::DraftOverlapArgs;
 pub use mirrors::{
     BatchCancelArgs, BatchCutArgs, BatchListArgs, BatchStatusArgs, MirrorAddArgs, MirrorAdmin,
-    MirrorFuture, MirrorKeyArgs, MirrorLineArg, MirrorListArgs, MirrorPurgeArgs, MirrorRemoveArgs,
-    MirrorSetArgs, changeset_bytes, join_lines, mirror_json, new_client_request_id, parse_lines,
-    request_json, with_retry,
+    MirrorCredentialArgs, MirrorFuture, MirrorKeyArgs, MirrorLineArg, MirrorListArgs,
+    MirrorPurgeArgs, MirrorRemoveArgs, MirrorSetArgs, changeset_bytes, join_lines, mirror_json,
+    new_client_request_id, parse_lines, request_json, with_retry,
 };
 pub use render::{MAX_RESULT_BYTES, PATCH_MAX_BYTES};
 pub use repos::{RepoAdmin, RepoAdminFuture, RepoCreateArgs};
@@ -31,6 +31,7 @@ pub use review::{
 pub use server::{
     Auth, BlameArgs, Caller, DiffArgs, LogArgs, LsArgs, MAX_REQUEST_BYTES, McpServer, ReadArgs,
     ShowArgs, StatusArgs, http_config, request_auth, streamable_http_service,
+    streamable_http_service_with_mirror_admin,
 };
 pub use upstream::UpstreamArgs;
 pub use workcopy::{
@@ -227,6 +228,12 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "graft_mirror_add",
         description: "Bind a repository to an upstream; needs mirror:bind.",
+        read_only: false,
+        bound: ToolBound::Capped,
+    },
+    ToolSpec {
+        name: "graft_mirror_credential",
+        description: "Set or clear a mirror's upstream credential from a file; never returned.",
         read_only: false,
         bound: ToolBound::Capped,
     },

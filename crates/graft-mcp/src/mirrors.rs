@@ -6,10 +6,12 @@
 //! [`MirrorAdmin`] (`graft mcp` does, over its connection). Without one the
 //! tools answer that they are not available here.
 //!
-//! Binding, removing and purging a mirror need `mirror:bind`, which only
-//! an operator holds; an agent calling them gets the server's typed
-//! permission refusal. No tool takes or returns a credential: a row says
-//! only whether one is set. Requests that create something carry a
+//! Binding, removing and purging a mirror need `mirror:bind`: an operator,
+//! or an oversight session token (D41 amendment, WI-4387), holds it; a
+//! worker calling them gets the server's typed permission refusal. A
+//! credential is taken only as a file path ([`MirrorCredentialArgs`]), never
+//! as tool text, and no tool returns one: a row says only whether one is
+//! set. Requests that create something carry a
 //! `client_request_id`, made once per call and reused on a retry, so a
 //! retried cut returns the request the first attempt recorded.
 
@@ -110,6 +112,28 @@ pub trait MirrorAdmin: Send + Sync + 'static {
 /// Attempts a request gets when the server is unavailable, the first
 /// included.
 const ATTEMPTS: u32 = 3;
+
+/// The most bytes a credential file may hold (the server's own limit).
+const MAX_CREDENTIAL_BYTES: usize = 8 * 1024;
+
+/// Reads a credential from `path` without exposing it: errors name the path
+/// and the OS failure, never the contents.
+fn read_credential(path: &str) -> Result<Vec<u8>, ToolError> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| ToolError::Invalid(format!("credential file `{path}` cannot be read: {e}")))?;
+    if !meta.is_file() {
+        return Err(ToolError::Invalid(format!(
+            "credential file `{path}` is not a regular file"
+        )));
+    }
+    if meta.len() > MAX_CREDENTIAL_BYTES as u64 {
+        return Err(ToolError::Invalid(format!(
+            "credential file `{path}` is larger than {MAX_CREDENTIAL_BYTES} bytes"
+        )));
+    }
+    std::fs::read(path)
+        .map_err(|e| ToolError::Invalid(format!("credential file `{path}` cannot be read: {e}")))
+}
 /// Longest wait between attempts, whatever the server suggests.
 const MAX_RETRY_WAIT_MS: u64 = 2_000;
 
@@ -360,6 +384,9 @@ pub struct MirrorAddArgs {
     /// Start disabled.
     #[serde(default)]
     pub disabled: bool,
+    /// The git commit to start importing from; absent walks all history.
+    #[serde(default)]
+    pub start_at: Option<String>,
 }
 
 /// Arguments of `graft_mirror_set`.
@@ -379,6 +406,24 @@ pub struct MirrorSetArgs {
     /// The new poll interval in seconds.
     #[serde(default)]
     pub interval_s: Option<u32>,
+    /// Change the import start point: a 40-hex git commit sha, or an empty
+    /// string to walk all history.
+    #[serde(default)]
+    pub start_at: Option<String>,
+}
+
+/// Arguments of `graft_mirror_credential`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MirrorCredentialArgs {
+    /// The graft repository.
+    pub repo: String,
+    /// The mirror's upstream URL.
+    pub upstream: String,
+    /// A file holding the upstream credential (an empty file clears it).
+    /// The file is read where this MCP server runs; its contents are never
+    /// returned or logged.
+    pub credential_file: String,
 }
 
 /// Arguments that name one mirror.
@@ -535,7 +580,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             enabled: !a.disabled,
             export: None,
             expected_version: None,
-            start_at: None,
+            start_at: a.start_at,
         };
         let row = admin.set_mirror(cx, req).await.map_err(ToolError::Api)?;
         bounded(json!({ "mirror": mirror_json(&row) }))
@@ -565,7 +610,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             enabled: a.enabled.unwrap_or(old.enabled),
             export: old.export,
             expected_version: Some(old.version),
-            start_at: None,
+            start_at: a.start_at.or(old.start_at),
         };
         let row = admin.set_mirror(cx, req).await.map_err(ToolError::Api)?;
         bounded(json!({ "mirror": mirror_json(&row) }))
@@ -584,6 +629,36 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             upstream: a.upstream,
         };
         let row = admin.get_mirror(cx, key).await.map_err(ToolError::Api)?;
+        bounded(json!({ "mirror": mirror_json(&row) }))
+    }
+
+    /// Sets (or, from an empty file, clears) a mirror's upstream credential.
+    /// The value is read from `credential_file` on this side and never
+    /// crosses a tool argument, result or log.
+    async fn mirror_credential(
+        &self,
+        cx: &CallContext,
+        a: MirrorCredentialArgs,
+    ) -> Result<CallToolResult, ToolError> {
+        text_arg("repo", &a.repo)?;
+        text_arg("upstream", &a.upstream)?;
+        let admin = self.mirrors("graft_mirror_credential")?;
+        let key = pb::MirrorKey {
+            repo: a.repo.clone(),
+            upstream: a.upstream.clone(),
+        };
+        let old = admin.get_mirror(cx, key).await.map_err(ToolError::Api)?;
+        let credential = read_credential(&a.credential_file)?;
+        let req = pb::SetMirrorCredentialRequest {
+            repo: a.repo,
+            upstream: a.upstream,
+            credential,
+            expected_version: old.version,
+        };
+        let row = admin
+            .set_mirror_credential(cx, req)
+            .await
+            .map_err(ToolError::Api)?;
         bounded(json!({ "mirror": mirror_json(&row) }))
     }
 
@@ -778,7 +853,7 @@ fn retry_hint(e: ApiError, client_request_id: &str) -> ToolError {
 impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
     #[tool(
         name = "graft_mirror_add",
-        description = "Bind a repository to an upstream git URL and its branches. Needs mirror:bind, which only an operator holds; other callers get permission_denied.",
+        description = "Bind a repository to an upstream git URL and its branches, optionally from a start commit. Needs mirror:bind (operator or oversight session); a worker gets permission_denied.",
         annotations(
             title = "Add mirror",
             read_only_hint = false,
@@ -841,6 +916,29 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         Ok(respond(async {
             let cx = self.call_context(&ctx)?;
             self.mirror_status(&cx, args).await
+        })
+        .await)
+    }
+
+    #[tool(
+        name = "graft_mirror_credential",
+        description = "Set or clear a mirror's upstream credential, read from a file on the MCP server host (an empty file clears it). Needs mirror:bind (operator or oversight session). The contents are never returned or logged.",
+        annotations(
+            title = "Set mirror credential",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn graft_mirror_credential(
+        &self,
+        Parameters(args): Parameters<MirrorCredentialArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(respond(async {
+            let cx = self.call_context(&ctx)?;
+            self.mirror_credential(&cx, args).await
         })
         .await)
     }

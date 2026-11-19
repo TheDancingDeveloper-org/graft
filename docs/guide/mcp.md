@@ -300,18 +300,32 @@ Binds a repository to an upstream git URL and its branches.
 
 - Arguments: required `repo`, `upstream` (on the server's allowlist) and
   `lines` (`branch`, `line`, optional `direction`: `follow`, `export` or
-  `both`); optional `interval_s` and `disabled`.
+  `both`); optional `interval_s`, `disabled` and `start_at` (a 40-hex git
+  commit to import from; absent walks all history).
 - Result: the mirror row. It says whether a credential is set, never the
   credential.
-- Errors: needs `mirror:bind`, which only an operator holds; any other
-  caller, an agent included, gets `permission_denied`.
+- Errors: needs `mirror:bind`, held by the operator and an oversight session
+  token; a worker gets `permission_denied`.
+
+### `graft_mirror_credential`
+
+Sets (or, from an empty file, clears) a mirror's upstream credential.
+
+- Arguments: required `repo`, `upstream` and `credential_file`, a path on
+  the host running this MCP server.
+- Result: the mirror row with `credential_set` and `kek_id`. The file's
+  contents never appear in an argument, result or log; an unreadable or
+  oversized file is `invalid_argument`, naming the path only.
+- Errors: needs `mirror:bind` (operator or oversight session), else
+  `permission_denied`.
 
 ### `graft_mirror_set`
 
 Enables or disables a mirror, or changes its lines or poll interval.
 
 - Arguments: required `repo` and `upstream`; optional `enabled`, `lines`
-  and `interval_s`. Unnamed fields keep their value.
+  and `interval_s`, plus `start_at` (set once; see `graft_mirror_add`).
+  Unnamed fields keep their value.
 - Result: the updated row. The tool reads the row's version and writes
   with it, so a concurrent change is a typed conflict.
 - Errors: needs the repository's admin; changing an export line needs
@@ -341,7 +355,8 @@ is set.
 
 - Arguments: required `repo` and `upstream`; optional `clear_followed`.
 - Result: the lines whose markers were cleared.
-- Errors: needs `mirror:bind` (operator only), else `permission_denied`.
+- Errors: needs `mirror:bind` (operator or oversight session), else
+  `permission_denied`.
 
 ### `graft_mirror_purge`
 
@@ -350,7 +365,8 @@ repository, its lines and history are untouched.
 
 - Arguments: required `repo` and `upstream`; optional `client_request_id`.
 - Result: the purge request.
-- Errors: needs `mirror:bind` (operator only), else `permission_denied`.
+- Errors: needs `mirror:bind` (operator or oversight session), else
+  `permission_denied`.
 
 ### `graft_batch_cut`
 

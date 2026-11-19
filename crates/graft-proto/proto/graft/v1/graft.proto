@@ -803,6 +803,11 @@ message MintTokenRequest {
   uint64 ttl_s = 3;
   optional string session = 4;
   optional string work_item = 5;
+  // The token kind asked for (D41 amendment, WI-4387). Absent mints the
+  // caller's delegation kind, as before. "oversight" asks for an oversight
+  // session token, which only an oversight-kind caller may ask for; it is
+  // the one kind that may hold `mirror:bind`. No other value is accepted.
+  optional string kind = 6;
 }
 
 // The token to revoke (docs/design.md §12.1). Its generated `Debug` is
