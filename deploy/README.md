@@ -105,19 +105,20 @@ session, scopes `read`, `write`, `drafts` and `land:<line>`.
 
 ### Open a batch pull request
 
-`pr-batch` still takes a per-repository config (`--config`); the service does
-not run batches yet (`claim_requests` is off until the batcher does, D41
-§3.5). Until then, write the config for the repository with
-`graft-mirror init-config` (the retired `mirror-<repo>.toml` files are in git
-history before the retirement commit and show the shape) and run it from a
-one-off container or a checkout, with a GitHub token file of your own:
+Batching is a server request. The mirror service claims it, opens the pull
+request and settles it; there is no per-repository config and no container to
+run (D41 §3.5). With `claim_requests = true` in the server's `[mirror]`
+section:
 
 ```sh
-graft-mirror pr-batch <line> --base <branch> --config <file>
+graft repo batch cut <repo> --line <line>   # repo admin or mirror:export
+graft repo batch status <repo> --line <line>
 ```
 
-This is a known gap of the retirement, not a design choice; it ends when
-batches become server requests.
+Omit `--base`: the batch is cut at the base line's tip, and the service
+refuses a chosen changeset as `unsupported` today. The service must be
+running with its credential set; a cut with no row credential fails
+`no_credential` rather than falling back to a token of its own.
 
 ### A Forgejo upstream (WI-3492)
 

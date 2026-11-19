@@ -62,11 +62,13 @@ pub enum Scope {
     /// Create, delete and list repositories: `repos:admin`. The holder
     /// administers a repository it creates (D41).
     ReposAdmin,
-    /// Bind a repository to an upstream: `mirror:bind`. Operator-only, and
-    /// implied by no other scope (D41).
+    /// Bind a repository to an upstream: `mirror:bind`. Held by an oversight
+    /// session token or the operator, never by a worker, and implied by no
+    /// other scope (D41, amended 2026-11-19).
     MirrorBind,
-    /// Turn on export to an upstream: `mirror:export`. Operator-only, and
-    /// implied by no other scope (D41).
+    /// Turn on export to an upstream: `mirror:export`. Held by an oversight
+    /// session token or the operator, never by a worker, and implied by no
+    /// other scope (D41, amended 2026-11-19).
     MirrorExport,
     /// The mirror permission set: held as `repo:*:mirror`, only by the
     /// `mirror` token kind (D41). `admin` does not grant it.
@@ -135,9 +137,10 @@ impl Scope {
         }
     }
 
-    /// Whether only the operator token kind may hold this scope
-    /// (`mirror:bind`, `mirror:export`).
-    pub fn is_operator_only(&self) -> bool {
+    /// Whether this scope is a mirror grant (`mirror:bind`, `mirror:export`):
+    /// held by the operator and an oversight session token, never by the
+    /// `Agent` kind.
+    pub fn is_mirror_grant(&self) -> bool {
         matches!(self, Self::MirrorBind | Self::MirrorExport)
     }
 
@@ -323,9 +326,9 @@ mod tests {
         }
         assert!(!holds(&["mirror:bind"], "mirror:export"));
         assert!(!holds(&["mirror:export"], "mirror:bind"));
-        assert!(Scope::MirrorBind.is_operator_only());
-        assert!(Scope::MirrorExport.is_operator_only());
-        assert!(!Scope::ReposAdmin.is_operator_only());
+        assert!(Scope::MirrorBind.is_mirror_grant());
+        assert!(Scope::MirrorExport.is_mirror_grant());
+        assert!(!Scope::ReposAdmin.is_mirror_grant());
     }
 
     #[test]

@@ -171,7 +171,7 @@ fn mirror_and_batch_commands_against_a_real_server() {
     let text = printed(&refused);
     assert!(text.contains("permission_denied"), "{text}");
     let error: Value = serde_json::from_slice(&refused.stdout).expect("json error");
-    assert_eq!(error["error"]["operator_only"], true, "{text}");
+    assert_eq!(error["error"]["mirror_grant"], true, "{text}");
     outputs.push(refused);
 
     // The operator binds; the agent, as repository admin, disables it.
@@ -214,7 +214,7 @@ fn mirror_and_batch_commands_against_a_real_server() {
         printed(&denied)
     );
     assert!(
-        printed(&denied).contains("operator-only"),
+        printed(&denied).contains("oversight session or the operator"),
         "{}",
         printed(&denied)
     );
