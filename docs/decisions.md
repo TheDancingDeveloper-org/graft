@@ -1477,3 +1477,34 @@ applies in full to the start commit's tree and to everything after it. The
 cut is auditable on each affected changeset (`mirror.start-at`,
 `mirror.cut-parents`). Mirrors without `start_at` behave as before. The
 details are in `docs/notes/mirror-service.md` §3.2.
+
+## Note on D41: an oversight token may hold mirror:bind (WI-4387, 2026-11-19)
+
+D41's second point is amended: `mirror:bind` (and `mirror:export`, which an
+export mirror needs alongside it) may be held by a token of the `oversight`
+kind, and by nothing else. Vogt mints an `oversight` token only for a
+session a person started to supervise other sessions; a worker or review
+token is an `Agent`, and the server refuses it the grants at mint and at
+call.
+
+The guard D41 chose for the exfiltration risk — an agent repointing a
+repository at an attacker's upstream — becomes a pair: `MintToken` refuses
+`kind: "oversight"` from any caller that is not itself oversight (and
+refuses `mirror:bind` on a token minted for another subject), and `upstream`
+stays bounded by `mirror.allowed_hosts`. Nothing else opens: the
+`oversight` kind behaves as an agent everywhere else (its author kind is
+`Agent`, `Attest` is refused), and the `mirror` kind is unchanged.
+
+Why: the self-serve goal — an agent creates or changes a mirror through MCP
+or the API with no ops PR, no secret and no redeploy — could not be met
+while the only principal holding `mirror:bind` was the operator at the
+server host. The operator accepted this on 2026-11-19, rejecting both "any
+agent token may bind" and keeping the grant operator-only.
+
+Rejected:
+
+- **Letting any agent or session token hold the grants.** That is an
+  exfiltration route for every worker, not only the one a person supervises.
+- **A per-session opt-in scope on the delegated token.** `MintToken` assumes
+  the delegation kind, so a worker could ask for it; the token kind is the
+  narrower gate.
