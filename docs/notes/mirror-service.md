@@ -5,13 +5,19 @@ for moving mirror definitions out of deploy files and into graft. On
 sign-off it becomes decision D40 and amends `design.md` §11. Nothing here is
 built before that.
 
+Revision 3 (2026-11-19, WI-4387) amends point 2 below: an oversight session
+token may hold `mirror:bind` and `mirror:export`. See
+[decisions.md, note on D41](../decisions.md#note-on-d41-an-oversight-token-may-hold-mirrorbind-wi-4387-2026-11-19)
+and §3.1.
+
 Revision 2 folds in the Opus review of f55bc56 (WI-3215) and the operator's
 answers of 2026-11-05:
 
 1. The GitHub App does not exist yet. Migration seeds per-row PAT
    credentials, and the App comes later.
 2. Only the operator holds the upstream-binding grant `mirror:bind`. Agents
-   can't add or repoint mirrors.
+   can't add or repoint mirrors. (Amended 2026-11-19, WI-4387: an oversight
+   session token may hold it too; see §3.1.)
 3. A server-side authority lease per repository is accepted. This amends §8.
 4. Export needs its own grant, separate from follow.
 
@@ -45,7 +51,9 @@ for each new repository.
 **Operator position (2026-11-03):** graft is a standalone stack. Users and
 agents create and manage repositories live through the API and MCP. Mirror
 definitions are not infrastructure-as-code. Binding a mirror to an upstream
-is an operator act (2026-11-05, §3.1).
+is an operator act (2026-11-05, §3.1). It stays an operator act for a
+worker: an oversight session token — one Vogt mints for a session a person
+started to supervise others — may bind too (D41 amendment, 2026-11-19).
 
 ## 2. Target
 
@@ -77,8 +85,8 @@ Add these forms to the scope grammar:
 | Scope | Grants | Held by |
 | --- | --- | --- |
 | `repos:admin` | `CreateRepo`, `DeleteRepo`, `ListRepos`. The holder gets `repo:<name>:admin` on a repository it creates. | operator; may be delegated |
-| `mirror:bind` | binding a repository to an upstream: `SetMirror` when it creates a row or changes `upstream`, `SetMirrorCredential`, `RemoveMirror`, `PurgeMirror` | **operator only** |
-| `mirror:export` | setting `direction` to `export` or `both` on any line, and changing the export author mapping | **operator only** |
+| `mirror:bind` | binding a repository to an upstream: `SetMirror` when it creates a row or changes `upstream`, `SetMirrorCredential`, `RemoveMirror`, `PurgeMirror` | operator; **oversight session** (D41 amendment, WI-4387) |
+| `mirror:export` | setting `direction` to `export` or `both` on any line, and changing the export author mapping | operator; **oversight session** |
 | `repo:*:mirror` | the mirror permission set below, on every repository now and later | the `mirror` token kind only |
 | `repo:*:<perm>[:<arg>]` | the named permission on every repository, now and later | service principals |
 
@@ -87,10 +95,15 @@ different things. Bind decides what the service *fetches*, which is the
 exfiltration risk. Export decides what it *pushes*, which is the write risk
 on an upstream the holder may have no rights on. Neither is implied by
 `repo:<name>:admin`, and neither is implied by `repos:admin`. The server
-refuses to mint either grant into an agent or session token kind; only the
-operator token kind may hold them. Agents can create repositories (if given
-`repos:admin`), read mirror status and request batches. They can't choose
-an upstream, point a credential at one, or turn on export.
+refuses to mint either grant into a worker token kind. Only the operator
+token kind and the `oversight` kind may hold them: Vogt mints an `oversight`
+token only for a session a person started to supervise other sessions, and
+`MintToken` refuses that kind from any caller that is not itself oversight.
+Workers and reviewers are `Agent` tokens and never hold either grant.
+Agents can create repositories (if given `repos:admin`), read mirror status
+and request batches. They can't choose an upstream, point a credential at
+one, or turn on export; an oversight session can (still under
+`mirror.allowed_hosts`).
 
 A repository admin (`repo:<name>:admin`) on a bound mirror may still:
 enable or disable it, change `interval_s` (subject to the minimum, §4), and
@@ -183,10 +196,13 @@ graft repo mirror status [<repo>]
 ```
 
 MCP tools: `mirror_set`, `mirror_status` and `mirror_list` for agents.
-`mirror_add`, `mirror_remove` and `mirror_purge` exist too, but they need
-`mirror:bind`, which agent tokens can't hold, so an agent calling them gets
-a typed permission error. Every response is bounded (status is paginated)
-and no response carries a credential.
+`mirror_add`, `mirror_credential`, `mirror_remove` and `mirror_purge` exist
+too; they need `mirror:bind`, so a worker calling them gets a typed
+permission error and an oversight session succeeds. `mirror_add` and
+`mirror_set` take `start_at`, and `mirror_credential` takes a file path,
+never a credential in an argument. The server's own `/mcp` mount installs
+the mirror service in process (WI-4387). Every response is bounded (status
+is paginated) and no response carries a credential.
 
 Branch names and an upstream URL are stored as strings. The server doesn't
 fetch them or hold any git type, which keeps rule 6 (git stays in
