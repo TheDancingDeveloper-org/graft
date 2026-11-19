@@ -1271,6 +1271,82 @@ async fn a_crash_between_opening_the_pr_and_recording_it_adopts_the_pr() {
     assert_eq!(outcome.branch.as_deref(), Some("graft/batch-7"));
 }
 
+/// A forge that refuses the credential itself (gh#357).
+struct Refusing(&'static str);
+
+impl PullDesk for Refusing {
+    async fn find_open(&self, _branch: &str) -> Result<Option<Pull>, ForgeError> {
+        Err(ForgeError::Refused(self.0.to_owned()))
+    }
+
+    async fn create(&self, _new: &NewPull) -> Result<Pull, ForgeError> {
+        Err(ForgeError::Refused(self.0.to_owned()))
+    }
+}
+
+#[tokio::test]
+async fn a_cut_the_forge_refuses_with_401_fails_as_a_credential_failure() {
+    let fake = Fake::default();
+    let epoch = fake.acquire_lease(REPO, "a").await.unwrap().epoch;
+    // Request 1 opens its PR; request 2 looks first for one an earlier
+    // attempt opened. Both are refused for the credential, and neither is
+    // left claimed to retry.
+    fake.st()
+        .pending
+        .push_back(request(1, MirrorRequestKind::CutBatch));
+    let bad = Refusing("status 401: Bad credentials");
+    let runner = Runner::default();
+    let turn = requests::run_turn(&fake, &bad, &runner, REPO, epoch)
+        .await
+        .unwrap();
+    assert!(!turn.retry);
+    fake.st()
+        .pending
+        .push_back(request(2, MirrorRequestKind::CutBatch));
+    requests::run_turn(&fake, &bad, &runner, REPO, epoch)
+        .await
+        .unwrap();
+    // Another refusal stays the forge's.
+    fake.st()
+        .pending
+        .push_back(request(3, MirrorRequestKind::CutBatch));
+    requests::run_turn(
+        &fake,
+        &Refusing("status 422: Validation Failed"),
+        &Runner::default(),
+        REPO,
+        epoch,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fake.st().failed,
+        [
+            (1, "auth_failed".to_owned()),
+            (2, "auth_failed".to_owned()),
+            (3, "forge_refused".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_401_or_git_authentication_failure_is_a_credential_failure() {
+    use graft_mirror::MirrorError;
+    use graft_mirror::service::status::is_auth_failure;
+    let refused = |w: &str| MirrorError::Forge(ForgeError::Refused(w.to_owned()));
+    assert!(is_auth_failure(&refused("status 401: Bad credentials")));
+    assert!(!is_auth_failure(&refused("status 422: Validation Failed")));
+    assert!(!is_auth_failure(&MirrorError::Forge(
+        ForgeError::Transient("status 401".to_owned())
+    )));
+    assert!(is_auth_failure(&MirrorError::Fetch(
+        "fatal: Authentication failed for 'https://github.com/o/r.git/'".to_owned()
+    )));
+    assert!(!is_auth_failure(&MirrorError::Fetch(
+        "fatal: unable to access: timed out".to_owned()
+    )));
+}
+
 #[tokio::test]
 async fn unwired_kinds_fail_typed_and_a_purge_deletes_only_an_idle_directory() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2238,6 +2314,7 @@ async fn bind(store: &MemoryStore, repo: &str, upstream: &str) {
             updated_by: "op".into(),
             updated_at_ms: 0,
             start_at: None,
+            auth: None,
         })],
     };
     assert!(matches!(

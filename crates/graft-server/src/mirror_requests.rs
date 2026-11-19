@@ -25,9 +25,9 @@ use graft_model::{ChangesetId, ObjectId};
 use graft_proto::types::followed_ref;
 use graft_proto::{ApiError, Principal, pb};
 use graft_store::{
-    BatchState, LeaseRecord, LineSlot, MetaStore, MetaTxn, MirrorRequestKind, MirrorRequestQuery,
-    MirrorRequestRecord, MirrorRequestResult, MirrorRequestState, Precondition, RepoId, TxnOutcome,
-    Write,
+    BatchState, LeaseRecord, LineSlot, MetaStore, MetaTxn, MirrorAuthRecord, MirrorQuery,
+    MirrorRequestKind, MirrorRequestQuery, MirrorRequestRecord, MirrorRequestResult,
+    MirrorRequestState, Precondition, RepoId, TxnOutcome, Write,
 };
 
 use crate::mirrors::{
@@ -36,6 +36,11 @@ use crate::mirrors::{
 
 /// The error code of a request the operator cancelled.
 pub(crate) const CANCELLED: &str = "cancelled";
+
+/// The error code of a request the forge refused because it rejected the
+/// repository's stored credential (gh#357). Failing a request with it marks
+/// the credential's last authentication failed.
+pub(crate) const AUTH_FAILED: &str = "auth_failed";
 
 /// How long a request may stay live (§3.5).
 pub(crate) const REQUEST_TIMEOUT_MS: i64 = 30 * 60_000;
@@ -832,7 +837,10 @@ where
         next.version = r.version + 1;
         next.updated_at_ms = now_ms;
         let fence = Precondition::LeaseHeld { epoch, now_ms };
-        let txn = rewrite(meta, id, &r, next.clone(), Some(fence)).await?;
+        let mut txn = rewrite(meta, id, &r, next.clone(), Some(fence)).await?;
+        if let Some(write) = credential_auth(meta, id, &r, &next, now_ms).await? {
+            txn.writes.push(write);
+        }
         match meta.commit(id, txn).await.map_err(store)? {
             TxnOutcome::Committed(_) => return Ok(view(repo, next)),
             TxnOutcome::PreconditionFailed(_) => {
@@ -843,6 +851,56 @@ where
         }
     }
     Err(busy())
+}
+
+/// What finishing a claimed request says about the repository's stored credential
+/// (gh#357): a failure with [`AUTH_FAILED`] means the forge refused it; a
+/// finished cut, settle or exclude that recorded a PR means the forge
+/// answered with it. `None` when the request did not use the credential, or
+/// the repository has no single mirror row.
+async fn credential_auth<M: MetaStore>(
+    meta: &M,
+    id: RepoId,
+    prev: &MirrorRequestRecord,
+    r: &MirrorRequestRecord,
+    now_ms: i64,
+) -> Result<Option<Write>, ApiError> {
+    if prev.state != MirrorRequestState::Claimed {
+        return Ok(None);
+    }
+    let ok = match r.state {
+        MirrorRequestState::Failed if r.result.error_code.as_deref() == Some(AUTH_FAILED) => false,
+        MirrorRequestState::Done
+            if matches!(
+                r.kind,
+                MirrorRequestKind::CutBatch
+                    | MirrorRequestKind::SettleBatch
+                    | MirrorRequestKind::Exclude
+            ) && r.result.pr_number.is_some() =>
+        {
+            true
+        }
+        _ => return Ok(None),
+    };
+    let rows = meta
+        .list_mirrors(MirrorQuery {
+            repo: Some(id),
+            enabled: None,
+            after: None,
+            limit: 2,
+        })
+        .await
+        .map_err(store)?;
+    let [row] = rows.as_slice() else {
+        return Ok(None);
+    };
+    if row.record.credential.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Write::SetMirrorAuth {
+        upstream: row.record.upstream.clone(),
+        auth: Some(MirrorAuthRecord { at_ms: now_ms, ok }),
+    }))
 }
 
 /// The request is claimed under `epoch`.

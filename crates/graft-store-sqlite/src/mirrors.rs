@@ -6,8 +6,9 @@
 //! that would not read back.
 
 use graft_store::{
-    LeaseRecord, MirrorDirection, MirrorExportRecord, MirrorLineRecord, MirrorListing, MirrorQuery,
-    MirrorRecord, MirrorStatusRecord, RepoId, StoreError, StoreResult, page_limit,
+    LeaseRecord, MirrorAuthRecord, MirrorDirection, MirrorExportRecord, MirrorLineRecord,
+    MirrorListing, MirrorQuery, MirrorRecord, MirrorStatusRecord, RepoId, StoreError, StoreResult,
+    page_limit,
 };
 use rusqlite::{Connection, OptionalExtension as _, Row, params};
 
@@ -17,7 +18,8 @@ const COLUMNS: &str = "m.upstream, m.lines, m.interval_s, m.enabled, m.credentia
      m.export_default_author, m.export_authors, m.version, m.created_by, m.updated_by,
      m.updated_at, m.status_set, m.status_poll_at, m.status_success_at, m.status_sha,
      m.status_changeset, m.status_lag_changesets, m.status_lag_s, m.status_error_code,
-     m.status_error_message, m.status_backoff_until, m.status_lease_epoch, m.start_at";
+     m.status_error_message, m.status_backoff_until, m.status_lease_epoch, m.start_at,
+     m.auth_at, m.auth_ok";
 
 fn field(s: &str) -> StoreResult<&str> {
     if s.contains(['\t', '\n']) {
@@ -109,6 +111,8 @@ fn record(r: &Row<'_>, o: usize) -> rusqlite::Result<StoreResult<MirrorRecord>> 
     let updated_by: String = r.get(o + 10)?;
     let updated_at_ms: i64 = r.get(o + 11)?;
     let start_at: Option<String> = r.get(o + 23)?;
+    let auth_at: Option<i64> = r.get(o + 24)?;
+    let auth_ok: Option<bool> = r.get(o + 25)?;
     Ok((|| {
         let status = if status_set {
             Some(MirrorStatusRecord {
@@ -144,6 +148,11 @@ fn record(r: &Row<'_>, o: usize) -> rusqlite::Result<StoreResult<MirrorRecord>> 
             updated_by,
             updated_at_ms,
             start_at,
+            auth: match (auth_at, auth_ok) {
+                (Some(at_ms), Some(ok)) => Some(MirrorAuthRecord { at_ms, ok }),
+                (None, None) => None,
+                _ => return Err(StoreError::Corrupt("mirror credential auth".into())),
+            },
         })
     })())
 }
@@ -265,6 +274,27 @@ pub(crate) fn delete(conn: &Connection, repo: i64, upstream: &str) -> StoreResul
     conn.prepare_cached("DELETE FROM repo_mirrors WHERE repo = ?1 AND upstream = ?2")
         .and_then(|mut s| s.execute(params![repo, upstream]))
         .map_err(sql_err)?;
+    Ok(())
+}
+
+pub(crate) fn set_auth(
+    conn: &Connection,
+    repo: i64,
+    upstream: &str,
+    auth: Option<MirrorAuthRecord>,
+) -> StoreResult<()> {
+    conn.prepare_cached(
+        "UPDATE repo_mirrors SET auth_at = ?3, auth_ok = ?4 WHERE repo = ?1 AND upstream = ?2",
+    )
+    .and_then(|mut s| {
+        s.execute(params![
+            repo,
+            upstream,
+            auth.map(|a| a.at_ms),
+            auth.map(|a| a.ok)
+        ])
+    })
+    .map_err(sql_err)?;
     Ok(())
 }
 

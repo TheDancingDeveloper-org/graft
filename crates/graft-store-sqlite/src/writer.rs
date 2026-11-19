@@ -827,6 +827,9 @@ fn commit(conn: &Connection, repo_id: RepoId, txn: MetaTxn) -> StoreResult<TxnOu
             Write::SetMirrorStatus { upstream, status } => {
                 crate::mirrors::set_status(conn, repo, &upstream, &status)?;
             }
+            Write::SetMirrorAuth { upstream, auth } => {
+                crate::mirrors::set_auth(conn, repo, &upstream, auth)?;
+            }
             Write::PutMirrorRequest(r) => {
                 let guarded = txn.preconditions.iter().any(
                     |p| matches!(p, Precondition::MirrorRequestVersionIs { id, .. } if *id == r.id),
