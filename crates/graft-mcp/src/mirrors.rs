@@ -642,6 +642,15 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
     ) -> Result<CallToolResult, ToolError> {
         text_arg("repo", &a.repo)?;
         text_arg("upstream", &a.upstream)?;
+        if !self.credential_files {
+            return Err(ToolError::Invalid(
+                "graft_mirror_credential reads a file on the MCP server's host; it is \
+                 available only from `graft mcp` over stdio. Use the API's \
+                 SetMirrorCredential, or run `graft repo mirror credential` where the \
+                 file is."
+                    .to_owned(),
+            ));
+        }
         let admin = self.mirrors("graft_mirror_credential")?;
         let key = pb::MirrorKey {
             repo: a.repo.clone(),

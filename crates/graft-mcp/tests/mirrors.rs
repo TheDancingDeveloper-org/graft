@@ -276,6 +276,27 @@ async fn serve(
     ().serve((read, write)).await.expect("handshake")
 }
 
+/// The server's own `/mcp` mount: an HTTP-built server, so a file path is on
+/// the server's filesystem and the credential tool must refuse it.
+async fn serve_http(
+    scopes: &[&str],
+    admin: Option<Arc<dyn MirrorAdmin>>,
+) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    let mut principal = principal();
+    principal.scopes = scopes.iter().map(|s| s.to_string()).collect();
+    let mut server = McpServer::new(Fake::standard(), principal).with_credential_files(false);
+    if let Some(admin) = admin {
+        server = server.with_mirror_admin(admin);
+    }
+    let (client_io, server_io) = tokio::io::duplex(1 << 16);
+    let (read, write) = tokio::io::split(server_io);
+    tokio::spawn(async move {
+        let _ = server.serve_io(read, write).await;
+    });
+    let (read, write) = tokio::io::split(client_io);
+    ().serve((read, write)).await.expect("handshake")
+}
+
 fn text(result: &rmcp::model::CallToolResult) -> String {
     serde_json::to_string(result).unwrap()
 }
@@ -584,5 +605,37 @@ async fn a_credential_is_read_from_a_file_and_never_returned() {
     assert_eq!(over.is_error, Some(true));
     assert!(text(&over).contains("larger than"), "{over:?}");
     assert!(!text(&over).contains(&"x".repeat(64)));
+    std::fs::remove_dir_all(&dir).expect("clean up");
+}
+
+#[tokio::test]
+async fn the_http_mount_refuses_a_credential_file_on_the_servers_filesystem() {
+    let service = Arc::new(Service::default());
+    let server = serve_http(&["mirror:bind"], Some(service.clone())).await;
+    let added = call(
+        &server,
+        "graft_mirror_add",
+        json!({"repo": "r", "upstream": UP, "lines": [{"branch": "main", "line": "main"}]}),
+    )
+    .await;
+    assert_ne!(added.is_error, Some(true), "{added:?}");
+
+    let dir = std::env::temp_dir().join(format!("graft-mcp-http-cred-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let file = dir.join("credential");
+    std::fs::write(&file, "ghp_neverInAToolResult0123456789").expect("credential");
+
+    let out = call(
+        &server,
+        "graft_mirror_credential",
+        json!({"repo": "r", "upstream": UP, "credential_file": file.display().to_string()}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(true), "{out:?}");
+    assert!(text(&out).contains("stdio"), "{out:?}");
+    assert!(
+        !text(&out).contains("ghp_neverInAToolResult"),
+        "the credential leaked"
+    );
     std::fs::remove_dir_all(&dir).expect("clean up");
 }
