@@ -74,7 +74,7 @@ fn check_kind(req: &MintRequest, scope: &Scope) -> Result<(), ApiError> {
     let allowed = if req.kind == PrincipalKind::Mirror {
         mirror_set
     } else {
-        !mirror_set && (operator || !scope.is_operator_only())
+        !mirror_set && (operator || !scope.is_mirror_grant())
     };
     if allowed {
         Ok(())

@@ -5,7 +5,8 @@
 //! `graft repo mirror` and `graft repo batch` drive the server's mirror
 //! settings and batch requests (D41 §3.2, §3.5). Binding, removing and
 //! purging need `mirror:bind`, and export lines `mirror:export`; both are
-//! operator-only grants. A credential is read from a file or standard input,
+//! grants an oversight session or the operator holds. A credential is read
+//! from a file or standard input,
 //! never an argument, and no output carries it. A request that creates
 //! something gets one `client_request_id` per invocation, reused on retry.
 
@@ -105,16 +106,16 @@ fn read_credential(path: Option<&Path>, stdin: bool) -> Result<Vec<u8>, Failure>
     Ok(raw)
 }
 
-/// A refusal, with a note when it is for an operator-only grant.
+/// A refusal, with a note when it is for a mirror grant.
 fn refused(e: ApiError) -> Failure {
-    let operator = matches!(
+    let mirror_grant = matches!(
         &e,
         ApiError::PermissionDenied { scope, .. } if scope.starts_with("mirror:")
     );
     let failure = Failure::from(e);
-    if operator {
-        failure.with_detail("operator_only", true.into()).with_note(
-            "mirror:bind and mirror:export are operator-only grants; an operator runs this command",
+    if mirror_grant {
+        failure.with_detail("mirror_grant", true.into()).with_note(
+            "mirror:bind and mirror:export are held by an oversight session or the operator; a worker or review token is refused",
         )
     } else {
         failure

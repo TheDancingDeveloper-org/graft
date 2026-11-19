@@ -768,6 +768,36 @@ async fn grants_and_fields_are_checked_at_the_boundary() {
     ));
 }
 
+async fn an_oversight_export_grant_cuts_a_batch(s: &impl MetaStore) {
+    // D41 amendment (WI-4387): an oversight session holds export, not repo
+    // admin, and oversight is what cuts batches. A worker holds neither.
+    let oversight = who(
+        "oversight",
+        &[
+            "repo:r:read",
+            "repo:r:write",
+            "repo:r:land:main",
+            "mirror:bind",
+            "mirror:export",
+        ],
+    );
+    let r = cut_batch(s, &oversight, 0, cut("main", "k1"))
+        .await
+        .expect("an oversight token cuts");
+    assert_eq!(batch(&r), pb::BatchState::Requested);
+    let worker = who(
+        "worker",
+        &["repo:r:read", "repo:r:write", "repo:r:land:main"],
+    );
+    assert!(
+        matches!(
+            cut_batch(s, &worker, 0, cut("main", "k2")).await,
+            Err(ApiError::PermissionDenied { .. })
+        ),
+        "a worker must not cut"
+    );
+}
+
 fn mirror_as(subject: &str) -> Principal {
     Principal {
         kind: PrincipalKind::Mirror,
@@ -812,4 +842,9 @@ async fn foreign_holder(s: &impl MetaStore) {
 #[tokio::test]
 async fn only_the_exact_holder_renews_or_releases_a_lease() {
     both!(foreign_holder);
+}
+
+#[tokio::test]
+async fn oversight_with_export_cuts_and_a_worker_does_not() {
+    both!(an_oversight_export_grant_cuts_a_batch);
 }

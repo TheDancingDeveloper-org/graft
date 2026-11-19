@@ -27,6 +27,49 @@ When a line is exported to a git host as a batch pull request, a land that arriv
 
 To re-land an outside contributor's GitHub pull request with their credit, run `graft-mirror import-pr <owner>/<repo>#<n> --github-token-file <file> --message-out <file>` in the working copy, review `graft diff`, then commit with that message and land. The message carries `Source-PR` and `Co-authored-by` trailers; the original pull request is closed with a note when its batch merges. See [the git migration guide](guide/git-migration.md#re-land-an-outside-contributors-pull-request).
 
+## Repositories, mirrors and batches
+
+Creating a repository and wiring it to a git upstream are API calls, not
+deploy changes. Nothing in an ops repository or a deployment manifest has to
+change, and nothing restarts.
+
+- **Create a repository.** `graft repo create NAME` (MCP `graft_repo_create`)
+  needs `repos:admin`; the creator then administers it. A repository that
+  already exists is a success.
+- **Bind a mirror.** `graft repo mirror add REPO UPSTREAM --follow main=main`
+  (MCP `graft_mirror_add`) records the row. The mirror service picks it up on
+  its next reconcile (about 15 s) and the first poll imports. `--start-at
+  SHA` imports from that commit as a root instead of walking all history;
+  use it for a very large upstream. A Forgejo or Gitea upstream is bound the
+  same way as `github.com`.
+- **A credential, if the upstream is private.** `graft repo mirror
+  credential REPO UPSTREAM --from-file FILE` (MCP `graft_mirror_credential`,
+  stdio only — see the MCP guide). The value is never an argument, never in a
+  result and never in a log.
+- **Cut a batch.** `graft repo batch cut REPO --line LINE` (MCP
+  `graft_batch_cut`) records a request; the mirror service cuts the batch at
+  the base line's tip, opens the pull request and settles it. `graft repo
+  batch status` shows the open batch. Omit `--base`: the API accepts a
+  changeset id there, but the service refuses a chosen base as `unsupported`
+  today. A cut needs `repo:<repo>:admin` or `mirror:export` (which an
+  oversight session holds), not `mirror:bind`. You do not need a
+  per-repository config file or a container.
+
+**Who may do which.** Binding, removing or purging a mirror needs
+`mirror:bind`, and changing export lines needs `mirror:export`. Those two
+scopes are held by the operator and by an **oversight session** token, which
+the engine mints only for a session a person started to supervise others. A
+worker's or a review session's token is an `Agent` token and cannot hold
+them. Reads still work with `repo:<r>:read`
+(`graft_mirror_status`, `graft_mirror_list`), and an existing row's other
+settings can be changed by the repository's admin; but a bind, remove or
+purge returns `permission_denied`, and that is the intended answer, not a
+bug to work around. If you are a worker and a task needs a mirror created or
+changed, report it to oversight rather than asking for the grant.
+
+The upstream is bounded by the server's `mirror.allowed_hosts`; a host the
+operator has not allowed is refused, and no token can widen that list.
+
 ## Conflicts (exit 3)
 
 The working copy moves onto the tip with your changes on top and the conflicts written into the files:
@@ -140,6 +183,8 @@ Writes: `graft_commit`, `graft_sync`, `graft_land`, `graft_revert`, `graft_works
 
 Open a workspace (`graft_workspace`) before write tools that name one. `graft_commit` can take inline file content, or `from_working_copy` on stdio. `graft_sync` moves the base to the tip. `graft_land` lands the stack. `graft_conflicts` returns paths and markers; `graft_resolve` rebases with the contents you supply.
 
+Repository administration, mirrors and batches, when the token's kind allows them: `graft_repo_create` (`repos:admin`); `graft_mirror_add`, `graft_mirror_set`, `graft_mirror_credential`, `graft_mirror_remove`, `graft_mirror_purge` (`mirror:bind`, or the repository's admin for the settable fields); `graft_mirror_status`, `graft_mirror_list`; `graft_batch_cut`, `graft_batch_status`, `graft_batch_list`, `graft_batch_cancel`. See [Repositories, mirrors and batches](#repositories-mirrors-and-batches) and the [MCP guide](guide/mcp.md).
+
 ### Resources
 
 - `graft://{repo}/{changeset}` — changeset metadata and its patch.
@@ -152,5 +197,11 @@ Results are capped or paginated.
 An agent with no working copy talks to the server's `/mcp` endpoint (streamable HTTP) instead of the CLI. Register `http://HOST:PORT/mcp` in the MCP client with the bearer token as the `Authorization` header. Never put the token in a URL, a tool argument, a config the client stores in a repository, or a prompt.
 
 The repository tools are the same as over stdio: `graft_log`, `graft_show`, `graft_diff`, `graft_blame`, `graft_read`, `graft_ls`, and the writes `graft_workspace`, `graft_commit` (inline file content), `graft_sync`, `graft_land`, `graft_conflicts`, `graft_resolve`. The loop is: `graft_workspace` to open one, `graft_commit` with the files, `graft_sync`, `graft_land`. Working-copy tools (`graft_status`, `graft_commit` with `from_working_copy`) exist only on stdio inside a checkout.
+
+The mirror and batch tools are installed on `/mcp` too, so a checkout-less
+agent with an oversight token can create a repository, bind its mirror and
+cut its first batch without a working copy. The one exception is
+`graft_mirror_credential`, which the mount refuses because it reads a host
+file.
 
 Results are capped; when a result has `next`, call again with it as `cursor`. Errors carry a `kind`: `conflict` lists the paths to fix with `graft_conflicts` and `graft_resolve`; `stale_base` means call `graft_sync` first; `contended` means call `graft_land` again; `unauthenticated` and `permission_denied` mean stop and report. See the [MCP guide](guide/mcp.md) for every tool's arguments.

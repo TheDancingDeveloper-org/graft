@@ -130,7 +130,7 @@ form are in [docs/agents.md](docs/agents.md).
 | --- | --- | --- |
 | Import | `graft mirror import` | Lossless import of a git repository, including raw tag objects |
 | Follow | `graft mirror follow` | Keep a git remote and graft in step |
-| Batch export | `graft mirror pr-batch` | Deliver lands to GitHub as one pull request, one commit per land |
+| Batch export | `graft repo batch cut` | Deliver lands to GitHub as one pull request, one commit per land |
 | Full export | `graft mirror export` | Write the history back out to git. This is the exit path |
 
 Git import and export stay behind `graft mirror`. Nothing else in graft speaks git.
