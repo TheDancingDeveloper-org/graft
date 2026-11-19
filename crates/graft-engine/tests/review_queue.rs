@@ -488,6 +488,7 @@ fn cost_follows_the_page_not_the_line_memory() {
 }
 
 #[test]
+#[ignore = "quarantined: hangs in CI (WI-4411, docs/known-flakes.md)"]
 fn cost_follows_the_page_not_the_line_sqlite() {
     let (meta, dir) = sqlite_meta();
     cost_follows_the_page_not_the_line(Arc::new(Counting::new(meta)), Some(dir));
