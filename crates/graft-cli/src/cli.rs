@@ -770,7 +770,7 @@ pub(crate) enum MirrorAction {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum BatchAction {
-    /// Request a batch PR of a line's lands; needs the repository's admin. A retry with the same --request-id returns the same request
+    /// Request a batch PR of a line's lands; needs the repository's admin or mirror:export (an oversight session). A retry with the same --request-id returns the same request
     Cut {
         /// The graft repository
         #[arg(value_name = "REPO")]
@@ -778,7 +778,7 @@ pub(crate) enum BatchAction {
         /// The line to batch
         #[arg(long, default_value = "main")]
         line: String,
-        /// Full id of the changeset the batch starts after
+        /// Full id of the changeset the batch starts after; leave it unset - the mirror service cuts at the base line's tip and refuses a chosen base
         #[arg(long, value_name = "CHANGESET")]
         base: Option<String>,
         /// Full id of a changeset to leave out; repeatable
