@@ -1939,10 +1939,14 @@ the full design is [notes/mirror-service.md](notes/mirror-service.md).
   credential.
 - **Grants.** Creating a row or changing its upstream, setting its
   credential, removing and purging need `mirror:bind`; turning on export
-  needs `mirror:export`. Both are operator-only and can't be minted into
-  agent or session tokens. A repository admin may enable or disable a
-  mirror, change its interval (not below `mirror.min_interval_s`) and edit
-  its follow lines.
+  needs `mirror:export`. Both are held by the operator and by an
+  **oversight session** token — one Vogt mints for a session a person
+  started to supervise others — and by nothing else: a worker or review
+  token is the `Agent` kind and is refused them at mint. The upstream
+  stays bounded by `mirror.allowed_hosts`. See
+  [decisions.md](decisions.md#note-on-d41-an-oversight-token-may-hold-mirrorbind-wi-4387-2026-11-19).
+  A repository admin may enable or disable a mirror, change its interval
+  (not below `mirror.min_interval_s`) and edit its follow lines.
 - **Upstream allowlist.** `https` or `ssh` only; loopback, link-local,
   private, CGNAT, unique-local and cluster names rejected; host in
   `mirror.allowed_hosts`. The service checks again after DNS resolution.

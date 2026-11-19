@@ -5,9 +5,9 @@ The general guide (no trial hosts) is [docs/agents.md](../docs/agents.md); this 
 Deliver through graft only. No `git push`. No GitHub PRs. No branches. Do not
 create `g<phase>-…` or `wi-…` branches, do not run `git commit`, and do not
 open or wait for a PR. Your change reaches the trial line `$LINE` only through `graft land`. You
-cannot land on `main`. `graft-mirror pr-batch` exports the line as one GitHub
-PR with one commit per land (D26); oversight reviews it and merges it with
-`land-pr` (D28).
+cannot land on `main`. oversight cuts a batch with `graft repo batch cut`, which the mirror
+service runs; it exports the line as one GitHub PR with one commit per land
+(D26), and oversight reviews it and merges it with `land-pr` (D28).
 
 Your token is `~/.config/graft/trial-N.token` (N is in your brief). Never print
 it, never put it in a command's arguments, never copy it into the checkout.

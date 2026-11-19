@@ -373,13 +373,16 @@ repository, its lines and history are untouched.
 Requests a batch PR of a line's lands.
 
 - Arguments: required `repo` and `line`; optional `base`, `excludes` (full
-  changeset ids) and `client_request_id`.
+  changeset ids) and `client_request_id`. Leave `base` unset: the service
+  cuts at the base line's tip and answers `unsupported` to a chosen base
+  today.
 - Result: the request. The tool makes one `client_request_id` per call
   and reuses it when it retries an unavailable server, so a retry returns
   the request the first attempt recorded. If the server stays unavailable
   the error names the key; pass it back to retry the same request.
-- Errors: needs the repository's admin; a batch already open on the line
-  is `batch_open`.
+- Errors: needs the repository's admin or `mirror:export` (an oversight
+  session holds the latter); a batch already open on the line is
+  `batch_open`.
 
 ### `graft_batch_status`
 
@@ -405,11 +408,21 @@ no mirror service will finish, or a batch whose PR was closed by hand.
 - Result: the request, `failed` with error code `cancelled` if it was
   still live, and a cut's batch `settled`. A service still running it is
   refused when it next reports.
-- Errors: needs `mirror:bind` (operator only), else `permission_denied`;
+- Errors: needs `mirror:bind` (an oversight session or the operator), else `permission_denied`;
   a request that holds nothing is refused (`mirror-request-state`).
 
 The mirror and batch tools are unavailable where the launcher provides no
-mirror service (a local repository, or the server's own HTTP mount).
+mirror service: a local repository, or a server started without one. They
+**are** installed on the server's own `/mcp` mount (WI-4387).
+
+One tool differs by mount. `graft_mirror_credential` reads a file from the
+host, so the HTTP mount refuses it before touching the filesystem: there is
+no way to probe for a file's existence over `/mcp`. Over `/mcp`, seed a
+private upstream's credential from inside the server with
+`graft-server admin mirror credential <repo> <upstream>` (the value on
+standard input), or use `graft repo mirror credential --from-file` from a
+host that can reach the server, or run `graft mcp` over stdio where a file
+path is allowed.
 
 ### `graft_tag`
 

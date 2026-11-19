@@ -467,7 +467,13 @@ pub(crate) fn view(repo: &str, r: MirrorRequestRecord) -> pb::MirrorRequest {
     }
 }
 
-/// `CutBatch` (§3.5), under `repo:<name>:admin`.
+/// `CutBatch` (§3.5), under `repo:<name>:admin` or `mirror:export`.
+///
+/// Export is the grant that already says "this token may push this
+/// repository's lines to the forge", and an oversight session holds it (D41
+/// amendment, WI-4387). Without it an oversight token could bind a mirror but
+/// never cut the batch the delivery process asks it to cut, because it holds
+/// no `repo:<name>:admin`.
 pub(crate) async fn cut_batch<M: MetaStore>(
     meta: &M,
     p: &Principal,
@@ -476,9 +482,12 @@ pub(crate) async fn cut_batch<M: MetaStore>(
 ) -> Result<pb::MirrorRequest, ApiError> {
     any_of(
         p,
-        &[Scope::Admin {
-            repo: req.repo.clone(),
-        }],
+        &[
+            Scope::Admin {
+                repo: req.repo.clone(),
+            },
+            Scope::MirrorExport,
+        ],
     )?;
     let draft = Draft {
         kind: MirrorRequestKind::CutBatch,

@@ -88,9 +88,11 @@ Already decided by the operator (2026-10-22):
   v0.3; independence from any orchestrator (generic session and
   work-item names).
 - **D41** (operator, 2026-11-05): mirrors are repository settings, served
-  by one mirror service, with operator-only upstream binding, encrypted
-  per-row credentials, a per-repository authority lease, and batching as a
-  server request. See [D41](#d41-mirrors-as-repository-settings-one-mirror-service).
+  by one mirror service, with upstream binding held by the operator and an
+  oversight session (amended 2026-11-19, WI-4387), encrypted per-row
+  credentials, a per-repository authority lease, and batching as a server
+  request. See [D41](#d41-mirrors-as-repository-settings-one-mirror-service)
+  and its [amendment note](#note-on-d41-an-oversight-token-may-hold-mirrorbind-wi-4387-2026-11-19).
 - **D42** (operator, 2026-11-06, WI-2636): `Revert` with `land = <line>`
   builds the revert and lands it in one call, needing `read` and
   `repo:<r>:land:<line>` (or `admin`) instead of `write`. See
@@ -1365,10 +1367,12 @@ The six points signed:
    one volume, one narrowly scoped token, no per-repository deploy files.
    Batching is an API call, not an exec into a container.
 2. **Scopes and grants.** Add `repos:admin`, `repo:*:<perm>`, the
-   operator-only grants `mirror:bind` (what is fetched) and `mirror:export`
-   (what is pushed), and a `mirror` token kind that can hold only the
-   `repo:*:mirror` set. Agent and session token kinds can't hold either
-   operator grant. The followed-line guard admits the `mirror` kind.
+   grants `mirror:bind` (what is fetched) and `mirror:export` (what is
+   pushed), and a `mirror` token kind that can hold only the
+   `repo:*:mirror` set. Agent and worker session token kinds can't hold
+   either grant; see the [2026-11-19 amendment](#note-on-d41-an-oversight-token-may-hold-mirrorbind-wi-4387-2026-11-19)
+   for the oversight session that can. The followed-line guard admits the
+   `mirror` kind.
 3. **Credentials.** Per-mirror credentials are stored in the server,
    sealed with XChaCha20-Poly1305 under a per-row data key wrapped by a
    separate key-encryption key ring with ids, with associated data binding
@@ -1496,6 +1500,12 @@ so it can pass them into an oversight token. `upstream` stays bounded by
 `mirror.allowed_hosts`. Nothing else opens: the
 `oversight` kind behaves as an agent everywhere else (its author kind is
 `Agent`, `Attest` is refused), and the `mirror` kind is unchanged.
+
+One adjacent call follows: `CutBatch` accepts `mirror:export` as well as
+`repo:<name>:admin` (WI-4387). An oversight token holds export and no
+admin, and oversight is what cuts the batch; without this the self-serve
+path ended at a step only an operator could take. A worker holds neither
+grant and stays refused.
 
 Why: the self-serve goal — an agent creates or changes a mirror through MCP
 or the API with no ops PR, no secret and no redeploy — could not be met

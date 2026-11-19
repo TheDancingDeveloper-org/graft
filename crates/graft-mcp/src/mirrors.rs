@@ -977,7 +977,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
 
     #[tool(
         name = "graft_mirror_remove",
-        description = "Remove a mirror. Its lines stay closed to lands unless clear_followed is set. Needs mirror:bind (operator only).",
+        description = "Remove a mirror. Its lines stay closed to lands unless clear_followed is set. Needs mirror:bind (an oversight session or the operator).",
         annotations(
             title = "Remove mirror",
             read_only_hint = false,
@@ -1000,7 +1000,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
 
     #[tool(
         name = "graft_mirror_purge",
-        description = "Request deletion of a removed or disabled mirror's local data. The graft repository is untouched. Needs mirror:bind (operator only).",
+        description = "Request deletion of a removed or disabled mirror's local data. The graft repository is untouched. Needs mirror:bind (an oversight session or the operator).",
         annotations(
             title = "Purge mirror data",
             read_only_hint = false,
@@ -1069,7 +1069,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
 
     #[tool(
         name = "graft_batch_cancel",
-        description = "Cancel a stuck batch or other mirror request and free its line, when no mirror service will finish it or its PR was closed by hand. Needs mirror:bind, which only an operator holds.",
+        description = "Cancel a stuck batch or other mirror request and free its line, when no mirror service will finish it or its PR was closed by hand. Needs mirror:bind (an oversight session or the operator).",
         annotations(
             title = "Cancel batch",
             read_only_hint = false,
