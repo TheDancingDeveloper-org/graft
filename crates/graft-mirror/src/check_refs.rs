@@ -499,7 +499,7 @@ where
         let sha = self.export(land).await?;
         let cx = self.call("record-export");
         self.exports
-            .record_exports(&cx, &self.config.repo, &[(land, sha)])
+            .record_exports(&cx, &self.config.repo, &[(land, sha)], None)
             .await?;
         let r = CheckRef {
             changeset: land,

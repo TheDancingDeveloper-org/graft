@@ -1379,9 +1379,10 @@ impl pb::ci_service_server::CiService for Services {
 #[tonic::async_trait]
 impl pb::mirror_service_server::MirrorService for Services {
     /// Records the commits graft-mirror exported for changesets
-    /// (`crate::exports`), which pinned CI exchanges check. Admin scope on
-    /// the repository, a write (the denylist and free-space floor apply),
-    /// and every changeset must be stored in the repository first.
+    /// (`crate::exports`), which pinned CI exchanges check. A write (the
+    /// denylist and free-space floor apply), and every changeset must be
+    /// stored in the repository first. An admin records without an epoch;
+    /// the mirror service records under the lease epoch it holds (D41).
     async fn record_exports(
         &self,
         request: Request<pb::RecordExportsRequest>,
@@ -1410,13 +1411,26 @@ impl pb::mirror_service_server::MirrorService for Services {
             records.push((id, commit));
         }
         let repo = req.repo;
+        let epoch = req.epoch;
         let store = self.app.exports.clone();
         let now_s = self.app.now_s();
+        let now_ms = now_s.saturating_mul(1000);
         let count = records.len();
         self.app
             .call(OP, &repo.clone(), cx, true, move |e, cx| async move {
-                let admin = Scope::Admin { repo: repo.clone() };
-                graft_auth::authorize(&cx.principal, &admin, None)?;
+                match epoch {
+                    // The service records under the lease it holds. The epoch
+                    // alone is a small integer, so the holder is checked too.
+                    Some(epoch) => {
+                        mirrors::export_caller(e.stores().0, &cx.principal, &repo, epoch, now_ms)
+                            .await?;
+                    }
+                    // CLI callers keep the admin path: no lease, no epoch.
+                    None => {
+                        let admin = Scope::Admin { repo: repo.clone() };
+                        graft_auth::authorize(&cx.principal, &admin, None)?;
+                    }
+                }
                 // Objects are stored before metadata names them.
                 let mut ids: Vec<ChangesetId> = records.iter().map(|(id, _)| *id).collect();
                 ids.sort_unstable();

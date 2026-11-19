@@ -873,6 +873,23 @@ pub(crate) fn lease_caller(p: &Principal, repo: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Records exports: the mirror permission set on the lease the caller holds
+/// under `epoch` (§3.1, §3.6). The batcher records the commits it will push
+/// before it pushes them, so a CI run on a batch commit can exchange its
+/// token for that land (D40).
+pub(crate) async fn export_caller<M: MetaStore>(
+    meta: &M,
+    p: &Principal,
+    repo: &str,
+    epoch: u64,
+    now_ms: i64,
+) -> Result<(), ApiError> {
+    lease_caller(p, repo)?;
+    let id = repo_id(meta, repo).await?;
+    caller_lease(meta, p, id, repo, epoch, now_ms).await?;
+    Ok(())
+}
+
 fn lease_view(repo: &str, l: &LeaseRecord) -> pb::Lease {
     pb::Lease {
         repo: repo.to_owned(),

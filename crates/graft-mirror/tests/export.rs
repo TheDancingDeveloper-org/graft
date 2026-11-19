@@ -245,6 +245,7 @@ impl ExportLog for Log {
         _cx: &'s CallContext,
         repo: &'s str,
         exports: &'s [(ChangesetId, GitSha)],
+        _epoch: Option<u64>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send + 's>>
     {
         Box::pin(async move {

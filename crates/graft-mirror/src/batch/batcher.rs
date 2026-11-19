@@ -2156,7 +2156,8 @@ where
         };
         for chunk in exports.chunks(MAX_RECORD_EXPORTS) {
             let cx = self.call("record-exports");
-            log.record_exports(&cx, &self.config.repo, chunk).await?;
+            log.record_exports(&cx, &self.config.repo, chunk, self.lease_epoch)
+                .await?;
         }
         Ok(())
     }

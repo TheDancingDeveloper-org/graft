@@ -222,11 +222,16 @@ impl From<ApiError> for MirrorError {
 /// push always finds it. [`server::Server`] is the real one.
 pub trait ExportLog: Send + Sync {
     /// Records each `(changeset, commit)` exported from `repo`.
+    ///
+    /// `epoch` is the mirror authority lease the caller holds (§3.6), or
+    /// `None` for an admin caller with no lease: the server admits the
+    /// mirror service only under a lease it holds (D41 §3.1).
     fn record_exports<'s>(
         &'s self,
         cx: &'s CallContext,
         repo: &'s str,
         exports: &'s [(ChangesetId, GitSha)],
+        epoch: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ApiError>> + Send + 's>>;
 }
 

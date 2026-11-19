@@ -425,7 +425,7 @@ where
         if state.sha != Some(sha) {
             if let Some(log) = self.exports {
                 let cx = self.call("record-export");
-                log.record_exports(&cx, &self.config.repo, &[(target, sha)])
+                log.record_exports(&cx, &self.config.repo, &[(target, sha)], None)
                     .await?;
             }
             let token = self.token().await?;

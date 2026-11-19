@@ -2983,6 +2983,7 @@ async fn a_checked_cut_reads_only_the_batch_rows() {
 struct Exports {
     got: Mutex<HashSet<(ChangesetId, GitSha)>>,
     calls: Mutex<Vec<usize>>,
+    epochs: Mutex<Vec<Option<u64>>>,
 }
 
 impl Exports {
@@ -2994,6 +2995,11 @@ impl Exports {
     fn calls(&self) -> Vec<usize> {
         self.calls.lock().unwrap().clone()
     }
+
+    /// The lease epoch each call carried.
+    fn epochs(&self) -> Vec<Option<u64>> {
+        self.epochs.lock().unwrap().clone()
+    }
 }
 
 impl ExportLog for Exports {
@@ -3002,6 +3008,7 @@ impl ExportLog for Exports {
         _cx: &'s CallContext,
         repo: &'s str,
         exports: &'s [(ChangesetId, GitSha)],
+        epoch: Option<u64>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send + 's>>
     {
         Box::pin(async move {
@@ -3013,6 +3020,7 @@ impl ExportLog for Exports {
                 });
             }
             self.calls.lock().unwrap().push(exports.len());
+            self.epochs.lock().unwrap().push(epoch);
             self.got.lock().unwrap().extend(exports.iter().copied());
             Ok(())
         })
@@ -3084,6 +3092,46 @@ async fn each_batch_commit_is_recorded_as_its_lands_export() {
     assert_eq!(assert_recorded(&w, &log, rec.number), commits);
 }
 
+/// The service cuts a batch under a lease `epoch`; the export log is told
+/// that epoch, so the server can admit the record without `repo:<name>:admin`
+/// (WI-4388). A CLI run with no lease records `None`.
+#[tokio::test]
+async fn the_export_log_is_told_the_batchers_lease_epoch() {
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+
+    // Without a lease (the CLI path) the epoch is absent.
+    let log = Exports::default();
+    let rec = opened(
+        w.batcher()
+            .with_export_log(&log)
+            .run()
+            .await
+            .unwrap()
+            .outcome,
+    );
+    assert_recorded(&w, &log, rec.number);
+    assert_eq!(log.epochs(), vec![None], "no lease, no epoch");
+
+    // Under the service's lease every record carries its epoch.
+    let w = World::new().await;
+    w.start().await;
+    w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+    let log = Exports::default();
+    let rec = opened(
+        w.batcher()
+            .with_lease_epoch(7)
+            .with_export_log(&log)
+            .run()
+            .await
+            .unwrap()
+            .outcome,
+    );
+    assert_recorded(&w, &log, rec.number);
+    assert_eq!(log.epochs(), vec![Some(7)], "the held lease epoch");
+}
+
 #[tokio::test]
 async fn batch_exports_are_recorded_before_the_push() {
     let w = World::new().await;
@@ -3121,6 +3169,7 @@ async fn batch_exports_are_recorded_before_the_push() {
             _cx: &'s CallContext,
             _repo: &'s str,
             _exports: &'s [(ChangesetId, GitSha)],
+            _epoch: Option<u64>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ApiError>> + Send + 's>>
         {
             Box::pin(async { Err(ApiError::Unavailable { retry_after_ms: 1 }) })
