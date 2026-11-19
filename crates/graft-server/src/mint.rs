@@ -58,15 +58,18 @@ pub(crate) fn mint(key: &SigningKey, req: MintRequest, now_s: i64) -> Result<Tok
     graft_auth::mint(key, &claims).map_err(|_| invalid("subject"))
 }
 
-/// Which token kinds may carry `scope` (D41):
+/// Which token kinds may carry `scope` (D41, amended by WI-4387):
 ///
-/// - `mirror:bind` and `mirror:export` only the operator kind: a human token
-///   with no session. Never an agent, session, CI or service token.
+/// - `mirror:bind` and `mirror:export` only the operator kind (a human token
+///   with no session), the `oversight` kind, or a `service` token. Never an
+///   agent, session or CI token. The service token is the engine's: it is
+///   already trusted to mint every session token, and it must hold these
+///   grants to mint them into an oversight session's token.
 /// - The mirror permission set (`repo:*:mirror`) only the `mirror` kind, and
 ///   the `mirror` kind nothing else.
 fn check_kind(req: &MintRequest, scope: &Scope) -> Result<(), ApiError> {
     let operator = (req.kind == PrincipalKind::Human && req.session.is_none())
-        || req.kind == PrincipalKind::Oversight;
+        || matches!(req.kind, PrincipalKind::Oversight | PrincipalKind::Service);
     let mirror_set = matches!(scope, Scope::Mirror { .. });
     let allowed = if req.kind == PrincipalKind::Mirror {
         mirror_set
@@ -153,15 +156,21 @@ pub(crate) fn mint_for(
 type Identity = (String, PrincipalKind, Option<String>, Option<String>);
 
 /// The kind a mint asks for (D41 amendment, WI-4387). Absent keeps the
-/// delegation kind; `oversight` is an oversight session token, which only an
-/// oversight-kind caller may ask for. Anything else is refused.
+/// delegation kind; `oversight` is an oversight session token. The engine's
+/// `service` token is the minter of session tokens, so it may ask for it; so
+/// may an oversight token for itself. Anything else is refused.
 fn requested_kind(
     caller: &Principal,
     asked: Option<&str>,
 ) -> Result<Option<PrincipalKind>, ApiError> {
     match asked {
         None => Ok(None),
-        Some("oversight") if caller.kind == PrincipalKind::Oversight => {
+        Some("oversight")
+            if matches!(
+                caller.kind,
+                PrincipalKind::Service | PrincipalKind::Oversight
+            ) =>
+        {
             Ok(Some(PrincipalKind::Oversight))
         }
         Some("oversight") => Err(ApiError::PermissionDenied {
@@ -191,10 +200,7 @@ fn identity(
             return Err(invalid(rule));
         }
     }
-    if matches!(
-        caller.kind,
-        PrincipalKind::Service | PrincipalKind::Oversight
-    ) {
+    if caller.kind == PrincipalKind::Service {
         let subject = if subject.is_empty() {
             caller.subject.clone()
         } else {
@@ -426,6 +432,112 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_service_mints_the_oversight_kind_but_an_oversight_token_cannot_delegate() {
+        let key = SigningKey::from_seed(&[7; 32]);
+        let verify = |t: &Token| {
+            graft_auth::verify(&key.verifying_key(), t, 1_000, &NoDenylist)
+                .expect("valid")
+                .principal
+        };
+        let ask_oversight = |subject: &str, session: Option<&str>, scopes: &[&str]| MintToken {
+            subject: subject.into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            ttl_s: 60,
+            session: session.map(Into::into),
+            work_item: None,
+            kind: Some("oversight".into()),
+        };
+
+        // The engine's service token holds the mirror grants; it mints an
+        // oversight session token for a subject it names.
+        let engine = caller(&[
+            "repo:r:read",
+            "repo:r:write",
+            "repo:r:drafts",
+            "repo:r:land:main",
+            "mirror:bind",
+            "mirror:export",
+        ]);
+        let minted = mint_for(
+            &key,
+            &engine,
+            4_600,
+            ask_oversight("ses_9", Some("ses_9"), &["repo:r:read", "mirror:bind"]),
+            3600,
+            1_000,
+        )
+        .expect("a service mints the oversight kind");
+        let p = verify(&minted);
+        assert_eq!(
+            (p.subject.as_str(), p.kind, p.session.as_deref()),
+            ("ses_9", PrincipalKind::Oversight, Some("ses_9"))
+        );
+        assert!(p.scopes.contains(&"mirror:bind".to_string()));
+
+        // A service that does not hold the grant cannot delegate it.
+        assert!(matches!(
+            mint_for(
+                &key,
+                &caller(&["repo:r:read"]),
+                4_600,
+                ask_oversight("ses_9", None, &["mirror:bind"]),
+                3600,
+                1_000
+            ),
+            Err(ApiError::PermissionDenied { .. })
+        ));
+
+        // An oversight token may ask for its own kind, and nothing else.
+        let oversight = Principal {
+            subject: "ses_o".into(),
+            kind: PrincipalKind::Oversight,
+            session: Some("ses_o".into()),
+            work_item: None,
+            scopes: vec!["mirror:bind".into()],
+        };
+        let own = mint_for(
+            &key,
+            &oversight,
+            4_600,
+            ask_oversight("", Some("ses_o"), &["mirror:bind"]),
+            3600,
+            1_000,
+        )
+        .expect("an oversight token mints for itself");
+        assert_eq!(verify(&own).kind, PrincipalKind::Oversight);
+        assert!(matches!(
+            mint_for(
+                &key,
+                &oversight,
+                4_600,
+                ask_oversight("alice", None, &["mirror:bind"]),
+                3600,
+                1_000
+            ),
+            Err(ApiError::PermissionDenied { .. })
+        ));
+
+        // An agent cannot ask for the kind at all.
+        assert!(matches!(
+            mint_for(
+                &key,
+                &Principal {
+                    subject: "ses_a".into(),
+                    kind: PrincipalKind::Agent,
+                    session: Some("ses_a".into()),
+                    work_item: None,
+                    scopes: vec!["mirror:bind".into()],
+                },
+                4_600,
+                ask_oversight("", Some("ses_a"), &["mirror:bind"]),
+                3600,
+                1_000
+            ),
+            Err(ApiError::PermissionDenied { .. })
+        ));
+    }
+
     fn admin_mint(
         kind: PrincipalKind,
         session: Option<&str>,
@@ -494,15 +606,16 @@ mod tests {
     }
 
     #[test]
-    fn bind_and_export_mint_only_into_the_operator_kind() {
+    fn bind_and_export_mint_only_into_the_operator_oversight_or_service_kind() {
         for scope in ["mirror:bind", "mirror:export"] {
             admin_mint(PrincipalKind::Human, None, &[scope]).expect("operator mints");
+            admin_mint(PrincipalKind::Oversight, None, &[scope]).expect("oversight mints");
+            admin_mint(PrincipalKind::Service, None, &[scope]).expect("the engine mints");
             for (kind, session) in [
                 (PrincipalKind::Agent, Some("ses_1")),
                 (PrincipalKind::Agent, None),
                 (PrincipalKind::Human, Some("ses_1")),
                 (PrincipalKind::Ci, None),
-                (PrincipalKind::Service, None),
             ] {
                 assert!(
                     refused(admin_mint(kind, session, &[scope])),
