@@ -223,8 +223,10 @@ To run the WI-2270 trial end to end:
    `GRAFT_TRIAL_BASE` (default `main`) and `GRAFT_TRIAL_LINE`; for vogt, the
    trial line forks from `rust-core`:
    `GRAFT_TRIAL_REPO=vogt GRAFT_TRIAL_BASE=rust-core`.
-4. When the agents are done, `graft-mirror pr-batch trial-1` opens the one
-   squashed PR (D21).
+4. When the agents are done, `graft repo batch cut <repo> --line trial-1`
+   (no `--base`) opens the one squashed PR (D21). `<repo>` is
+   `GRAFT_TRIAL_REPO`, default `rusttorrent`; see "Open a batch pull request"
+   above for the service-side path.
 
 What it does:
 
