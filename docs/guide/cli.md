@@ -1121,7 +1121,7 @@ Cut, show or list the batch PRs of a line
 Usage: graft repo batch [OPTIONS] <COMMAND>
 
 Commands:
-  cut     Request a batch PR of a line's lands; needs the repository's admin. A retry with the same --request-id returns the same request
+  cut     Request a batch PR of a line's lands; needs the repository's admin or mirror:export (an oversight session). A retry with the same --request-id returns the same request
   status  Show a line's open batch
   cancel  Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (an oversight session or the operator)
   list    List a repository's batches
@@ -1140,7 +1140,7 @@ Options:
 ## `graft repo batch cut`
 
 ```text
-Request a batch PR of a line's lands; needs the repository's admin. A retry with the same --request-id returns the same request
+Request a batch PR of a line's lands; needs the repository's admin or mirror:export (an oversight session). A retry with the same --request-id returns the same request
 
 Usage: graft repo batch cut [OPTIONS] <REPO>
 
@@ -1150,7 +1150,7 @@ Arguments:
 Options:
       --json                 Print stable JSON; its schema is published with the release
       --line <LINE>          The line to batch [default: main]
-      --base <CHANGESET>     Full id of the changeset the batch starts after
+      --base <CHANGESET>     Full id of the changeset the batch starts after; leave it unset - the mirror service cuts at the base line's tip and refuses a chosen base
       --endpoint <URL>       Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --exclude <CHANGESET>  Full id of a changeset to leave out; repeatable
       --repo <NAME>          Repository name (default: the working copy's)
