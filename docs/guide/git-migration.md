@@ -98,15 +98,16 @@ Land work on the graft `integration` line. To publish its pending lands, sync
 them onto the followed GitHub base and create or update one batch pull request:
 
 ```sh
-graft-mirror pr-batch integration \
-  --base main \
-  --config /etc/graft/mirror.toml
+graft repo batch cut integration --line integration     # repo admin or mirror:export
+graft repo batch status integration --line integration
 ```
 
-Run the command again when more lands are ready. Each land is exported as one
-commit in the batch. `graft-mirror` creates or updates the pull request but
-never merges it. Review and merge that pull request with your normal process;
-afterward, `follow` imports the resulting GitHub history and settles the batch.
+This is a server request: the mirror service claims it, opens the pull request
+on the followed base and settles it (D41 §3.5). Omit `--base`: the service
+cuts at the base line's tip and refuses a chosen changeset as `unsupported`.
+Each land is exported as one commit in the batch. The service never merges the
+pull request. Review and merge it with your normal process; afterward, follow
+imports the resulting GitHub history and settles the batch.
 
 To avoid many small batches, set cut thresholds in `mirror.toml`:
 
