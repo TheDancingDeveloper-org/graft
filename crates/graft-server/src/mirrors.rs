@@ -425,6 +425,8 @@ pub(crate) fn view(repo: &str, r: MirrorRecord) -> pb::Mirror {
         updated_by: r.updated_by,
         updated_at_ms: r.updated_at_ms,
         start_at: r.start_at,
+        credential_auth_at_ms: r.auth.map(|a| a.at_ms),
+        credential_auth_ok: r.auth.map(|a| a.ok),
     }
 }
 
@@ -512,6 +514,7 @@ pub(crate) async fn set<M: MetaStore>(
         updated_by: p.subject.clone(),
         updated_at_ms: now_ms,
         start_at,
+        auth: old.as_ref().and_then(|o| o.auth),
     };
     // A re-enable cancels any live purge in the same transaction. A purge
     // that moves under us is a race to retry; the row's version is not.
@@ -1083,6 +1086,8 @@ pub(crate) async fn set_credential<M: MetaStore>(
         version: old.version + 1,
         updated_by: p.subject.clone(),
         updated_at_ms: now_ms,
+        // A new value has never authenticated (gh#357).
+        auth: None,
         ..old
     };
     let txn = MetaTxn {
@@ -1090,7 +1095,13 @@ pub(crate) async fn set_credential<M: MetaStore>(
             upstream: req.upstream.clone(),
             version: Some(req.expected_version),
         }],
-        writes: vec![Write::PutMirror(record.clone())],
+        writes: vec![
+            Write::PutMirror(record.clone()),
+            Write::SetMirrorAuth {
+                upstream: req.upstream.clone(),
+                auth: None,
+            },
+        ],
     };
     match meta.commit(id, txn).await.map_err(store)? {
         TxnOutcome::Committed(_) => Ok(view(&req.repo, record)),
@@ -2646,11 +2657,42 @@ mod tests {
         .expect("read");
         assert!(read.credential_set);
         assert!(!format!("{read:?}").contains("ghp_"));
+        // Sealed is not working: it has never authenticated (gh#357).
+        assert_eq!(
+            (read.credential_auth_at_ms, read.credential_auth_ok),
+            (None, None)
+        );
+        // Once a use has failed, sealing a new value resets it to never.
+        let failed = MetaTxn {
+            preconditions: vec![],
+            writes: vec![Write::SetMirrorAuth {
+                upstream: UP.into(),
+                auth: Some(graft_store::MirrorAuthRecord {
+                    at_ms: 2,
+                    ok: false,
+                }),
+            }],
+        };
+        assert!(matches!(
+            s.commit(id, failed).await.expect("auth"),
+            TxnOutcome::Committed(_)
+        ));
+        let resealed = set_credential(&s, &bind, &keys, 3, cred(UP, PAT, 2))
+            .await
+            .expect("reseal");
+        assert_eq!(
+            (resealed.credential_auth_at_ms, resealed.credential_auth_ok),
+            (None, None)
+        );
+        assert_eq!(
+            s.get_mirror(id, UP).await.expect("get").expect("row").auth,
+            None
+        );
         // An empty credential clears it, and bumps the version again.
-        let cleared = set_credential(&s, &bind, &keys, 3, cred(UP, b"", 2))
+        let cleared = set_credential(&s, &bind, &keys, 3, cred(UP, b"", 3))
             .await
             .expect("clear");
-        assert_eq!((cleared.version, cleared.credential_set), (3, false));
+        assert_eq!((cleared.version, cleared.credential_set), (4, false));
         assert_eq!(cleared.kek_id, None);
         let absent = set_credential(
             &s,

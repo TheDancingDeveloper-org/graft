@@ -915,3 +915,111 @@ async fn mirror_numbered_batch(s: &impl MetaStore) {
 async fn a_cut_settles_on_the_mirrors_own_batch_number() {
     both!(mirror_numbered_batch);
 }
+
+const UP: &str = "https://github.com/o/r.git";
+
+/// A mirror row for `r` with a sealed credential that has never been used.
+async fn sealed_row(s: &impl MetaStore) -> RepoId {
+    let id = s.repo("r").await.expect("repo").expect("exists");
+    let row = graft_store::MirrorRecord {
+        upstream: UP.into(),
+        lines: Vec::new(),
+        interval_s: 60,
+        enabled: true,
+        credential: Some(vec![1, 2, 3]),
+        kek_id: Some("k1".into()),
+        export: graft_store::MirrorExportRecord::default(),
+        version: 1,
+        status: None,
+        created_by: "op".into(),
+        updated_by: "op".into(),
+        updated_at_ms: 0,
+        start_at: None,
+        auth: None,
+    };
+    let txn = MetaTxn {
+        preconditions: vec![Precondition::MirrorVersionIs {
+            upstream: UP.into(),
+            version: None,
+        }],
+        writes: vec![Write::PutMirror(row)],
+    };
+    assert!(matches!(
+        s.commit(id, txn).await,
+        Ok(TxnOutcome::Committed(_))
+    ));
+    id
+}
+
+async fn auth_of(s: &impl MetaStore, id: RepoId) -> Option<MirrorAuthRecord> {
+    s.get_mirror(id, UP).await.expect("get").expect("row").auth
+}
+
+fn fail_req(id: u64, epoch: u64, code: &str) -> pb::FailRequestRequest {
+    pb::FailRequestRequest {
+        repo: "r".into(),
+        id,
+        epoch,
+        error_code: code.into(),
+    }
+}
+
+async fn credential_auth_scenario(s: &impl MetaStore) {
+    let id = sealed_row(s).await;
+    assert_eq!(auth_of(s, id).await, None, "sealed, never used");
+    let epoch = take(s, "i1", 0).await;
+
+    // A failure for another reason says nothing about the credential.
+    let r = cut_batch(s, &admin(), 0, cut("main", "k1"))
+        .await
+        .expect("cut");
+    claim(s, &service(), 0, claim_req(epoch))
+        .await
+        .expect("claim");
+    fail(s, &service(), 1, fail_req(r.id, epoch, "nothing_to_batch"))
+        .await
+        .expect("fail");
+    assert_eq!(auth_of(s, id).await, None);
+
+    // The forge refusing the credential marks it failed, in the same write.
+    let r = cut_batch(s, &admin(), 2, cut("main", "k2"))
+        .await
+        .expect("cut");
+    claim(s, &service(), 2, claim_req(epoch))
+        .await
+        .expect("claim");
+    let failed = fail(s, &service(), 3, fail_req(r.id, epoch, AUTH_FAILED))
+        .await
+        .expect("fail");
+    assert_eq!(
+        failed.result.and_then(|o| o.error_code).as_deref(),
+        Some(AUTH_FAILED)
+    );
+    assert_eq!(
+        auth_of(s, id).await,
+        Some(MirrorAuthRecord {
+            at_ms: 3,
+            ok: false
+        })
+    );
+
+    // A cut the forge answered with a PR marks it working.
+    let r = cut_batch(s, &admin(), 4, cut("main", "k3"))
+        .await
+        .expect("cut");
+    claim(s, &service(), 4, claim_req(epoch))
+        .await
+        .expect("claim");
+    complete(s, &service(), 5, with_pr(r.id, epoch, true))
+        .await
+        .expect("complete");
+    assert_eq!(
+        auth_of(s, id).await,
+        Some(MirrorAuthRecord { at_ms: 5, ok: true })
+    );
+}
+
+#[tokio::test]
+async fn a_request_the_forge_refused_marks_the_credential_failed() {
+    both!(credential_auth_scenario);
+}

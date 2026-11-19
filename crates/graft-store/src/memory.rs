@@ -781,10 +781,9 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
                 }
             }
             Write::PutMirror(mut record) => {
-                record.status = repo
-                    .mirrors
-                    .get(&record.upstream)
-                    .and_then(|m| m.status.clone());
+                let stored = repo.mirrors.get(&record.upstream);
+                record.status = stored.and_then(|m| m.status.clone());
+                record.auth = stored.and_then(|m| m.auth);
                 repo.mirrors.insert(record.upstream.clone(), record);
             }
             Write::DeleteMirror(upstream) => {
@@ -796,6 +795,11 @@ fn commit_txn(st: &mut State, id: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcom
             Write::SetMirrorStatus { upstream, status } => {
                 if let Some(m) = repo.mirrors.get_mut(&upstream) {
                     m.status = Some(status);
+                }
+            }
+            Write::SetMirrorAuth { upstream, auth } => {
+                if let Some(m) = repo.mirrors.get_mut(&upstream) {
+                    m.auth = auth;
                 }
             }
             Write::PutLease(lease) => {

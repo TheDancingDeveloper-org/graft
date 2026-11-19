@@ -564,6 +564,9 @@ fn print_request(g: &Global, verb: &str, r: &pb::MirrorRequest) -> Result<(), Fa
     Ok(())
 }
 
+/// The request error code for a forge that refused the stored credential.
+const AUTH_FAILED: &str = "auth_failed";
+
 /// One line for a mirror row, from its JSON form so both outputs agree.
 fn mirror_line(m: &pb::Mirror) -> String {
     let v = mirror_json(m);
@@ -583,7 +586,7 @@ fn mirror_line(m: &pb::Mirror) -> String {
         m.upstream,
         if m.enabled { "enabled" } else { "disabled" },
         m.version,
-        if m.credential_set { "set" } else { "none" },
+        credential_word(&v),
         if lines.is_empty() {
             "-".to_owned()
         } else {
@@ -595,6 +598,21 @@ fn mirror_line(m: &pb::Mirror) -> String {
         .as_ref()
         .map(|s| format!(" start_at:{s}"))
         .unwrap_or_default()
+}
+
+/// The credential field of a mirror line: `none`, or `set` with its last
+/// authentication (gh#357), so a sealed value that has never worked does not
+/// read as a working one: `set(auth:never)`, `set(auth:ok@<ms>)`,
+/// `set(auth:failed@<ms>)`.
+fn credential_word(v: &Value) -> String {
+    if v["credential_set"] != Value::Bool(true) {
+        return "none".to_owned();
+    }
+    let auth = &v["credential_auth"];
+    match (auth["state"].as_str(), auth["at_ms"].as_i64()) {
+        (Some(state), Some(at)) => format!("set(auth:{state}@{at})"),
+        _ => "set(auth:never)".to_owned(),
+    }
 }
 
 /// One line for a request, from its JSON form.
@@ -616,7 +634,61 @@ fn request_line(r: &pb::MirrorRequest) -> String {
     }
     if let Some(code) = v["result"]["error_code"].as_str() {
         out.push_str(&format!(" error:{code}"));
+        if code == AUTH_FAILED {
+            out.push_str(&format!(
+                " (the forge refused repository {}'s stored mirror credential; reseal it with `graft repo mirror credential`)",
+                r.repo
+            ));
+        }
     }
     out.push_str(&format!(" request-id:{}", r.client_request_id));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mirror(set: bool, at: Option<i64>, ok: Option<bool>) -> pb::Mirror {
+        pb::Mirror {
+            repo: "r".into(),
+            upstream: "https://github.com/o/r.git".into(),
+            credential_set: set,
+            credential_auth_at_ms: at,
+            credential_auth_ok: ok,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_sealed_credential_shows_its_last_authentication() {
+        let word = |m: &pb::Mirror| credential_word(&mirror_json(m));
+        assert_eq!(word(&mirror(false, None, None)), "none");
+        assert_eq!(word(&mirror(true, None, None)), "set(auth:never)");
+        assert_eq!(word(&mirror(true, Some(5), Some(true))), "set(auth:ok@5)");
+        assert_eq!(
+            word(&mirror(true, Some(6), Some(false))),
+            "set(auth:failed@6)"
+        );
+        assert!(mirror_line(&mirror(true, None, None)).contains(" credential:set(auth:never) "));
+    }
+
+    #[test]
+    fn an_auth_failed_request_names_the_credential() {
+        let r = pb::MirrorRequest {
+            repo: "r".into(),
+            result: Some(pb::MirrorRequestOutcome {
+                error_code: Some(AUTH_FAILED.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let line = request_line(&r);
+        assert!(
+            line.contains(
+                "error:auth_failed (the forge refused repository r's stored mirror credential"
+            ),
+            "{line}"
+        );
+    }
 }

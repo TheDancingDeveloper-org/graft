@@ -927,6 +927,12 @@ message Mirror {
   // The import start point (WI-4332): a 40-hex git commit sha. Absent:
   // the import walks the whole history.
   optional string start_at = 14;
+  // The stored credential's last use against the forge (gh#357): when, and
+  // whether the forge accepted it. Both absent: it has never been used, so
+  // `credential_set` says only that a value is sealed, not that it works.
+  // Sealing a new credential clears both.
+  optional int64 credential_auth_at_ms = 15;
+  optional bool credential_auth_ok = 16;
 }
 
 // Creates (`expected_version` absent) or replaces a row's settings. A

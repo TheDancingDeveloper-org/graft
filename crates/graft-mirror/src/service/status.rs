@@ -133,6 +133,18 @@ fn git_class(text: &str) -> (MirrorErrorCode, &'static str) {
     }
 }
 
+/// Whether `e` is the upstream refusing the mirror's credential (gh#357):
+/// a 401 from the forge's API, or git's authentication failure on a fetch
+/// or push.
+pub fn is_auth_failure(e: &MirrorError) -> bool {
+    match e {
+        MirrorError::Forge(f) => f.unauthorized(),
+        MirrorError::Fetch(text) => git_class(text).0 == MirrorErrorCode::AuthFailed,
+        MirrorError::Cli(e) => git_class(&e.0).0 == MirrorErrorCode::AuthFailed,
+        _ => false,
+    }
+}
+
 /// What status says about a failed poll.
 pub fn classify(e: &MirrorError) -> PollFailure {
     match e {

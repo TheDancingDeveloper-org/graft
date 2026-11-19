@@ -17,10 +17,10 @@ pub mod memory;
 pub use meta::{
     AttestKind, AttestStatus, AttestationRow, BatchState, ChangesetRecord, DoomMark, LandCheckRow,
     LandCheckState, LandingRow, LeaseRecord, LineMergeRow, LineSlot, Lsn, MetaStore, MetaTxn,
-    MirrorDirection, MirrorExportRecord, MirrorLineRecord, MirrorListing, MirrorQuery,
-    MirrorRecord, MirrorRequestKind, MirrorRequestQuery, MirrorRequestRecord, MirrorRequestResult,
-    MirrorRequestState, MirrorStatusRecord, Precondition, Protection, RecordState, RefKind,
-    RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
+    MirrorAuthRecord, MirrorDirection, MirrorExportRecord, MirrorLineRecord, MirrorListing,
+    MirrorQuery, MirrorRecord, MirrorRequestKind, MirrorRequestQuery, MirrorRequestRecord,
+    MirrorRequestResult, MirrorRequestState, MirrorStatusRecord, Precondition, Protection,
+    RecordState, RefKind, RefRecord, TimedRow, TxnOutcome, WorkspaceRecord, Write,
 };
 pub use object::{ObjectStore, StoreStats};
 
