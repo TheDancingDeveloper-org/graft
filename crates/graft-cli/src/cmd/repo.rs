@@ -443,11 +443,11 @@ async fn batch(g: &Global, client: &MirrorClient, action: &BatchAction) -> Resul
             exclude,
             request_id,
         } => {
-            let base = base
-                .as_deref()
-                .map(|b| changeset_bytes("--base", b))
-                .transpose()
-                .map_err(Failure::usage)?;
+            if base.is_some() {
+                return Err(Failure::usage(
+                    "--base is not supported: a batch is always cut at the base line's tip",
+                ));
+            }
             let excludes = exclude
                 .iter()
                 .map(|e| changeset_bytes("--exclude", e))
@@ -456,7 +456,7 @@ async fn batch(g: &Global, client: &MirrorClient, action: &BatchAction) -> Resul
             let req = pb::CutBatchRequest {
                 repo: name.clone(),
                 line: line.clone(),
-                base,
+                base: None,
                 excludes,
                 client_request_id: request_id
                     .clone()
