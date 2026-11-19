@@ -150,18 +150,44 @@ pub enum GitError {
     },
 }
 
+/// How many entries an error's `Display` names before "and N more".
+const DISPLAY_LIMIT: usize = 5;
+
+/// Writes `: a; b; c; and N more` for the first [`DISPLAY_LIMIT`] items.
+fn list_first<T>(
+    f: &mut fmt::Formatter<'_>,
+    items: &[T],
+    mut one: impl FnMut(&mut fmt::Formatter<'_>, &T) -> fmt::Result,
+) -> fmt::Result {
+    for (i, item) in items.iter().take(DISPLAY_LIMIT).enumerate() {
+        f.write_str(if i == 0 { ": " } else { "; " })?;
+        one(f, item)?;
+    }
+    if items.len() > DISPLAY_LIMIT {
+        write!(f, "; and {} more", items.len() - DISPLAY_LIMIT)?;
+    }
+    Ok(())
+}
+
 impl fmt::Display for GitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             GitError::Read(what) => write!(f, "reading the git repository failed: {what}"),
             GitError::BadPaths(paths) => {
-                write!(f, "{} paths break graft's path rules", paths.len())
+                write!(f, "{} paths break graft's path rules", paths.len())?;
+                list_first(f, paths, |f, p| {
+                    write!(f, "{:?}: {} (commit {})", p.path, p.reason, p.commit)
+                })
             }
             GitError::Unrepresentable(commits) => {
-                write!(f, "{} commits cannot be represented", commits.len())
+                write!(f, "{} commits cannot be represented", commits.len())?;
+                list_first(f, commits, |f, u| {
+                    write!(f, "commit {}: {}", u.commit, u.reason)
+                })
             }
             GitError::Fidelity(shas) => {
-                write!(f, "{} commits do not export to their sha", shas.len())
+                write!(f, "{} commits do not export to their sha", shas.len())?;
+                list_first(f, shas, |f, sha| write!(f, "commit {sha}"))
             }
             GitError::Indistinct(pairs) => {
                 write!(
@@ -202,5 +228,67 @@ mod tests {
         assert_eq!(GitSha::from_hex(&hex.to_uppercase()), Some(sha));
         assert_eq!(GitSha::from_hex("4b82"), None);
         assert_eq!(GitSha::from_hex(&"g".repeat(40)), None);
+    }
+
+    fn sha(n: u8) -> GitSha {
+        GitSha::from_hex(&format!("{n:02x}").repeat(20)).unwrap()
+    }
+
+    #[test]
+    fn bad_paths_display_names_path_reason_commit_and_more() {
+        let one = GitError::BadPaths(vec![BadPath {
+            path: "a/b".into(),
+            reason: "case-clash".into(),
+            commit: sha(1),
+        }]);
+        assert_eq!(
+            one.to_string(),
+            format!(
+                "1 paths break graft's path rules: \"a/b\": case-clash (commit {})",
+                sha(1)
+            )
+        );
+        let many = GitError::BadPaths(
+            (0..8)
+                .map(|i| BadPath {
+                    path: format!("p{i}"),
+                    reason: "r".into(),
+                    commit: sha(i),
+                })
+                .collect(),
+        );
+        let text = many.to_string();
+        assert!(text.starts_with("8 paths break"), "{text}");
+        assert!(
+            text.contains("\"p4\"") && !text.contains("\"p5\""),
+            "{text}"
+        );
+        assert!(text.ends_with("; and 3 more"), "{text}");
+    }
+
+    #[test]
+    fn unrepresentable_and_fidelity_display_name_commits() {
+        let u = GitError::Unrepresentable(vec![
+            Unrepresentable {
+                commit: sha(2),
+                reason: "empty-changeset"
+            };
+            7
+        ]);
+        let text = u.to_string();
+        assert!(
+            text.contains(&format!("commit {}: empty-changeset", sha(2))),
+            "{text}"
+        );
+        assert!(text.ends_with("; and 2 more"), "{text}");
+        let fid = GitError::Fidelity(vec![sha(3), sha(4)]);
+        assert_eq!(
+            fid.to_string(),
+            format!(
+                "2 commits do not export to their sha: commit {}; commit {}",
+                sha(3),
+                sha(4)
+            )
+        );
     }
 }
