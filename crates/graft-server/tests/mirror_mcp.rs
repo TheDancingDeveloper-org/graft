@@ -1,7 +1,8 @@
 //! The mirror tools on `/mcp` (D41 amendment, WI-4387): the server's own
 //! mount runs the mirror service in process, an oversight-kind token binds a
-//! mirror (with a start point) and sets its credential, a worker is refused,
-//! and no result carries the credential.
+//! mirror (with a start point), a worker is refused, no result carries a
+//! credential, and the mount refuses the file-reading credential tool because
+//! a path there names the server's own filesystem.
 
 mod common;
 #[path = "common/mcp_agent.rs"]
@@ -30,7 +31,7 @@ fn add_args(start_at: Option<&str>) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn an_oversight_token_binds_a_mirror_and_sets_its_credential_over_mcp() {
+async fn an_oversight_token_binds_a_mirror_over_mcp_and_the_mount_refuses_a_credential_file() {
     let site = Site::new("mcp-mirror-bind", "");
     let kek = site.dir.path().join("kek-k1");
     std::fs::write(&kek, [0x11; 32]).expect("kek");
@@ -66,26 +67,13 @@ async fn an_oversight_token_binds_a_mirror_and_sets_its_credential_over_mcp() {
     assert_eq!(added["mirror"]["start_at"], START);
     assert_eq!(added["mirror"]["credential_set"], false);
 
-    // A credential is taken as a file path; its value never comes back.
+    // The credential tool reads a path on the caller's host, so on the
+    // server's own mount it is refused: a path here would name the KEK, the
+    // signing key, or any other file the server can read. The refusal names
+    // where the tool does work and carries no file content.
     let secret = "ghp_thisMustNotAppearInAnyResult1234567890";
     let path = site.dir.path().join("upstream-credential");
     std::fs::write(&path, secret).expect("credential file");
-    let out = agent.ok(
-        "graft_mirror_credential",
-        json!({
-            "repo": "r",
-            "upstream": UPSTREAM,
-            "credential_file": path.display().to_string(),
-        }),
-    );
-    assert_eq!(out["mirror"]["credential_set"], true);
-    assert!(
-        !out.to_string().contains(secret),
-        "the credential leaked into a tool result"
-    );
-
-    // Closing the file surfaces no contents either.
-    std::fs::remove_file(&path).expect("remove credential file");
     let err = agent.err(
         "graft_mirror_credential",
         json!({
@@ -95,7 +83,32 @@ async fn an_oversight_token_binds_a_mirror_and_sets_its_credential_over_mcp() {
         }),
     );
     assert_eq!(err["kind"], "invalid_argument");
+    assert!(err.to_string().contains("stdio"), "{err}");
     assert!(!err.to_string().contains(secret));
+
+    // The credential can still be seeded through the API, which takes the
+    // value itself: the caller read the file on its own side.
+    let mirrors = graft_proto::pb::mirror_service_client::MirrorServiceClient::with_interceptor(
+        server.channel().await,
+        common::Auth::new(Some(&oversight)),
+    );
+    let sealed = mirrors
+        .clone()
+        .set_mirror_credential(pb::SetMirrorCredentialRequest {
+            repo: "r".into(),
+            upstream: UPSTREAM.into(),
+            credential: secret.as_bytes().to_vec(),
+            expected_version: added["mirror"]["version"].as_u64().unwrap_or(1),
+        })
+        .await
+        .expect("the API seals a credential")
+        .into_inner();
+    assert!(sealed.credential_set);
+    assert!(
+        !format!("{sealed:?}").contains(secret),
+        "the credential leaked"
+    );
+    std::fs::remove_file(&path).expect("remove credential file");
 }
 
 #[tokio::test]
@@ -167,8 +180,9 @@ async fn only_an_oversight_token_mints_an_oversight_token() {
         .expect("claims");
     assert_eq!(claims.principal.kind, PrincipalKind::Oversight);
 
-    // Delegating a worker token that carries mirror:bind is refused: the kind
-    // rule in `mint` still refuses an agent the operator-only scope.
+    // An oversight token does not delegate: naming another subject is refused
+    // before the scope rule is reached, so it cannot hand mirror:bind to a
+    // worker (D41 amendment; only the engine's service token delegates).
     let e = c
         .admin
         .mint_token(pb::MintTokenRequest {
@@ -180,11 +194,11 @@ async fn only_an_oversight_token_mints_an_oversight_token() {
             kind: None,
         })
         .await
-        .expect_err("an agent may not carry mirror:bind");
+        .expect_err("an oversight token may not delegate");
     assert!(
         matches!(
             common::api(e),
-            ApiError::InvalidChange { ref rule, .. } if rule == "scope-kind"
+            ApiError::PermissionDenied { ref scope, .. } if scope == "delegate"
         ),
         "a delegated agent never holds mirror:bind"
     );
