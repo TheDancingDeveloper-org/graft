@@ -700,7 +700,13 @@ fn without_start_at_the_bad_history_is_still_rejected() {
             commit: sha(&bad),
         }])
     );
-    assert_eq!(err.to_string(), "1 paths break graft's path rules");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "1 paths break graft's path rules: \"codex-cli/>\": portability (reserved-char) (commit {})",
+            sha(&bad)
+        )
+    );
     assert!(api.calls().is_empty());
     assert!(map.is_empty());
 }
