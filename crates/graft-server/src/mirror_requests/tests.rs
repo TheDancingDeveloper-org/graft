@@ -220,6 +220,29 @@ async fn idempotent_retry(s: &impl MetaStore) {
     assert_eq!(all.len(), 1, "a retry never records a second request");
 }
 
+async fn base_is_refused_without_a_row(s: &impl MetaStore) {
+    for base in [vec![1; 32], vec![1; 3]] {
+        let mut chosen = cut("main", "k1");
+        chosen.base = Some(base);
+        rejected(
+            cut_batch(s, &admin(), 0, chosen).await,
+            "mirror-base-unsupported",
+        );
+    }
+    // No row was written: the key is unused and the line is free, so a cut
+    // without a base under the same key is a new request.
+    let r = cut_batch(s, &admin(), 0, cut("main", "k1"))
+        .await
+        .expect("cut");
+    assert_eq!(r.id, 1);
+    assert_eq!(state(&r), pb::MirrorRequestState::Pending);
+}
+
+#[tokio::test]
+async fn a_chosen_base_is_refused_before_any_request_row() {
+    both!(base_is_refused_without_a_row);
+}
+
 #[tokio::test]
 async fn a_retried_cut_returns_the_original_request() {
     both!(idempotent_retry);
@@ -745,9 +768,6 @@ async fn grants_and_fields_are_checked_at_the_boundary() {
         cut_batch(&s, &admin(), 0, cut("main", "a b")).await,
         "mirror-field",
     );
-    let mut bad = cut("main", "k1");
-    bad.base = Some(vec![1; 3]);
-    rejected(cut_batch(&s, &admin(), 0, bad).await, "mirror-field");
     // The service calls need a mirror-kind token.
     assert!(matches!(
         claim(&s, &admin(), 0, claim_req(1)).await,

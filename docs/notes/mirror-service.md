@@ -386,7 +386,7 @@ tables). The control moves to the server as a request table,
 | `id` | server-assigned |
 | `repo`, `line`, `kind` | `kind` is `cut_batch`, `settle_batch`, `exclude`, `rewind` or `purge` |
 | `client_request_id` | caller-supplied idempotency key, unique per `(repo, kind)` |
-| `args` | base, excludes and so on |
+| `args` | excludes and so on (a chosen base is not an arg: see `CutBatch`) |
 | `state` | `pending` → `claimed` → `done` / `failed` / `expired` |
 | `claimed_by_epoch`, `claimed_at` | the lease epoch of the claimer (§3.6) |
 | `deadline` | `created_at` + request timeout (default 30 min) |
@@ -395,7 +395,7 @@ tables). The control moves to the server as a request table,
 
 | Call | Effect |
 | --- | --- |
-| `CutBatch(repo, line, base, excludes, client_request_id)` | records a `cut_batch` request; returns the existing request if the id was seen |
+| `CutBatch(repo, line, base, excludes, client_request_id)` | records a `cut_batch` request; returns the existing request if the id was seen. A batch is always cut at the base line's tip, so a set `base` is refused with `mirror-base-unsupported` before any request row is written (gh#360); the field stays in the wire format until the service honours it |
 | `GetBatch(repo, line)` | the open batch, its PR, its lands, its state |
 | `ListBatches(repo)` | paginated history |
 | `RewindFollowed(repo, line, client_request_id)` | records a `rewind` request (WI-3142) |
