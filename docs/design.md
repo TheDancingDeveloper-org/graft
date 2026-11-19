@@ -1756,9 +1756,11 @@ at once. That is how the mirror avoids split-brain.
 ### 11.4 Batch PR export
 
 Under [D21](decisions.md#d21-batch-pr-export) clients land on a graft
-integration line forked from the followed `main`, and `graft-mirror pr-batch
-<line> --base main` delivers it to GitHub as one PR at a time, which the
-operator merges. [D26](decisions.md#d26-one-commit-per-land-in-a-batch-pr)
+integration line forked from the followed `main`, and a batch request
+(`graft repo batch cut`, D41 §3.5) delivers it to GitHub as one PR at a time,
+which oversight merges. The service that claims the request cuts at the base
+line's tip, so no base is passed; `graft-mirror pr-batch` is the retired CLI
+for the same export. [D26](decisions.md#d26-one-commit-per-land-in-a-batch-pr)
 changes the PR's commits from one squash to one commit per land, and
 [D25](decisions.md#d25-post-land-checks-on-the-batch-line) (§8.7, phase 2) will
 decide where a batch is cut; in phase 1 a batch is cut at the tip.
