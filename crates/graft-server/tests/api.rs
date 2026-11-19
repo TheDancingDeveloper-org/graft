@@ -118,6 +118,7 @@ async fn unauthenticated_and_out_of_scope_calls_are_refused() {
             ttl_s: 60,
             session: None,
             work_item: None,
+            kind: None,
         })
         .await
         .expect_err("refused");
@@ -134,6 +135,7 @@ async fn unauthenticated_and_out_of_scope_calls_are_refused() {
             ttl_s: 60,
             session: None,
             work_item: None,
+            kind: None,
         })
         .await
         .expect("mint")

@@ -14,6 +14,11 @@ pub enum PrincipalKind {
     /// The mirror service (D41). It may hold only `repo:*:mirror`, and is
     /// the one principal that moves a followed line.
     Mirror,
+    /// An oversight session (D41 amendment, WI-4387): a session token Vogt
+    /// mints for a session that supervises other sessions. It may hold
+    /// `mirror:bind` (so it can create a mirror through the API) and is
+    /// otherwise an agent. A worker session is `Agent`, never this.
+    Oversight,
 }
 
 /// An authenticated caller, as established by `graft-auth` from a token.

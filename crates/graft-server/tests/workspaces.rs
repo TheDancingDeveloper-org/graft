@@ -292,6 +292,7 @@ fn mint_req(subject: &str, session: Option<&str>, work_item: Option<&str>) -> pb
         ttl_s: 600,
         session: session.map(Into::into),
         work_item: work_item.map(Into::into),
+        kind: None,
     }
 }
 

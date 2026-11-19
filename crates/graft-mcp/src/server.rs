@@ -1012,8 +1012,29 @@ pub fn streamable_http_service<A>(
 where
     A: RepoApi + WorkspaceApi + Send + Sync + 'static,
 {
+    streamable_http_service_with_mirror_admin(api, config, None)
+}
+
+/// [`streamable_http_service`], with the mirror service the mounting server
+/// runs in process: every session's [`McpServer`] gets `mirror_admin`, so
+/// `graft_mirror_*` and `graft_batch_*` work there as they do in
+/// `graft mcp`. Without one those tools answer that they are unavailable.
+pub fn streamable_http_service_with_mirror_admin<A>(
+    api: Arc<A>,
+    config: StreamableHttpServerConfig,
+    mirror_admin: Option<Arc<dyn MirrorAdmin>>,
+) -> StreamableHttpService<McpServer<A>, LocalSessionManager>
+where
+    A: RepoApi + WorkspaceApi + Send + Sync + 'static,
+{
     StreamableHttpService::new(
-        move || Ok(McpServer::for_http(Arc::clone(&api))),
+        move || {
+            let server = McpServer::for_http(Arc::clone(&api));
+            Ok(match &mirror_admin {
+                Some(admin) => server.with_mirror_admin(Arc::clone(admin)),
+                None => server,
+            })
+        },
         Arc::new(LocalSessionManager::default()),
         config,
     )

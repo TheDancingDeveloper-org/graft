@@ -740,6 +740,27 @@ fn admin_types_round_trip() {
                 ttl_s,
                 session,
                 work_item,
+                kind: None,
+            }),
+    );
+
+    // The optional kind (WI-4387) round-trips when it is set.
+    check::<MintToken, pb::MintTokenRequest, _>(
+        "MintToken::kind",
+        (
+            text(),
+            prop::collection::vec(text(), 1..3),
+            any::<u64>(),
+            otext(),
+            otext(),
+        )
+            .prop_map(|(subject, scopes, ttl_s, session, work_item)| MintToken {
+                subject,
+                scopes,
+                ttl_s,
+                session,
+                work_item,
+                kind: Some("oversight".to_owned()),
             }),
     );
 }

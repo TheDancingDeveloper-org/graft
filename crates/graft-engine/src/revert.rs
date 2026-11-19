@@ -44,7 +44,7 @@ pub(crate) fn caller(cx: &CallContext) -> Author {
         email: String::new(),
         kind: match cx.principal.kind {
             PrincipalKind::Human => AuthorKind::Human,
-            PrincipalKind::Agent => AuthorKind::Agent,
+            PrincipalKind::Agent | PrincipalKind::Oversight => AuthorKind::Agent,
             PrincipalKind::Ci => AuthorKind::Ci,
             PrincipalKind::Service | PrincipalKind::Mirror => AuthorKind::Bot,
         },

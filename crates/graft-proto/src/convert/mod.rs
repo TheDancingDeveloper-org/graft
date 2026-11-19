@@ -2045,6 +2045,7 @@ impl From<MintToken> for pb::MintTokenRequest {
             ttl_s: r.ttl_s,
             session: r.session,
             work_item: r.work_item,
+            kind: r.kind,
         }
     }
 }
@@ -2057,6 +2058,7 @@ impl From<pb::MintTokenRequest> for MintToken {
             ttl_s: r.ttl_s,
             session: r.session,
             work_item: r.work_item,
+            kind: r.kind,
         }
     }
 }
