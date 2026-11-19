@@ -487,7 +487,8 @@ pub struct BatchCutArgs {
     pub repo: String,
     /// The line to batch.
     pub line: String,
-    /// The changeset the batch starts after.
+    /// The changeset the batch starts after. Leave it unset: the mirror
+    /// service cuts at the base line's tip and refuses a chosen base.
     #[serde(default)]
     pub base: Option<String>,
     /// Changesets to leave out.
