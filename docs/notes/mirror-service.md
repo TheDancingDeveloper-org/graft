@@ -15,9 +15,9 @@ answers of 2026-11-05:
 
 1. The GitHub App does not exist yet. Migration seeds per-row PAT
    credentials, and the App comes later.
-2. Only the operator holds the upstream-binding grant `mirror:bind`. Agents
-   can't add or repoint mirrors. (Amended 2026-11-19, WI-4387: an oversight
-   session token may hold it too; see §3.1.)
+2. The operator holds the upstream-binding grant `mirror:bind`, and so does
+   an oversight session token (amended 2026-11-19, WI-4387; see §3.1). Other
+   agents can't add or repoint mirrors.
 3. A server-side authority lease per repository is accepted. This amends §8.
 4. Export needs its own grant, separate from follow.
 
@@ -404,8 +404,11 @@ tables). The control moves to the server as a request table,
 
 CLI `graft repo batch cut|status|list|cancel`, MCP `batch_cut`,
 `batch_status`, `batch_list`, `batch_cancel`. A batch is requested under
-`repo:<name>:admin`, and a rewind under `mirror:bind` because it discards
-history. A cancel is also under `mirror:bind`: it is the operator's way to
+`repo:<name>:admin` or `mirror:export` — the latter so an oversight session,
+which holds export and not admin (D41 amendment, WI-4387), can cut the batch
+the delivery process asks it to cut. A chosen `base` is accepted by the API
+but the service answers `unsupported`; the batch is cut at the base line's
+tip. A rewind is under `mirror:bind` because it discards history. A cancel is also under `mirror:bind`: it is the operator's way to
 free a line held by a cut no service will finish (a claimed cut with no PR
 never expires) or by a batch whose PR was closed by hand. `land-pr` is unchanged,
 since the PR itself is what it merges.
@@ -594,9 +597,9 @@ executed by the service under the rules in §3.5.
 
 1. Adopt §2 as the target, amending `design.md` §11 to say the mirror
    service is one process driven by repository settings.
-2. Add `repos:admin`, `repo:*:<perm>`, the operator-only `mirror:bind` and
-   `mirror:export` grants, and the `mirror` token kind limited to the
-   `repo:*:mirror` set (§3.1).
+2. Add `repos:admin`, `repo:*:<perm>`, the `mirror:bind` and
+   `mirror:export` grants (operator and oversight session; §3.1), and the
+   `mirror` token kind limited to the `repo:*:mirror` set (§3.1).
 3. Store per-mirror credentials in the server, encrypted under a separate
    KEK with key ids and associated data (§3.4), not as secret-store
    references. Seed them from today's PATs; the GitHub App follows later.

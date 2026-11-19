@@ -646,7 +646,7 @@ pub(crate) enum RepoAction {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MirrorAction {
-    /// Bind a repository to an upstream; needs mirror:bind (and mirror:export for export lines), operator-only grants
+    /// Bind a repository to an upstream; needs mirror:bind (an oversight session or the operator), and mirror:export for export lines
     Add {
         /// The graft repository
         #[arg(value_name = "REPO")]
@@ -797,7 +797,7 @@ pub(crate) enum BatchAction {
         #[arg(long, default_value = "main")]
         line: String,
     },
-    /// Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (operator only)
+    /// Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (an oversight session or the operator)
     Cancel {
         /// The graft repository
         #[arg(value_name = "REPO")]

@@ -928,7 +928,7 @@ Bind, change, credential, remove, purge or show a repository's git mirrors
 Usage: graft repo mirror [OPTIONS] <COMMAND>
 
 Commands:
-  add            Bind a repository to an upstream; needs mirror:bind (and mirror:export for export lines), operator-only grants
+  add            Bind a repository to an upstream; needs mirror:bind (an oversight session or the operator), and mirror:export for export lines
   set            Enable, disable or change a mirror; needs the repository's admin (mirror:export to change export lines)
   credential     Seal a credential into a mirror; needs mirror:bind and read access. Read from a file or standard input, never an argument
   remove         Remove a mirror; its lines stay closed to lands unless --clear-followed. Needs mirror:bind
@@ -950,7 +950,7 @@ Options:
 ## `graft repo mirror add`
 
 ```text
-Bind a repository to an upstream; needs mirror:bind (and mirror:export for export lines), operator-only grants
+Bind a repository to an upstream; needs mirror:bind (an oversight session or the operator), and mirror:export for export lines
 
 Usage: graft repo mirror add [OPTIONS] <REPO> <UPSTREAM>
 
@@ -1123,7 +1123,7 @@ Usage: graft repo batch [OPTIONS] <COMMAND>
 Commands:
   cut     Request a batch PR of a line's lands; needs the repository's admin. A retry with the same --request-id returns the same request
   status  Show a line's open batch
-  cancel  Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (operator only)
+  cancel  Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (an oversight session or the operator)
   list    List a repository's batches
   help    Print this message or the help of the given subcommand(s)
 
@@ -1185,7 +1185,7 @@ Options:
 ## `graft repo batch cancel`
 
 ```text
-Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (operator only)
+Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (an oversight session or the operator)
 
 Usage: graft repo batch cancel [OPTIONS] <REPO> <ID>
 

@@ -62,10 +62,13 @@ cargo nextest run -p <crate> --all-features   # or: cargo test -p <crate>
 - Add a changelog fragment `changes/<item>.md`.
 - Land with `g land` on the graft line (`backlog-1`): commit, `g sync`, then
   `g land`. Once landed, **stop**. Don't open a PR, don't poll CI.
-- Batch PRs are the normal path. Oversight cuts one batch PR from the line
-  (`graft/batch-<n>`, made by `pr-batch`) and `land-pr` rebase-merges it with
-  `--admin` once the required checks pass, so each land's commit survives
-  (D28). Hand-made PRs squash through the merge queue.
+- Batch PRs are the normal path. Oversight asks the server for one with
+  `graft repo batch cut <repo> --line <line>`; the mirror service cuts at the
+  base line's tip, opens `graft/batch-<n>`, and `land-pr` rebase-merges it
+  with `--admin` once the required checks pass, so each land's commit
+  survives (D28). Don't pass `--base`: the API takes a changeset id, and the
+  service refuses a chosen base as `unsupported`. Hand-made PRs squash
+  through the merge queue.
 - Commit with the identity in your brief.
 - Leave a Vogt hand-off comment on your work item: branch, head sha, and
   which checks you ran. Then list **every** Deliver and Accept item from the
