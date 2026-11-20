@@ -137,7 +137,9 @@ jobs:
 
   test:
     runs-on: [self-hosted]
-    timeout-minutes: 45
+    # Stopgap (WI-4463): a cold compile plus 1944 tests overran 45 minutes on
+    # ci-k8s. Lower it once the build cache hits.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       # Docs-only diffs skip the build but still report the check (WI-2401).
@@ -150,10 +152,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: steps.scope.outputs.docs_only != 'true'
       # Only main writes the cache back; every ref restores what main saved.
+      # cache-on-failure also saves it when a test step fails, so a red main
+      # run still warms the next one (WI-4463).
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.docs_only != 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       # Pinned cargo-nextest, run from the job's temp dir. Some self-hosted
       # runners carry an older cargo-nextest in $CARGO_HOME/bin, which cargo
       # resolves before PATH, so neither install-action nor a PATH prepend
@@ -162,6 +167,14 @@ jobs:
         run: |
           curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/cargo-nextest" nextest --version
+      # Compile the test binaries once, as their own step, so compile time
+      # shows apart from test time. The nextest step runs the archive.
+      - name: build test archive
+        if: steps.scope.outputs.docs_only != 'true'
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/cargo-nextest" nextest archive --workspace --all-features \
+            --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst"
       # Quarantine (WI-2314, docs/known-flakes.md): rustc, cargo or the
       # linker is sometimes OOM-killed on a shared runner. Retry once only
       # when the log matches .github/scripts/oom-flake-signature.sh; any
@@ -173,7 +186,8 @@ jobs:
         run: |
           set +e
           nextest() {
-            "$RUNNER_TEMP/cargo-nextest" nextest run --workspace --all-features --no-tests=pass 2>&1 \
+            "$RUNNER_TEMP/cargo-nextest" nextest run --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst" \
+              --no-tests=pass 2>&1 \
               | tee "$RUNNER_TEMP/nextest.log"
             return "${PIPESTATUS[0]}"
           }
