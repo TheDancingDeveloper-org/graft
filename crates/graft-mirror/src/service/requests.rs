@@ -17,6 +17,11 @@ use crate::github::{Forge, ForgeError, NewPull, Pull};
 /// The most requests one task runs between two polls.
 pub const REQUESTS_PER_TURN: usize = 4;
 
+/// How many of a repository's newest cuts one turn looks at for a batch to
+/// settle. A line holds at most one open batch, and it is the line's newest
+/// cut.
+pub const SETTLE_SCAN: u32 = 16;
+
 /// Why a request failed: a typed code the server records.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestFailure(pub &'static str);
@@ -76,6 +81,12 @@ pub trait RequestRunner: Send + Sync {
         &self,
         req: &pb::MirrorRequest,
     ) -> impl Future<Output = Result<pb::MirrorRequestOutcome, RequestFailure>> + Send;
+    /// Reads the PR of the batch cut `req` opened and reports whether it is
+    /// over: merged (and followed back) or closed unmerged.
+    fn batch_settled(
+        &self,
+        req: &pb::MirrorRequest,
+    ) -> impl Future<Output = Result<bool, RequestFailure>> + Send;
 }
 
 /// A runner for the kinds not wired to the batcher yet: refuses each with
@@ -96,6 +107,10 @@ impl RequestRunner for Unwired {
         _req: &pb::MirrorRequest,
     ) -> Result<pb::MirrorRequestOutcome, RequestFailure> {
         Err(UNSUPPORTED)
+    }
+
+    async fn batch_settled(&self, _req: &pb::MirrorRequest) -> Result<bool, RequestFailure> {
+        Ok(false)
     }
 }
 
@@ -168,10 +183,58 @@ pub struct Turn {
     pub finished: usize,
     /// A request was left claimed to retry.
     pub retry: bool,
+    /// Open batches settled because their PR was merged or closed.
+    pub settled: usize,
 }
 
-/// Claims and runs up to [`REQUESTS_PER_TURN`] requests on `repo` under
-/// `epoch`. A purge is refused here: it runs only for a repository with no
+/// Settles each open or sealed batch on `repo` whose PR is over, so the
+/// server frees its line for the next cut (§3.5). A batch the runner cannot
+/// read yet is left for a later turn. `LeaseLost` is returned.
+async fn settle_open<C: Control, R: RequestRunner>(
+    control: &C,
+    runner: &R,
+    repo: &str,
+    epoch: u64,
+) -> ApiResult<usize> {
+    let mut settled = 0;
+    for b in control.list_batches(repo, SETTLE_SCAN).await? {
+        let open = matches!(
+            pb::BatchState::try_from(b.batch_state),
+            Ok(pb::BatchState::Open | pb::BatchState::Sealed)
+        );
+        if !open {
+            continue;
+        }
+        match runner.batch_settled(&b).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(RequestFailure(code)) => {
+                tracing::warn!(
+                    repo,
+                    request = b.id,
+                    code,
+                    "mirror batch: its PR could not be read"
+                );
+                continue;
+            }
+        }
+        match control.settle_batch(repo, b.id, epoch).await {
+            Ok(()) => {
+                tracing::info!(repo, request = b.id, line = %b.line, "mirror batch settled; the line is free");
+                settled += 1;
+            }
+            Err(e) if is_lease_lost(&e) => return Err(e),
+            // Cancelled or settled since it was listed.
+            Err(e) => {
+                tracing::warn!(repo, request = b.id, error = %e, "mirror batch: settling failed")
+            }
+        }
+    }
+    Ok(settled)
+}
+
+/// Settles the batches whose PRs are over, then claims and runs up to
+/// [`REQUESTS_PER_TURN`] requests on `repo` under `epoch`. A purge is refused here: it runs only for a repository with no
 /// task ([`purge`]). `LeaseLost` is returned so the task stops.
 pub async fn run_turn<C: Control, D: PullDesk, R: RequestRunner>(
     control: &C,
@@ -180,7 +243,10 @@ pub async fn run_turn<C: Control, D: PullDesk, R: RequestRunner>(
     repo: &str,
     epoch: u64,
 ) -> ApiResult<Turn> {
-    let mut turn = Turn::default();
+    let mut turn = Turn {
+        settled: settle_open(control, runner, repo, epoch).await?,
+        ..Turn::default()
+    };
     for _ in 0..REQUESTS_PER_TURN {
         let Some(req) = control.claim_request(repo, epoch).await? else {
             break;

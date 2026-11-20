@@ -59,6 +59,7 @@ struct State {
     completed: Vec<(u64, pb::MirrorRequestOutcome)>,
     failed: Vec<(u64, String)>,
     list_calls: Vec<tokio::time::Instant>,
+    batches: Vec<pb::MirrorRequest>,
 }
 
 /// The server's mirror calls, in memory. Leases are mirrored into the
@@ -424,6 +425,32 @@ impl Control for Fake {
         if let Some(req) = ended {
             self.put_store_cut(&req, None).await;
         }
+        Ok(())
+    }
+
+    async fn list_batches(&self, repo: &str, limit: u32) -> ApiResult<Vec<pb::MirrorRequest>> {
+        self.up()?;
+        Ok(self
+            .st()
+            .batches
+            .iter()
+            .filter(|b| b.repo == repo)
+            .take(limit as usize)
+            .cloned()
+            .collect())
+    }
+
+    async fn settle_batch(&self, repo: &str, id: u64, epoch: u64) -> ApiResult<()> {
+        self.held(repo, epoch)?;
+        let mut st = self.st();
+        let b = st
+            .batches
+            .iter_mut()
+            .find(|b| b.repo == repo && b.id == id)
+            .ok_or(ApiError::NotFound {
+                what: format!("request {id}"),
+            })?;
+        b.batch_state = pb::BatchState::Settled as i32;
         Ok(())
     }
 }
@@ -1188,6 +1215,8 @@ impl PullDesk for Desk {
 struct Runner {
     prepared: AtomicUsize,
     ran: AtomicUsize,
+    /// The cuts whose PR is over.
+    over: Mutex<Vec<u64>>,
 }
 
 impl RequestRunner for Runner {
@@ -1222,6 +1251,50 @@ impl RequestRunner for Runner {
             _ => Err(requests::UNSUPPORTED),
         }
     }
+
+    async fn batch_settled(&self, req: &pb::MirrorRequest) -> Result<bool, RequestFailure> {
+        Ok(self.over.lock().unwrap().contains(&req.id))
+    }
+}
+
+/// WI-4468: a batch whose PR is merged is settled on the next turn, with
+/// no cut queued, so the server frees its line.
+#[tokio::test]
+async fn a_turn_settles_an_open_batch_whose_pr_is_over() {
+    let fake = Fake::default();
+    let epoch = fake.acquire_lease(REPO, "a").await.unwrap().epoch;
+    let batch = |id, state: pb::BatchState| pb::MirrorRequest {
+        batch_state: state as i32,
+        ..request(id, MirrorRequestKind::CutBatch)
+    };
+    fake.st().batches = vec![
+        batch(6, pb::BatchState::Open),
+        batch(5, pb::BatchState::Settled),
+        batch(4, pb::BatchState::Sealed),
+    ];
+    let (desk, runner) = (Desk::default(), Runner::default());
+
+    // Still open on the forge: nothing settles.
+    let turn = requests::run_turn(&fake, &desk, &runner, REPO, epoch)
+        .await
+        .unwrap();
+    assert_eq!(turn.settled, 0);
+
+    runner.over.lock().unwrap().extend([6, 4]);
+    let turn = requests::run_turn(&fake, &desk, &runner, REPO, epoch)
+        .await
+        .unwrap();
+    assert_eq!(turn.settled, 2);
+    assert!(
+        fake.st()
+            .batches
+            .iter()
+            .all(|b| b.batch_state == pb::BatchState::Settled as i32)
+    );
+    let turn = requests::run_turn(&fake, &desk, &runner, REPO, epoch)
+        .await
+        .unwrap();
+    assert_eq!(turn.settled, 0, "a settled batch is not settled again");
 }
 
 fn request(id: u64, kind: MirrorRequestKind) -> pb::MirrorRequest {

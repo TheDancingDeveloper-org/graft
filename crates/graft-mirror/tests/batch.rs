@@ -3736,6 +3736,40 @@ mod request_cut {
         assert!(w.github.prs().is_empty());
     }
 
+    /// WI-4468: the service settles a batch once its PR is over, whatever
+    /// the merge method, with no further cut to run the batcher.
+    #[tokio::test]
+    async fn a_rebase_merged_or_closed_batch_reads_as_settled_without_another_cut() {
+        let w = World::new().await;
+        w.start().await;
+        w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+        w.land(&[("b.txt", "b1\n")], "add b", 2).await;
+        let new = runner(&w).prepare_batch(&cut(6)).await.expect("cut");
+        PullDesk::create(&w.github, &new).await.unwrap();
+        assert!(
+            !runner(&w).batch_settled(&cut(6)).await.unwrap(),
+            "an open PR is not settled"
+        );
+        assert!(
+            !runner(&w).batch_settled(&cut(99)).await.unwrap(),
+            "no such cut"
+        );
+
+        w.github.rebase_merge(1);
+        assert!(runner(&w).batch_settled(&cut(6)).await.unwrap());
+        let rec = w.batcher().track().await.unwrap().unwrap();
+        assert_eq!(rec.state, BatchState::Merged);
+
+        // A closed PR settles too, as rejected.
+        w.land(&[("c.txt", "c1\n")], "add c", 3).await;
+        let new = runner(&w).prepare_batch(&cut(7)).await.expect("cut");
+        PullDesk::create(&w.github, &new).await.unwrap();
+        w.github.close(2);
+        assert!(runner(&w).batch_settled(&cut(7)).await.unwrap());
+        let rec = w.batcher().track().await.unwrap().unwrap();
+        assert_eq!(rec.state, BatchState::Rejected);
+    }
+
     #[tokio::test]
     async fn settle_exclude_and_rewind_run_through_the_real_batch_runner() {
         let w = World::new().await;
