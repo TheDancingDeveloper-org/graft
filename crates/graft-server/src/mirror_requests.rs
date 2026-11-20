@@ -15,10 +15,10 @@
 //! - **Expiry is lazy.** A live request past its deadline becomes
 //!   `expired` when it is next read. An expired or failed cut releases the
 //!   batch slot only if no PR was recorded, so expiry never orphans a PR.
-//!   The PR branch is `graft/batch-<n>`, numbered by the mirror (its own
-//!   batch counter may be past the request id on a repo with older batch
-//!   history). The first result that names a branch fixes it for the
-//!   request, so a service that reclaims it looks for the PR there.
+//!   The PR branch is `graft/batch-<id>`, named by the request (the mirror
+//!   falls back to its own counter only when that branch is taken). The
+//!   first result that names a branch fixes it for the request, so a service
+//!   that reclaims it looks for the PR there.
 
 use graft_auth::Scope;
 use graft_model::{ChangesetId, ObjectId};

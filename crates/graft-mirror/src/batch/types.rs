@@ -47,6 +47,15 @@ pub(crate) const MESSAGE_CHARS: usize = 8000;
 /// The prefix of a batch branch: `graft/batch-<n>`.
 pub const BRANCH_PREFIX: &str = "graft/batch-";
 
+/// The branch a batch cut for mirror request `id` pushes: `graft/batch-<id>`.
+/// The request names it, not the batch counter, so a request claimed again
+/// looks for the PR it opened, and the server (which keeps the first branch a
+/// request records) gets the name it expects, even after an earlier request
+/// on the line failed before recording a batch (WI-4458).
+pub(crate) fn request_branch(id: u64) -> String {
+    format!("{BRANCH_PREFIX}{id}")
+}
+
 /// The trailer naming the batch, in the squashed commit and the PR body.
 pub const BATCH_TRAILER: &str = "Graft-Batch:";
 

@@ -55,6 +55,8 @@ struct FakeGitHub {
     /// `(branch, skip)`: after `skip` PR lookups for `branch` answer as
     /// usual, a merged PR graft did not open appears on it.
     foreign_pr: Mutex<Option<(String, usize)>>,
+    /// A branch whose PR lookups the forge refuses (a 401), until cleared.
+    refuse_lookup: Mutex<Option<String>>,
 }
 
 impl FakeGitHub {
@@ -67,6 +69,7 @@ impl FakeGitHub {
             merging: Mutex::new(Vec::new()),
             race_push: Mutex::new(None),
             foreign_pr: Mutex::new(None),
+            refuse_lookup: Mutex::new(None),
         }
     }
 
@@ -199,6 +202,9 @@ impl FakeGitHub {
 
 impl Forge for FakeGitHub {
     async fn find_pull(&self, branch: &str) -> Result<Option<Pull>, ForgeError> {
+        if self.refuse_lookup.lock().unwrap().as_deref() == Some(branch) {
+            return Err(ForgeError::Refused("status 401: Bad credentials".into()));
+        }
         let mut prs = self.prs.lock().unwrap();
         let mut foreign = self.foreign_pr.lock().unwrap();
         if let Some((b, skip)) = foreign.as_mut()
@@ -3651,15 +3657,16 @@ mod request_cut {
             .prepare_batch(&cut(7))
             .await
             .expect("the batch is cut");
+        // The branch is the request's own name (docs/notes/mirror-service.md §3.5).
         assert_eq!(
             (new.head.as_str(), new.base.as_str()),
-            ("graft/batch-1", "main")
+            ("graft/batch-7", "main")
         );
         for id in [a, b] {
             assert!(new.body.contains(&id.to_string()[..13]), "{}", new.body);
         }
         // One commit per land on main (D26), and no PR: the desk opens it.
-        let head = support::branch(&w.upstream, "graft/batch-1").expect("branch pushed");
+        let head = support::branch(&w.upstream, "graft/batch-7").expect("branch pushed");
         assert_eq!(git(&w.upstream, &["rev-parse", &format!("{head}~2")]), main);
         assert_eq!(w.changed(&main, &head), ["a.txt", "b.txt"]);
         assert!(w.github.prs().is_empty(), "the runner opens no PR");
@@ -3671,7 +3678,7 @@ mod request_cut {
             .expect("the retry finds the pushed batch");
         assert_eq!(again.head, new.head);
         assert_eq!(
-            support::branch(&w.upstream, "graft/batch-1").unwrap(),
+            support::branch(&w.upstream, "graft/batch-7").unwrap(),
             head,
             "the branch is not moved"
         );
@@ -3686,7 +3693,7 @@ mod request_cut {
         // While it is open, another cut is refused and opens nothing.
         let busy = runner(&w).prepare_batch(&cut(8)).await;
         assert_eq!(busy.unwrap_err(), batch_task::BATCH_OPEN);
-        assert!(support::branch(&w.upstream, "graft/batch-2").is_none());
+        assert!(support::branch(&w.upstream, "graft/batch-8").is_none());
         assert_eq!(w.github.prs().len(), 1);
 
         // Once merged, the next cut settles it and batches only new lands.
@@ -3698,8 +3705,8 @@ mod request_cut {
             .expect("the next batch is cut");
         assert!(next.body.contains(&c.to_string()[..13]));
         assert!(!next.body.contains(&a.to_string()[..13]));
-        assert_eq!(next.head, "graft/batch-2");
-        let head = support::branch(&w.upstream, "graft/batch-2").unwrap();
+        assert_eq!(next.head, "graft/batch-9");
+        let head = support::branch(&w.upstream, "graft/batch-9").unwrap();
         assert_eq!(w.changed(&merged, &head), ["c.txt"]);
     }
 
@@ -3805,22 +3812,32 @@ mod request_cut {
     }
 
     #[tokio::test]
-    async fn a_cut_request_takes_the_next_free_number_past_earlier_batches() {
+    async fn a_cut_request_whose_branch_is_taken_takes_the_next_free_number() {
         let w = World::new().await;
         w.start().await;
         for n in 1..=41 {
             assert!(w.db.insert_batch(&settled(n), &[]).unwrap());
         }
         w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+        // A stale graft/batch-7 with other commits holds the request's name.
+        git(
+            &w.work,
+            &["push", "-q", "origin", "HEAD:refs/heads/graft/batch-7"],
+        );
+        let stale = support::branch(&w.upstream, "graft/batch-7").unwrap();
 
-        // Request 7 is below the batches the database holds.
+        // The cut falls back past the batches the database holds.
         let new = runner(&w)
             .prepare_batch(&cut(7))
             .await
             .expect("the batch is cut");
         assert_eq!(new.head, "graft/batch-42");
         assert!(support::branch(&w.upstream, "graft/batch-42").is_some());
-        assert!(support::branch(&w.upstream, "graft/batch-7").is_none());
+        assert_eq!(
+            support::branch(&w.upstream, "graft/batch-7").unwrap(),
+            stale,
+            "the stale branch is never overwritten"
+        );
         assert_eq!(
             runner(&w).cut_branch(&cut(7)).await.unwrap().as_deref(),
             Some("graft/batch-42"),
@@ -4001,4 +4018,81 @@ async fn a_land_next_to_an_unrelated_base_edit_still_conflicts() {
     }
     assert_eq!(w.tip(LINE).await, tip, "nothing moved");
     assert!(w.github.prs().is_empty());
+}
+
+/// Attests `id` as passing its check, so the line lets it into a batch.
+async fn attest_land(w: &World, id: ChangesetId) {
+    w.api
+        .attest(
+            &attest_cx(),
+            Attest {
+                repo: REPO.to_owned(),
+                changeset: id,
+                check: "ci/test".to_owned(),
+                passed: true,
+                url: "https://ci.example/1".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_cut_after_a_failed_request_is_named_by_its_own_request() {
+    // WI-4458: request 1 fails at the forge before it records a batch, so
+    // the counter is still at 1. Request 2 must still push graft/batch-2 (the
+    // name the server expects for it), with the first batch number.
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    attest_land(&w, a).await;
+
+    *w.github.refuse_lookup.lock().unwrap() = Some("graft/batch-1".to_owned());
+    assert!(w.batcher().for_request(1).run().await.is_err());
+    assert!(w.github.prs().is_empty());
+    assert_eq!(
+        w.db.next_batch_number().unwrap(),
+        1,
+        "no batch was recorded"
+    );
+
+    *w.github.refuse_lookup.lock().unwrap() = None;
+    let rec = opened(w.batcher().for_request(2).run().await.unwrap().outcome);
+    assert_eq!(rec.number, 1);
+    assert_eq!(rec.branch, "graft/batch-2");
+    // A request's cut stops once the branch is pushed; the service opens the PR.
+    assert_eq!(rec.state, BatchState::Pushed);
+    assert!(support::branch(&w.upstream, "graft/batch-2").is_some());
+    assert!(w.github.prs().is_empty());
+    assert_eq!(
+        w.db.batch_of_request(2).unwrap().map(|r| r.branch),
+        Some("graft/batch-2".to_owned()),
+        "a retry of request 2 finds its own branch"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_branch_under_the_request_name_falls_back_to_the_next_free_number() {
+    // A stale graft/batch-2 with other commits (an old trial, a reset DB) is
+    // never overwritten: the cut takes the next free counter name instead.
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    attest_land(&w, a).await;
+    git(
+        &w.work,
+        &["push", "-q", "origin", "HEAD:refs/heads/graft/batch-2"],
+    );
+    let stale = support::branch(&w.upstream, "graft/batch-2").unwrap();
+
+    let rec = opened(w.batcher().for_request(2).run().await.unwrap().outcome);
+    assert_eq!(rec.number, 1);
+    assert_eq!(rec.branch, "graft/batch-1");
+    assert_eq!(rec.state, BatchState::Pushed);
+    assert!(support::branch(&w.upstream, "graft/batch-1").is_some());
+    assert_eq!(
+        support::branch(&w.upstream, "graft/batch-2").unwrap(),
+        stale,
+        "the stale branch is untouched"
+    );
 }

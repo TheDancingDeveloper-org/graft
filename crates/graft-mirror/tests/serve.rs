@@ -2097,14 +2097,14 @@ async fn a_claimed_cut_request_runs_through_the_spawned_task_and_opens_its_pr() 
     assert!(st.failed.is_empty(), "the cut failed: {:?}", st.failed);
     let (id, outcome) = &st.completed[0];
     assert_eq!(*id, 7);
-    assert_eq!(outcome.branch.as_deref(), Some("graft/batch-1"));
+    assert_eq!(outcome.branch.as_deref(), Some("graft/batch-7"));
     assert_eq!(outcome.pr_number, Some(1));
     // The batch branch holds the land's one commit on main.
-    let head = git(&bare, &["rev-parse", "graft/batch-1"]);
+    let head = git(&bare, &["rev-parse", "graft/batch-7"]);
     assert_eq!(git(&bare, &["rev-parse", &format!("{head}~1")]), c1);
     let pulls = book.pulls.lock().unwrap();
     assert_eq!(pulls.len(), 1);
-    assert_eq!(pulls[0].head_ref, "graft/batch-1");
+    assert_eq!(pulls[0].head_ref, "graft/batch-7");
 }
 
 /// The mirror's call context with the mirror set only (`repo:*:mirror`),
@@ -2264,7 +2264,7 @@ async fn a_mirror_token_cuts_a_batch_that_syncs_its_line() {
         .unwrap();
     assert_eq!(cs.found[0].changeset.parents, vec![land, new_main]);
     // The batch branch holds the land's one commit on main's new tip.
-    let head = git(&bare, &["rev-parse", "graft/batch-1"]);
+    let head = git(&bare, &["rev-parse", "graft/batch-7"]);
     assert_eq!(git(&bare, &["rev-parse", &format!("{head}~1")]), c2);
 }
 
