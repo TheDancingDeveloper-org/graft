@@ -354,4 +354,31 @@ where
             _ => Err(BAD_REQUEST),
         }
     }
+
+    async fn batch_settled(&self, req: &pb::MirrorRequest) -> Result<bool, RequestFailure> {
+        let Some(mine) = self.db.batch_of_request(req.id).map_err(|_| INTERNAL)? else {
+            return Ok(false);
+        };
+        if mine.state.is_terminal() {
+            return Ok(true);
+        }
+        let config = BatchConfig::new(req.line.clone(), self.base.clone(), self.follow.clone());
+        let mut batcher = Batcher::new(
+            self.api,
+            self.cx.clone(),
+            self.db,
+            self.mirror.clone(),
+            self.forge,
+            config,
+        )
+        .map_err(|e| failure(&e))?;
+        if let Some(log) = self.exports {
+            batcher = batcher.with_export_log(log);
+        }
+        if let Some(epoch) = self.epoch {
+            batcher = batcher.with_lease_epoch(epoch);
+        }
+        let last = batcher.track_followed().await.map_err(|e| failure(&e))?;
+        Ok(last.is_some_and(|r| r.number == mine.number && r.state.is_terminal()))
+    }
 }

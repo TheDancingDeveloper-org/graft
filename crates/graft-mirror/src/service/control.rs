@@ -1,6 +1,7 @@
 //! The server calls the mirror service makes (D41 §3.3–§3.6): list the
 //! mirror rows, hold each repository's authority lease, read a row's
-//! credential, write status, and claim and finish mirror requests. Every
+//! credential, write status, claim and finish mirror requests, and settle
+//! a batch whose PR was merged or closed. Every
 //! fenced call carries the lease epoch. [`Server`] speaks them over gRPC;
 //! tests use an in-process fake.
 
@@ -75,6 +76,19 @@ pub trait Control: Send + Sync + 'static {
         id: u64,
         epoch: u64,
         error_code: &str,
+    ) -> impl Future<Output = ApiResult<()>> + Send;
+    /// `repo`'s newest batch cuts, at most `limit` of them.
+    fn list_batches(
+        &self,
+        repo: &str,
+        limit: u32,
+    ) -> impl Future<Output = ApiResult<Vec<pb::MirrorRequest>>> + Send;
+    /// Settles cut `id`'s open or sealed batch, freeing its line.
+    fn settle_batch(
+        &self,
+        repo: &str,
+        id: u64,
+        epoch: u64,
     ) -> impl Future<Output = ApiResult<()>> + Send;
 }
 
@@ -271,6 +285,41 @@ impl Control for Server {
         )?;
         self.mirror()
             .fail_request(req)
+            .await
+            .map_err(status_error)?;
+        Ok(())
+    }
+
+    async fn list_batches(&self, repo: &str, limit: u32) -> ApiResult<Vec<pb::MirrorRequest>> {
+        let req = self.request(
+            &service_cx("list-batches"),
+            pb::ListBatchesRequest {
+                repo: repo.to_owned(),
+                line: None,
+                page_token: String::new(),
+                limit,
+            },
+        )?;
+        let resp = self
+            .mirror()
+            .list_batches(req)
+            .await
+            .map_err(status_error)?;
+        Ok(resp.into_inner().batches)
+    }
+
+    async fn settle_batch(&self, repo: &str, id: u64, epoch: u64) -> ApiResult<()> {
+        let req = self.request(
+            &service_cx("settle-batch"),
+            pb::SetBatchStateRequest {
+                repo: repo.to_owned(),
+                id,
+                epoch,
+                state: pb::BatchState::Settled as i32,
+            },
+        )?;
+        self.mirror()
+            .set_batch_state(req)
             .await
             .map_err(status_error)?;
         Ok(())
