@@ -168,13 +168,25 @@ jobs:
           curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/cargo-nextest" nextest --version
       # Compile the test binaries once, as their own step, so compile time
-      # shows apart from test time. The nextest step runs the archive.
+      # shows apart from test time. The nextest step runs the archive. The
+      # OOM quarantine below covers this compile too (WI-4463).
       - name: build test archive
         if: steps.scope.outputs.docs_only != 'true'
         shell: bash
         run: |
-          "$RUNNER_TEMP/cargo-nextest" nextest archive --workspace --all-features \
-            --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst"
+          set +e
+          archive() {
+            "$RUNNER_TEMP/cargo-nextest" nextest archive --workspace --all-features \
+              --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst" 2>&1 \
+              | tee "$RUNNER_TEMP/archive.log"
+            return "${PIPESTATUS[0]}"
+          }
+          archive; status=$?
+          if [ "$status" -ne 0 ] && .github/scripts/oom-flake-signature.sh "$RUNNER_TEMP/archive.log"; then
+            echo "::warning::known OOM flake (WI-2314): rustc killed with no diagnostic; retrying once"
+            archive; status=$?
+          fi
+          exit "$status"
       # Quarantine (WI-2314, docs/known-flakes.md): rustc, cargo or the
       # linker is sometimes OOM-killed on a shared runner. Retry once only
       # when the log matches .github/scripts/oom-flake-signature.sh; any

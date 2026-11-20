@@ -1,0 +1,59 @@
+name: cache-warm
+
+# Warms the Rust build cache that the required `test` job in ci.yml restores
+# (WI-4463). Pull requests and the merge queue never write this cache: they
+# run off main's cache, and no CI workflow runs on push to main. So this
+# workflow runs on main alone, on a schedule and by hand, and saves it.
+# It compiles the same test archive as ci.yml's test job (same profile,
+# features, RUSTFLAGS and toolchain) and runs no tests.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: cache-warm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Job id must stay `test`: Swatinem/rust-cache keys on the job name, so
+  # this is the cache the test job in ci.yml restores.
+  test:
+    runs-on: [self-hosted]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: install pinned cargo-nextest
+        run: |
+          curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/cargo-nextest" nextest --version
+      # Same retry as ci.yml's test job: an OOM-killed compile is retried
+      # once, and any other failure fails the job.
+      - name: build test archive
+        shell: bash
+        run: |
+          set +e
+          archive() {
+            "$RUNNER_TEMP/cargo-nextest" nextest archive --workspace --all-features \
+              --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst" 2>&1 \
+              | tee "$RUNNER_TEMP/archive.log"
+            return "${PIPESTATUS[0]}"
+          }
+          archive; status=$?
+          if [ "$status" -ne 0 ] && .github/scripts/oom-flake-signature.sh "$RUNNER_TEMP/archive.log"; then
+            echo "::warning::known OOM flake (WI-2314): rustc killed with no diagnostic; retrying once"
+            archive; status=$?
+          fi
+          exit "$status"
