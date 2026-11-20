@@ -168,23 +168,23 @@ jobs:
           curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/cargo-nextest" nextest --version
       # Compile the test binaries once, as their own step, so compile time
-      # shows apart from test time. The nextest step runs the archive. The
-      # OOM quarantine below covers this compile too (WI-4463).
-      - name: build test archive
+      # shows apart from test time. No archive file: an archive holds a second
+      # copy of every test binary and filled the runner's disk (WI-4469).
+      # The OOM quarantine below covers this compile too (WI-4463).
+      - name: build test binaries
         if: steps.scope.outputs.docs_only != 'true'
         shell: bash
         run: |
           set +e
-          archive() {
-            "$RUNNER_TEMP/cargo-nextest" nextest archive --workspace --all-features \
-              --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst" 2>&1 \
-              | tee "$RUNNER_TEMP/archive.log"
+          build() {
+            "$RUNNER_TEMP/cargo-nextest" nextest run --workspace --all-features --no-run 2>&1 \
+              | tee "$RUNNER_TEMP/build.log"
             return "${PIPESTATUS[0]}"
           }
-          archive; status=$?
-          if [ "$status" -ne 0 ] && .github/scripts/oom-flake-signature.sh "$RUNNER_TEMP/archive.log"; then
+          build; status=$?
+          if [ "$status" -ne 0 ] && .github/scripts/oom-flake-signature.sh "$RUNNER_TEMP/build.log"; then
             echo "::warning::known OOM flake (WI-2314): rustc killed with no diagnostic; retrying once"
-            archive; status=$?
+            build; status=$?
           fi
           exit "$status"
       # Quarantine (WI-2314, docs/known-flakes.md): rustc, cargo or the
@@ -198,8 +198,7 @@ jobs:
         run: |
           set +e
           nextest() {
-            "$RUNNER_TEMP/cargo-nextest" nextest run --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst" \
-              --no-tests=pass 2>&1 \
+            "$RUNNER_TEMP/cargo-nextest" nextest run --workspace --all-features --no-tests=pass 2>&1 \
               | tee "$RUNNER_TEMP/nextest.log"
             return "${PIPESTATUS[0]}"
           }

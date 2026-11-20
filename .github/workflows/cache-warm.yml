@@ -4,7 +4,7 @@ name: cache-warm
 # (WI-4463). Pull requests and the merge queue never write this cache: they
 # run off main's cache, and no CI workflow runs on push to main. So this
 # workflow runs on main alone, on a schedule and by hand, and saves it.
-# It compiles the same test archive as ci.yml's test job (same profile,
+# It compiles the same test binaries as ci.yml's test job (same profile,
 # features, RUSTFLAGS and toolchain) and runs no tests.
 on:
   schedule:
@@ -40,20 +40,19 @@ jobs:
           curl -fsSL https://get.nexte.st/0.9.148/linux | tar -xzf - -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/cargo-nextest" nextest --version
       # Same retry as ci.yml's test job: an OOM-killed compile is retried
-      # once, and any other failure fails the job.
-      - name: build test archive
+      # once, and any other failure fails the job. No archive file (WI-4469).
+      - name: build test binaries
         shell: bash
         run: |
           set +e
-          archive() {
-            "$RUNNER_TEMP/cargo-nextest" nextest archive --workspace --all-features \
-              --archive-file "$RUNNER_TEMP/nextest-archive.tar.zst" 2>&1 \
-              | tee "$RUNNER_TEMP/archive.log"
+          build() {
+            "$RUNNER_TEMP/cargo-nextest" nextest run --workspace --all-features --no-run 2>&1 \
+              | tee "$RUNNER_TEMP/build.log"
             return "${PIPESTATUS[0]}"
           }
-          archive; status=$?
-          if [ "$status" -ne 0 ] && .github/scripts/oom-flake-signature.sh "$RUNNER_TEMP/archive.log"; then
+          build; status=$?
+          if [ "$status" -ne 0 ] && .github/scripts/oom-flake-signature.sh "$RUNNER_TEMP/build.log"; then
             echo "::warning::known OOM flake (WI-2314): rustc killed with no diagnostic; retrying once"
-            archive; status=$?
+            build; status=$?
           fi
           exit "$status"
