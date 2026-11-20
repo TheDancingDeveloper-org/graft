@@ -265,6 +265,14 @@ where
         Ok(Some(rec))
     }
 
+    /// [`track`](Self::track) after one follow poll of the base, so a
+    /// merged PR's merge commit is imported and the batch can settle. A
+    /// stopped base does not stop the read.
+    pub async fn track_followed(&mut self) -> Result<Option<BatchRecord>, MirrorError> {
+        self.follow().await?;
+        self.track().await
+    }
+
     fn call(&mut self, what: &str) -> CallContext {
         self.calls += 1;
         let mut cx = self.cx.clone();
