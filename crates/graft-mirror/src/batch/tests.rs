@@ -37,6 +37,7 @@ fn header(capped: bool) -> BatchHeader {
         number: 9,
         line: "integration".to_owned(),
         branch: "main".to_owned(),
+        pushed: "graft/batch-9".to_owned(),
         base: id,
         base_sha: GitSha([1; 20]),
         start: id,
@@ -730,5 +731,24 @@ mod cut_thresholds {
         assert!(forced.contains(FORCED_LINE));
         assert!(forced.contains("(forced)"));
         assert!(message.contains("forced"));
+    }
+
+    #[test]
+    fn overflow_note_names_the_pushed_branch() {
+        // A batch cut after a failed request: the counter says 1, the
+        // branch is graft/batch-2. The PR body's `git log` pointer must
+        // name the pushed branch, in both the per-land and squashed forms.
+        // Enough long lands to pass MAX_PR_BODY (60 KB) many times over.
+        let lands: Vec<_> = (1..=500).map(|n| land(n, true)).collect();
+        for fallback in [None, Some("test".to_owned())] {
+            let mut h = header(false);
+            h.number = 1;
+            h.pushed = "graft/batch-2".to_owned();
+            h.fallback = fallback;
+            let (body, _) = render(&h, &lands);
+            assert!(body.contains("more lands are"), "the body must overflow");
+            assert!(body.contains("graft/batch-2"), "{body}");
+            assert!(!body.contains("graft/batch-1"), "{body}");
+        }
     }
 }
