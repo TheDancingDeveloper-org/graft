@@ -11,8 +11,8 @@ use graft_proto::types::{LandCheck, LandCheckState};
 use crate::text::clean_text;
 
 use super::types::{
-    BATCH_TRAILER, BRANCH_PREFIX, BatchOutcome, CHANGESET_TRAILER, Dropped, FIELD_CHARS, LandLine,
-    MAX_CHECKS, MAX_DROPS_LISTED, MAX_LANDS, MAX_PR_BODY, git_time_at, short,
+    BATCH_TRAILER, BatchOutcome, CHANGESET_TRAILER, Dropped, FIELD_CHARS, LandLine, MAX_CHECKS,
+    MAX_DROPS_LISTED, MAX_LANDS, MAX_PR_BODY, git_time_at, short,
 };
 
 /// What a batch's PR body and commit message say before the land list.
@@ -20,6 +20,10 @@ pub(crate) struct BatchHeader {
     pub(crate) number: u64,
     pub(crate) line: String,
     pub(crate) branch: String,
+    /// The branch the batch was pushed to (`graft/batch-<n>`), which the
+    /// PR body's `git log` pointers name. It can differ from `number` when
+    /// an earlier request on the line failed.
+    pub(crate) pushed: String,
     pub(crate) base: ChangesetId,
     pub(crate) base_sha: GitSha,
     pub(crate) start: ChangesetId,
@@ -456,13 +460,14 @@ pub(crate) fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
     let note = |n: usize| match h.fallback {
         None => format!(
             "\n{n} more lands are on the branch, one commit each \
-             (`git log {}..{BRANCH_PREFIX}{}`).\n",
-            h.base_sha, h.number
+             (`git log {}..{}`).\n",
+            h.base_sha,
+            clean_text(&h.pushed, FIELD_CHARS, false)
         ),
         Some(_) => format!(
             "\n{n} more lands are listed in the squashed commit's message \
-             (`git log -1 {BRANCH_PREFIX}{}`).\n",
-            h.number
+             (`git log -1 {}`).\n",
+            clean_text(&h.pushed, FIELD_CHARS, false)
         ),
     };
     let reserve = note(lands.len()).chars().count() + trailers.chars().count();
