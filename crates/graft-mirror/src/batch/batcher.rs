@@ -32,7 +32,7 @@ use super::types::{
     BatchRun, BatchState, DEFAULT_DROP_REASON, Dropped, FETCH, FIELD_CHARS, LandLine,
     MAX_ATTEST_PAGES, MAX_CHECK_PROBES, MAX_COMMITS, MAX_LANDS, MESSAGE_CHARS, PAGE, REVERTS_KEY,
     SYNC_KEY, Stamp, TITLE_CHARS, claimed_author_trailer, config_err, git_time, is_sync,
-    land_ident, short, sync_base, system_ms,
+    land_ident, request_branch, short, sync_base, system_ms,
 };
 
 /// An open batch's detail when the line has nothing past its tip.
@@ -1444,9 +1444,8 @@ where
             }
         }
 
-        let number = self.free_number().await?;
+        let (number, branch) = self.new_slot().await?;
         let created_ms = (self.clock)();
-        let branch = format!("{BRANCH_PREFIX}{number}");
         let line = clean_text(&self.config.line, FIELD_CHARS, false);
         let title = clean_text(
             &format!(
@@ -2215,27 +2214,58 @@ where
         Ok(())
     }
 
+    /// The number and branch of a new batch. A batch cut for mirror request
+    /// `id` takes that request's branch ([`request_branch`]), the name the
+    /// server expects for the request, whatever the batch counter says. When
+    /// that branch is taken, the cut falls back to the next free counter
+    /// number, which the server accepts as a `graft/batch-<n>` name.
+    async fn new_slot(&mut self) -> Result<(u64, String), MirrorError> {
+        let Some(id) = self.request else {
+            let number = self.free_number().await?;
+            return Ok((number, format!("{BRANCH_PREFIX}{number}")));
+        };
+        let branch = request_branch(id);
+        if self.branch_free(&branch).await? {
+            return Ok((self.db.next_batch_number()?, branch));
+        }
+        tracing::warn!(
+            repo = %self.config.repo, request = id, branch = %branch,
+            "mirror batch: the request's branch is taken; numbering the batch by the counter"
+        );
+        let number = self.free_number().await?;
+        Ok((number, format!("{BRANCH_PREFIX}{number}")))
+    }
+
+    /// Whether `branch` has no branch and no PR on GitHub. A branch or PR
+    /// there is never reused or adopted (WI-2585).
+    async fn branch_free(&mut self, branch: &str) -> Result<bool, MirrorError> {
+        let there = self.mirror.ls_remote(&[branch]).await?;
+        if there.iter().any(|(_, sha)| sha.is_some()) {
+            tracing::warn!(branch = %branch, "mirror batch: branch exists");
+            return Ok(false);
+        }
+        if let Some(pull) = self.forge.find_pull(branch).await? {
+            tracing::warn!(
+                branch = %branch, pr = pull.number,
+                "mirror batch: branch has a PR graft did not open"
+            );
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     /// The next batch number whose branch graft is free to use: past the
     /// database's last batch, and past any `graft/batch-<n>` that already
     /// has a branch or a PR on GitHub (a reset database, trial leftovers).
-    /// Such a branch or PR is never reused or adopted (WI-2585).
     async fn free_number(&mut self) -> Result<u64, MirrorError> {
         let first = self.db.next_batch_number()?;
         for number in first..first + MAX_TAKEN_PROBES {
-            let branch = format!("{BRANCH_PREFIX}{number}");
-            let there = self.mirror.ls_remote(&[branch.as_str()]).await?;
-            if there.iter().any(|(_, sha)| sha.is_some()) {
-                tracing::warn!(branch = %branch, "mirror batch: branch exists; skipping its number");
-                continue;
+            if self
+                .branch_free(&format!("{BRANCH_PREFIX}{number}"))
+                .await?
+            {
+                return Ok(number);
             }
-            if let Some(pull) = self.forge.find_pull(&branch).await? {
-                tracing::warn!(
-                    branch = %branch, pr = pull.number,
-                    "mirror batch: branch has a PR graft did not open; skipping its number"
-                );
-                continue;
-            }
-            return Ok(number);
         }
         Err(config_err(format!(
             "batch numbers {first} to {} all have a branch or PR on GitHub; \
