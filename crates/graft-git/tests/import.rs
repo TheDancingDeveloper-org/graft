@@ -749,3 +749,33 @@ fn a_start_commit_off_the_imported_refs_is_an_error() {
     assert!(matches!(err, GitError::Config(_)), "{err:?}");
     assert!(api.calls().is_empty());
 }
+
+#[test]
+fn a_start_older_than_the_imported_root_still_follows() {
+    // WI-4504: the mirror was seeded from `tip`, then its start point was set
+    // to `c1`, an older commit that was never imported. Following new commits
+    // must not refuse because `c1` is neither mapped nor walked.
+    let mut git = Git::init("older-start");
+    let (c1, _, tip) = history_with_a_bad_path(&mut git);
+    git.set_ref("refs/heads/main", &tip);
+    let api = FakeApi::new();
+    let map = MemoryMirrorMap::new();
+    let mut c = config(&git, &["main"]);
+    c.tags = false;
+    c.start_at = Some(sha(&tip));
+    run(&api, &map, &c).expect("seeds from the start point");
+    let root = changeset_of(&api, &map, &tip).unwrap();
+
+    let a = git.blob(b"a\n");
+    let n = git.blob(b"n\n");
+    let next_tree = git.raw_tree(&[("100644", b"a.txt", &a), ("100644", b"n.txt", &n)]);
+    let next = git.commit_tree(&next_tree, &[&tip], "next");
+    git.set_ref("refs/heads/main", &next);
+    c.start_at = Some(sha(&c1));
+    let report = run(&api, &map, &c).expect("follows past an older start point");
+    assert_eq!(report.commits, 1);
+    let next_cs = changeset_of(&api, &map, &next).unwrap();
+    assert_eq!(next_cs.parents, vec![root.id()]);
+    assert_eq!(report.lines, vec![("main".to_owned(), next_cs.id())]);
+    assert!(map.changeset_of(sha(&c1)).unwrap().is_none());
+}
