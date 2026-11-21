@@ -203,8 +203,11 @@ where
         .chain(tag_tips.iter().map(|(_, s, _)| *s))
         .collect();
     let mut cut = HashSet::new();
+    // Whether the walk met history an earlier run imported (WI-4504).
+    let mut anchored = false;
     let walk = topo(&repo, &tips, |sha| {
         if map.changeset_of(sha)?.is_some() {
+            anchored = true;
             return Ok(true);
         }
         if before_start(&repo, sha)? {
@@ -213,7 +216,12 @@ where
         }
         Ok(false)
     })?;
+    // The start point is checked against a fresh import only. Once the walk
+    // meets imported history, that history fixed where the mirror starts,
+    // and a start configured after it (or older than it) cuts nothing more:
+    // refusing would wedge every follow from then on (WI-4504).
     if let Some(start) = config.start_at
+        && !anchored
         && map.changeset_of(start)?.is_none()
         && !walk.order.contains(&start)
     {
