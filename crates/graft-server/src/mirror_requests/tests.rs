@@ -916,6 +916,35 @@ async fn a_cut_settles_on_the_mirrors_own_batch_number() {
     both!(mirror_numbered_batch);
 }
 
+async fn refused_result(s: &impl MetaStore) {
+    let r = cut_batch(s, &admin(), 0, cut("main", "k1"))
+        .await
+        .expect("cut");
+    let epoch = take(s, "i1", 0).await;
+    claim(s, &service(), 0, claim_req(epoch))
+        .await
+        .expect("claim");
+    // A result the server refuses, with no PR recorded or named.
+    let mut bad = with_pr(r.id, epoch, true);
+    if let Some(o) = bad.result.as_mut() {
+        o.pr_number = None;
+        o.pr_url = None;
+        o.branch = Some("main".into());
+    }
+    rejected(complete(s, &service(), 0, bad).await, "mirror-field");
+    let got = get_request(s, &admin(), 0, key(r.id)).await.expect("get");
+    assert_eq!(state(&got), pb::MirrorRequestState::Failed);
+    // The line's slot is free: the next cut proceeds.
+    cut_batch(s, &admin(), 0, cut("main", "k2"))
+        .await
+        .expect("a refused result released the line");
+}
+
+#[tokio::test]
+async fn a_refused_result_releases_the_line() {
+    both!(refused_result);
+}
+
 const UP: &str = "https://github.com/o/r.git";
 
 /// A mirror row for `r` with a sealed credential that has never been used.
