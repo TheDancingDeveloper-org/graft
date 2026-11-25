@@ -231,8 +231,8 @@ pub struct Config {
     /// (a sibling `<tree>.cache` directory, removed with the tree), so one
     /// draft cannot poison what a later draft builds against (WI-2285).
     pub isolate_cache: bool,
-    /// Run the checks with no network, in a fresh network namespace.
-    /// Needs `unshare` (util-linux) and permission to create user
+    /// Run the checks with no network, in a fresh network namespace. This
+    /// implies [`Config::pid_namespace`], for the prefetch too. Needs `unshare` (util-linux) and permission to create user
     /// namespaces; when it cannot, the check is not started (fail closed).
     pub no_network: bool,
     /// Run each check in its own pid namespace, so the kernel kills every
@@ -1174,7 +1174,11 @@ pub(crate) fn cache_dir(dir: &Path) -> PathBuf {
 /// this run may keep the network.
 pub(crate) fn wrap_argv(cfg: &Config, argv: &[String], network: bool) -> Vec<String> {
     let net = cfg.no_network && !network;
-    if !net && !cfg.pid_namespace {
+    // `no_network` implies the pid namespace: the prefetch runs with the
+    // network, so a process it starts must not outlive it (`setsid`) and relay
+    // network traffic to the later, network-less check.
+    let pid = cfg.pid_namespace || cfg.no_network;
+    if !net && !pid {
         return argv.to_vec();
     }
     let mut out: Vec<String> = ["unshare", "--user", "--map-current-user"]
@@ -1183,7 +1187,7 @@ pub(crate) fn wrap_argv(cfg: &Config, argv: &[String], network: bool) -> Vec<Str
     if net {
         out.push("--net".to_owned());
     }
-    if cfg.pid_namespace {
+    if pid {
         out.extend(["--pid", "--fork", "--kill-child"].map(str::to_owned));
     }
     out.push("--".to_owned());
@@ -1743,10 +1747,11 @@ mod tests {
         cfg.no_network = true;
         let w = wrap_argv(&cfg, &argv, false);
         assert_eq!(w[0], "unshare");
-        assert!(w.contains(&"--net".to_owned()) && !w.contains(&"--pid".to_owned()));
+        assert!(w.contains(&"--net".to_owned()) && w.contains(&"--pid".to_owned()));
         assert_eq!(w[w.len() - 3..], argv[..], "the command follows `--`");
         // The prefetch keeps the network.
-        assert!(!wrap_argv(&cfg, &argv, true).contains(&"--net".to_owned()));
+        let w = wrap_argv(&cfg, &argv, true);
+        assert!(!w.contains(&"--net".to_owned()) && w.contains(&"--pid".to_owned()));
         cfg.no_network = false;
         cfg.pid_namespace = true;
         let w = wrap_argv(&cfg, &argv, false);
@@ -1817,6 +1822,38 @@ mod tests {
         let out = run_command(&cfg, &dir, &c, id(2), &log).await.expect("run");
         assert_eq!(out, Outcome::Failed(Some(3)));
         assert!(!dir.join("ran").exists());
+    }
+
+    #[tokio::test]
+    async fn no_network_alone_puts_the_prefetch_and_the_check_in_a_pid_namespace() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (bin, calls) = (root.path().join("bin"), root.path().join("calls"));
+        stub_unshare(&bin, &calls);
+        let mut cfg = cfg_in(root.path(), Some(&bin));
+        cfg.no_network = true;
+        assert!(!cfg.pid_namespace, "only no_network is set");
+        cfg.prefetch = Some(sh("echo fetched > fetched"));
+        let dir = root.path().join("t");
+        fs::create_dir_all(&dir).expect("dir");
+        let out = run_command(
+            &cfg,
+            &dir,
+            &check("test -f fetched"),
+            id(1),
+            &root.path().join("l.log"),
+        )
+        .await
+        .expect("run");
+        assert_eq!(out, Outcome::Passed);
+        let calls = fs::read_to_string(&calls).expect("calls");
+        let lines: Vec<&str> = calls.lines().collect();
+        assert_eq!(lines.len(), 2, "{calls}");
+        assert!(!lines[0].contains("--net"), "prefetch keeps the network");
+        for l in &lines {
+            for flag in ["--pid", "--fork", "--kill-child"] {
+                assert!(l.contains(flag), "{flag} missing from `{l}`");
+            }
+        }
     }
 
     #[tokio::test]

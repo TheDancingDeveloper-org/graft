@@ -140,7 +140,8 @@ struct Args {
     #[arg(long)]
     isolate_cache: bool,
     /// Run checks with no network (needs `unshare` and user namespaces; the
-    /// check is not started when they are unavailable).
+    /// check is not started when they are unavailable). Implies
+    /// --pid-namespace, for the prefetch too.
     #[arg(long)]
     no_network: bool,
     /// Run each check in its own pid namespace, so every process it started
