@@ -107,6 +107,9 @@ pub struct ServeConfig {
     /// the LAN or tailnet. Empty, the default, allows none
     /// ([`netguard::private_hosts`]).
     pub private_hosts_allowed: Vec<String>,
+    /// The GitHub App's installation access (D41). `None`, the default:
+    /// every row uses its own credential.
+    pub app: Option<Arc<crate::credentials::InstallationAccess>>,
 }
 
 impl ServeConfig {
@@ -127,6 +130,7 @@ impl ServeConfig {
             claim_requests: false,
             allow_local_upstreams: false,
             private_hosts_allowed: Vec::new(),
+            app: None,
         }
     }
 }
@@ -621,6 +625,10 @@ pub struct ServeFile {
     /// link-local stay refused. Empty by default.
     #[serde(default)]
     pub private_hosts_allowed: Vec<String>,
+    /// A GitHub App to fetch bound GitHub rows under (off unless set).
+    /// Only rows whose repository the installation lists use it.
+    #[serde(default)]
+    pub github_app: Option<crate::config::AppFile>,
 }
 
 /// One `[[forgejo]]` host.
@@ -749,6 +757,16 @@ impl ServeFile {
         c.claim_requests = self.claim_requests;
         c.private_hosts_allowed =
             netguard::private_hosts(&self.private_hosts_allowed).map_err(MirrorError::Config)?;
+        if let Some(a) = &self.github_app {
+            let app = crate::credentials::GithubApp::load(
+                crate::github::GITHUB_API,
+                a.app_id,
+                a.installation_id,
+                &a.private_key_file,
+                crate::entry::system_ms,
+            )?;
+            c.app = Some(Arc::new(crate::credentials::InstallationAccess::new(app)));
+        }
         if c.reconcile.is_zero()
             || c.poll_timeout.is_zero()
             || c.max_fetches == 0
@@ -767,6 +785,18 @@ impl ServeFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_app_is_off_unless_configured_and_a_bad_key_is_a_config_error() {
+        let base = "server = \"http://s\"\ndata_dir = \"/d\"\n";
+        let off: ServeFile = toml::from_str(base).unwrap();
+        assert!(off.config().unwrap().app.is_none());
+        let on = format!(
+            "{base}[github_app]\napp_id = 1\ninstallation_id = 2\nprivate_key_file = \"/nonexistent\"\n"
+        );
+        let f: ServeFile = toml::from_str(&on).unwrap();
+        assert!(f.config().is_err(), "an unreadable key fails at load");
+    }
 
     #[test]
     fn a_directory_without_the_marker_is_refused_and_a_new_one_marked() {
