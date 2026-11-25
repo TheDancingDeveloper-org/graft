@@ -2031,9 +2031,11 @@ caller's subject, kind and `jti` and the target's `jti`, never a token value.
   a named-repository `land:<line>` (or `admin`) instead of `write`. A
   wildcard `repo:*:land:<line>` does not satisfy it. The reverted changeset
   must be the line's tip or reachable from it (`is_ancestor`, no walk), else
-  `Invalid("revert-not-on-line")`. Only the changeset the server builds in
-  that call skips the per-path `write` check; `graft.reverts` metadata never
-  grants anything.
+  `Invalid("revert-not-on-line")`. `onto` is the line's tip. Only the
+  changeset the server builds in that call skips the per-path `write` check;
+  `graft.reverts` metadata never grants anything. There is no version gate:
+  an old server ignores `land` and returns the revert unlanded, and a new
+  client checks that the land happened.
 - **Node:** it verifies the caller's token locally (it has the server's public
   key) before serving cached objects for a repository. It forwards the token
   on repository RPCs. Unix-socket peer credentials (`SO_PEERCRED`) are logged
