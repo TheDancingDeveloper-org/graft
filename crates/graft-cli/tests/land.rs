@@ -519,6 +519,34 @@ fn revert_then_land_restores_the_file() {
     assert_eq!(error_of(&a)["kind"], json!("conflict"));
 }
 
+/// D42, no version gate: this fixture server, like one from before D42,
+/// ignores `land` and answers with the inverse unlanded. The client sees the
+/// line did not move and fails, instead of reporting a revert that is not on
+/// it. (The landing itself is the engine's, and the checker's test runs it.)
+#[test]
+fn revert_land_fails_when_the_server_did_not_land_it() {
+    let s = serve(Policy::Direct);
+    let dir = scratch();
+    let (app, head) = with_draft(&s, dir.path(), None);
+    json_run(&app, &["land"]);
+    let tip = s.rt.block_on(s.repo.tip());
+
+    let a = wc_cmd(&app)
+        .args(["--json", "revert", &head.to_string(), "--land", "main"])
+        .assert()
+        .failure();
+    assert_eq!(error_of(&a)["kind"], json!("invalid_change"), "{a:?}");
+    assert!(
+        error_of(&a)["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("revert-not-landed")),
+        "{a:?}"
+    );
+    assert_eq!(s.rt.block_on(s.repo.tip()), tip, "the line did not move");
+    // The working copy is left alone: no draft was added.
+    assert_eq!(fs::read_to_string(app.join("README.md")).unwrap(), "mine\n");
+}
+
 #[test]
 fn pick_reapplies_a_landed_changeset_and_writes_its_conflicts() {
     let s = serve(Policy::Direct);

@@ -46,10 +46,13 @@ struct Faults {
     attest_after: Mutex<Option<u32>>,
     /// Attestations failed by the fault.
     attest_fired: Mutex<u32>,
-    /// Lands to carry out and then answer `Unavailable`, as a lost response.
+    /// Lands (a revert's land included) to carry out and then answer
+    /// `Unavailable`, as a lost response.
     land_lost: Mutex<u32>,
     /// Lands whose response was lost.
     land_fired: Mutex<u32>,
+    /// Answer as a server from before D42 does: ignore a revert's `land`.
+    ignore_revert_land: std::sync::atomic::AtomicBool,
 }
 
 /// The engine, answering every call as the checker's principal.
@@ -64,8 +67,10 @@ fn checker_principal() -> Principal {
         kind: PrincipalKind::Service,
         session: None,
         work_item: None,
+        // No `write` (D42): the revert and its land are one call under
+        // `land:<line>` on the named repository.
         scopes: vec![
-            format!("repo:{REPO}:write"),
+            format!("repo:{REPO}:read"),
             format!("repo:{REPO}:attest"),
             format!("repo:{REPO}:land:{LINE}"),
         ],
@@ -73,6 +78,18 @@ fn checker_principal() -> Principal {
 }
 
 impl AsChecker {
+    /// Answers `Unavailable` instead of `done` while a lost response is
+    /// armed, after the call was carried out.
+    fn lose<T>(&self, done: T) -> ApiResult<T> {
+        let mut lost = self.faults.land_lost.lock().expect("faults");
+        if *lost > 0 {
+            *lost -= 1;
+            *self.faults.land_fired.lock().expect("faults") += 1;
+            return Err(ApiError::Unavailable { retry_after_ms: 1 });
+        }
+        Ok(done)
+    }
+
     fn cx(&self, cx: &CallContext) -> CallContext {
         CallContext {
             principal: checker_principal(),
@@ -116,19 +133,28 @@ impl RepoApi for AsChecker {
     diff(Diff) -> DiffResult;
     blame(Blame) -> BlameResult;
     rebase(Rebase) -> ChangesetId;
-    revert(Revert) -> ChangesetId;
     watch(Watch) -> JournalPage;
     }
 
     async fn land(&self, cx: &CallContext, req: Land) -> ApiResult<Landed> {
         let landed = self.engine.land(&self.cx(cx), req).await?;
-        let mut lost = self.faults.land_lost.lock().expect("faults");
-        if *lost > 0 {
-            *lost -= 1;
-            *self.faults.land_fired.lock().expect("faults") += 1;
-            return Err(ApiError::Unavailable { retry_after_ms: 1 });
+        self.lose(landed)
+    }
+
+    async fn revert(&self, cx: &CallContext, mut req: Revert) -> ApiResult<ChangesetId> {
+        if self
+            .faults
+            .ignore_revert_land
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // An old server checks `write` on the paths, which this test's
+            // caller is given so the unlanded answer can be made.
+            req.land = None;
+            return self.engine.revert(&admin(), req).await;
         }
-        Ok(landed)
+        let lands = req.land.is_some();
+        let id = self.engine.revert(&self.cx(cx), req).await?;
+        if lands { self.lose(id) } else { Ok(id) }
     }
 
     async fn attest(&self, cx: &CallContext, req: Attest) -> ApiResult<()> {
@@ -1159,4 +1185,125 @@ async fn a_bad_stack_is_reverted_whole() {
     assert_eq!(states.get(&good), Some(&LandCheckState::Good));
     assert_eq!(states.get(&bad), Some(&LandCheckState::Reverted));
     assert_eq!(entries(&rig.engine, "LandReverted").await.len(), 1);
+}
+
+/// D42: the checker's token has no `write`, and its revert still ends on
+/// the line: the revert and its land are one call under `land:<line>`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_checker_without_write_ends_with_the_revert_on_the_line() {
+    assert!(
+        !checker_principal()
+            .scopes
+            .iter()
+            .any(|s| s.ends_with(":write")),
+        "the checker's token must not carry write"
+    );
+    let rig = Rig::new(0).await;
+    land(&rig.engine, &[("a.txt", "a\n")]).await;
+    let bad = land(&rig.engine, &[("broken", "yes\n")]).await;
+    let before = tip(&rig.engine).await;
+
+    let mut c = rig.checker(Fake::default()).await;
+    let reports = drain(&mut c).await;
+    let revert = match &reports[1] {
+        PostLandReport::Reverted { land, revert } if *land == bad => *revert,
+        other => panic!("expected the revert, got {other:?} in {reports:?}"),
+    };
+    assert_eq!(tip(&rig.engine).await, revert, "the revert is the tip");
+    assert_ne!(revert, before);
+    assert!(at_tip(&rig.engine, "a.txt").await);
+    assert!(!at_tip(&rig.engine, "broken").await);
+    assert_eq!(entries(&rig.engine, "LandReverted").await.len(), 1);
+}
+
+/// D42: a changeset of the bad stack that is already undone (`revert-empty`)
+/// is done, not a block: the rest of the stack is still reverted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_already_undone_change_does_not_block_the_rest_of_the_revert() {
+    let rig = Rig::new(0).await;
+    let good = land(&rig.engine, &[("a.txt", "a\n")]).await;
+    let lower = commit(&rig.engine, Some(good), &[("extra.txt", "x\n")]).await;
+    let upper = commit(&rig.engine, Some(lower), &[("broken", "yes\n")]).await;
+    let bad = match rig
+        .engine
+        .land(
+            &admin(),
+            Land {
+                repo: REPO.to_owned(),
+                head: upper,
+                line: LINE.to_owned(),
+                squash: false,
+                merge: MergeMode::Line,
+                deadline_ms: None,
+                merged_from: None,
+            },
+        )
+        .await
+        .expect("land")
+    {
+        Landed::Landed { landed, .. } => landed,
+        other => panic!("not landed: {other:?}"),
+    };
+    // Someone already undid the lower change, on the line.
+    let undone = rig
+        .engine
+        .revert(
+            &admin(),
+            Revert {
+                repo: REPO.to_owned(),
+                changeset: lower,
+                onto: tip(&rig.engine).await,
+                workspace: None,
+                check_url: None,
+                land: Some(LINE.to_owned()),
+            },
+        )
+        .await
+        .expect("manual revert-land");
+    assert_eq!(tip(&rig.engine).await, undone);
+
+    let mut c = rig.checker(Fake::default()).await;
+    let reports = drain(&mut c).await;
+    assert!(
+        reports
+            .iter()
+            .any(|r| matches!(r, PostLandReport::Reverted { land, .. } if *land == bad)),
+        "{reports:?}"
+    );
+    assert!(at_tip(&rig.engine, "a.txt").await);
+    assert!(!at_tip(&rig.engine, "broken").await);
+    assert!(!at_tip(&rig.engine, "extra.txt").await);
+}
+
+/// D42, no version gate: a server from before it ignores `land` and answers
+/// with the inverse unlanded. The client checks the line and fails; a
+/// current server's answer passes the same check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revert_the_server_did_not_land_is_an_error() {
+    let rig = Rig::new(0).await;
+    land(&rig.engine, &[("a.txt", "a\n")]).await;
+    let bad = land(&rig.engine, &[("broken", "yes\n")]).await;
+    let before = tip(&rig.engine).await;
+    let remote = rig.remote().await;
+    let cx = call_context();
+
+    rig.faults
+        .ignore_revert_land
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let err = graft_client::revert_land::revert_and_land(&remote, &cx, REPO, bad, LINE, None)
+        .await
+        .expect_err("an unlanded revert");
+    assert!(
+        matches!(&err, ApiError::InvalidChange { rule, .. } if rule == "revert-not-landed"),
+        "{err:?}"
+    );
+    assert_eq!(tip(&rig.engine).await, before, "the line did not move");
+
+    rig.faults
+        .ignore_revert_land
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let id = graft_client::revert_land::revert_and_land(&remote, &cx, REPO, bad, LINE, None)
+        .await
+        .expect("landed");
+    assert_eq!(tip(&rig.engine).await, id);
 }

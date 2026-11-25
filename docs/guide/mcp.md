@@ -243,12 +243,25 @@ Rebases a conflicted stack using caller-provided resolutions.
 
 ### `graft_revert`
 
-Creates a draft that inverses a changeset.
+Creates a draft that inverses a changeset, or lands the inverse of a change
+that is already on a line.
 
 - Arguments: required `repo` and `changeset`; optional `onto` and `workspace`.
-- Result: new draft changeset id and workspace information.
+  `land` names a line instead: the server builds the inverse and lands it on
+  that line in the same call, and `onto` and `workspace` are not allowed with
+  it. The call needs `read` and `land:<line>` on the named repository (a
+  wildcard repository scope does not do), not `write`. The changeset must be
+  on the line.
+- Result: new draft changeset id and workspace information. With `land`: the
+  landed revert's `id`, the `reverted` changeset, the `line`, and
+  `landed: true`.
 - Errors: overlapping inverse changes return `conflict`; unknown changesets
-  and invalid workspace state are typed.
+  and invalid workspace state are typed. With `land`, a change the line has
+  already had undone is `invalid_change` (`revert-empty`), which a caller that
+  wants the change gone can take as done. A server that does not land the
+  revert (an older server ignores `land`) is `invalid_change`
+  (`revert-not-landed`): the tool checks the line and never reports an
+  unlanded revert as landed.
 
 ### `graft_pick`
 

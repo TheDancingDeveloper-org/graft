@@ -60,6 +60,8 @@ struct Rig {
     /// Lines whose authority is GitHub: land goes through the PR bridge.
     git_primary: BTreeSet<String>,
     prs: Mutex<Vec<Pr>>,
+    /// Answer a revert as a server from before D42 does: ignore `land`.
+    ignore_revert_land: std::sync::atomic::AtomicBool,
 }
 
 fn principal(subject: &str, scopes: &[&str]) -> Principal {
@@ -139,6 +141,7 @@ impl Rig {
             engine,
             git_primary: BTreeSet::from(["main".to_owned()]),
             prs: Mutex::new(Vec::new()),
+            ignore_revert_land: false.into(),
         };
         (Arc::new(rig), root.id)
     }
@@ -267,8 +270,20 @@ impl RepoApi for Rig {
             Err(fake())
         }
     }
-    async fn revert(&self, _: &CallContext, _: Revert) -> ApiResult<ChangesetId> {
-        Err(fake())
+    async fn revert(&self, cx: &CallContext, mut req: Revert) -> ApiResult<ChangesetId> {
+        if self
+            .ignore_revert_land
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // What a server from before D42 does, as one that may write.
+            req.land = None;
+            return self.engine.revert(&admin(), req).await;
+        }
+        if req.land.is_some() {
+            self.engine.revert(cx, req).await
+        } else {
+            Err(fake())
+        }
     }
     async fn land(&self, cx: &CallContext, req: Land) -> ApiResult<Landed> {
         if self.git_primary.contains(&req.line) {
@@ -1290,4 +1305,145 @@ async fn a_model_review_pass_empties_the_real_review_queue() {
         )
         .await;
     assert_eq!(attested["attestations"].as_array().unwrap().len(), 1);
+}
+
+/// A line `work` (not git-primary) holding one change on top of `main`'s
+/// root: a new file `x.txt`. Returns that change.
+async fn work_line(rig: &Rig, root: ChangesetId) -> ChangesetId {
+    let blob = b"x\n";
+    let c = rig
+        .engine
+        .create_changeset(
+            &admin(),
+            CreateChangeset {
+                repo: REPO.into(),
+                parents: vec![root],
+                changes: vec![Change::Put {
+                    path: RepoPath::new("x.txt").unwrap(),
+                    kind: EntryKind::File,
+                    id: BlobId::hash(blob).0,
+                }],
+                author: Author {
+                    name: "admin".into(),
+                    email: "admin@example.com".into(),
+                    kind: AuthorKind::Human,
+                },
+                authored_at: Timestamp {
+                    ms: NOW_MS,
+                    offset_min: 0,
+                },
+                message: "add x".into(),
+                metadata: Metadata::new(),
+                inline_blobs: vec![Frame::encode(ObjectKind::Blob, blob)],
+                workspace: None,
+            },
+        )
+        .await
+        .expect("change")
+        .id;
+    rig.engine
+        .update_ref(
+            &admin(),
+            UpdateRef {
+                repo: REPO.into(),
+                name: "work".into(),
+                expected: None,
+                new: c,
+                kind: RefKind::Line,
+                lease_epoch: None,
+            },
+        )
+        .await
+        .expect("work");
+    c
+}
+
+async fn work_tip(rig: &Rig) -> ChangesetId {
+    rig.engine
+        .resolve_ref(
+            &admin(),
+            ResolveRef {
+                repo: REPO.into(),
+                name: "work".into(),
+            },
+        )
+        .await
+        .expect("work")
+        .target
+}
+
+/// D42: `graft_revert` with `land` reverts a change on the line and lands
+/// the inverse in one call, for a token with `land:<line>` on the named
+/// repository and no `write`. A wildcard repository scope does not do.
+#[tokio::test]
+async fn graft_revert_lands_the_inverse_under_a_land_scope_without_write() {
+    let (rig, root) = Rig::new().await;
+    let c = work_line(&rig, root).await;
+    let addr = serve(rig.clone()).await;
+
+    let mut wild = Agent::connect(addr, token("wild", &["repo:r:read", "repo:*:land:work"])).await;
+    wild.fails(
+        "graft_revert",
+        json!({"repo": REPO, "changeset": c.to_string(), "land": "work"}),
+    )
+    .await;
+    assert_eq!(work_tip(&rig).await, c, "a wildcard scope landed nothing");
+
+    let mut agent =
+        Agent::connect(addr, token("agent-1", &["repo:r:read", "repo:r:land:work"])).await;
+    // `land` is the whole instruction: no `onto`, no `workspace`.
+    agent
+        .fails(
+            "graft_revert",
+            json!({"repo": REPO, "changeset": c.to_string(), "land": "work", "onto": "work"}),
+        )
+        .await;
+    let done = agent
+        .ok(
+            "graft_revert",
+            json!({"repo": REPO, "changeset": c.to_string(), "land": "work"}),
+        )
+        .await;
+    assert_eq!(done["landed"], true);
+    assert_eq!(done["line"], "work");
+    assert_eq!(done["reverted"], c.to_string());
+    assert_eq!(
+        done["id"],
+        work_tip(&rig).await.to_string(),
+        "the revert is the tip"
+    );
+    assert_ne!(work_tip(&rig).await, c);
+
+    // Already undone: the server's `revert-empty`, and nothing more lands.
+    let before = work_tip(&rig).await;
+    agent
+        .fails(
+            "graft_revert",
+            json!({"repo": REPO, "changeset": c.to_string(), "land": "work"}),
+        )
+        .await;
+    assert_eq!(work_tip(&rig).await, before);
+}
+
+/// D42, no version gate: a server that ignores `land` answers with the
+/// inverse unlanded, and the tool fails instead of reporting it.
+#[tokio::test]
+async fn graft_revert_fails_when_the_server_did_not_land_it() {
+    let (rig, root) = Rig::new().await;
+    let c = work_line(&rig, root).await;
+    rig.ignore_revert_land
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let addr = serve(rig.clone()).await;
+    let mut agent =
+        Agent::connect(addr, token("agent-1", &["repo:r:read", "repo:r:land:work"])).await;
+    let failure = agent
+        .fails(
+            "graft_revert",
+            json!({"repo": REPO, "changeset": c.to_string(), "land": "work"}),
+        )
+        .await;
+    assert!(
+        failure.to_string().contains("revert-not-landed"),
+        "{failure}"
+    );
 }

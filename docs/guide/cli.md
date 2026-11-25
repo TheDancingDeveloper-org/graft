@@ -1432,6 +1432,7 @@ Arguments:
 
 Options:
       --json               Print stable JSON; its schema is published with the release
+      --land <LINE>        Land the inverse on this line in the same call, instead of adding a draft. The server builds and lands it; the token needs `land:<line>` on this repository by name (a wildcard repository scope does not do), not `write`. The change must already be on the line. Fails if the server did not land it
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --repo <NAME>        Repository name (default: the working copy's)
       --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument

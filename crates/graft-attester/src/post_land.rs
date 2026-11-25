@@ -43,8 +43,11 @@
 //!   by anyone else counts the same way; one followed by a pass is a flake
 //!   and is left as the server reads it.
 //! - **Revert.** The first bad land is reverted (each changeset of its
-//!   stack, newest first, with line merge) on the line's tip and landed
-//!   through the ordinary land path. The server stamps each revert
+//!   stack, newest first) on the line's tip and landed in one call
+//!   (`Revert` with `land`, D42), so the checker holds `land:<line>` on the
+//!   named repository and not `write`. An inverse the server finds empty is
+//!   already undone and counts as done; a revert answered but not on the
+//!   line is refused. The server stamps each revert
 //!   `graft.reverts`, and `graft.revert-check` with the link of the last
 //!   failed run read for the land, and journals `LandReverted` with the
 //!   failed check. Lands after it stay on the line; they are
@@ -70,12 +73,12 @@ use std::time::Instant;
 
 use graft_client::Sparse;
 use graft_client::fetch::FetchOptions;
+use graft_client::revert_land::{REVERT_NOT_LANDED, revert_and_land};
 use graft_client::workcopy::{self, WcConfig};
 use graft_model::ChangesetId;
 use graft_proto::api::{ObjectApi, RepoApi};
 use graft_proto::types::{
-    AttestKind, AttestStatus, AttestV2, GetChangesets, JournalEntry, Land, Landed, MAX_ATTEST_URL,
-    MergeMode, ResolveRef, Revert, Watch,
+    AttestKind, AttestStatus, AttestV2, GetChangesets, JournalEntry, MAX_ATTEST_URL, Watch,
 };
 use graft_proto::{ApiError, CallContext};
 
@@ -1007,76 +1010,38 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
             };
             c = parent;
         }
-        let tip = self
-            .api
-            .resolve_ref(
-                &self.cx,
-                ResolveRef {
-                    repo: self.cfg.repo.clone(),
-                    name: self.cfg.line.clone(),
-                },
-            )
-            .await?
-            .target;
-        let mut head = tip;
+        // D42: each inverse is built and landed in one call, so the checker
+        // needs `land:<line>` on the repository and not `write`. The chain
+        // goes newest first, each onto the line's tip as it then is. An
+        // inverse the server finds empty is already undone, which is done.
+        let mut landed_last = None;
         for c in chain {
-            let inverse = match self
-                .api
-                .revert(
+            let mut tried = 1;
+            let outcome = loop {
+                let r = revert_and_land(
+                    &self.api,
                     &self.cx,
-                    Revert {
-                        repo: self.cfg.repo.clone(),
-                        changeset: c,
-                        onto: head,
-                        workspace: None,
-                        check_url: check_url.clone(),
-                        land: None,
-                    },
-                )
-                .await
-            {
-                Ok(id) => id,
-                Err(e) => return self.revert_failed(land, e),
-            };
-            head = inverse;
-        }
-        for tried in 1..=LAND_TRIES {
-            let landed = self
-                .api
-                .land(
-                    &self.cx,
-                    Land {
-                        repo: self.cfg.repo.clone(),
-                        head,
-                        line: self.cfg.line.clone(),
-                        squash: false,
-                        merge: MergeMode::Line,
-                        deadline_ms: None,
-                        merged_from: None,
-                    },
+                    &self.cfg.repo,
+                    c,
+                    &self.cfg.line,
+                    check_url.clone(),
                 )
                 .await;
-            match landed {
-                Ok(Landed::Landed { landed, .. }) => {
-                    return Ok(PostLandReport::Reverted {
-                        land,
-                        revert: landed,
-                    });
+                match r {
+                    Err(ApiError::Contended { .. }) if tried < LAND_TRIES => tried += 1,
+                    other => break other,
                 }
-                Ok(_) => {
-                    return Ok(self.blocked(
-                        land,
-                        BlockReason::Rejected {
-                            policy: "queued".to_owned(),
-                            detail: "the line hands lands to a pull request".to_owned(),
-                        },
-                    ));
-                }
-                Err(ApiError::Contended { .. }) if tried < LAND_TRIES => {}
+            };
+            match outcome {
+                Ok(id) => landed_last = Some(id),
+                Err(ApiError::InvalidChange { rule, .. }) if rule == "revert-empty" => {}
                 Err(e) => return self.revert_failed(land, e),
             }
         }
-        unreachable!("the last try returns")
+        match landed_last {
+            Some(revert) => Ok(PostLandReport::Reverted { land, revert }),
+            None => Ok(self.blocked(land, BlockReason::NothingToRevert)),
+        }
     }
 
     fn revert_failed(&self, land: ChangesetId, e: ApiError) -> Result<PostLandReport, Error> {
@@ -1092,6 +1057,12 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
             }
             ApiError::InvalidChange { rule, .. } if rule == "revert-empty" => {
                 BlockReason::NothingToRevert
+            }
+            ApiError::InvalidChange { rule, .. } if rule == REVERT_NOT_LANDED => {
+                BlockReason::Rejected {
+                    policy: "queued".to_owned(),
+                    detail: "the line hands lands to a pull request".to_owned(),
+                }
             }
             e => return Err(Error::Api(e)),
         };

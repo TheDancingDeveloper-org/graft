@@ -18,6 +18,7 @@ pub mod fetch;
 pub mod ignore;
 pub mod local;
 pub mod remote;
+pub mod revert_land;
 pub mod sparse;
 pub mod workcopy;
 pub mod workspace;

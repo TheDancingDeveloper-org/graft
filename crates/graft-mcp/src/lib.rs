@@ -167,7 +167,7 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "graft_revert",
-        description: "Create a draft that inverts a changeset.",
+        description: "Create a draft that inverts a changeset, or with `land` land the inverse on a line.",
         read_only: false,
         bound: ToolBound::Capped,
     },

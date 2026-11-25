@@ -94,7 +94,7 @@ The working copy moves onto the tip with your changes on top and the conflicts w
 
 ## Reading history
 
-`graft log`, `graft show REV`, `graft cat PATH`, `graft ls [DIR]`, `graft blame PATH`. Add `--json` for machine output. `graft diff A B` diffs two changesets. `graft revert REV` adds a draft that undoes a changeset; `graft pick REV` adds one that re-applies it.
+`graft log`, `graft show REV`, `graft cat PATH`, `graft ls [DIR]`, `graft blame PATH`. Add `--json` for machine output. `graft diff A B` diffs two changesets. `graft revert REV` adds a draft that undoes a changeset (`graft revert REV --land LINE` instead lands the undo on a line you already hold `land:LINE` on, by repository name and without `write`; it fails if the server did not land it); `graft pick REV` adds one that re-applies it.
 
 ## What never to do
 
@@ -181,7 +181,7 @@ Read-only (`readOnlyHint`): `graft_log`, `graft_show`, `graft_diff`, `graft_blam
 
 Writes: `graft_commit`, `graft_sync`, `graft_land`, `graft_revert`, `graft_workspace`, `graft_resolve`, `graft_line_create`, `graft_merge`, `graft_pick`, `graft_tag`.
 
-Open a workspace (`graft_workspace`) before write tools that name one. `graft_commit` can take inline file content, or `from_working_copy` on stdio. `graft_sync` moves the base to the tip. `graft_land` lands the stack. `graft_conflicts` returns paths and markers; `graft_resolve` rebases with the contents you supply.
+Open a workspace (`graft_workspace`) before write tools that name one. `graft_commit` can take inline file content, or `from_working_copy` on stdio. `graft_sync` moves the base to the tip. `graft_land` lands the stack. `graft_revert` with `land` set to a line lands the undo of a change already on that line in one call: it needs `land:<line>` on the named repository (a wildcard repository scope does not do) and no `write`, and it errors if the server did not land it. `graft_conflicts` returns paths and markers; `graft_resolve` rebases with the contents you supply.
 
 Repository administration, mirrors and batches, when the token's kind allows them: `graft_repo_create` (`repos:admin`); `graft_mirror_add`, `graft_mirror_set`, `graft_mirror_credential`, `graft_mirror_remove`, `graft_mirror_purge` (`mirror:bind`, or the repository's admin for the settable fields); `graft_mirror_status`, `graft_mirror_list`; `graft_batch_cut`, `graft_batch_status`, `graft_batch_list`, `graft_batch_cancel`. See [Repositories, mirrors and batches](#repositories-mirrors-and-batches) and the [MCP guide](guide/mcp.md).
 
