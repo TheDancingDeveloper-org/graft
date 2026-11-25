@@ -311,11 +311,12 @@ Options:
 ```text
 Diff the working copy, or two changesets
 
-Usage: graft diff [OPTIONS] [FROM] [TO]
+Usage: graft diff [OPTIONS] [FROM] [TO] [-- <PATHS>...]
 
 Arguments:
-  [FROM]  The earlier changeset or ref
-  [TO]    The later changeset or ref. With neither, diff the working copy
+  [FROM]      The earlier changeset or ref
+  [TO]        The later changeset or ref. With neither, diff the working copy
+  [PATHS]...  Paths after `--`, the same as repeating --path
 
 Options:
       --json               Print stable JSON; its schema is published with the release
@@ -344,7 +345,7 @@ Options:
       --json               Print stable JSON; its schema is published with the release
       --endpoint <URL>     Where to send requests: `http://host:port`, `https://…`, or `unix:/path`
       --path <PATH>        Only changesets that touch this path or directory (repeatable)
-      --limit <LIMIT>      Changesets per page [default: 50]
+  -n, --limit <LIMIT>      Changesets per page [default: 50]
       --repo <NAME>        Repository name (default: the working copy's)
       --cursor <TOKEN>     Resume token from a previous page
       --token-file <PATH>  File holding the bearer token for API calls. When this is absent, `GRAFT_TOKEN` or the file named by `GRAFT_TOKEN_FILE` supplies it. A token is never taken from an argument

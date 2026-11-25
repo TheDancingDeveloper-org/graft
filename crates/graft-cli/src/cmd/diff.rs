@@ -59,10 +59,31 @@ pub(crate) fn run(g: &Global, args: &DiffArgs) -> Result<(), Failure> {
     }
 }
 
+/// The `--path` and `--` filters, normalised, as strings. Empty means no filter.
+fn path_filters(args: &DiffArgs) -> Result<Vec<String>, Failure> {
+    args.paths
+        .iter()
+        .chain(&args.trailing_paths)
+        .map(|p| repo_path(p).map(|r| r.to_string()))
+        .collect()
+}
+
 /// The working copy against its base: unified patches, or paths only.
 fn working_copy_diff(g: &Global, args: &DiffArgs) -> Result<(), Failure> {
     let wc = require_working_copy()?;
-    let changes = wc.status()?;
+    let mut changes = wc.status()?;
+    let filters = path_filters(args)?;
+    if !filters.is_empty() {
+        changes.retain(|change| {
+            let path = change.path().as_str();
+            filters.iter().any(|f| {
+                path == f
+                    || path
+                        .strip_prefix(f.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+        });
+    }
     if g.json {
         let mut value = json!({
             "from": wc.state().base.to_string(),
@@ -362,6 +383,7 @@ fn changeset_diff(g: &Global, args: &DiffArgs, from: &str, to: &str) -> Result<(
     let paths = args
         .paths
         .iter()
+        .chain(&args.trailing_paths)
         .map(|p| repo_path(p))
         .collect::<Result<Vec<_>, _>>()?;
     runtime()?.block_on(async {
