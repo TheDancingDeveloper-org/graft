@@ -3,18 +3,6 @@
 Each entry is quarantined, not fixed. Its fix removes the entry and the
 quarantine together, under the same Vogt item.
 
-## `test` / `graft-engine::review_queue` `cost_follows_the_page_not_the_line_sqlite` hangs
-
-- **Vogt item:** WI-4411 (raised 2026-11-19).
-- **Symptom:** the test runs past 360 s with no output and the `test`
-  job is cancelled about 46 minutes in. The `_memory` variant passes in
-  about 2 s. Seen twice on docs-only PR #356, run 44504083258 (attempts 1
-  and 2).
-- **Quarantine:** `#[ignore]` on the SQLite variant only. The memory
-  variant still runs.
-- **Fix:** find the hang in the SQLite path, then remove the `#[ignore]`
-  and this entry.
-
 ## `test` / `nextest`: build OOM-killed (rustc, cargo or the linker)
 
 - **Vogt item:** WI-2314 (raised 2026-10-23).
