@@ -55,7 +55,9 @@ pub use commit::{CommitLimits, CommitOptions, Committed, UploadStats};
 pub use conflict::{ConflictFile, ConflictMode, Conflicts, sidecar_path};
 pub use rewrite::{Picked, Reverted, Rewritten};
 pub use session::{Begun, LandOptions, LandOutcome, Moved, Recovered, SyncOutcome};
-pub use upstream::{MAX_OWN_PATHS, Outcome, Overlap, Upstream, UpstreamChange, predict};
+pub use upstream::{
+    MAX_OWN_PATHS, Outcome, Overlap, TouchingLand, Upstream, UpstreamChange, predict,
+};
 
 /// The working copy's state directory.
 pub const GRAFT_DIR: &str = ".graft";

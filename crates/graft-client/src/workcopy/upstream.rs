@@ -64,6 +64,15 @@ pub struct UpstreamChange {
     pub deleted: bool,
 }
 
+/// A land on the line since the base that touched one of the author's paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TouchingLand {
+    /// The landed changeset.
+    pub id: ChangesetId,
+    /// First line of its message.
+    pub subject: String,
+}
+
 /// A path both the line and the author changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Overlap {
@@ -94,6 +103,12 @@ pub struct Upstream {
     pub changed: Vec<UpstreamChange>,
     /// Resume token for the next page of `changed`.
     pub next: Option<String>,
+    /// Lands since the base that touched the author's paths (WI-2416),
+    /// newest first, bounded by the limit.
+    pub touching: Vec<TouchingLand>,
+    /// More touching lands exist than `touching` holds, or the author's
+    /// paths were cut at [`MAX_OWN_PATHS`].
+    pub touching_more: bool,
     /// The author's paths the line also changed, with their predictions.
     pub overlaps: Vec<Overlap>,
     /// The overlap list was cut (by the limit or [`MAX_OWN_PATHS`]).
@@ -140,6 +155,8 @@ impl WorkingCopy {
             behind_more: false,
             changed: Vec::new(),
             next: None,
+            touching: Vec::new(),
+            touching_more: false,
             overlaps: Vec::new(),
             overlaps_truncated: false,
             stack_conflict: None,
@@ -184,6 +201,8 @@ impl WorkingCopy {
             out.overlaps_truncated = true;
         }
         let own: Vec<RepoPath> = own.into_iter().take(MAX_OWN_PATHS).collect();
+        self.touching(api, cx, base, tip, &own, limit as usize, &mut out)
+            .await?;
         let theirs = self
             .theirs(api, cx, base, tip, &own, limit as usize, &mut out)
             .await?;
@@ -261,6 +280,56 @@ impl WorkingCopy {
                 _ => return Ok(()),
             }
         }
+    }
+
+    /// The lands base..tip that touched the author's paths: the server's
+    /// path-pruned `Log`, `DIFF_PATHS` paths at a time, never a scan of
+    /// history (rule 2). Up to `limit` lands, deduplicated across chunks.
+    #[allow(clippy::too_many_arguments)]
+    async fn touching<A: RepoApi>(
+        &self,
+        api: &A,
+        cx: &CallContext,
+        base: ChangesetId,
+        tip: ChangesetId,
+        own: &[RepoPath],
+        limit: usize,
+        out: &mut Upstream,
+    ) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for chunk in own.chunks(DIFF_PATHS) {
+            let page = api
+                .log(
+                    cx,
+                    Log {
+                        repo: self.config.repo.clone(),
+                        from: tip,
+                        until: Some(base),
+                        paths: chunk.to_vec(),
+                        page: Page {
+                            limit: limit as u32,
+                            token: None,
+                        },
+                    },
+                )
+                .await?;
+            out.touching_more |= page.next.is_some();
+            for c in page.changesets {
+                if !seen.insert(c.id) {
+                    continue;
+                }
+                if out.touching.len() == limit {
+                    out.touching_more = true;
+                    return Ok(());
+                }
+                out.touching.push(TouchingLand {
+                    id: c.id,
+                    subject: c.subject,
+                });
+            }
+        }
+        out.touching_more |= own.len() >= MAX_OWN_PATHS;
+        Ok(())
     }
 
     /// The line's changes base..tip to the author's paths, `DIFF_PATHS` at
