@@ -135,6 +135,22 @@ struct Args {
     /// (repeatable; `PATH` defaults to the attester's).
     #[arg(long = "env", value_parser = parse_env)]
     env: Vec<(String, String)>,
+    /// Give each draft its own HOME, CARGO_HOME and CARGO_TARGET_DIR, so a
+    /// draft cannot poison later builds (slower: no shared cache).
+    #[arg(long)]
+    isolate_cache: bool,
+    /// Run checks with no network (needs `unshare` and user namespaces; the
+    /// check is not started when they are unavailable).
+    #[arg(long)]
+    no_network: bool,
+    /// Run each check in its own pid namespace, so every process it started
+    /// dies with it, even one that called setsid.
+    #[arg(long)]
+    pid_namespace: bool,
+    /// Command run before each check with the network (split on whitespace),
+    /// for example `cargo fetch --locked`; only with --no-network.
+    #[arg(long)]
+    prefetch: Option<String>,
     /// Most bytes of a check's output kept in its log.
     #[arg(long, default_value_t = 8 << 20)]
     max_log_bytes: u64,
@@ -198,6 +214,14 @@ fn config(args: &Args) -> Result<Config, String> {
     cfg.queue_cap = args.queue;
     cfg.run_as = args.run_as;
     cfg.env = args.env.clone();
+    cfg.isolate_cache = args.isolate_cache;
+    cfg.no_network = args.no_network;
+    cfg.pid_namespace = args.pid_namespace;
+    cfg.prefetch = args
+        .prefetch
+        .as_deref()
+        .map(|p| p.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|p| !p.is_empty());
     cfg.max_log_bytes = args.max_log_bytes;
     cfg.log_retention = Duration::from_secs(args.log_days.saturating_mul(24 * 3600));
     Ok(cfg)
