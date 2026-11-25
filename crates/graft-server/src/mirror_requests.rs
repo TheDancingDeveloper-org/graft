@@ -42,6 +42,10 @@ pub(crate) const CANCELLED: &str = "cancelled";
 /// the credential's last authentication failed.
 pub(crate) const AUTH_FAILED: &str = "auth_failed";
 
+/// The error code of a cut whose result the server refused with no PR
+/// recorded: the cut fails, so its batch slot is released.
+pub(crate) const RESULT_REFUSED: &str = "result_refused";
+
 /// How long a request may stay live (§3.5).
 pub(crate) const REQUEST_TIMEOUT_MS: i64 = 30 * 60_000;
 
@@ -970,7 +974,7 @@ pub(crate) async fn complete<M: MetaStore>(
 ) -> Result<pb::MirrorRequest, ApiError> {
     let done = req.done;
     let wire = req.result.unwrap_or_default();
-    apply(meta, p, now_ms, &req.repo, req.id, req.epoch, |r| {
+    let first = apply(meta, p, now_ms, &req.repo, req.id, req.epoch, |r| {
         claimed_by(r, req.epoch)?;
         let mut next = r.clone();
         next.result = outcome(r, wire.clone())?;
@@ -980,7 +984,33 @@ pub(crate) async fn complete<M: MetaStore>(
         }
         Ok(next)
     })
-    .await
+    .await;
+    // A refused result must not pin the line (gh#359): a cut with no PR
+    // recorded, and none in the refused result, fails and releases its
+    // batch slot, as a failed cut does. With a PR named anywhere the cut
+    // stays claimed, so a retry can record it and no PR is orphaned.
+    if let Err(ApiError::Rejected { policy, .. }) = &first
+        && policy == "mirror-field"
+        && let Err(e) = &first
+    {
+        let released = apply(meta, p, now_ms, &req.repo, req.id, req.epoch, |r| {
+            claimed_by(r, req.epoch)?;
+            if r.kind != MirrorRequestKind::CutBatch
+                || r.result.pr_number.is_some()
+                || wire.pr_number.is_some()
+            {
+                return Err(e.clone());
+            }
+            let mut next = r.clone();
+            next.state = MirrorRequestState::Failed;
+            next.result.error_code = Some(RESULT_REFUSED.to_owned());
+            next.batch = batch_after(&next);
+            Ok(next)
+        })
+        .await;
+        drop(released);
+    }
+    first
 }
 
 /// `FailRequest`: finishes a claimed request with a typed error. A failed
