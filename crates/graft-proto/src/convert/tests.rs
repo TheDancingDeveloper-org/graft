@@ -564,13 +564,14 @@ fn land_types_round_trip() {
     );
     check::<Revert, pb::RevertRequest, _>(
         "Revert",
-        (text(), cid(), cid(), otext(), otext()).prop_map(
-            |(repo, changeset, onto, workspace, check_url)| Revert {
+        (text(), cid(), cid(), otext(), otext(), otext()).prop_map(
+            |(repo, changeset, onto, workspace, check_url, land)| Revert {
                 repo,
                 changeset,
                 onto,
                 workspace,
                 check_url,
+                land,
             },
         ),
     );
@@ -1176,6 +1177,7 @@ fn revert_check_url_is_additive_and_bounded() {
         onto: id,
         workspace: None,
         check_url: Some("https://ci.example/run/7".to_owned()),
+        land: None,
     };
     let bytes = pb::RevertRequest::from(revert.clone()).encode_to_vec();
     let back = Revert::try_from(pb::RevertRequest::decode(bytes.as_slice()).unwrap()).unwrap();
@@ -1202,6 +1204,7 @@ fn revert_check_url_is_additive_and_bounded() {
     .encode_to_vec();
     let back = Revert::try_from(pb::RevertRequest::decode(old.as_slice()).unwrap()).unwrap();
     assert_eq!(back.check_url, None);
+    assert_eq!(back.land, None);
 
     let at_cap = pb::RevertRequest {
         check_url: Some("u".repeat(MAX_ATTEST_URL)),
@@ -1218,5 +1221,44 @@ fn revert_check_url_is_additive_and_bounded() {
             field: "check_url",
             reason: "over the url cap",
         }
+    );
+}
+
+// D42: `land` is one additive optional field; both forms round-trip, and a
+// request without it (an old client's) decodes with `land = None`.
+#[test]
+fn revert_land_round_trips_in_both_forms() {
+    use prost::Message;
+    let id = ChangesetId(ObjectId([5; 32]));
+    for land in [None, Some("backlog-1".to_owned())] {
+        let revert = Revert {
+            repo: "r".to_owned(),
+            changeset: id,
+            onto: id,
+            workspace: None,
+            check_url: None,
+            land: land.clone(),
+        };
+        let bytes = pb::RevertRequest::from(revert.clone()).encode_to_vec();
+        let back = Revert::try_from(pb::RevertRequest::decode(bytes.as_slice()).unwrap()).unwrap();
+        assert_eq!(back, revert);
+        assert_eq!(back.land, land);
+    }
+    // Absent on the wire is the same bytes as before the field existed.
+    let without = Revert {
+        repo: "r".to_owned(),
+        changeset: id,
+        onto: id,
+        workspace: None,
+        check_url: None,
+        land: None,
+    };
+    let with = Revert {
+        land: Some("main".to_owned()),
+        ..without.clone()
+    };
+    assert!(
+        pb::RevertRequest::from(with).encode_to_vec().len()
+            > pb::RevertRequest::from(without).encode_to_vec().len()
     );
 }

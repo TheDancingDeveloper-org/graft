@@ -20,13 +20,14 @@
 //! Cost: one tree lookup per path `c` changes, plus the rebase.
 
 use graft_model::{Author, AuthorKind, Change, Changeset, ChangesetId};
-use graft_proto::types::{MergeMode, Revert};
+use graft_proto::types::{Land, Landed, MergeMode, Revert};
 use graft_proto::{ApiError, CallContext, PrincipalKind};
 use graft_store::{MetaStore, ObjectStore};
 
 use crate::access::{Need, require, require_changes};
 use crate::land::MAX_ATTEST_URL;
 use crate::rebase::{REBASED_FROM, key};
+use crate::refs::check_ref_name;
 use crate::source::Trees;
 use crate::{Engine, errors};
 
@@ -76,8 +77,30 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
         let repo = self.repo_id(&req.repo).await?;
         let (c, _) = self.changeset(repo, req.changeset).await?;
-        self.or_cut(cx, &req.repo, require_changes(cx, &req.repo, &c.changes))
-            .await?;
+        // D42: with `land`, the line's `land:<line>` on the named repository
+        // stands in for the per-path `write` check, and the revert goes
+        // onto the line's tip, so `c` must already be on the line.
+        let mut req = req;
+        if let Some(line) = req.land.clone() {
+            if req.workspace.is_some() {
+                return Err(errors::invalid(None, "revert-land-workspace"));
+            }
+            check_ref_name(&line)?;
+            require(cx, &req.repo, Need::LandRevert(&line))?;
+            let tip = self.line_ref(repo, &line).await?.target;
+            let on_line = self
+                .index
+                .is_ancestor(repo, req.changeset, tip)
+                .await
+                .map_err(errors::store)?;
+            if !on_line {
+                return Err(errors::invalid(None, "revert-not-on-line"));
+            }
+            req.onto = tip;
+        } else {
+            self.or_cut(cx, &req.repo, require_changes(cx, &req.repo, &c.changes))
+                .await?;
+        }
         let parent = c
             .first_parent()
             .ok_or_else(|| errors::invalid(None, "revert-root"))?;
@@ -142,6 +165,34 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             cs.metadata.remove(REBASED_FROM);
             (cs, uploads)
         };
+        if let Some(line) = req.land.clone() {
+            // Store the inverse, then land it through the normal land path
+            // (CAS, retry, authority and followed-line guards). Only this
+            // changeset skips the per-path `write` check; its
+            // `graft.reverts` metadata grants nothing.
+            let id = result.id();
+            let stored = self.insert_unheld(repo, result, uploads).await?.id;
+            debug_assert_eq!(stored, id);
+            let landed = self
+                .land_checked(
+                    cx,
+                    Land {
+                        repo: req.repo.clone(),
+                        head: stored,
+                        line,
+                        squash: false,
+                        merge: MergeMode::Line,
+                        deadline_ms: None,
+                        merged_from: None,
+                    },
+                    Some(stored),
+                )
+                .await?;
+            return match landed {
+                Landed::Landed { landed, .. } => Ok(landed),
+                _ => Err(errors::invalid(None, "revert-not-landed")),
+            };
+        }
         let created = match &req.workspace {
             Some(name) => {
                 self.insert_held(cx, &req.repo, repo, name, result, uploads)

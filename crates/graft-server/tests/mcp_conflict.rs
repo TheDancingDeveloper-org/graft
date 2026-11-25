@@ -369,6 +369,7 @@ async fn revert_into_a_workspace_is_for_its_owner_only() {
             onto: tip_id.0.0.to_vec(),
             workspace: Some("wa".into()),
             check_url: None,
+            land: None,
         })
         .await
         .expect_err("foreign revert");

@@ -1397,6 +1397,7 @@ async fn a_revert_left_by_an_interrupted_run_is_appended_to_the_open_batch() {
                 onto: tip.unwrap(),
                 workspace: None,
                 check_url: None,
+                land: None,
             },
         )
         .await
@@ -2348,6 +2349,7 @@ impl World {
                     onto: tip,
                     workspace: None,
                     check_url: None,
+                    land: None,
                 },
             )
             .await

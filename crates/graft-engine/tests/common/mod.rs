@@ -24,6 +24,7 @@ use graft_store::{MetaStore, ObjectStore, RepoId, StoreError, StoreResult, Store
 use graft_store_sqlite::{SqliteConfig, SqliteMetaStore};
 use graft_testkit::clock::FakeClock;
 
+pub mod counting;
 pub mod race;
 
 struct Unpark(thread::Thread);
