@@ -488,9 +488,11 @@ fn cost_follows_the_page_not_the_line_memory() {
 }
 
 #[test]
-#[ignore = "quarantined: hangs in CI (WI-4411, docs/known-flakes.md)"]
 fn cost_follows_the_page_not_the_line_sqlite() {
-    let (meta, dir) = sqlite_meta();
+    // 10k landings, each a `synchronous=FULL` commit: on a disk that is
+    // tens of minutes of fsync (it looked like a hang in CI), and the test
+    // asserts read costs, not durability.
+    let (meta, dir) = sqlite_meta_volatile();
     cost_follows_the_page_not_the_line(Arc::new(Counting::new(meta)), Some(dir));
 }
 

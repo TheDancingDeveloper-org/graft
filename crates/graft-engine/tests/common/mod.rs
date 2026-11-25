@@ -121,10 +121,29 @@ pub struct TempDir(PathBuf);
 
 impl TempDir {
     pub fn new(tag: &str) -> Self {
+        Self::under(std::env::temp_dir(), tag)
+    }
+
+    /// As [`TempDir::new`], but on memory-backed storage (`/dev/shm`) when
+    /// the host has it, so `synchronous=FULL` commits don't wait on a disk.
+    /// For tests that write thousands of transactions and assert read
+    /// costs, not durability.
+    pub fn volatile(tag: &str) -> Self {
+        let shm = std::path::Path::new("/dev/shm");
+        Self::under(
+            if shm.is_dir() {
+                shm.to_path_buf()
+            } else {
+                std::env::temp_dir()
+            },
+            tag,
+        )
+    }
+
+    fn under(root: PathBuf, tag: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("graft-engine-{tag}-{}-{n}", std::process::id()));
+        let dir = root.join(format!("graft-engine-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         Self(dir)
@@ -185,7 +204,16 @@ pub fn sqlite_with(config: EngineConfig) -> Fixture<SqliteMetaStore> {
 
 /// A SQLite store in a fresh directory, for a fixture built over a wrapper.
 pub fn sqlite_meta() -> (SqliteMetaStore, TempDir) {
-    let dir = TempDir::new("sqlite");
+    sqlite_meta_in(TempDir::new("sqlite"))
+}
+
+/// As [`sqlite_meta`], on memory-backed storage: for a test that lands
+/// thousands of changesets, where disk fsync latency would dominate.
+pub fn sqlite_meta_volatile() -> (SqliteMetaStore, TempDir) {
+    sqlite_meta_in(TempDir::volatile("sqlite"))
+}
+
+fn sqlite_meta_in(dir: TempDir) -> (SqliteMetaStore, TempDir) {
     let meta = SqliteMetaStore::open(SqliteConfig::new(dir.0.join("meta.sqlite")))
         .expect("open sqlite store");
     (meta, dir)
