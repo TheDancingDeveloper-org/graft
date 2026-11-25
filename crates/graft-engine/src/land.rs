@@ -656,13 +656,23 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         }
     }
 
-    pub(crate) async fn do_land(
+    pub(crate) async fn do_land(&self, cx: &CallContext, req: Land) -> Result<Landed, ApiError> {
+        check_ref_name(&req.line)?;
+        require(cx, &req.repo, Need::Land(&req.line))?;
+        self.land_checked(cx, req, None).await
+    }
+
+    /// The land path, after the caller's `land:<line>` check. `built` names
+    /// the one changeset the server built in this very call (a D42 revert),
+    /// which skips the per-path `write` check; the caller has checked
+    /// `LandRevert` for it. Every other changeset in the stack is checked.
+    /// An internal flag, never read from the wire.
+    pub(crate) async fn land_checked(
         &self,
         cx: &CallContext,
         mut req: Land,
+        built: Option<ChangesetId>,
     ) -> Result<Landed, ApiError> {
-        check_ref_name(&req.line)?;
-        require(cx, &req.repo, Need::Land(&req.line))?;
         let repo = self.repo_id(&req.repo).await?;
         if req.squash {
             return Err(rejected(
@@ -718,8 +728,10 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
             return Err(errors::invalid(None, "draft-landed"));
         }
         let mut stack = self.chain(repo, req.head, line.target).await?;
-        for (_, cs) in &stack {
-            require_changes(cx, &req.repo, &cs.changes)?;
+        for (id, cs) in &stack {
+            if Some(*id) != built {
+                require_changes(cx, &req.repo, &cs.changes)?;
+            }
         }
         // A merge resolution lands as its head stamped with what it merged
         // (`graft.merged-from`, for readers and export), once the caller

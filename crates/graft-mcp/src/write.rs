@@ -539,6 +539,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             onto,
             workspace: args.workspace.clone(),
             check_url: None,
+            land: None,
         };
         let id = self.api.revert(cx, req).await.map_err(ToolError::Api)?;
         bounded(json!({

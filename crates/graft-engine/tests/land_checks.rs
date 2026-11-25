@@ -297,6 +297,7 @@ fn a_revert_marks_its_landing<M: MetaStore>(f: &Fixture<M>) {
             onto: a,
             workspace: None,
             check_url: None,
+            land: None,
         },
     ))
     .expect("revert");
@@ -337,6 +338,7 @@ fn a_revert_carries_its_check_url<M: MetaStore>(f: &Fixture<M>) {
                 onto,
                 workspace: None,
                 check_url,
+                land: None,
             },
         ))
     };

@@ -1030,6 +1030,7 @@ impl<A: ObjectApi + RepoApi, R: Runner<A>> PostLand<A, R> {
                         onto: head,
                         workspace: None,
                         check_url: check_url.clone(),
+                        land: None,
                     },
                 )
                 .await

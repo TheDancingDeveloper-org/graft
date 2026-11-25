@@ -1126,6 +1126,7 @@ impl From<Revert> for pb::RevertRequest {
             onto: cb(r.onto),
             workspace: r.workspace,
             check_url: r.check_url,
+            land: r.land,
         }
     }
 }
@@ -1145,6 +1146,7 @@ impl TryFrom<pb::RevertRequest> for Revert {
             onto: cid(r.onto, "onto")?,
             workspace: r.workspace,
             check_url: r.check_url,
+            land: r.land,
         })
     }
 }

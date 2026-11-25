@@ -341,6 +341,7 @@ async fn health_metrics_and_the_json_facade() {
             onto: first.0.0.to_vec(),
             workspace: None,
             check_url: None,
+            land: None,
         })
         .await
         .expect_err("revert onto itself");

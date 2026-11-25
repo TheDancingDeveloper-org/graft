@@ -468,6 +468,11 @@ pub struct Revert {
     /// stamped on the inverse as `graft.revert-check`. At most
     /// [`MAX_ATTEST_URL`] bytes.
     pub check_url: Option<String>,
+    /// Build the revert and land it on this line in the same call (D42).
+    /// Needs `read` and a named-repository `land:<line>` (or `admin`), not
+    /// `write`; the changeset must be on the line, and `onto` is ignored
+    /// (the line's tip is used).
+    pub land: Option<String>,
 }
 
 /// The longest attestation or revert-check URL, in bytes.

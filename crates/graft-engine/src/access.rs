@@ -46,6 +46,9 @@ pub(crate) enum Need<'a> {
     Workspace,
     /// Land on a line (`land:<line>`).
     Land(&'a str),
+    /// Land a server-built revert on a line (D42): `land:<line>` or `admin`
+    /// held on the *named* repository. A `*` repository does not satisfy it.
+    LandRevert(&'a str),
     /// Post an attestation (`attest`).
     Attest,
     /// See other workspaces' draft paths (`drafts`).
@@ -66,6 +69,12 @@ pub(crate) fn require(cx: &CallContext, repo: &str, need: Need<'_>) -> Result<()
         Need::Write(path) => ("write", path.map(|p| p.to_string())),
         Need::Workspace => ("write", None),
         Need::Land(line) => {
+            return Err(ApiError::PermissionDenied {
+                scope: format!("repo:{repo}:land:{line}"),
+                path: None,
+            });
+        }
+        Need::LandRevert(line) => {
             return Err(ApiError::PermissionDenied {
                 scope: format!("repo:{repo}:land:{line}"),
                 path: None,
@@ -387,13 +396,17 @@ fn grants(scope: &str, repo: &str, need: Need<'_>) -> bool {
     }
     let perm = parts.next();
     let arg = parts.next();
+    // A revert-land is authorised by a named repository only (D42).
+    if matches!(need, Need::LandRevert(_)) && scope.split(':').nth(1) == Some("*") {
+        return false;
+    }
     match (perm, need) {
         (Some("mirror"), Need::Mirror) => arg.is_none(),
         (_, Need::Mirror) => false,
         (Some("admin"), _) => true,
         (Some("read" | "land" | "write"), Need::Objects | Need::Read) => true,
         (Some("write"), Need::Workspace) => true,
-        (Some("land"), Need::Land(line)) => arg == Some(line),
+        (Some("land"), Need::Land(line) | Need::LandRevert(line)) => arg == Some(line),
         (Some("attest"), Need::Attest) => arg.is_none(),
         (Some("drafts"), Need::Drafts) => arg.is_none(),
         (Some("write"), Need::Write(path)) => match (arg, path) {
@@ -526,6 +539,32 @@ mod tests {
     }
 
     #[test]
+    fn revert_land_needs_a_named_repository() {
+        // D42: `repo:*:land:L` does not authorise it; `repo:r:land:L` and
+        // `repo:r:admin` do, on their own repository and line only.
+        assert!(!grants("repo:*:land:main", "r", Need::LandRevert("main")));
+        assert!(!grants("repo:*:admin", "r", Need::LandRevert("main")));
+        assert!(grants("repo:r:land:main", "r", Need::LandRevert("main")));
+        assert!(grants("repo:r:admin", "r", Need::LandRevert("main")));
+        assert!(!grants("repo:r:land:dev", "r", Need::LandRevert("main")));
+        assert!(!grants("repo:s:land:main", "r", Need::LandRevert("main")));
+        assert!(!grants("repo:r:write", "r", Need::LandRevert("main")));
+        assert!(!grants("repo:r:read", "r", Need::LandRevert("main")));
+        // The wildcard still lands as before.
+        assert!(grants("repo:*:land:main", "r", Need::Land("main")));
+        // The mirror kind's own scope grants nothing here, and a mirror
+        // principal holding only the wildcard is refused.
+        let mirror = Principal {
+            subject: "m".into(),
+            kind: PrincipalKind::Mirror,
+            session: None,
+            work_item: None,
+            scopes: vec!["repo:*:mirror".into(), "repo:*:land:main".into()],
+        };
+        assert!(!granted(&mirror, "r", Need::LandRevert("main")));
+    }
+
+    #[test]
     fn a_wildcard_repository_holds_everywhere() {
         assert!(grants("repo:*:read", "r", Need::Read));
         assert!(grants("repo:*:land:main", "s", Need::Land("main")));
@@ -552,6 +591,7 @@ mod tests {
             Need::Workspace,
             Need::Admin,
             Need::Land("main"),
+            Need::LandRevert("main"),
             Need::Attest,
             Need::Drafts,
         ] {
