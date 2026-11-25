@@ -66,7 +66,8 @@ pub(crate) fn mint(key: &SigningKey, req: MintRequest, now_s: i64) -> Result<Tok
 ///   already trusted to mint every session token, and it must hold these
 ///   grants to mint them into an oversight session's token.
 /// - The mirror permission set (`repo:*:mirror`) only the `mirror` kind, and
-///   the `mirror` kind nothing else.
+///   the `mirror` kind nothing else (so never a `repo:<r>:land:<line>` scope,
+///   WI-4711).
 fn check_kind(req: &MintRequest, scope: &Scope) -> Result<(), ApiError> {
     let operator = (req.kind == PrincipalKind::Human && req.session.is_none())
         || matches!(req.kind, PrincipalKind::Oversight | PrincipalKind::Service);
@@ -602,6 +603,33 @@ mod tests {
                 refused(admin_mint(kind, None, &["repo:*:mirror"])),
                 "{kind:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_mirror_token_never_carries_a_land_scope() {
+        for scope in ["repo:r:land:main", "repo:*:land:backlog-1"] {
+            assert!(
+                refused(admin_mint(PrincipalKind::Mirror, None, &[scope])),
+                "{scope} alone"
+            );
+            assert!(
+                refused(admin_mint(
+                    PrincipalKind::Mirror,
+                    None,
+                    &["repo:*:mirror", scope]
+                )),
+                "{scope} beside the mirror set"
+            );
+            // Other kinds are unchanged: they still mint a land scope.
+            for kind in [
+                PrincipalKind::Human,
+                PrincipalKind::Agent,
+                PrincipalKind::Ci,
+                PrincipalKind::Service,
+            ] {
+                admin_mint(kind, None, &[scope]).expect("land mints for other kinds");
+            }
         }
     }
 
