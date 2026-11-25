@@ -14,6 +14,7 @@ mod cmd;
 mod config;
 mod conn;
 mod error;
+mod hints;
 mod identity;
 mod mirror_client;
 mod render;
@@ -52,6 +53,9 @@ pub(crate) enum Exit {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if let Some(code) = legacy_role_entry(&args) {
+        return code;
+    }
+    if let Some(code) = version_flag_entry(&args) {
         return code;
     }
     let matches = match Cli::command().try_get_matches() {
@@ -107,14 +111,53 @@ fn parse_failure(e: clap::Error) -> ExitCode {
         let _ = e.print();
         return ExitCode::SUCCESS;
     }
-    if std::env::args_os().any(|a| a == "--json") {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let hint = hints::for_error(&e, &args);
+    if args.iter().any(|a| a == "--json") {
         let first = e.to_string();
         let message = first.lines().next().unwrap_or("usage error");
         let message = message.strip_prefix("error: ").unwrap_or(message);
-        let code = Failure::usage(message.to_owned()).report(true);
+        let message = match hint {
+            Some(hint) => format!("{message}; {hint}"),
+            None => message.to_owned(),
+        };
+        let code = Failure::usage(message).report(true);
         return ExitCode::from(code as u8);
     }
+    if let Some(hint) = hint {
+        let _ = e.print();
+        eprintln!("  hint: {hint}");
+        return ExitCode::from(Exit::Usage as u8);
+    }
     e.exit()
+}
+
+/// `graft --version` and `graft -V`, the way every tool answers them. They
+/// are not in the command tree (the `version` command is), so they are read
+/// here, alone or with `--json`.
+fn version_flag_entry(args: &[String]) -> Option<ExitCode> {
+    let rest = &args[1..];
+    let asks = rest.iter().any(|a| a == "--version" || a == "-V");
+    if !asks
+        || !rest
+            .iter()
+            .all(|a| a == "--version" || a == "-V" || a == "--json")
+    {
+        return None;
+    }
+    let global = cli::Global {
+        json: rest.iter().any(|a| a == "--json"),
+        endpoint: None,
+        repo: None,
+        token_file: None,
+        server: None,
+        directory: None,
+        experimental: false,
+    };
+    Some(match cmd::version::run(&global) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => ExitCode::from(failure.report(global.json) as u8),
+    })
 }
 
 /// `graft -C <dir>` runs as if it had been started in `<dir>`.
