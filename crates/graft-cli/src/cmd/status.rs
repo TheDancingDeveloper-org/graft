@@ -16,7 +16,8 @@ use graft_proto::ApiError;
 use graft_proto::api::{RepoApi, WorkspaceApi};
 use graft_proto::context::CallContext;
 use graft_proto::types::{
-    Diff, DraftWorkspace, MAX_OVERLAP_PAGE, MAX_OVERLAP_PATHS, OverlappingDrafts, Page,
+    Diff, DraftOverlap, DraftWorkspace, MAX_OVERLAP_PAGE, MAX_OVERLAP_PATHS, OverlappingDrafts,
+    Page,
 };
 use serde_json::{Value, json};
 
@@ -139,14 +140,41 @@ async fn drafts(
     repo: &str,
     line: &str,
     paths: Vec<RepoPath>,
-    mut truncated: bool,
+    truncated: bool,
     soft: bool,
 ) -> Result<Drafts, Failure> {
+    drafts_with(
+        |req| remote.overlapping_drafts(cx, req),
+        repo,
+        line,
+        paths,
+        truncated,
+        soft,
+        (MAX_DRAFT_HITS, MAX_DRAFT_PAGES),
+    )
+    .await
+}
+
+/// [`drafts`] over any asker, with the `(hits, pages)` caps given.
+async fn drafts_with<F, Fut>(
+    mut ask: F,
+    repo: &str,
+    line: &str,
+    paths: Vec<RepoPath>,
+    mut truncated: bool,
+    soft: bool,
+    (max_hits, max_pages): (usize, usize),
+) -> Result<Drafts, Failure>
+where
+    F: FnMut(OverlappingDrafts) -> Fut,
+    Fut: std::future::Future<Output = Result<DraftOverlap, ApiError>>,
+{
     let asked = paths.len();
     let mut rows: BTreeMap<String, DraftOverlapRow> = BTreeMap::new();
     let mut hits = 0;
     let mut pages = 0;
-    'batches: for batch in paths.chunks(MAX_OVERLAP_PATHS) {
+    let batches = paths.len().div_ceil(MAX_OVERLAP_PATHS);
+    'batches: for (n, batch) in paths.chunks(MAX_OVERLAP_PATHS).enumerate() {
         let mut token = None;
         loop {
             let req = OverlappingDrafts {
@@ -159,7 +187,7 @@ async fn drafts(
                     token,
                 },
             };
-            let page = match remote.overlapping_drafts(cx, req).await {
+            let page = match ask(req).await {
                 Ok(page) => page,
                 Err(ApiError::PermissionDenied { scope, .. }) if soft => {
                     return Ok(Drafts {
@@ -185,8 +213,10 @@ async fn drafts(
                 }
             }
             token = page.next;
-            if hits >= MAX_DRAFT_HITS || pages >= MAX_DRAFT_PAGES {
-                truncated |= token.is_some();
+            if hits >= max_hits || pages >= max_pages {
+                // The cap can land on the last page of a batch: batches
+                // still unasked are cut too, not only a remaining token.
+                truncated |= token.is_some() || n + 1 < batches;
                 break 'batches;
             }
             if token.is_none() {
@@ -482,4 +512,54 @@ fn print_upstream(up: &Upstream) -> Result<(), Failure> {
         outln!("(overlaps cut at the limit)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(i: usize) -> RepoPath {
+        RepoPath::new(&format!("f{i}")).expect("path")
+    }
+
+    /// The hit cap landing on the last page of the first batch, with
+    /// another batch unasked, must report the answer as cut.
+    #[test]
+    fn the_cap_on_a_batchs_last_page_truncates_when_batches_remain() {
+        let paths: Vec<RepoPath> = (0..MAX_OVERLAP_PATHS + 1).map(path).collect();
+        let run = |n: usize| {
+            let paths = paths[..n].to_vec();
+            let calls = std::cell::Cell::new(0);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            let got = rt
+                .block_on(drafts_with(
+                    |req: OverlappingDrafts| {
+                        calls.set(calls.get() + 1);
+                        let hit = req.paths[0].clone();
+                        async move {
+                            Ok(DraftOverlap {
+                                hits: vec![graft_proto::types::DraftHit {
+                                    path: hit,
+                                    workspace: "w".into(),
+                                }],
+                                workspaces: Vec::new(),
+                                next: None,
+                            })
+                        }
+                    },
+                    "r",
+                    "l",
+                    paths,
+                    false,
+                    false,
+                    (1, 64),
+                ))
+                .expect("drafts");
+            (got.truncated, calls.get())
+        };
+        assert_eq!(run(MAX_OVERLAP_PATHS + 1), (true, 1), "a batch is unasked");
+        assert_eq!(run(MAX_OVERLAP_PATHS), (false, 1), "that was the last");
+    }
 }

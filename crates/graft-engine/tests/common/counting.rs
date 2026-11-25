@@ -14,6 +14,8 @@ use graft_store::{
 pub struct Counting<M> {
     pub inner: M,
     pub calls: AtomicU64,
+    /// `commit_run` calls only (also counted in `calls`).
+    pub runs: AtomicU64,
 }
 
 impl<M: MetaStore> MetaStore for Counting<M> {
@@ -28,6 +30,11 @@ impl<M: MetaStore> MetaStore for Counting<M> {
     async fn commit(&self, repo: RepoId, txn: MetaTxn) -> StoreResult<TxnOutcome> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.commit(repo, txn).await
+    }
+    async fn commit_run(&self, repo: RepoId, txns: Vec<MetaTxn>) -> StoreResult<Vec<TxnOutcome>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        self.inner.commit_run(repo, txns).await
     }
     async fn changeset(
         &self,
