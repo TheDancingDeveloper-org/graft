@@ -442,10 +442,10 @@ if [ "$attester" = 1 ]; then
   compose build graft-attester
 fi
 
-# The post-land checker's token. `land` on its line lands the reverts;
-# `write` on the whole repository is what a revert needs, since Revert
-# requires write on every path the bad land touched; `attest` posts the
-# failures and interior passes; `read` follows the journal. Owned by uid
+# The post-land checker's token. `land` on its line, named for this
+# repository, lands the reverts: `Revert` with `land` needs only `read` and
+# that scope, not `write` (D42), so the token holds no `write`; `attest`
+# posts the failures and interior passes; `read` follows the journal. Owned by uid
 # 10001, the checker's user, which runs no checks. TTL 30 days, re-minted
 # after GRAFT_TOKEN_RENEW_DAYS (20) by the next deploy.
 post_land_mint=0
@@ -457,7 +457,7 @@ if [ "$post_land" = 1 ]; then
     compose exec -T graft-server graft-server admin token mint \
       --subject graft-post-land-graft --kind service \
       --scope repo:graft:read --scope repo:graft:attest \
-      --scope repo:graft:write --scope "repo:graft:land:$post_land_line" \
+      --scope "repo:graft:land:$post_land_line" \
       --ttl "$ttl" \
       | store_secret post-land-token
   fi

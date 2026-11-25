@@ -56,7 +56,7 @@ by uid 10001, mounted read-only:
 | `/etc/graft/mirror-service-token` | `/run/secrets/graft-mirror-token` in `graft-mirror` | `up.sh`, minted by the running server: kind `mirror`, scope `repo:*:mirror` |
 | `/etc/graft/attester-token` | `/run/secrets/graft-attester-token` | `up.sh` with `GRAFT_ATTESTER=1`; owned by root, not uid 10001 (see below) |
 | `/etc/graft/github-checker-token` | `/run/secrets/github-checker-token` in `graft-post-land` only | `up.sh` with `GRAFT_POST_LAND=1`, from Infisical, or placed by hand (see below) |
-| `/etc/graft/post-land-token` | `/run/secrets/graft-post-land-token` in `graft-post-land` | `up.sh` with `GRAFT_POST_LAND=1`; scopes `read`, `attest`, `write` on `graft` and `land` on the checked line (see below) |
+| `/etc/graft/post-land-token` | `/run/secrets/graft-post-land-token` in `graft-post-land` | `up.sh` with `GRAFT_POST_LAND=1`; scopes `read` and `attest` on `graft` and `land` on the checked line; no `write` (see below) |
 
 `up.sh` writes them from a throwaway root container of the pinned image, so
 the runner user needs only the docker group, not sudo. A missing file stops
@@ -310,8 +310,8 @@ never the mirrors' `github-token`, and its own `post-land-token`. `up.sh`
 places the first from Infisical when the host has the `secret` tool, or uses
 the copy placed on the host. Without it the checker stays off. `up.sh` mints
 the second. The token
-needs `write` on the repository as well as `land` on the line, because a
-revert requires write on every path the bad land touched. The procedure,
+needs `read`, `attest` and a named-repository `land` on the line, and no
+`write`: `Revert` with `land` needs only `read` and that scope (D42). The procedure,
 the measurements, rotation and the switch to `backlog-1` are in
 [docs/runbooks/v02-exit.md](../docs/runbooks/v02-exit.md).
 
