@@ -308,12 +308,17 @@ where
             let mirror = Mirror::new(task.dir.join(GIT_DIR), task.row.upstream.clone());
             // Batch cuts need a forge (its PRs) and a followed base.
             let forge = if task.config.claim_requests && base.is_some() {
-                let credential = LeaseCredential::new(
+                let mut credential = LeaseCredential::new(
                     task.control.clone(),
                     &task.row.repo,
                     &task.row.upstream,
                     task.epoch,
                 );
+                if let (Some(app), Some((o, r))) =
+                    (&task.config.app, github_repo(&task.row.upstream))
+                {
+                    credential = credential.with_app(app.clone(), &o, &r);
+                }
                 match forges.forge(&task.row.upstream, credential) {
                     Some(Ok(f)) => Some(f),
                     Some(Err(_)) => return task.broken("the forge client could not be built"),

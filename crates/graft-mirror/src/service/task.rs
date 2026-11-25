@@ -312,9 +312,16 @@ impl<C: Control> TaskCtx<C> {
                 Err(f) => return (Err(f), None),
             }
         };
-        let credential = match self.control.credential(repo, upstream, self.epoch).await {
-            Ok(c) => c,
-            Err(e) => return (Err(PollFailure::server(&e)), None),
+        let app_token = match (&self.config.app, super::batch_task::github_repo(upstream)) {
+            (Some(app), Some((o, r))) => app.token_for(&o, &r).await.ok(),
+            _ => None,
+        };
+        let credential = match app_token {
+            Some(t) => Some(t),
+            None => match self.control.credential(repo, upstream, self.epoch).await {
+                Ok(c) => c,
+                Err(e) => return (Err(PollFailure::server(&e)), None),
+            },
         };
         let fingerprint = credential
             .as_ref()

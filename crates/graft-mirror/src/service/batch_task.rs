@@ -18,7 +18,7 @@ use super::requests::{
 };
 use super::status::is_auth_failure;
 use crate::batch::{BatchConfig, BatchOutcome, BatchRecord, BatchState, Batcher};
-use crate::credentials::{CredentialPipe, CredentialProvider, SecretToken};
+use crate::credentials::{CredentialPipe, CredentialProvider, InstallationAccess, SecretToken};
 use crate::db::MirrorDb;
 use crate::follow::{FollowConfig, FollowLine};
 use crate::git::Mirror;
@@ -77,6 +77,7 @@ pub struct LeaseCredential<C> {
     repo: String,
     upstream: String,
     epoch: u64,
+    app: Option<(Arc<InstallationAccess>, String, String)>,
 }
 
 impl<C> LeaseCredential<C> {
@@ -87,12 +88,28 @@ impl<C> LeaseCredential<C> {
             repo: repo.to_owned(),
             upstream: upstream.to_owned(),
             epoch,
+            app: None,
         }
+    }
+
+    /// Prefer the App's installation token for `owner/repo` when the
+    /// installation lists it; otherwise the row's own credential.
+    pub fn with_app(mut self, app: Arc<InstallationAccess>, owner: &str, repo: &str) -> Self {
+        self.app = Some((app, owner.to_owned(), repo.to_owned()));
+        self
     }
 }
 
 impl<C: Control> CredentialProvider for LeaseCredential<C> {
     async fn token(&self) -> Result<SecretToken, ForgeError> {
+        if let Some((app, owner, repo)) = &self.app {
+            match app.token_for(owner, repo).await {
+                Ok(t) => return Ok(t),
+                Err(e) => {
+                    tracing::debug!(error = %e, "App token unavailable; using the row credential")
+                }
+            }
+        }
         match self
             .control
             .credential(&self.repo, &self.upstream, self.epoch)
