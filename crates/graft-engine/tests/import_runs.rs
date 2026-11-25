@@ -5,7 +5,9 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
+use common::counting::Counting;
 use common::race::{Task, YieldSleeper, Yielding, run_scheduled};
 use common::*;
 use graft_engine::EngineConfig;
@@ -72,7 +74,7 @@ fn a_mid_run_build_failure_keeps_the_ones_before_it() {
         let mut bad = batch.clone();
         bad[5] = orphaned(bad[5].clone());
         let err = import(&repo, bad).expect_err("missing parent");
-        assert!(!matches!(err, ApiError::Contended { .. }), "{err:?}");
+        assert!(matches!(err, ApiError::UnknownParent { .. }), "{err:?}");
         assert_eq!(repo.journal().len(), 5, "0 to 4 committed, nothing after");
         let kept = import(&repo, batch[..5].to_vec()).expect("re-import");
         assert_eq!(
@@ -99,7 +101,14 @@ fn runs_longer_than_one_commit_run() {
         ..EngineConfig::default()
     };
     case(&memory_with(config.clone()));
-    case(&sqlite_with(config));
+    case(&sqlite_with(config.clone()));
+    // The cut itself: 300 in runs of at most 256 is two `commit_run` calls.
+    let meta = Arc::new(Counting::<MemoryStore>::default());
+    let f = build(meta.clone(), config, None);
+    let (batch, blobs) = chain(&f, 300);
+    let repo = target(&f, "cut", &blobs);
+    import(&repo, batch).expect("import");
+    assert_eq!(meta.runs.load(Ordering::SeqCst), 2);
 }
 
 /// With a claim window too short for a second changeset, every run holds
@@ -110,10 +119,12 @@ fn the_claim_deadline_cuts_runs() {
         claim_ms: 1,
         ..EngineConfig::default()
     };
-    let f = memory_with(config);
+    let meta = Arc::new(Counting::<MemoryStore>::default());
+    let f = build(meta.clone(), config, None);
     let (batch, blobs) = chain(&f, 6);
     let repo = target(&f, "deadline", &blobs);
     let got = import(&repo, batch.clone()).expect("import");
+    assert_eq!(meta.runs.load(Ordering::SeqCst), 6, "one changeset per run");
     assert_eq!(got.iter().map(|c| c.id).collect::<Vec<_>>(), ids(&batch));
     assert_eq!(repo.journal().len(), 6);
 }
