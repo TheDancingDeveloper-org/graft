@@ -12,7 +12,7 @@ use crate::text::clean_text;
 
 use super::types::{
     BATCH_TRAILER, BatchOutcome, CHANGESET_TRAILER, Dropped, FIELD_CHARS, LandLine, MAX_CHECKS,
-    MAX_DROPS_LISTED, MAX_LANDS, MAX_PR_BODY, git_time_at, short,
+    MAX_DROPS_LISTED, MAX_LANDS, MAX_PR_BODY, branch_number, git_time_at, short,
 };
 
 /// What a batch's PR body and commit message say before the land list.
@@ -331,17 +331,18 @@ pub(crate) fn parse_commit(raw: &[u8]) -> (Vec<GitSha>, Option<ChangesetId>) {
 pub(crate) fn render(h: &BatchHeader, lands: &[LandLine]) -> (String, String) {
     let line = clean_text(&h.line, FIELD_CHARS, false);
     let branch = clean_text(&h.branch, FIELD_CHARS, false);
+    let shown = branch_number(&h.pushed, h.number);
     let mut head = match &h.fallback {
         None => format!(
             "Batch {} of graft line `{line}`, one commit per land, oldest first, by \
              graft-mirror (decision D26). Merge it with rebase-merge to keep the commits \
              (D28). graft never merges or queues this PR.\n\n",
-            h.number
+            shown
         ),
         Some(why) => format!(
             "Batch {} of graft line `{line}`, squashed into one commit by graft-mirror \
              (the D26 fallback: {}). graft never merges or queues this PR.\n\n",
-            h.number,
+            shown,
             clean_text(why, 300, false)
         ),
     };

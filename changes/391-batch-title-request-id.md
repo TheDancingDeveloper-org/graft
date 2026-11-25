@@ -1,0 +1,1 @@
+- A batch PR's title and body name the batch by its pushed branch (the request id for a request's cut), not the batch counter (#391).
