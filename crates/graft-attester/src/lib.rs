@@ -232,8 +232,9 @@ pub struct Config {
     /// draft cannot poison what a later draft builds against (WI-2285).
     pub isolate_cache: bool,
     /// Run the checks with no network, in a fresh network namespace. This
-    /// implies [`Config::pid_namespace`], for the prefetch too. Needs `unshare` (util-linux) and permission to create user
-    /// namespaces; when it cannot, the check is not started (fail closed).
+    /// implies [`Config::pid_namespace`], for the prefetch too. Needs
+    /// `unshare` (util-linux) and permission to create user namespaces;
+    /// when it cannot, the check is not started (fail closed).
     pub no_network: bool,
     /// Run each check in its own pid namespace, so the kernel kills every
     /// process it started, `setsid` or not, when it ends. Same needs as
@@ -242,7 +243,11 @@ pub struct Config {
     /// Run before each check, with the network but otherwise as the checks
     /// (cache, user, pid namespace), so the crates are fetched before the
     /// checks lose the network, for example `cargo fetch --locked`. Used
-    /// only with [`Config::no_network`]. A failure fails the check.
+    /// only with [`Config::no_network`] (the binary refuses it otherwise).
+    /// A failure fails the check. It runs with the network, by design, and
+    /// reads the draft's own cargo configuration, so it trusts the draft as
+    /// far as the network goes. Arguments are not split on whitespace here;
+    /// the binary splits its `--prefetch` text that way.
     pub prefetch: Option<Vec<String>>,
 }
 
@@ -1849,6 +1854,7 @@ mod tests {
         let lines: Vec<&str> = calls.lines().collect();
         assert_eq!(lines.len(), 2, "{calls}");
         assert!(!lines[0].contains("--net"), "prefetch keeps the network");
+        assert!(lines[1].contains("--net"), "the check loses the network");
         for l in &lines {
             for flag in ["--pid", "--fork", "--kill-child"] {
                 assert!(l.contains(flag), "{flag} missing from `{l}`");

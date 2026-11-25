@@ -148,8 +148,12 @@ struct Args {
     /// dies with it, even one that called setsid.
     #[arg(long)]
     pid_namespace: bool,
-    /// Command run before each check with the network (split on whitespace),
-    /// for example `cargo fetch --locked`; only with --no-network.
+    /// Command run before each check with the network, for example `cargo
+    /// fetch --locked`. Requires --no-network (refused without it). It is
+    /// split on whitespace, so an argument cannot contain a space; wrap
+    /// such a command in a script. It runs the draft's own cargo
+    /// configuration with the network, by design: the draft is trusted that
+    /// far, and only the checks lose the network.
     #[arg(long)]
     prefetch: Option<String>,
     /// Most bytes of a check's output kept in its log.
@@ -223,6 +227,10 @@ fn config(args: &Args) -> Result<Config, String> {
         .as_deref()
         .map(|p| p.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
         .filter(|p| !p.is_empty());
+    // Fail closed: a prefetch that would silently not run is a mistake.
+    if args.prefetch.is_some() && !args.no_network {
+        return Err("--prefetch only runs with --no-network".to_owned());
+    }
     cfg.max_log_bytes = args.max_log_bytes;
     cfg.log_retention = Duration::from_secs(args.log_days.saturating_mul(24 * 3600));
     Ok(cfg)
@@ -576,5 +584,22 @@ mod tests {
         // Only post-land mode runs on GitHub.
         let args = Args::parse_from(["graft-attester", "--runner", "github"]);
         assert!(config(&args).is_err());
+    }
+
+    #[test]
+    fn prefetch_without_no_network_is_refused() {
+        let args = Args::parse_from(["graft-attester", "--prefetch", "cargo fetch"]);
+        assert!(config(&args).is_err(), "it would be silently ignored");
+        let args = Args::parse_from([
+            "graft-attester",
+            "--no-network",
+            "--prefetch",
+            "cargo fetch",
+        ]);
+        let cfg = config(&args).expect("config");
+        assert_eq!(
+            cfg.prefetch,
+            Some(vec!["cargo".to_owned(), "fetch".to_owned()])
+        );
     }
 }
