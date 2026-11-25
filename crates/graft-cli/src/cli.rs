@@ -926,6 +926,12 @@ pub(crate) enum LandMerge {
 pub(crate) struct RevertArgs {
     /// The changeset to invert: an id or a ref
     pub(crate) rev: String,
+    /// Land the inverse on this line in the same call, instead of adding a draft.
+    /// The server builds and lands it; the token needs `land:<line>` on this
+    /// repository by name (a wildcard repository scope does not do), not `write`.
+    /// The change must already be on the line. Fails if the server did not land it
+    #[arg(long, value_name = "LINE")]
+    pub(crate) land: Option<String>,
 }
 
 #[derive(Debug, Args)]

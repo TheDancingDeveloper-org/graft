@@ -19,8 +19,8 @@ use graft_proto::{
     types::{
         ConflictReason, ConflictSide, ConflictView, CreateChangeset, CreateLine, DraftState,
         GetChangesets, GetConflicts, Land, Landed, LineMerge, LineMergeOutcome, MergeBaseVia,
-        MergeMode, MergedFrom, OpenWorkspace, Page, PathResolution, Rebase, RefKind, Resolution,
-        ResolvedContent, Revert, SetHead, UpdateRef, WorkspaceRef, WorkspaceView,
+        MergeMode, MergedFrom, OpenWorkspace, Page, Pair, PathResolution, Rebase, RefKind,
+        Resolution, ResolvedContent, Revert, SetHead, UpdateRef, WorkspaceRef, WorkspaceView,
     },
 };
 use rmcp::{
@@ -321,6 +321,11 @@ pub struct RevertArgs {
     pub onto: Option<String>,
     /// The workspace to hold the new draft.
     pub workspace: Option<String>,
+    /// A line to land the inverse on in the same call, instead of making a
+    /// draft. Needs `land:<line>` on the named repository (a wildcard
+    /// repository scope does not do), not `write`. The changeset must
+    /// already be on the line. Give no `onto` or `workspace` with it.
+    pub land: Option<String>,
 }
 
 /// Arguments of `graft_pick`.
@@ -524,6 +529,13 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
         if let Some(ws) = &args.workspace {
             check_name("workspace", ws)?;
         }
+        if let Some(line) = &args.land {
+            check_name("land", line)?;
+            if args.onto.is_some() || args.workspace.is_some() {
+                return Err(invalid("`land` takes no `onto` or `workspace`"));
+            }
+            return self.revert_land(cx, args.repo, &args.changeset, line).await;
+        }
         let changeset = self.resolve(cx, &args.repo, &args.changeset).await?;
         let onto = match (&args.onto, &args.workspace) {
             (Some(rev), _) => self.resolve(cx, &args.repo, rev).await?,
@@ -547,6 +559,55 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
             "reverted": changeset.to_string(),
             "onto": onto.to_string(),
             "workspace": args.workspace.as_deref().map(|w| clip(w, FIELD_MAX_BYTES).0),
+        }))
+    }
+
+    /// D42: the server builds the inverse and lands it on `line` in one
+    /// call. A server from before D42 ignores `land` and returns the
+    /// inverse unlanded, so the answer is checked against the line.
+    async fn revert_land(
+        &self,
+        cx: &CallContext,
+        repo: String,
+        rev: &str,
+        line: &str,
+    ) -> Result<CallToolResult, ToolError> {
+        let changeset = self.resolve(cx, &repo, rev).await?;
+        let onto = self.resolve(cx, &repo, line).await?;
+        let req = Revert {
+            repo: repo.clone(),
+            changeset,
+            onto,
+            workspace: None,
+            check_url: None,
+            land: Some(line.to_owned()),
+        };
+        let id = self.api.revert(cx, req).await.map_err(ToolError::Api)?;
+        let tip = self.resolve(cx, &repo, line).await?;
+        let on_line = id == tip
+            || self
+                .api
+                .is_ancestor(
+                    cx,
+                    Pair {
+                        repo,
+                        a: id,
+                        b: tip,
+                    },
+                )
+                .await
+                .map_err(ToolError::Api)?;
+        if !on_line {
+            return Err(ToolError::Api(ApiError::InvalidChange {
+                path: String::new(),
+                rule: "revert-not-landed".to_owned(),
+            }));
+        }
+        bounded(json!({
+            "id": id.to_string(),
+            "reverted": changeset.to_string(),
+            "line": clip(line, FIELD_MAX_BYTES).0,
+            "landed": true,
         }))
     }
 
@@ -1179,7 +1240,7 @@ impl<A: RepoApi + WorkspaceApi + Send + Sync + 'static> McpServer<A> {
 
     #[tool(
         name = "graft_revert",
-        description = "Create a draft that inverts a changeset, applied on `onto` (default: the workspace head). Land it with graft_land.",
+        description = "Create a draft that inverts a changeset, applied on `onto` (default: the workspace head). Land it with graft_land. With `land` set to a line instead, the server reverts a changeset that is already on that line and lands the inverse in the same call; that needs `land:<line>` on the named repository (a wildcard repository scope does not do), not write, and takes no `onto` or `workspace`. A server that does not land it is an error.",
         annotations(
             title = "Revert",
             read_only_hint = false,

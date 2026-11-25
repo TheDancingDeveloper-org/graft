@@ -1,40 +1,74 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "graft revert --json",
-  "type": "object",
-  "required": [
-    "reverted",
-    "id",
-    "workspace",
-    "changed",
-    "recovered"
-  ],
-  "additionalProperties": false,
-  "properties": {
-    "reverted": {
-      "type": "string",
-      "pattern": "^[a-z][0-9a-f]{64}$",
-      "description": "The changeset inverted."
+  "description": "Without --land, the draft added; with --land <line>, the revert as landed on the line.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "reverted",
+        "id",
+        "workspace",
+        "changed",
+        "recovered"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "reverted": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "The changeset inverted."
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "The new draft, now the workspace head."
+        },
+        "workspace": {
+          "type": "string"
+        },
+        "changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recovered": {
+          "description": "An interrupted commit the command found first: finished, rolled back, or none.",
+          "enum": [
+            "finished",
+            "rolled_back",
+            null
+          ]
+        }
+      }
     },
-    "id": {
-      "type": "string",
-      "pattern": "^[a-z][0-9a-f]{64}$",
-      "description": "The new draft, now the workspace head."
-    },
-    "workspace": {
-      "type": "string"
-    },
-    "changed": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "recovered": {
-      "description": "An interrupted commit the command found first: finished, rolled back, or none.",
-      "enum": [
-        "finished",
-        "rolled_back",
-        null
-      ]
+    {
+      "type": "object",
+      "required": [
+        "reverted",
+        "id",
+        "line",
+        "landed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "reverted": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "The changeset inverted."
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][0-9a-f]{64}$",
+          "description": "The revert, landed on the line."
+        },
+        "line": {
+          "type": "string",
+          "description": "The line the revert landed on."
+        },
+        "landed": {
+          "const": true
+        }
+      }
     }
-  }
+  ]
 }

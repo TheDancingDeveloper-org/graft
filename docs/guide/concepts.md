@@ -115,5 +115,5 @@ server-owned workspaces and drafts replace git's local-history workflow.
 | Merge | Land, or line merge | Ordinary work lands by server-side rebase. A line merge integrates one line into another and records a merge point. |
 | Rebase | Server-side rebase during sync or land | The server rebases the workspace stack; the client resolves only paths that cannot merge automatically. |
 | Cherry-pick | `graft pick` | Pick creates a draft that re-applies a landed changeset; conflicts are written into the working-copy files. |
-| Revert | `graft revert` | Revert creates a draft that inverts a changeset, ready to land like any other draft. |
+| Revert | `graft revert` | Revert creates a draft that inverts a changeset, ready to land like any other draft. With `--land <line>` the server lands the inverse on that line in the same call, for a token with `land:<line>` on the named repository and no `write`. |
 | Pull request | Review of a workspace stack before land | Graft itself has no pull-request object or branch-per-change requirement; review can use changesets, diffs, and workspace metadata directly. |
