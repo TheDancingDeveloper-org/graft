@@ -231,6 +231,8 @@ pub struct GithubApp {
     key: EncodingKey,
     client: reqwest::Client,
     cache: Mutex<Option<Cached>>,
+    /// Held while minting, so tasks that find the cache stale share one mint.
+    minting: tokio::sync::Mutex<()>,
     clock: fn() -> i64,
 }
 
@@ -283,6 +285,7 @@ impl GithubApp {
             key,
             client,
             cache: Mutex::new(None),
+            minting: tokio::sync::Mutex::new(()),
             clock,
         })
     }
@@ -362,7 +365,130 @@ impl CredentialProvider for GithubApp {
         if let Some(token) = self.fresh((self.clock)()) {
             return Ok(token);
         }
+        let _one_at_a_time = self.minting.lock().await;
+        if let Some(token) = self.fresh((self.clock)()) {
+            return Ok(token);
+        }
         self.mint().await
+    }
+}
+
+/// How long the installation's repository list is trusted.
+const REPO_LIST_TTL_MS: i64 = 5 * 60 * 1000;
+/// Repositories per page, and the most pages read (bounds the answer).
+const REPO_PAGE: usize = 100;
+const REPO_PAGES_MAX: usize = 50;
+
+/// The mirror service's GitHub App access (D41): one installation token,
+/// cached and shared by every task, handed out for a repository only when
+/// its `OWNER/REPO` is in the installation's repository list.
+pub struct InstallationAccess {
+    app: GithubApp,
+    repos: Mutex<Option<(i64, std::collections::HashSet<String>)>>,
+}
+
+impl fmt::Debug for InstallationAccess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InstallationAccess")
+            .field("app", &self.app)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InstallationAccess {
+    /// Access through `app`.
+    pub fn new(app: GithubApp) -> InstallationAccess {
+        InstallationAccess {
+            app,
+            repos: Mutex::new(None),
+        }
+    }
+
+    /// The installation token for `owner/repo`, only if the installation
+    /// lists that repository. A repository outside it is refused, and no
+    /// token is handed out for it.
+    pub async fn token_for(&self, owner: &str, repo: &str) -> Result<SecretToken, ForgeError> {
+        let token = self.app.token().await?;
+        let want = format!("{owner}/{repo}").to_ascii_lowercase();
+        let now = (self.app.clock)();
+        let known = {
+            let cache = self.repos.lock().expect("repo list lock");
+            match cache.as_ref() {
+                Some((at, set)) if now - at < REPO_LIST_TTL_MS => Some(set.contains(&want)),
+                _ => None,
+            }
+        };
+        let listed = match known {
+            // A miss may be a repository added since: re-read once.
+            Some(true) => true,
+            _ => self.refresh(&token, now).await?.contains(&want),
+        };
+        if listed {
+            Ok(token)
+        } else {
+            Err(ForgeError::Refused(
+                "the repository is not in the GitHub App installation".to_owned(),
+            ))
+        }
+    }
+
+    async fn refresh(
+        &self,
+        token: &SecretToken,
+        now: i64,
+    ) -> Result<std::collections::HashSet<String>, ForgeError> {
+        let mut set = std::collections::HashSet::new();
+        for page in 1..=REPO_PAGES_MAX {
+            let url = format!(
+                "{}/installation/repositories?per_page={REPO_PAGE}&page={page}",
+                self.app.api
+            );
+            let mut auth =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.expose()))
+                    .map_err(|_| ForgeError::Refused("the token is not a header value".into()))?;
+            auth.set_sensitive(true);
+            let resp = self
+                .app
+                .client
+                .get(&url)
+                .header(reqwest::header::AUTHORIZATION, auth)
+                .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send()
+                .await
+                .map_err(|_| ForgeError::Transient("no answer listing the installation".into()))?;
+            let status = resp.status();
+            if status.is_server_error() || status.as_u16() == 429 {
+                return Err(ForgeError::Transient(format!(
+                    "status {} listing the installation",
+                    status.as_u16()
+                )));
+            }
+            if !status.is_success() {
+                return Err(ForgeError::Refused(format!(
+                    "status {} listing the installation",
+                    status.as_u16()
+                )));
+            }
+            let body: Value = resp
+                .json()
+                .await
+                .map_err(|_| ForgeError::Refused("malformed installation list".to_owned()))?;
+            let items = body
+                .get("repositories")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ForgeError::Refused("malformed installation list".to_owned()))?;
+            for r in items {
+                if let Some(n) = r.get("full_name").and_then(Value::as_str) {
+                    set.insert(n.to_ascii_lowercase());
+                }
+            }
+            if items.len() < REPO_PAGE {
+                break;
+            }
+        }
+        *self.repos.lock().expect("repo list lock") = Some((now, set.clone()));
+        Ok(set)
     }
 }
 
