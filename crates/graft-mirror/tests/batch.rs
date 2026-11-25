@@ -4108,6 +4108,30 @@ async fn a_cut_after_a_failed_request_is_named_by_its_own_request() {
 }
 
 #[tokio::test]
+async fn a_request_cut_titles_the_pr_by_the_request_number() {
+    // #391: the counter is at 1 but request 3 pushes graft/batch-3, so the
+    // title and body name batch 3, the number of the pushed branch.
+    let w = World::new().await;
+    w.start().await;
+    let a = w.land(&[("a.txt", "a1\n")], "add a", 1).await;
+    attest_land(&w, a).await;
+
+    let rec = opened(w.batcher().for_request(3).run().await.unwrap().outcome);
+    assert_eq!(rec.number, 1, "the counter keys the record");
+    assert_eq!(rec.branch, "graft/batch-3");
+    assert!(
+        rec.title.starts_with("graft batch 3: "),
+        "title: {}",
+        rec.title
+    );
+    assert!(
+        rec.body.starts_with("Batch 3 of graft line"),
+        "{}",
+        rec.body
+    );
+}
+
+#[tokio::test]
 async fn a_stale_branch_under_the_request_name_falls_back_to_the_next_free_number() {
     // A stale graft/batch-2 with other commits (an old trial, a reset DB) is
     // never overwritten: the cut takes the next free counter name instead.

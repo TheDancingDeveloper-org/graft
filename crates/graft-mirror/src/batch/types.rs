@@ -56,6 +56,16 @@ pub(crate) fn request_branch(id: u64) -> String {
     format!("{BRANCH_PREFIX}{id}")
 }
 
+/// The number a batch is called in its PR title and body: the number in the
+/// pushed branch's `graft/batch-<n>` name, which is the request id for a
+/// request's cut. `fallback` (the record's counter) when the name has none.
+pub(crate) fn branch_number(branch: &str, fallback: u64) -> u64 {
+    branch
+        .strip_prefix(BRANCH_PREFIX)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(fallback)
+}
+
 /// The trailer naming the batch, in the squashed commit and the PR body.
 pub const BATCH_TRAILER: &str = "Graft-Batch:";
 

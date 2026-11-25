@@ -31,8 +31,8 @@ use super::types::{
     Attested, BATCH, BRANCH_PREFIX, BatchCommit, BatchConfig, BatchLine, BatchOutcome, BatchRecord,
     BatchRun, BatchState, DEFAULT_DROP_REASON, Dropped, FETCH, FIELD_CHARS, LandLine,
     MAX_ATTEST_PAGES, MAX_CHECK_PROBES, MAX_COMMITS, MAX_LANDS, MESSAGE_CHARS, PAGE, REVERTS_KEY,
-    SYNC_KEY, Stamp, TITLE_CHARS, claimed_author_trailer, config_err, git_time, is_sync,
-    land_ident, request_branch, short, sync_base, system_ms,
+    SYNC_KEY, Stamp, TITLE_CHARS, branch_number, claimed_author_trailer, config_err, git_time,
+    is_sync, land_ident, request_branch, short, sync_base, system_ms,
 };
 
 /// An open batch's detail when the line has nothing past its tip.
@@ -1456,9 +1456,10 @@ where
         let (number, branch) = self.new_slot().await?;
         let created_ms = (self.clock)();
         let line = clean_text(&self.config.line, FIELD_CHARS, false);
+        let shown = branch_number(&branch, number);
         let title = clean_text(
             &format!(
-                "graft batch {number}: {} land{} from {line}",
+                "graft batch {shown}: {} land{} from {line}",
                 lands.len(),
                 if lands.len() == 1 { "" } else { "s" }
             ),
