@@ -377,6 +377,9 @@ pub(crate) struct DiffArgs {
     /// Restrict to this path or directory (repeatable)
     #[arg(long = "path", value_name = "PATH")]
     pub(crate) paths: Vec<String>,
+    /// Paths after `--`, the same as repeating --path
+    #[arg(last = true, value_name = "PATHS")]
+    pub(crate) trailing_paths: Vec<String>,
     /// Files per page
     #[arg(long, default_value_t = PAGE_DEFAULT)]
     pub(crate) limit: u32,
@@ -400,7 +403,7 @@ pub(crate) struct LogArgs {
     #[arg(long = "path", value_name = "PATH")]
     pub(crate) paths: Vec<String>,
     /// Changesets per page
-    #[arg(long, default_value_t = 50)]
+    #[arg(short = 'n', long, default_value_t = 50)]
     pub(crate) limit: u32,
     /// Resume token from a previous page
     #[arg(long, value_name = "TOKEN")]
