@@ -319,3 +319,37 @@ async fn a_large_upstream_delta_is_paged_and_bounded() {
     assert_eq!(next.changed.len(), 7);
     assert!(next.changed[0].path > up.changed[6].path);
 }
+
+#[tokio::test]
+async fn lands_touching_my_paths_are_named_and_an_unrelated_land_is_not() {
+    let env = Env::new().await;
+    let wc = env.clone("a").await;
+    write(&wc, "src/lib.rs", &lib_with(1, "fn A() {}"));
+    env.repo.advance(put("README.md", "unrelated\n")).await;
+    let up = env.upstream(&wc, 10).await;
+    assert_eq!(up.behind, 1);
+    assert!(up.touching.is_empty() && !up.touching_more);
+
+    env.repo
+        .advance(put("src/lib.rs", &lib_with(5, "fn E() {}")))
+        .await;
+    let up = env.upstream(&wc, 10).await;
+    assert_eq!(up.behind, 2);
+    assert_eq!(up.touching.len(), 1, "only the land on my path: {up:?}");
+    assert!(!up.touching_more);
+}
+
+#[tokio::test]
+async fn touching_lands_are_bounded_by_the_limit() {
+    let env = Env::new().await;
+    let wc = env.clone("a").await;
+    write(&wc, "src/lib.rs", &lib_with(1, "fn A() {}"));
+    for i in 0..4 {
+        env.repo
+            .advance(put("src/lib.rs", &lib_with(5, &format!("fn E{i}() {{}}"))))
+            .await;
+    }
+    let up = env.upstream(&wc, 2).await;
+    assert_eq!(up.touching.len(), 2);
+    assert!(up.touching_more);
+}

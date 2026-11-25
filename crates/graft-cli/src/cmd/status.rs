@@ -232,6 +232,11 @@ pub(crate) fn upstream_json(up: &Upstream, workspace: Option<&str>) -> Value {
             "status": if c.deleted { "deleted" } else { "changed" },
         })).collect::<Vec<_>>(),
         "next": up.next,
+        "touching": up.touching.iter().map(|t| json!({
+            "id": t.id.to_string(),
+            "subject": t.subject,
+        })).collect::<Vec<_>>(),
+        "touching_more": up.touching_more,
         "overlaps": up.overlaps.iter().map(|o| {
             let (outcome, hunks, reason) = match &o.outcome {
                 Outcome::Clean => ("clean", &[][..], None),
@@ -427,6 +432,16 @@ fn print_upstream(up: &Upstream) -> Result<(), Failure> {
     }
     if let Some(next) = &up.next {
         outln!("  (more: --cursor {next})");
+    }
+    if !up.touching.is_empty() {
+        let more = if up.touching_more { "+" } else { "" };
+        outln!(
+            "{}{more} land(s) touched your paths since your base:",
+            up.touching.len()
+        );
+        for t in &up.touching {
+            outln!("  {} {}", short(t.id), t.subject);
+        }
     }
     if up.overlaps.is_empty() {
         outln!("none of your changes overlap");
