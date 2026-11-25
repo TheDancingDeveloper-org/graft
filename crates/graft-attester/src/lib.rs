@@ -227,6 +227,23 @@ pub struct Config {
     pub attest_tries: u32,
     /// First delay between `Attest` tries; it doubles each time.
     pub retry_delay: Duration,
+    /// Give each tree its own `HOME`, `CARGO_HOME` and `CARGO_TARGET_DIR`
+    /// (a sibling `<tree>.cache` directory, removed with the tree), so one
+    /// draft cannot poison what a later draft builds against (WI-2285).
+    pub isolate_cache: bool,
+    /// Run the checks with no network, in a fresh network namespace.
+    /// Needs `unshare` (util-linux) and permission to create user
+    /// namespaces; when it cannot, the check is not started (fail closed).
+    pub no_network: bool,
+    /// Run each check in its own pid namespace, so the kernel kills every
+    /// process it started, `setsid` or not, when it ends. Same needs as
+    /// [`Config::no_network`].
+    pub pid_namespace: bool,
+    /// Run before each check, with the network but otherwise as the checks
+    /// (cache, user, pid namespace), so the crates are fetched before the
+    /// checks lose the network, for example `cargo fetch --locked`. Used
+    /// only with [`Config::no_network`]. A failure fails the check.
+    pub prefetch: Option<Vec<String>>,
 }
 
 impl Config {
@@ -257,6 +274,10 @@ impl Config {
             max_attempts: 5,
             attest_tries: 5,
             retry_delay: Duration::from_secs(1),
+            isolate_cache: false,
+            no_network: false,
+            pid_namespace: false,
+            prefetch: None,
         }
     }
 }
@@ -1141,6 +1162,35 @@ impl<A: ObjectApi + RepoApi + WorkspaceApi> Attester<A> {
     }
 }
 
+/// The sibling directory holding a tree's private cache.
+pub(crate) fn cache_dir(dir: &Path) -> PathBuf {
+    let mut name = dir.file_name().unwrap_or_default().to_os_string();
+    name.push(".cache");
+    dir.with_file_name(name)
+}
+
+/// The command line that runs `argv`: wrapped in `unshare` when the
+/// configuration asks for a network or pid namespace. `network` is whether
+/// this run may keep the network.
+pub(crate) fn wrap_argv(cfg: &Config, argv: &[String], network: bool) -> Vec<String> {
+    let net = cfg.no_network && !network;
+    if !net && !cfg.pid_namespace {
+        return argv.to_vec();
+    }
+    let mut out: Vec<String> = ["unshare", "--user", "--map-current-user"]
+        .map(str::to_owned)
+        .to_vec();
+    if net {
+        out.push("--net".to_owned());
+    }
+    if cfg.pid_namespace {
+        out.extend(["--pid", "--fork", "--kill-child"].map(str::to_owned));
+    }
+    out.push("--".to_owned());
+    out.extend(argv.iter().cloned());
+    out
+}
+
 /// Runs `check` in `dir` for `at` (a draft, or a landed snapshot) in its
 /// own process group, with the configured environment only and the
 /// configured timeout, its output capped into `log_path`.
@@ -1161,9 +1211,52 @@ pub(crate) async fn run_command(
         left: cfg.max_log_bytes,
         truncated: false,
     }));
+    if cfg.isolate_cache {
+        let cache = cache_dir(dir);
+        let made = fs::create_dir_all(&cache).and_then(|()| match cfg.run_as {
+            Some((uid, gid)) => chown_tree(&cache, uid, gid),
+            None => Ok(()),
+        });
+        if let Err(e) = made {
+            let outcome = Outcome::NotStarted(e.kind().to_string());
+            finish_log(&sink, &outcome, started)?;
+            return Ok(outcome);
+        }
+    }
+    if cfg.no_network
+        && let Some(prefetch) = &cfg.prefetch
+    {
+        {
+            let mut s = sink.lock().expect("log sink");
+            writeln!(s.file, "# prefetch (with network): {}", prefetch.join(" "))?;
+        }
+        let outcome = exec(cfg, dir, prefetch, &sink, true).await;
+        if !outcome.passed() {
+            {
+                let mut s = sink.lock().expect("log sink");
+                writeln!(s.file, "# graft-attester: prefetch did not pass")?;
+            }
+            finish_log(&sink, &outcome, started)?;
+            return Ok(outcome);
+        }
+    }
+    let outcome = exec(cfg, dir, &check.argv, &sink, false).await;
+    finish_log(&sink, &outcome, started)?;
+    Ok(outcome)
+}
 
-    let mut cmd = tokio::process::Command::new(&check.argv[0]);
-    cmd.args(&check.argv[1..])
+/// Runs one command line (see [`run_command`]); `network` lets it keep the
+/// network even under [`Config::no_network`].
+async fn exec(
+    cfg: &Config,
+    dir: &Path,
+    argv: &[String],
+    sink: &Arc<Mutex<Sink>>,
+    network: bool,
+) -> Outcome {
+    let argv = wrap_argv(cfg, argv, network);
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .current_dir(dir)
         .env_clear()
         .stdin(Stdio::null())
@@ -1177,16 +1270,18 @@ pub(crate) async fn run_command(
         cmd.env("PATH", path);
     }
     cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
+    if cfg.isolate_cache {
+        let cache = cache_dir(dir);
+        cmd.env("HOME", &cache)
+            .env("CARGO_HOME", cache.join("cargo"))
+            .env("CARGO_TARGET_DIR", cache.join("target"));
+    }
     if let Some((uid, gid)) = cfg.run_as {
         cmd.uid(uid).gid(gid);
     }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => {
-            let outcome = Outcome::NotStarted(e.kind().to_string());
-            finish_log(&sink, &outcome, started)?;
-            return Ok(outcome);
-        }
+        Err(e) => return Outcome::NotStarted(e.kind().to_string()),
     };
     let pid = child.id();
     let out = child
@@ -1215,13 +1310,17 @@ pub(crate) async fn run_command(
         // The group is dead, so the pipes close; don't hang if not.
         let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
     }
-    finish_log(&sink, &outcome, started)?;
-    Ok(outcome)
+    outcome
 }
 
 /// Removes a checked-out tree. A tree handed to [`Config::run_as`] is
 /// removed as that user (the files its checks wrote are theirs).
 pub(crate) async fn remove_tree(cfg: &Config, dir: &Path) {
+    remove_one(cfg, dir).await;
+    remove_one(cfg, &cache_dir(dir)).await;
+}
+
+async fn remove_one(cfg: &Config, dir: &Path) {
     if !dir.exists() {
         return;
     }
@@ -1596,5 +1695,146 @@ mod tests {
         assert_eq!(read_lsn(&path).expect("read"), 42);
         fs::write(&path, "x").expect("write");
         assert!(read_lsn(&path).is_err());
+    }
+
+    fn sh(script: &str) -> Vec<String> {
+        ["sh", "-c", script].map(str::to_owned).to_vec()
+    }
+
+    fn check(script: &str) -> Check {
+        Check {
+            name: "t/check".to_owned(),
+            argv: sh(script),
+        }
+    }
+
+    /// A config rooted in `root` that finds `bin` first.
+    fn cfg_in(root: &Path, bin: Option<&Path>) -> Config {
+        let mut cfg = Config::new("r", "l", root);
+        let path = match bin {
+            Some(b) => format!("{}:/usr/bin:/bin", b.display()),
+            None => "/usr/bin:/bin".to_owned(),
+        };
+        cfg.env = vec![("PATH".to_owned(), path)];
+        cfg.timeout = Duration::from_secs(60);
+        cfg
+    }
+
+    /// A stand-in `unshare` that logs its arguments and runs what follows
+    /// `--`, so the wrapping is tested without namespace privileges.
+    fn stub_unshare(bin: &Path, calls: &Path) {
+        fs::create_dir_all(bin).expect("bin");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> {}\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+            calls.display()
+        );
+        let path = bin.join("unshare");
+        fs::write(&path, script).expect("stub");
+        let mut perm = fs::metadata(&path).expect("meta").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+        fs::set_permissions(&path, perm).expect("chmod");
+    }
+
+    #[test]
+    fn wrapping_adds_namespaces_only_when_asked() {
+        let argv = sh("true");
+        let mut cfg = Config::new("r", "l", Path::new("/x"));
+        assert_eq!(wrap_argv(&cfg, &argv, false), argv);
+        cfg.no_network = true;
+        let w = wrap_argv(&cfg, &argv, false);
+        assert_eq!(w[0], "unshare");
+        assert!(w.contains(&"--net".to_owned()) && !w.contains(&"--pid".to_owned()));
+        assert_eq!(w[w.len() - 3..], argv[..], "the command follows `--`");
+        // The prefetch keeps the network.
+        assert!(!wrap_argv(&cfg, &argv, true).contains(&"--net".to_owned()));
+        cfg.no_network = false;
+        cfg.pid_namespace = true;
+        let w = wrap_argv(&cfg, &argv, false);
+        assert!(w.contains(&"--pid".to_owned()) && w.contains(&"--kill-child".to_owned()));
+        assert!(!w.contains(&"--net".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn each_tree_gets_its_own_cache_and_it_goes_with_the_tree() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut cfg = cfg_in(root.path(), None);
+        cfg.isolate_cache = true;
+        let c = check("printf '%s' \"$CARGO_HOME:$CARGO_TARGET_DIR:$HOME\" > seen");
+        let mut seen = Vec::new();
+        for (n, b) in [(1u8, "a"), (2, "b")] {
+            let dir = root.path().join(b);
+            fs::create_dir_all(&dir).expect("dir");
+            let log = root.path().join(format!("{b}.log"));
+            let out = run_command(&cfg, &dir, &c, id(n), &log).await.expect("run");
+            assert_eq!(out, Outcome::Passed);
+            seen.push(fs::read_to_string(dir.join("seen")).expect("seen"));
+            assert!(cache_dir(&dir).is_dir());
+        }
+        let cache_a = cache_dir(&root.path().join("a"));
+        assert_eq!(
+            seen[0],
+            format!("{0}/cargo:{0}/target:{0}", cache_a.display())
+        );
+        assert_ne!(seen[0], seen[1], "no cache is shared between trees");
+        remove_tree(&cfg, &root.path().join("a")).await;
+        assert!(!cache_a.exists() && !root.path().join("a").exists());
+        // Off, the checks see only the configured environment.
+        cfg.isolate_cache = false;
+        let dir = root.path().join("c");
+        fs::create_dir_all(&dir).expect("dir");
+        run_command(&cfg, &dir, &c, id(3), &root.path().join("c.log"))
+            .await
+            .expect("run");
+        assert_eq!(fs::read_to_string(dir.join("seen")).expect("seen"), "::");
+        assert!(!cache_dir(&dir).exists());
+    }
+
+    #[tokio::test]
+    async fn checks_run_without_network_after_a_prefetch_with_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (bin, calls) = (root.path().join("bin"), root.path().join("calls"));
+        stub_unshare(&bin, &calls);
+        let mut cfg = cfg_in(root.path(), Some(&bin));
+        cfg.no_network = true;
+        cfg.pid_namespace = true;
+        cfg.prefetch = Some(sh("echo fetched > fetched"));
+        let dir = root.path().join("t");
+        fs::create_dir_all(&dir).expect("dir");
+        let c = check("test -f fetched");
+        let log = root.path().join("l.log");
+        let out = run_command(&cfg, &dir, &c, id(1), &log).await.expect("run");
+        assert_eq!(out, Outcome::Passed, "the check saw what the prefetch got");
+        let calls = fs::read_to_string(&calls).expect("calls");
+        let lines: Vec<&str> = calls.lines().collect();
+        assert_eq!(lines.len(), 2, "{calls}");
+        assert!(!lines[0].contains("--net"), "prefetch keeps the network");
+        assert!(lines[1].contains("--net"), "the check does not");
+        assert!(lines.iter().all(|l| l.contains("--pid")));
+
+        // A failing prefetch fails the check without running it.
+        cfg.prefetch = Some(sh("exit 3"));
+        let c = check("touch ran");
+        let out = run_command(&cfg, &dir, &c, id(2), &log).await.expect("run");
+        assert_eq!(out, Outcome::Failed(Some(3)));
+        assert!(!dir.join("ran").exists());
+    }
+
+    #[tokio::test]
+    async fn a_check_is_not_started_when_it_cannot_lose_the_network() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // No `unshare` on this PATH.
+        let empty = root.path().join("none");
+        fs::create_dir_all(&empty).expect("dir");
+        let mut cfg = cfg_in(root.path(), None);
+        cfg.env = vec![("PATH".to_owned(), empty.display().to_string())];
+        cfg.no_network = true;
+        let dir = root.path().join("t");
+        fs::create_dir_all(&dir).expect("dir");
+        let c = check("touch ran");
+        let out = run_command(&cfg, &dir, &c, id(1), &root.path().join("l.log"))
+            .await
+            .expect("run");
+        assert!(matches!(out, Outcome::NotStarted(_)), "{out:?}");
+        assert!(!dir.join("ran").exists(), "it did not run with a network");
     }
 }
