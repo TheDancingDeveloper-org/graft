@@ -44,9 +44,9 @@ tar -xzf graft.tar.gz
 docker run --rm ghcr.io/thedancingdeveloper-org/graft:vX.Y.Z version
 ```
 
-Archives are Linux x86_64, Linux aarch64 and macOS Apple Silicon. There is
-no Intel macOS archive. crates.io is not available yet; install with the
-git command above.
+Archives are Linux x86_64 and Linux aarch64 (musl). macOS binaries are not
+published for now because hosted macOS runners are unavailable to the org.
+crates.io is not available yet; install with the git command above.
 
 Enable shell completions from the installed `graft` binary:
 
@@ -149,10 +149,11 @@ Git import and export stay behind `graft mirror`. Nothing else in graft speaks g
 graft does not run builds, tests or checkers. It does not try to be
 git-compatible. Command names follow git where the meaning is the same.
 
-The CLI, the node and the server ship for Linux x86_64 and aarch64 (musl)
-and macOS aarch64, the archive jobs in
-[.github/workflows/release.yml](.github/workflows/release.yml). Windows is
-not built. Required checks run on the repository's self-hosted runner
+The CLI, the node and the server ship for Linux x86_64 and aarch64 (musl),
+the archive jobs in
+[.github/workflows/release.yml](.github/workflows/release.yml). macOS
+binaries are not published for now (hosted macOS runners are unavailable to
+the org). Windows is not built. Required checks run on the repository's self-hosted runner
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)); release builds use
 the hosted runners named in the release workflow.
 

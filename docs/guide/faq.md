@@ -62,6 +62,6 @@ for the rule and consult your own counsel for legal advice.
 
 ## Which platforms are supported?
 
-The documented release archives target Linux on x86_64 and aarch64, plus macOS
-on Apple Silicon. There is no Intel macOS archive, and no Windows archive is
-currently documented.
+The documented release archives target Linux on x86_64 and aarch64 (musl).
+macOS binaries are not published for now because hosted macOS runners are
+unavailable to the org, and no Windows archive is currently documented.
