@@ -2,7 +2,7 @@
 
 ### release-linux-only
 
-- Release builds are Linux-only (x86_64 and aarch64 musl) until hosted macOS runners are available; this release has no macOS binary.
+- Release builds are Linux-only (x86_64 and aarch64 musl) until hosted macOS runners are available; No macOS binary in v0.1.2: GitHub-hosted macOS runners are unavailable; tracked in WI-4800.
 
 ### 391-batch-title-request-id
 
