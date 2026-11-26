@@ -38,6 +38,6 @@ The CLI, the node and the server are built and shipped for:
 - Linux aarch64, musl (`aarch64-unknown-linux-musl`)
 - macOS aarch64 (`aarch64-apple-darwin`)
 
-Those are the three archive jobs in [.github/workflows/release.yml](../../.github/workflows/release.yml). Windows is not built.
+Those are the two archive jobs in [.github/workflows/release.yml](../../.github/workflows/release.yml). macOS binaries are not published for now because hosted macOS runners are unavailable to the org. Windows is not built.
 
 Continuous integration runs the required checks on the repository's self-hosted runner. Release builds use the hosted runners named in that same workflow (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-14`). The required-check jobs are in [.github/workflows/ci.yml](../../.github/workflows/ci.yml).

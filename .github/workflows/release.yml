@@ -187,36 +187,15 @@ jobs:
             graft-aarch64-unknown-linux-musl.tar.gz
             graft-aarch64-unknown-linux-musl.tar.gz.sha256
 
-  binaries-macos-aarch64:
-    name: binaries (aarch64-apple-darwin)
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
-    needs: [release-preflight]
-    runs-on: macos-14
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-      - name: Build archive
-        run: scripts/release/build-archive.sh aarch64-apple-darwin cargo
-      - name: Verify checksum
-        run: shasum -a 256 -c graft-aarch64-apple-darwin.tar.gz.sha256
-      - uses: actions/upload-artifact@v4
-        with:
-          name: graft-aarch64-apple-darwin
-          path: |
-            graft-aarch64-apple-darwin.tar.gz
-            graft-aarch64-apple-darwin.tar.gz.sha256
+  # aarch64-apple-darwin is not built: hosted macOS runners are unavailable
+  # to this org, so release builds are Linux-only.
 
   # image.yml handles ad hoc SHA images; release tags are published only here.
   image:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    needs: [release-preflight, binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-aarch64]
+    needs: [release-preflight, binaries-linux-x86_64, binaries-linux-aarch64]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -262,7 +241,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    needs: [release-preflight, binaries-linux-x86_64, binaries-linux-aarch64, binaries-macos-aarch64, image]
+    needs: [release-preflight, binaries-linux-x86_64, binaries-linux-aarch64, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
