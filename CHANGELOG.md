@@ -1,5 +1,9 @@
 ## 0.1.2 — 2026-11-26
 
+### release-linux-only
+
+- Release builds are Linux-only (x86_64 and aarch64 musl) until hosted macOS runners are available; this release has no macOS binary.
+
 ### 391-batch-title-request-id
 
 - A batch PR's title and body name the batch by its pushed branch (the request id for a request's cut), not the batch counter (#391).
