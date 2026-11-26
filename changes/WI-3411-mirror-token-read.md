@@ -1,1 +1,0 @@
-- Mirror service: the `mirror`-kind token (`repo:*:mirror`) now reads a repository (refs, history, objects) only while that repository is bound to a mirror, so the service can poll and import what it follows; unbound repositories stay closed to it, it still writes only followed lines, and mint still refuses any other scope on that kind.

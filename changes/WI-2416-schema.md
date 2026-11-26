@@ -1,1 +1,0 @@
-- `graft status --upstream --json`: the `upstream` schema now allows the `touching` lands and `touching_more` flag the command emits (WI-2416 schema).

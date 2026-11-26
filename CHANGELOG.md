@@ -1,3 +1,1003 @@
+## 0.1.2 — 2026-11-26
+
+### 391-batch-title-request-id
+
+- A batch PR's title and body name the batch by its pushed branch (the request id for a request's cut), not the batch counter (#391).
+
+### WI-2285
+
+- graft-attester: opt-in hardening for checks: `--isolate-cache` (per-draft HOME/CARGO_HOME/CARGO_TARGET_DIR, removed with the tree), `--no-network` with `--prefetch CMD` (checks run in a network namespace after a prefetch with network), and `--pid-namespace` (implied by `--no-network`, prefetch included, so nothing the prefetch starts can outlive it and relay the network; every process a check starts dies with it, even after setsid). Namespaces use `unshare` and fail closed: under `--no-network` the prefetch too is not started when `unshare` is unavailable. (WI-2285)
+
+### WI-2294-git-race
+
+- bench: the git baseline turns off background gc and accepts any want, so the concurrent-writers step no longer fails with "upload-pack: not our ref".
+  The git baseline now runs without automatic gc, so label any comparison with results from before this change.
+
+### WI-2329
+
+graft-cli: `status --drafts` reports `truncated` when the cap lands on a batch's last page and batches remain. graft-engine tests: import runs assert the cut by counting `commit_run` calls; the mid-run failure asserts `UnknownParent` (WI-2329).
+
+### WI-2416-schema
+
+- `graft status --upstream --json`: the `upstream` schema now allows the `touching` lands and `touching_more` flag the command emits (WI-2416 schema).
+
+### WI-2416
+
+- `graft status --upstream` (and the `upstream` JSON) names the lands since your base that touched your paths, newest first with ids and subjects, bounded by `--limit` (WI-2416 step 2).
+
+### WI-2453
+
+docs/agents.md: the checkout-less section names the `/mcp` tools, the commit, sync, land loop and the error kinds.
+
+### WI-2462
+
+User guide: a stability page (frozen encodings, schema migrations, the protocol rule, the 0.x policy, platforms) and a safety page that links each claim to the test or result file that shows it. The guide link check fails when a relative link does not resolve.
+
+### WI-2463
+
+## Security policy and licence note
+
+`SECURITY.md` says how to report a vulnerability (GitHub private
+vulnerability reporting), which versions get fixes (the latest 0.x), the
+threat model, and the token rules for users. The README Licence section
+says what AGPL-3.0-only means for a server run inside an organisation.
+
+### WI-2469
+
+## The kill-9 import test no longer fails on restart time
+
+`import_kill9_restart_fetch_fsck` failed merge-queue run 40186983726
+(PR #196, 2026-10-25) because restart took 2.008s against a 2s bound.
+The assertion ran before any fetch or fsck, so no lost write was shown.
+Ten local runs of the same test passed with the data checks intact.
+
+The durability test no longer times the restart. Startup latency stays
+covered by `restart_to_serving_is_under_two_seconds`. The `#[ignore]`,
+the non-required `slow` job and the known-flakes entry are gone.
+
+### WI-2472
+
+Fixed `graft clone` so `--line b` and `--line=b` both conflict with a URL `?line=` instead of silently keeping the URL line. A URL `?line=` on its own is unchanged.
+
+### WI-2478
+
+- A merge-queue job runs both README quick-start blocks against the built `graft` binary and fails when a step fails or the second land does not line-merge.
+
+### WI-2479
+
+# WI-2479: MCP workspace endpoint comparison
+
+- `graft-mcp`: `graft_workspace` treats a `graft://` URL as the connected server after lowercasing the host and dropping the scheme's default port (`:80` for `http`, `:443` for `https`). A non-default port still differs, and `http` never matches `https`.
+
+### WI-2480
+
+- The required `test` job no longer fails `restart_to_serving_is_under_two_seconds` on a 2 s wall-clock bound. The replacement asserts that the server serves after restart and that an acknowledged repo is still there. Startup time is printed, and a non-required `restart-timing` job on the merge queue records it with `continue-on-error`.
+
+### WI-2482
+
+# WI-2482: retry Unavailable during import
+
+- `graft-mirror`: `import_repo` retries `Unavailable { retry_after_ms }` on the calls an import makes, after the hinted delay, for at most 8 attempts and 30s of waits. Any other API error still fails at once. Tests inject the sleeper and assert the recorded delays, not wall time.
+
+### WI-2483
+
+Fixed `deploy/onboard-repo.sh` line creation, which inverted the `docker run` exit status: a successful create died with "could not create line", and a failure (including exit 75, "no ref yet") counted as success. Added `deploy/tests/onboard-rc.sh` as a regression check.
+
+### WI-2484
+
+# WI-2484: only a busy store is retryable
+
+- `graft-engine`: `errors::store` maps `StoreError::Busy` to `Unavailable` with the store's retry hint. Every other kind (`Full`, `Corrupt`, `Exists`, `Invalid`, `Backend`) becomes `Rejected { policy: "store" }` naming the kind only, which is not retryable. The store's detail string is dropped, so the message carries no file contents or tokens.
+
+### WI-2485
+
+- deploy: `up.sh` no longer exits silently when a repository's refs list is empty. Under `set -e -o pipefail` the ref count's `grep` now tolerates no match, so the "importing (no refs yet)" wait is reached (WI-2485).
+
+### WI-2487
+
+# WI-2487: GitHub credential for every graft-dev mirror
+
+- `up.sh` installs `/etc/graft/github-token` (placed once on the VM, not
+  fetched at deploy time) through `as_root`, mode 0600, owned by 10001:10001
+  like the other secrets; the runner never reads it. A missing or empty file
+  logs one warning and the deploy continues: the mounted configs omit
+  `[github]`, and private mirrors start without credentials and retry. The
+  value never goes on argv, in logs, or in compose env.
+- The mounted mirror configs are staged in a temp dir (removed by a trap) and
+  written by `as_root` to `/etc/graft/mirror-configs`. The last good record
+  and rollback use those mounted copies.
+- Every mirror mounts that file at `/run/secrets/github-token`. When the file
+  has a token, each mirror config sets `[github] token_file` so `pr-batch` can
+  push `graft/batch-*` for public repos too.
+- `deploy/tests/onboard-render.sh` treats a successful `docker run` as exit 0
+  (the inverted-rc leftover from #229) and covers 75-then-1.
+
+### WI-2508
+
+Agent docs no longer tell workers to run `graft land --squash`. A stack lands as one changeset with `graft stack squash` then `graft land`. Exit 5 with `not built yet` means use that sequence, not report blocked.
+
+### WI-2509
+
+# WI-2509 — batch export keeps the land's author
+
+A batch commit's git author is the land's own identity when the changeset
+has an email, otherwise the principal named in `[export.authors]`. The
+configured bot identity is used only when there is no mapping. Trailers
+carry the session, work item, model (when recorded) and `Co-authored-by`
+lines from `vogt.coauthors`. Native git export encoding is unchanged.
+
+### WI-2510
+
+- test: `unified_roles` lets each role bind port 0 and reads the bound addresses from the role's output, removing a port race under parallel nextest runs. A role that exits early now reports its stderr. The node role's metrics endpoint is also checked.
+
+### WI-2511
+
+# WI-2511 — batch export authors come from the authenticated principal
+
+Batch commits take their git author from the land's token subject
+(`RefMoved.actor`), mapped through `[export.authors]`, then
+`[export] default_author`, then the bot committer. A client-supplied
+author is written only as a `Claimed-Author` trailer.
+
+### WI-2513
+
+- graft: an image build stamps `graft version` from `GRAFT_BUILD_REV` (the commit the workflow passes in), because the Docker context has no `.git` and used to print `0.1.0+unknown` (WI-2513).
+
+### WI-2522
+
+- docs: `docs/roadmap.md` is the product roadmap of record; decisions D35 to D39 (the pull request as a bridge and the phase-2 trigger, parked lands, checks decoupled from the forge, a read-only web UI in v0.3, independence from any orchestrator); plan.md phases point at the roadmap; README links it (WI-2522).
+
+### WI-2524-design
+
+- design §8.7 reads "candidate lines" per D35 and D40; D25 carries a note pointing to D40.
+
+### WI-2524
+
+- Decision D40: graft is the first repository to switch to graft-primary; phase 2 (v0.2, v0.3) starts for graft only, and graft stays git-primary until the v0.4 switch.
+
+### WI-2527
+
+- graft-proto: new `attribution` module with orchestrator-neutral metadata keys (`agent.*`), environment names (`GRAFT_SESSION_ID`, `GRAFT_WORK_ITEM`) and the `Graft-Work-Item` trailer, plus a reader that falls back to the legacy names (D39).
+
+### WI-2528
+
+### Changed
+
+- The session-bound token rule reads session and work-item metadata through the attribution alias reader: `agent.session` / `agent.work_item` and the legacy keys must each match the token when set. Stored keys are unchanged.
+
+### WI-2529
+
+# WI-2529
+
+Batch PR bodies read session, work item, model and co-authors through the attribution alias reader, so either the new keys or the legacy names fill the same cells. Exported commit trailer names are unchanged.
+
+### WI-2530
+
+- graft-git export reads session and work item through `graft_proto::attribution` (D39). A changeset carrying any `agent.*` key exports `Graft-Work-Item`; one carrying only legacy keys keeps the legacy trailer, so its commit bytes and sha are unchanged (pinned by a golden test).
+
+### WI-2531
+
+- graft-lsp: hover blame reads session, work item, model and co-authors through the attribution alias, so the new keys win and the hover never names a tracker (WI-2531).
+
+### WI-2532
+
+# WI-2532
+
+MCP tool, parameter and resource descriptions say "session" and "work item"
+and do not name a tracker. Overlapping-draft output still uses the `session`
+and `work_item` fields. When those fields are absent they are read from
+draft metadata with `graft_proto::attribution::get`, so `agent.*` wins and
+the legacy keys still show the same fields.
+
+### WI-2533
+
+# WI-2533
+
+The CLI reads the session and work item from `GRAFT_SESSION_ID` and
+`GRAFT_WORK_ITEM`, falling back to the legacy environment names. Drafts
+are written with `agent.session` and `agent.work_item`. When both names
+are set, the new one wins. A session id under either name still defaults
+the author kind to `agent`.
+
+### WI-2534
+
+## WI-2534
+
+Doc comments and crate READMEs in graft-client, graft-auth, graft-server,
+graft-store, graft-store-sqlite and graft-telemetry say "session", "work
+item" and "orchestrator" instead of naming the estate's tracker.
+
+### WI-2535
+
+# WI-2535
+
+Docs (D39): user-facing docs name `GRAFT_SESSION_ID`, `GRAFT_WORK_ITEM`,
+`agent.session` / `agent.work_item` / `agent.model` / `agent.coauthors`,
+and the `Graft-Work-Item` trailer. Older names are documented as aliases.
+The estate tracker is not named in agents, guide or README.
+
+### WI-2536
+
+# WI-2536
+
+A graft-cli repository test now locks D39 vocabulary across recursive CLI help,
+MCP tool, parameter and resource descriptions, and the agent-facing guides.
+
+### WI-2537
+
+- auth: `Claims::peek_unverified` reads a token's claims without checking its signature, for display only (expiry, scopes, subject; `graft doctor`). Never for authorization. Errors never echo the token (WI-2537).
+
+### WI-2538
+
+# WI-2538: graft doctor checks config, server, endpoint, protocol and token
+
+`graft doctor` prints `ok`, `fail` or `skip` for the user config, the resolved server, one unauthenticated default-line read, protocol compatibility, and a peeked token (expiry and scopes only). `--json` prints `{checks: [{name, ok, status, detail}]}` with `status` of `pass`, `fail` or `skip`. Exit 0 when every check passes, 1 when any fails or is skipped, and 2 for a usage error or an unreadable working copy before the checks run. The token is never printed.
+
+### WI-2539
+
+- cli: `graft doctor` also checks the working copy, base and head, workspace lease, node daemon and ignore files. A missing node is ok. An expired lease names `graft workspace renew`. Outside a working copy those checks are skipped (WI-2539).
+
+### WI-2540
+
+- graft-cli: add generated shell completions for bash, zsh, fish, elvish and PowerShell, plus a hidden command that writes man pages for every public command. Hidden and experimental commands are excluded from both outputs. (WI-2540)
+
+### WI-2541
+
+## Release archives include man pages and shell completions
+
+Release tarballs now contain `man/graft.1`, `man/graft-land.1` and
+`completions/graft.{bash,zsh,fish}`, generated by a host-built `graft`
+(`graft man --out` and `graft completions`). The build fails if any of
+those files is empty. The README install section shows how to enable
+bash, zsh and fish completions.
+
+### WI-2542
+
+Added a user glossary and git-to-graft concept table to the guide.
+
+### WI-2543
+
+- docs: `docs/guide/cli.md` is generated from `graft --help`, and a graft-cli test fails when it is stale (WI-2543).
+
+### WI-2544
+
+Added a complete MCP registration and tool reference, enforced by a test that every registered tool is documented.
+
+### WI-2545
+
+Document server configuration, authorization, administration, health, and schema upgrades.
+
+### WI-2546
+
+- Add a Git migration guide covering lossless import, GitHub follow, batch pull-request delivery, full export, and the advanced authority switch.
+
+### WI-2547
+
+Added a concise guide FAQ covering interoperability, offline use, lines,
+conflicts, CI, git export, performance, licensing, and supported platforms.
+
+### WI-2548
+
+- Benchmark documentation describes the measured hosts by CPU and memory instead of estate-specific names, and the agent guide now documents `graft serve --dev` as available.
+
+### WI-2549
+
+- User guide pages are indexed from the README and `docs/guide/README.md`, with the engineering record under "How it is built". `scripts/check-guide-names.sh` fails when the guide names an estate host, tracker, trial or internal id.
+
+### WI-2550
+
+- `graft-mirror import` accepts an `https://`, `ssh://`, `git@` or `file://` URL as well as a local git directory. A URL is cloned with `git clone --mirror` into a temporary directory that is removed afterwards, on success and on error. A URL that carries userinfo is refused; credentials stay in git's own configuration and never appear on the command line. When import stops for fidelity, a path rule or an unrepresentable commit, the command prints each offender as `<sha> <reason>` (and the path, for a path rule), the first 100 and then a count.
+
+### WI-2551
+
+- graft-mirror: `init-config [--out FILE]` writes a commented sample `mirror.toml` (follow, pr-batch and export) that the config loader accepts, and refuses to overwrite an existing file (WI-2551).
+
+### WI-2552
+
+### CLI
+
+- `graft import <path-or-url> --repo NAME [--line main]` imports a git repository onto the configured server. The endpoint and token come from `graft login`; a missing server names that command. The token is passed as a file path, never as an argument.
+- `graft mirror` is listed in help, completions and the manual.
+
+### WI-2553
+
+- `graft-server serve`: optional `bootstrap_admin_token_file` (with `bootstrap_admin_repos`) writes a one-time admin token, mode 0600, on first start when the file is absent; it is never logged.
+
+### WI-2554
+
+- examples: a user-facing compose file for the server, the node and an optional mirror profile, with loopback host ports and named volumes (WI-2554).
+
+### WI-2555
+
+# Server compose operations
+
+Document running the example Compose stack, bootstrap-token login, repository
+and line creation, cloning, ordered online backup, restore with fsck, and
+upgrade/rollback guidance.
+
+### WI-2556
+
+- ci: a merge-queue compose smoke that logs in, clones, commits and lands against examples/compose (WI-2556).
+
+### WI-2557
+
+### Demo
+
+- `scripts/demo/run.sh` scripts two working copies against `graft serve --dev`: a line merge, a conflict that exits 3, a resolve, and `graft mirror export --to` a local bare git repo. The docs-smoke job runs it.
+
+### WI-2559
+
+- cli: `graft clone --line=b` with a URL `?line=a` reports the same line conflict as `--line b`. Detection uses clap's value source, so both spellings count (WI-2559).
+
+### WI-2560
+
+### Fixed
+
+- `graft land --sync` no longer syncs a second time after a stale base and then reports every sync failure except a conflict as that stale-base refusal. The client already syncs once; a failed sync (for example unavailable) keeps its own exit code.
+
+### WI-2561
+
+## Docs CI checks the bench chart is freshly rendered (WI-2561)
+
+The docs-only `fmt` step renders `bench/render.py` to a temporary file and
+`cmp`s it with `docs/guide/bench.svg`. A stale chart fails with
+`run python3 bench/render.py docs/guide/bench.svg`.
+
+The real-PR agreement line is no longer a fixed string. It is "Both tools
+agreed on every case." when every case matches, and "N of M matched."
+otherwise.
+
+### WI-2571
+
+- graft-mirror: with `[github] token_file` set, every git command the mirror runs against an HTTPS upstream (ls-remote, fetch and push) carries that token as an `http.extraHeader` in its environment, never argv. `pr-batch` exec'd into a private mirror (myaiagent, rdpapp) no longer fails with `could not read Username`. `deploy/private-follow.sh` no longer injects the header itself. (WI-2571)
+
+### WI-2577
+
+- graft-mirror: `pr-batch` on an open batch now reports this run's outcome. A run that takes no append (sealed by auto-merge or a merge queue, nothing new, a sync after the tip, or the land cap) says why, instead of repeating an earlier run's "waiting for review after appending N land(s)". An append is reported only once `ls-remote` shows the batch branch at the new head; a failed lease or a branch left elsewhere is a typed `MirrorError::Append` and a non-zero exit. (WI-2577)
+
+### WI-2581
+
+- Pilot server startup is ready when graft-server prints its listen address, or failed when the process exits. A 120s bound only catches a hang, and that error includes captured stderr. The pilot tests are not quarantined.
+
+### WI-2582
+
+- CLI tests decide serve readiness and clone completion by a printed line or process exit. A 120s bound only catches a hang, and a failure includes the child stderr. MCP replies use the same hang bound.
+
+### WI-2583
+
+# WI-2583 — the CLI writes only agent.* attribution keys
+
+`graft commit` and the MCP commit tool record the session and work item as
+`agent.session` and `agent.work_item` only. They no longer also write the
+legacy `vogt.session` and `vogt.work_item` keys. Reads still accept those
+legacy keys, and the legacy environment names remain a fallback for
+`GRAFT_SESSION_ID` and `GRAFT_WORK_ITEM`.
+
+### WI-2585
+
+- `graft-mirror pr-batch` no longer adopts a PR it did not open. A new batch skips every number whose `graft/batch-<n>` branch or PR already exists on GitHub, and a PR is adopted only when it is open at the batch's own head; any other is refused and the batch rejected, so its lands stay pending. Previously a reset mirror DB could settle new lands as merged in an old merged PR. Repair procedure: `docs/runbooks/batch-adoption-repair.md`.
+
+### WI-2586
+
+# WI-2586
+
+Repository CI runs `scripts/check-guide-names.sh` on the docs-only path. The script is not part of graft's land path.
+
+### WI-2587
+
+# WI-2587
+
+A URL import creates its temp-clone guard before `git clone` runs, so a failed or killed clone is removed. The rejected-commit report is the `<sha> <reason>` line the command prints.
+
+### WI-2590
+
+v0.2 interface in graft-proto, stubbed: attestations gain a kind (check, review, approval), a status (pass, fail, pending, error) and a display name (`AttestV2`, carried in the existing `AttestRequest` with fresh field numbers; an old client's request reads as a check with the same status). New paged reads `GetAttestations`, `GetLandChecks` and `ReviewQueue` on a new `ReviewService`, with limits clamped to 1,000. Every new trait method answers not-implemented by default.
+
+### WI-2591
+
+v0.2 interface in graft-store, with the in-memory implementation. `Write::PutAttestation` records an attestation in the transaction that holds its `Attested` journal entry, under that entry's LSN. It is indexed by changeset and by `(line, pos)`. `Write::PutLand` takes `pos` and `checked`: a checked land inserts a pending land-checks row in the same transaction, and `Write::SetLandCheck` updates that row. New paged reads: `attestations_by_changeset`, `attestations_by_line`, `land_checks` and `review_queue`. The review queue indexes only unreviewed landings, so a read costs one page. SQLite answers the new writes with "not implemented in this store yet"; the engine passes `pos: None, checked: false`, so lands behave as before.
+
+### WI-2592
+
+# WI-2592
+
+A failed line lookup while the attester reads a journal page is retried with a bound. Past the bound the entry stays unprocessed and the page continues, and the saved position does not move past it.
+A line lookup that fails its bounded retries is dropped, counted and logged, and the attester reads on past it. A full queue no longer moves the saved position past an earlier failed entry on the same page.
+A lookup that has used up its retries is dropped: the cursor moves past it, the drop is counted and logged with its LSN, and a restart does not ask again.
+
+### WI-2593
+
+- graft-store-sqlite: schema version 8 adds the `attestations` table (indexed
+  by `(repo, changeset)` and `(repo, line, pos)`), `land_checks` (keyed by
+  `(repo, line, pos)`) and the review queue, and implements `PutAttestation`,
+  `SetLandCheck`, the checked `PutLand` and the four v0.2 reads. A checked
+  land writes its `pending` row, and an attestation its row, in the same
+  transaction as the journal entry. The migration is additive; existing rows
+  are unchanged.
+
+### WI-2594
+
+graft-engine implements the v0.2 attestation and land-checks interfaces. Line config gains `checks: Off | PostLand { required, retries }` (default `Off`). A land that moves a `PostLand` line writes a `pending` land-checks row in its own transaction; lines with checks `Off` land exactly as before, with no row. `Attest` takes kinds `check`, `review` and `approval` and statuses `pass`, `fail`, `pending` and `error` (`AttestV2`; the old shape is a `check` that passed or failed). Each attestation is stored with its `Attested` journal entry, which keeps its old keys and adds `kind`, `status` and `by`. A `check` on a landed changeset recomputes its landing's state in the same transaction: `good` once every required check passed, `bad` once a required check failed more than `retries` times, else `pending`. A revert land carrying `graft.reverts` marks that landing `reverted` and journals `LandReverted`. New paged reads `GetAttestations` and `GetLandChecks` need `repo:<r>:read` and use the store's indexes, never the journal. Nothing here refuses, delays or queues a land; reviews and approvals gate nothing yet.
+
+### WI-2595
+
+graft-engine implements `ReviewQueue`: the landings on a line after `since_lsn` with no `review` attestation, in LSN order, with each landing's author, paths touched and lines changed, filtered by `path_prefix` and `max_lines`, paged with `next_lsn` (pass it back as `since_lsn`; `None` when caught up; a page token is rejected). Every land that moves a line, on any line whatever its `checks` setting, now writes only the store's review queue index row (position, LSN, changeset); the land computes nothing for the queue and reads no blob. A `review` attestation of any status takes the landing out; `check` and `approval` leave it. Summaries are computed when the queue is read: the land's old tip from its own `RefMoved` entry (a probe from the row's LSN of at most `MAX_JOURNAL_PROBE`, 16, entries; past the cap the item's summary is unavailable), one id-pruned tree diff and the changed blobs, then cached as a `land-summary` derived value. When those objects are missing or corrupt the item reports `PATHS_UNAVAILABLE` / `LINES_UNAVAILABLE` (a `max_lines` filter leaves it out) and the rest of the page is answered. Lines are exact for text within the patch input cap; a larger text side counts its size in bytes (an upper bound) and binary counts none. The path filter reads the line path index and needs no blob. A call reads at most `MAX_REVIEW_SCAN` (4,000) queue rows, the page included, never the line or the journal. It needs `repo:<r>:read` and never affects landing.
+
+### WI-2596
+
+- Add post-land line-check tracking configuration and expose bounded attestation, land-check, and review-queue reads over gRPC and JSON.
+
+### WI-2597
+
+graft-client calls GetAttestations, GetLandChecks, ReviewQueue and the generalised Attest over gRPC and the in-process backend. Page helpers stop at the caller's limit. A server that has not implemented the review service returns a typed error. The old attest(check, passed) call still compiles.
+
+### WI-2598
+
+graft-attester has a post-land mode (`--mode post-land --line <name>`, with `--retries`) for a line configured `checks = "post-land"` (design §8.7, D25). It reads `RefMoved`, `Attested` and `LandReverted` from a saved position, checks the newest unsettled land first, bisects to the first bad land when that fails, retries a failed check (a pass after a failure counts as a flake), and posts `Attest{kind=check}` per check. It then lands a revert of the first bad land through the ordinary land path; the lands after it stay on the line and are settled on top of the revert. A revert that conflicts lands nothing: the line is reported blocked and the checker stops. Nothing post-land runs in the default draft mode. The revert carries the server's `graft.reverts`; `graft.revert-check` still needs `Revert` to carry it.
+
+### WI-2599
+
+`graft-mirror pr-batch --checks post-land` cuts a batch on a line with post-land checks (design §8.7 step 6) at the newest land whose prefix is settled in `GetLandChecks`: every land up to the cut is `good`, or is `bad`/`reverted` with its revert inside the cut. Pending lands, and a bad land with no revert yet, wait for the next batch; a run with nothing settled reports `Unsettled` and opens no PR. Appends to an open batch take only the settled lands. The rows are read once, paged, for the batch's own lands, after an O(log line length) one-row probe that finds the batch start's position. Lines batched without `--checks` behave exactly as before.
+
+### WI-2600
+
+- Add experimental CLI commands for typed attestations, attestation and check reads, and resumable review queues.
+
+### WI-2601
+
+Add MCP tools to inspect the review queue, attestations, and landed check state,
+and to record bounded check, review, and approval outcomes.
+The review queue page field is `next_lsn`, land checks are `rows`, and `graft_attest` returns `{changeset, recorded: true}`.
+
+### WI-2602
+
+graft-server can POST new journal entries to configured HTTP endpoints. Each endpoint names its URL, kinds, lines, repositories and the environment variable holding its HMAC key. Delivery runs beside lands and Watch, retries a non-2xx without moving its per-repository cursor, and counts delivered, failed and rejected attempts. A new endpoint starts at the journal tip (`start = "tip"`, the default) unless `start` names an LSN to replay. A 4xx is final for that entry; 5xx and network errors keep the bounded retry.
+
+### WI-2603
+
+Document GitHub OIDC exchange for changeset-scoped attest-only tokens, enable it for the graft repository in the development deployment, and provide a manual non-required attestation workflow for rehearsal.
+
+The rehearsal job installs the graft client from the deployed server container before it exchanges its token.
+
+The rehearsal job sets GRAFT_EXPERIMENTAL=1, which `graft attest` and `graft ci` need in this release.
+
+The rehearsal job reads the server address from the repository variable GRAFT_ENDPOINT and falls back to loopback.
+
+Call the token-holding attestation steps as a reusable workflow pinned to main, and allow `refs/heads/graft/` so a batch branch can dispatch the rehearsal without trusting its own workflow copy.
+
+### WI-2604-deploy
+
+graft-dev: the line `exit-rehearsal` of `graft` tracks post-land checks (`ci/fmt`, `ci/clippy`, `ci/test`, one retry), graft-mirror-graft pushes its per-land check refs, and an opt-in `post-land` compose profile runs the GitHub-backed post-land checker; the image is repinned to main 2f6a05f. Runbook: docs/runbooks/v02-exit.md.
+
+### WI-2606
+
+### Fixed
+
+- A webhook saves its starting cursor before the first delivery attempt, so a 5xx and a restart still deliver that journal entry.
+
+### WI-2607
+
+### Fixed
+
+- Review routes clamp the requested page in `clamp_review_page` before the engine sees it, on both the JSON facade and the gRPC review service. `0` and a missing limit stay the engine default; a limit above `MAX_REVIEW_PAGE` becomes that cap. A unit test asserts the cap, and the seeded `limit=1` tests still require one row and a resume token.
+
+### WI-2608
+
+`Revert` takes an optional `check_url` (new field 5 of `RevertRequest`; old clients send none), at most `MAX_ATTEST_URL` (2048) bytes and rejected over that at the wire and in the engine. When set, the revert carries `graft.revert-check = <url>` in its metadata (design §8.7 step 5). The post-land checker passes the link of the last failed run it read for the land it reverts.
+
+### WI-2611-attester
+
+# WI-2611 attester
+
+- Post-land: a restart no longer passes a check over a failure it had
+  already posted. A crash while posting a bad verdict's failures left the
+  land `pending`, and a flaky check that then passed turned it `good`. The
+  restart now finishes the verdict from the failures already posted,
+  without running the check, and the land is reverted once. Only a check
+  whose latest report is a failure counts; a fail then a pass within
+  `retries` is a flake and stays good.
+- Docs: `--retries` must match the line's `retries` setting, since the
+  checker does not read it from `GetLineConfig` yet; the `ceil(log2 n) + 1` bound
+  counts runs of the failing check only when `retries` is 0.
+
+### WI-2611-mirror
+
+`graft-mirror pr-batch --checks` is documented as an operator override that must match the line's server `checks` setting. The server does not expose that setting, so a mismatch is not refused here: a checked line batched without `--checks post-land` ships lands whose checks have not run. `attribution_raw`'s doc comment sits on that function again, and the checked-cut read test bounds one-row probes at 12.
+
+### WI-2612
+
+Mirror: `pr-batch` records each batch commit as the export of its land's changeset (`RecordExports`, in chunks within the server's cap) before it pushes the batch branch, and records appended commits before an append, so a CI job on a batch commit can exchange its token for that land (D40). A squashed batch records its one commit as the export of the cut tip.
+
+### WI-2614-attester
+
+- Post-land mode reads the line's `retries` with `GetLineConfig` at start. `--retries` overrides that value. A server that returns unimplemented falls back to the flag, or to 0, and prints one warning. The effective count is logged once.
+
+### WI-2614-mirror
+
+`pr-batch` reads the batch line with `GetLineConfig` and refuses when
+`--checks` disagrees with the line's checks mode. An older server that
+answers unimplemented keeps the previous behaviour and prints a one-line
+warning. (WI-2614)
+
+### WI-2614
+
+- Add the v0.2 `GetLineConfig` read (`ReviewService`, JSON `GET /v1/repos/{repo}/line-config?line=`): a line's post-land check mode, required checks (at most 64) and retries from the server's `[[lines]]` config. Read scope; an unknown line is `NotFound`. `Remote` and `Backend` carry it, and graft-node forwards it.
+
+### WI-2615
+
+# WI-2615
+
+`graft diff` in a working copy prints unified patches of uncommitted changes. `--name-only` prints paths only. Output past the patch cap is truncated with a note; the exit code is unchanged.
+
+Follow-up: `--name-only` prints bare paths for the working copy and for two changesets. The blame integration test stays.
+
+### WI-2616
+
+- graft-attester: in post-land mode, a check that fails and then passes on a retry (a flake) now posts its pass with a `#graft-attempts=N` fragment on the url. The server keeps a record of which check on which land needed N runs, and it survives an attester restart. The land still reads good, with no fail attestation. `post_land::flake_attempts` reads the count back.
+
+### WI-2624
+
+# WI-2624: per-land check refs on a post-land line
+
+- `graft-mirror follow` with a `[[check_refs]] line = "...", prefix = "graft/check/<line>/"` section keeps one upstream branch per unsettled land of that line, at the land's export. Each land is exported with the deterministic exporter and recorded through `RecordExports` before its ref is pushed with a must-not-exist lease, every land of a poll page included, so a post-land CI run on the ref can exchange its token for that land. Refs of lands that `GetLandChecks` reads settled are deleted with a lease, so live refs are at most the unsettled lands.
+- It never claims a line's authority, and refuses a line whose `GetLineConfig` is not `post-land` (or a server without `GetLineConfig`) with a one-line error. A transient failure at start-up is retried each poll. Config refuses a check-ref line that is also a followed `[[lines]]` line, and overlapping prefixes.
+- Cost follows the change: the journal is read from a durable cursor, each held ref's row is read alone at its recorded position, and new rows are read once each from a durable position (at most 1024 a poll, the rest next poll). A land stuck bad costs one row a poll, whatever settles behind it.
+- `GetLandChecks` rows decide which line moves are lands: pr-batch's sync merges and other admin moves have no row and get no ref.
+- Lands already on the line when its check refs first start get no ref, even if still pending. Enable `[[check_refs]]` on a line before its first checked land, or settle those lands another way.
+
+### WI-2625
+
+# WI-2625
+
+`graft-attester --mode post-land --runner github` runs a checked line's checks as a GitHub Actions workflow instead of on the checker's host. For each landed snapshot and attempt it dispatches `--workflow` (default `graft-post-land.yml`) once, on `<ref-prefix><changeset>` (default `graft/check/<line>/`), with the inputs `changeset`, `attempt` and `request_id`, finds the run again by `request_id` (the workflow's `run-name` must carry it), and reads jobs `fmt`, `clippy` and `test` as the line's `required` checks, linking each job's page.
+
+A GitHub outage, a 5xx, a ref not pushed yet, or a run that never leaves the queue judges nothing and is tried again later: it never makes a land bad or reverts one. A red job, a run past `--timeout-s` (cancelled) and a 422 for a workflow not on the ref are failed runs. The workflow attests its own passes; the checker reads them back before attesting and never posts a second pass for a land and check.
+
+The GitHub token is read from `--github-token-file` (0600, opened read-only, shareable with graft-mirror) and sent only in a sensitive `Authorization` header. `--token-file` help now states the graft token needs `read`, `attest` and `land` (reverts).
+
+`--max-in-flight N` (default 2) caps the workflow's runs that are queued or in progress at once, counted on GitHub across every ref. A new snapshot and attempt is not dispatched while N are, and waits for one to finish (no verdict if the start timeout passes first). A run or job that ends `cancelled` is no verdict: the checker tries again with a fresh run, so a cancellation never fails a land or reverts one.
+
+Review fixes: only a check job concluding `failure` or `timed_out`, or running past `--timeout-s`, fails a check. A completed run without the check's job, or a job ending `skipped`, `neutral`, `stale`, `startup_failure`, `action_required`, `cancelled` or with no conclusion, is no verdict: that run is set aside and a fresh one is dispatched. A run made red only by its `attest` job gives the checks' passes. `--timeout-s` counts from the job's `started_at` on GitHub, so time queued for a self-hosted runner never counts and a restart keeps the clock. A queued run is never failed or cancelled; it is waited on, within the in-flight cap.
+
+### WI-2626
+
+- ci: a post-land dispatch workflow and a main-pinned check-and-attest workflow that runs fmt, clippy and test on the self-hosted pool and attests a pass for each check that succeeded (WI-2626).
+
+### WI-2627
+
+bench/postland records the v0.2 exit measurements. record.py follows a post-land line through `graft api watch` (to the head) and `GET /v1/repos/{repo}/land-checks` from the oldest unsettled position, with the token only in the request header, and appends JSONL that a restart never duplicates. All times are the recorder's observations, because the journal carries none; `late` marks rows from the first poll after a recorder gap. plant.py lands a fmt or test plant and a good follower with `graft land --json` and prints both ids. report.py writes the M1 day table (p95 ≤ 30 min, max ≤ 4 h, operator Blocked windows subtracted and shown), bad-to-reverted, the M2 plant table, the M3 day table, and the D31 before/after table from Prometheus instant queries at stated instants. Tests replay pages captured from graft-dev.
+
+### WI-2630
+
+graft-mirror's API wrappers (`Server` and `Api` in server.rs, `Waiting` in import.rs) now forward every RepoApi method. Before, nine methods with trait defaults were dropped, including `GetLineConfig`, so `pr-batch` warned "the server does not implement GetLineConfig" against a server that serves it, and never verified `--checks`. `Server` also forwards `GetConflicts`, `Resolve` and `OverlappingDrafts` instead of answering unimplemented. A test reads the trait method lists from graft-proto's api.rs and fails when any wrapper in graft-mirror leaves a method to its default. The line-config error and warning no longer carry long runs of spaces.
+
+### WI-2631
+
+- Treat GitHub workflow input-contract 422 responses as retryable checker errors instead of failed checks, while retaining terminal failures for missing workflows and `workflow_dispatch` triggers.
+- Document that the post-land checker token needs repo-wide `write` permission to revert paths touched by a bad land.
+
+### WI-2638
+
+- Add `graft_proto::forward_repo_api!`, which hands every `RepoApi` method to a wrapper's forwarding macro, so a forwarding wrapper cannot skip a method that has a trait default. graft-mirror's `Server`, `Api` and `Waiting` and graft-client's `Backend` use it. A graft-proto test pins the macro's list to the trait. No behaviour change.
+
+### WI-2639
+
+- Add `graft_proto::forward_workspace_api!`, which hands every `WorkspaceApi` method (with all its arguments) to a wrapper's forwarding macro, so a forwarding wrapper cannot skip `overlapping_drafts` or any later method with a trait default. graft-mirror's `Server` and graft-client's `Backend` use it. A graft-proto test pins the macro's list to the trait. No behaviour change.
+
+### WI-2682
+
+WI-2682: onboard email-rs onto graft-dev, a private mirror on port 17898.
+
+### WI-2688
+
+- graft-mirror pr-batch: the sync diffs the line's own change from the newest common ancestor of the line tip and the base tip when a land merged the base past the recorded sync point. A line that merged main no longer reports false conflicts (e.g. on a lockfile), and a revert of base content landed after such a merge is batched instead of dropped as "nothing the base lacks" (WI-2688, WI-2687).
+
+### WI-2713
+
+- `graft commit` now puts the committed blobs in the local cache, so a later `graft diff` (or `diff --stat`) on a file this working copy committed no longer fails with "base blob is missing from cache", including after `land` and `sync` (WI-2713).
+
+### WI-2716
+
+- graft-mirror: per-land commit trailers now join a message's final trailer block (as `git interpret-trailers` does) instead of starting a new paragraph, so GitHub credits `Co-authored-by` lines from the original message. CRLF and trailing whitespace are normalized.
+- graft-mirror: `import-pr <owner>/<repo>#<n>` re-lands an outside GitHub PR through graft. It applies the PR's net change to a graft working copy (read-only fetch, nothing from the PR runs, `.git`/`.graft` paths refused) and writes a message with the PR title, `Source-PR` and a `Co-authored-by` trailer for the author's GitHub noreply address. When the batch holding that land merges, `pr-batch` comments on and closes the source PR.
+- graft-mirror `import-pr` hardening: the scratch repository is a new 0700 directory made exclusively (never a reused one) with hooks and fsmonitor off; changes over 5,000 paths or a 64 MiB patch, symlinks, submodules and HFS+/NTFS spellings of `.git`/`.graft` are refused; GitHub's answer must name the requested repository; close-on-merge never closes a graft batch PR.
+- graft-mirror `import-pr`: every git command on its scratch repository ignores the user's and the system's git config (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`), so a global `url.<x>.insteadOf`, `includeIf` or credential helper cannot redirect the fetch or see the token. Other mirror commands are unchanged.
+- graft-mirror `import-pr`: an isolated scratch repository also drops the inherited git variables that could redirect or re-configure its git (`GIT_CONFIG_PARAMETERS`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CEILING_DIRECTORIES`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`), so a `git -c` rewrite in the environment cannot redirect its fetch. Other mirror commands are unchanged.
+
+### WI-2719
+
+- `graft-mirror pr-batch` gains `--min-lands N`, `--min-age MINUTES` and `--force`, and a `[batch]` table in `mirror.toml` (`min_lands`, `min_age_minutes`, defaults 6 and 60). With thresholds set, a run cuts a batch only when enough lands wait or the previous batch settled long enough ago; otherwise it prints `batch deferred: …` and exits 0. `--force` cuts anyway and marks the PR body `forced`. Unset keeps today's behaviour. The age counts from GitHub's merge or close time for the previous batch's PR.
+
+### WI-2774
+
+- graft-client: resolving a merge of a mirror-imported line no longer copies the source's reserved `mirror.*` metadata (failed with `reserved-metadata`), and a merge resolved to the snapshot's own tree is committed as an empty two-parent changeset so it can be landed with `--merged-from`. A sync resolved to no change clears its conflicts. (WI-2774)
+
+### WI-2850
+
+- graft-dev moved to k8s: `graft-ci-attest.yml` targets the in-cluster Service (`GRAFT_ENDPOINT`) and takes the client from the image (`GRAFT_IMAGE`); `deploy-dev.yml` now fails fast pointing at ops `apps/graft-dev/gen.py`; `trial/mint-agent-tokens.sh` mints through `kubectl exec` (old VM path via `GRAFT_TRIAL_HOST`).
+
+### WI-2853
+
+- CI: removed the retired `deploy-dev.yml`, which failed the `runner-policy` check (WI-2853).
+
+### WI-3053
+
+- graft-mirror: a batch commit's `Claimed-Author` trailer no longer leaks a
+  client-supplied email. It is dropped when the email matches
+  `[export.authors]` or `default_author`; otherwise the email is kept only
+  when it has exactly one `@` and its domain is on the new
+  `[export] claimed_author_domains` allow-list (default
+  `["users.noreply.github.com"]`); the trailer otherwise keeps the name
+  alone. Empty entries and entries containing `@` are ignored in the
+  allow-list. Applies to batches cut from now on; merged commits are unchanged.
+
+### WI-3140
+
+server, mirror: a line the mirror follows from GitHub is marked with the admin-only tool ref `graft.followed/<line>` (at the last upstream head imported), and the server refuses every `land` on a marked line ("line <name> is followed from GitHub; land on an integration line forked from it"); only the mirror's own `UpdateRef` advances it. Lines cannot be created under the `graft.followed/` prefix.
+engine: `graft pick` of a landed changeset whose parent is the workspace's snapshot (it landed on a line forked there) now makes a new draft stamped `graft.rebased-from`, instead of printing "nothing to commit".
+
+### WI-3207
+
+server: mirror settings (D41). SQLite schema v10 adds `repo_mirrors`, one row per `(repo, upstream)`: lines, interval, enabled, credential (filled by WI-3209), export author map, `version` and service-written status. `MirrorService` gains `SetMirror` (CAS on `version`; a mismatch is `Rejected { policy: "mirror-version" }`), `GetMirror`, `ListMirrors` (paginated, `enabled` filter, cross-repository under `repo:*:read`, `repo:*:mirror` or `repos:admin`), `RemoveMirror` (optional `clear_followed`: the markers go in the same transaction, one `RefDeleted` journal entry each), `PurgeMirror` (grant and state checks; answers `unimplemented` until WI-3310) and `SetMirrorStatus` (typed `MirrorErrorCode`, message ≤ 200 characters, not journalled). Creating a row needs `mirror:bind`, export needs `mirror:export`, a repo admin may edit the rest. Upstream URLs must be `https` or `ssh` on a host in `[mirror] allowed_hosts` (default `github.com`), never loopback, link-local, RFC 1918, CGNAT, unique-local, `*.svc`, `*.cluster.local` or the server's own names; `[mirror] min_interval_s` (default 15) sets the poll floor. Reads return `credential_set` and the kek id, never credential bytes.
+
+### WI-3208
+
+- `graft-mirror serve` (D41): one mirror service for every repository. Its
+  config names the server, token file, data directory, metrics address and
+  `[limits]`, and no repositories; it follows the server's enabled mirror
+  rows. It reconciles every 15 s (a row's change is its `version`; a task
+  restarts only between polls), holds each repository's authority lease
+  (renewed every 20 s, every write fenced by its epoch, a lost lease stops
+  the task), refuses a data directory without the migration marker, hands
+  git the row credential through a credential helper on a pipe for one
+  poll, re-checks the upstream after DNS resolution (`url_blocked`), caps
+  concurrent and per-host fetches, stretches intervals past 80% of a
+  per-host, per-credential request budget, honours `Retry-After`, backs off
+  a failing repository exponentially and a failing server up to 60 s, and
+  writes at most one coalesced status per poll with typed codes, never git
+  output. Batch cuts adopt the PR already open on `graft/batch-<id>` after
+  a crash. Purges run for disabled or removed mirrors. Claiming batch,
+  settle, exclude and rewind requests is off (`claim_requests`) until the
+  batcher runs them.
+
+### WI-3209
+
+Server: encrypted per-row mirror credentials (D41 §3.4). `[mirror] credential_kek` (id + 32-byte private key file) and `retired_keks` form a key ring, unrelated to the signing key. Each row's credential is sealed with a fresh data key wrapped by the active KEK, both XChaCha20-Poly1305 with associated data binding repo, upstream and key id (envelope frozen by a golden vector). `MirrorService.SetMirrorCredential` is write-only under `mirror:bind` and bumps the row version; `GetMirrorCredential` answers only a mirror-kind token holding the current lease epoch. `graft-server admin mirror credential <repo> <upstream>` seals a value from stdin (seeding the interim per-row PATs); `admin mirror rewrap` moves every row to the active KEK, one transaction per row. Credential messages and types print `<redacted>`.
+
+### WI-3210
+
+auth: mirror service grants (D41). New scopes `repos:admin`, `mirror:bind`, `mirror:export`, `repo:*:mirror` and `repo:*:<perm>[:<arg>]`; a `mirror` token kind that carries only `repo:*:mirror`; `mirror:bind`/`mirror:export` mint only into the operator kind and are implied by no other scope. `repos:admin` creates repositories (`graft repo create`, MCP `graft_repo_create`) and the creator administers them (SQLite schema v9, `repo_owners`). The followed-line guard admits the `mirror` kind on a followed line, by CAS only.
+
+### WI-3211
+
+graft-mirror serve exports its metrics on the one `/metrics` endpoint with a `repo` label on every mirror series: `graft_mirror_lag_seconds`, `graft_mirror_lag_changesets` and `graft_mirror_divergence` gain `repo` (before `line`), and the service adds `graft_mirror_last_success_timestamp_seconds`, `graft_mirror_poll_error{repo,code}`, `graft_mirror_request_backlog`, `graft_mirror_lease_lost_total` and `graft_mirror_tasks`. A repository's series exist only while its task runs for an enabled row and are dropped when it stops, so the label's cardinality follows the enabled rows. `deploy/monitoring/graft-mirror-alerts.yml` is one rule set on one job: stalled, diverged, force-pushed, lease lost, credential error and request backlog, each naming the repo; `graft-dev-alerts.yml`'s lag alert groups by repo too. (WI-3211, D41.)
+
+### WI-3212
+
+Mirror service migration: `graft-mirror import-config <toml>…` creates each repository's mirror row from its follow config, seals its credential from `<credential-dir>/<repo>` (never argv, never printed), moves the old `<repo>.git`/`<repo>.sqlite` into the service's layout and writes a migration marker naming the repository. A rerun is a no-op, a differing row is reported and left alone, and `--dry-run` prints the plan. `serve` now refuses a directory whose marker names another repository. Cutover runbook: `deploy/mirror-service-cutover.md`.
+
+### WI-3213
+
+Mirror service retirement: graft-dev's deploy/ runs one `graft-mirror serve` in place of the per-repository `graft-mirror follow` containers. Removes `mirrors.tsv`, `mirror*.toml`, `compose.onboarded.yml`, `onboard-repo.sh`, `render-onboarded-compose.sh`, `private-follow.sh` and the per-repository tokens; adds `mirror-service.toml`, the `[mirror]` server table with `kek-k1`, and the `mirror-service-token` that `up.sh` mints. The cutover runbook gains the retire step and a rollback order.
+
+### WI-3214
+
+- `graft pick` (and every command that resolves a revision) now says a missed short changeset id was searched only among the refs and the line's recent history, and to give the full id (WI-3214).
+
+### WI-3215-mirror-service
+
+- Mirror service review fixes: git never follows redirects and allows only the upstream's transport, pinned to the vetted address; the credential helper answers only for the upstream host; credentials with a line break or NUL are refused; credential AEAD binds the repository id, not its name; lease renew, release, status and credential reads check the exact holder; a claimed cut with no recorded PR never expires, so a crash cannot open a second batch PR; graft-node forwards every mirror call but GetMirrorCredential; up.sh backs up the metadata database before a new server image migrates it and restores it on rollback.
+- Mirror service: `graft repo batch cancel` and `graft_batch_cancel` (MirrorService.CancelRequest, operator only) fail a stuck request and free its line; the `mirror` token kind is frozen by golden vectors; the cutover backs up the database and the old containers' state off the volumes, then retires them at once.
+- Mirror service: re-enabling a mirror cancels any live purge of its upstream in the same transaction, so a later disable purges nothing until a fresh purge is requested.
+- Mirror service: PurgeMirror commits only if the mirror row is still the version it checked, so a re-enable that lands between the check and the commit refuses the purge (`mirror-version`) instead of leaving it live.
+
+### WI-3215
+
+- Record D41: mirrors as repository settings served by one mirror service; amend design.md §8.10 and §11.7.
+
+### WI-3235
+
+# WI-3235: AdminService.RevokeToken
+
+- `graft-proto`: `AdminService.RevokeToken(RevokeTokenRequest { token }) -> Empty`; the request's `Debug` redacts the token.
+- `graft-server`: `RevokeToken` adds a live token of this server to the denylist. The service principal that minted a token through `MintToken` (recorded in a new `token_mints` table, token encoding unchanged) may revoke it, and so may a caller holding `repo:<r>:admin` on every repository the token names. Anyone else gets `PermissionDenied`. Every revoke and refusal is logged on the `audit` target by principal and token id, never token value. The revoked token's next write is refused.
+- `graft-node`: forwards `RevokeToken` to the server.
+
+### WI-3309
+
+Server: mirror authority lease (D41 §3.6): SQLite v11 `mirror_leases`; `MirrorService.AcquireLease` (CAS when free or lapsed, bumps the epoch), `RenewLease` (60 s TTL) and `ReleaseLease`, for mirror-kind tokens only. `SetMirrorStatus` and the mirror's `UpdateRef` on a followed line (new `lease_epoch` field) commit under the lease in their own transaction; a stale epoch is the typed `lease_lost` error.
+
+### WI-3310
+
+Server: mirror requests (D41 §3.5): SQLite v12 `mirror_requests` and per-line `mirror_line_slots`. MirrorService CutBatch (repo admin), GetBatch, ListBatches (paginated), RewindFollowed (mirror:bind, followed lines only), GetRequest, and the service's ClaimRequest, CompleteRequest, FailRequest and SetBatchState under a lease-epoch fence. A client request id makes a retry return the original request; one batch or rewind per line by CAS on its slot, refused with the typed `BatchOpen`; a claim under a lost epoch returns to pending; a live request past its 30-minute deadline expires on read, and an expired or failed cut frees the line only when no PR was recorded on `graft/batch-<id>`. PurgeMirror now records a purge request.
+
+### WI-3311
+
+Mirror service CLI and MCP: `graft repo mirror add|set|credential|remove|purge|status` and `graft repo batch cut|status|list`, plus the `graft_mirror_*` and `graft_batch_*` MCP tools. A credential is read from a file or standard input and never appears in output; cuts and purges carry one request id per action, reused on retry; binding needs the operator-only `mirror:bind` grant, and a refusal says so.
+
+### WI-3312
+
+graft-mirror: the mirror service can fetch bound GitHub rows under a GitHub App
+(`[github_app]` in the serve config: `app_id`, `installation_id`,
+`private_key_file`; off by default). A row uses the App only if its
+`OWNER/REPO` is in the installation's repository list; one installation token
+is cached and shared across tasks. The key, JWT and token never appear in
+`Debug` or error output. Clearing row credentials is not part of this change.
+
+### WI-3357
+
+docs/design.md: §12.2 states that `Revert` with `land` has `onto` at the line tip and that there is no version gate (WI-3357).
+
+### WI-3358
+
+- graft-proto, graft-engine: `Revert` gains an optional `land = <line>` (D42).
+  With it, the server builds the revert on the line's tip and lands it in the
+  same call, needing `read` and a named-repository `land:<line>` (or `admin`);
+  a wildcard `repo:*:land:<line>` does not authorise it. The changeset must be
+  on the line (`revert-not-on-line` otherwise). Without `land`, `Revert` is
+  unchanged (WI-3358).
+
+### WI-3359
+
+`graft revert <rev> --land <line>` and `graft_revert` with `land` revert a change already on a line and land the inverse in one call, under `land:<line>` on the named repository and no `write`. The client checks that the revert is on the line and fails if the server did not land it. The post-land checker uses the same call, treats an already-undone change as done, and no longer needs `write`.
+
+### WI-3391
+
+# WI-3391
+
+- `graft-mirror pr-batch` no longer reports a false conflict when the line
+  merged the base after its last batch merged: the sync now starts from the
+  base snapshot the line merged, because the merged batch is already in it,
+  instead of counting the base's own edits as the line's.
+
+### WI-3411-mirror-token-read
+
+- Mirror service: the `mirror`-kind token (`repo:*:mirror`) now reads a repository (refs, history, objects) only while that repository is bound to a mirror, so the service can poll and import what it follows; unbound repositories stay closed to it, it still writes only followed lines, and mint still refuses any other scope on that kind.
+
+### WI-3426-grant
+
+- The mirror service cuts batches with the mirror token alone (WI-3426). On a
+  repository bound to a mirror, while a line's batch slot names a cut the
+  service has claimed, the mirror kind may create, rebase and revert
+  changesets and move that line, fenced by the claimer's lease epoch. Any
+  other line, a finished cut, or an unbound repository is refused. The cut's
+  line moves now carry the lease epoch.
+
+### WI-3426-lease-fence
+
+- A claimed batch cut grants the mirror service changeset writes and its
+  line move only while the mirror lease is held under the claim's epoch
+  (WI-3426). A claim outlived by its lease grants nothing, even before it is
+  settled back to pending.
+
+### WI-3426-mirror-token
+
+- The mirror service's line poll works with a minted mirror token: on a repository bound to a mirror, the `mirror` kind may upload objects, import changesets and move an existing followed marker under its lease. Before, the first upstream change after a batch merge stopped the line with `PermissionDenied { scope: "repo:<r>:admin" }`.
+
+### WI-3426
+
+- The mirror service now runs batch-cut requests (`graft repo batch cut`) for a
+  GitHub upstream: the batch keeps `pr-batch`'s semantics (one commit per land,
+  the D26 squash fallback) on the next free `graft/batch-<n>` branch, and a typed
+  code (`nothing_to_batch`, `batch_open`, `conflict`, `base_stopped`,
+  `not_due`, `branch_taken`) when no batch is cut. A cut at a chosen base
+  changeset is still `unsupported`; an unreadable upstream credential fails the
+  cut (`no_credential` when none is stored) instead of being ignored.
+
+### WI-3492-private-hosts
+
+- `graft-mirror serve` can poll an upstream on a private address when the
+  serve config names its host in `private_hosts_allowed` (exact names, no
+  wildcards; empty by default, which keeps today's refusal). Only RFC 1918,
+  CGNAT (100.64.0.0/10) and unique-local addresses are excused for a named
+  host; loopback, link-local and reserved ranges, and literal addresses in the
+  URL, are still refused. Only an `https://` upstream is excused: ssh is not
+  pinned to the vetted address. git stays pinned to the vetted address and follows
+  no redirect.
+
+### WI-3492
+
+- `graft-mirror` can batch to Forgejo. A `[forgejo]` table (`api`, `owner`,
+  `repo`, `token_file`, `required_contexts`) is the other choice to `[github]`;
+  a config may set only one of them. With it, `pr-batch` opens and tracks the
+  batch PR through Forgejo's REST API. The new `land-batch <pr> --config`
+  command rebase-merges the PR (`Do=rebase` at the PR's current head, so each
+  land keeps its commit) once every required status context on the head is
+  `success`. Forgejo has no merge queue. `land-batch` makes one attempt and
+  never waits. Its exit status is 0 when the PR is merged, 75 while statuses are
+  pending, 1 when a required status failed, and 3 when the PR was closed
+  unmerged. The token comes from `token_file` and goes only in a sensitive
+  header. GitHub behaviour is unchanged: GitHub batches still land with
+  `land-pr`.
+- A per-repository config with only `[forgejo]` now gives git that table's
+  token for fetch and push, sent only to an HTTPS upstream on the Forgejo API's
+  host (before, git reached a private Forgejo repository with no credential).
+- `graft-mirror serve` handles a repository whose upstream is on Forgejo. A
+  `[[forgejo]]` entry (`host`, optional `api`) in the serve config makes batch
+  cuts for upstreams on that host open and track their PRs through Forgejo's
+  API with the row's credential, the one git fetches and pushes with.
+  `land-batch <pr> --serve-config <file> --upstream <url>` merges such a batch,
+  taking the API, `token_file` and `required_contexts` from that host's entry.
+  GitHub upstreams are unchanged.
+
+### WI-3524
+
+# WI-3524 — distinguish connection failures
+
+Connection failures from the client and mirror client now identify the endpoint
+and transport cause instead of being reported as a retryable server
+`Unavailable` response. Genuine server-side `Unavailable` responses retain
+their retry hint.
+
+### WI-3528
+
+# WI-3528 — Fence mirror object imports after a rebind
+
+Mirror-only repository writes now require the active mirror lease held by the
+calling subject and a followed marker for a configured followed line on the
+enabled mirror row. This keeps object and changeset imports fenced while
+allowing a rebound upstream to resume after its marker is retained.
+
+### WI-3568
+
+- cli: `graft doctor` and `graft land` treat client connection failures (`connect`) like server `unavailable` responses; doctor names the endpoint and connection error instead of reporting it reachable (WI-3568).
+
+### WI-3738
+
+- `graft log -n N` is `--limit N`; `graft --version` and `-V` print the version; `graft diff` takes paths after `--`; common git flags that graft spells differently (`--max-count`, `--cached`, `status --short`, `cat -r`, `land --line`, ...) now get a "did you mean" hint (WI-3738).
+
+### WI-4272
+
+mirror: `pr-batch` no longer reports a conflict for a land whose change already reached the base under another id (for example a hand-made PR). When the line's net change does not rebase onto the base, the sync replays the lands one by one and skips each land whose files the base already holds. The per-land export then gives that land no commit and lists it under "Already on the base" in the PR body. A real conflict is still reported, and nothing moves.
+
+### WI-4283
+
+- tests: binary-spawning tests find `target/<profile>` under Rust 1.100's build-dir layout (`target/<profile>/build/<pkg>/<hash>/out/<test>`) as well as the old `deps/` layout, through `graft_testkit::target::profile_dir`. This fixes `unified_roles` ("legacy graft-server binary not found"), the graft-node and graft-server process tests, and the pilot's `Bins::locate`, which used to rebuild the whole workspace into a per-test directory and hang the CI `test` job.
+- ci: `.config/nextest.toml` kills a test after 10 minutes (20 for the two known long-running tests), so a hang fails the job fast instead of running into the 45-minute job timeout.
+
+### WI-4295
+
+- A session that renews, commits to or closes another session's working copy now gets a `workspace-owner` refusal naming the lease owner and telling it to clone a fresh working copy, instead of `permission denied: needs repo:<r>:admin`. Admins can still take over. `docs/agents.md` says to clone into a session-unique directory. (WI-4295)
+
+### WI-4328
+
+- graft-cli: the token comes from `--token-file`, `GRAFT_TOKEN`, then the file named by `GRAFT_TOKEN_FILE`, before a stored server token; a connection failure names the endpoint and hints that a sandbox or network policy may block it (WI-4328).
+
+### WI-4332
+
+mirror: opt-in, set-once `start_at` import point (`graft repo mirror add|set --start-at`, `import-config` `start_at`): the start commit imports as a root and history before it is never walked, so an upstream with D11-violating old history (codex `codex-cli/>`) can be mirrored. Schema version 13.
+
+### WI-4387
+
+An oversight-only token kind can bind a mirror, and `/mcp` carries the mirror
+tools. `MintToken` gains an optional `kind`. Only the engine's `service` token
+(which may hold the mirror grants for this purpose) or an oversight token for
+itself may mint an oversight token; an oversight token cannot name another
+subject, and a worker asking for the kind is refused, so a worker never holds
+`mirror:bind`. `mirror:bind` and `mirror:export` stay bounded by
+`mirror.allowed_hosts`.
+
+The server's own `/mcp` mount now installs the in-process mirror service, so
+`graft_mirror_add|set|credential|status|list|remove|purge` and
+`graft_batch_cut|status|cancel|list` work there as they do in `graft mcp`.
+`graft_mirror_add|set` take `start_at`. `CutBatch` now accepts
+`mirror:export` as well as `repo:<name>:admin`: an oversight token holds the
+former and no admin, and oversight is what cuts the batch, so requiring admin
+left the last step of the self-serve path to an operator. A worker holds
+neither and stays refused. `graft_mirror_credential` reads the
+value from a file on the caller's host over stdio and never puts it in a tool
+argument, result or log; the server's `/mcp` mount refuses it, since a path
+there would name the server's own keys.
+
+Docs follow the code. `docs/agents.md` gains "Repositories, mirrors and
+batches": create, bind, credential and cut are API calls with no ops change,
+and a worker's `permission_denied` is the intended answer. `design.md` §11,
+`guide/mcp.md`, `guide/cli.md` (regenerated), the `graft repo mirror add` and
+`batch cancel` help, the MCP tool descriptions and the CLI refusal note say
+"an oversight session or the operator" instead of "operator-only"; the MCP
+guide says the mirror tools are on `/mcp` and records the credential tool as
+the one exception there. The batch instructions in the repository `AGENTS.md`,
+`deploy/README.md`, the README and `trial/agent-guide.md` use `graft repo
+batch cut` rather than `pr-batch`, and say to omit `--base`: the API takes a
+changeset id, and the service answers `unsupported` to a chosen base and cuts
+at the base line's tip.
+
+Follow-up in the same batch: `graft repo batch cut --help` (and so the
+generated `docs/guide/cli.md`) named only the repository's admin, and its
+`--base` help invited a value; both now match the server. `CONTRIBUTING.md`,
+`deploy/README.md` and `deploy/server.toml` no longer tell a reader to run the
+retired `graft-mirror pr-batch` container.
+
+The remaining current-tense uses of `pr-batch` in `docs/architecture.md` §3c,
+`docs/design.md` §11.4 and `docs/guide/git-migration.md` describe the export as
+`graft-mirror pr-batch --base`; they now describe the batch request and the
+service that claims it, and say no base is passed. The same page's sequence
+diagrams name the participant `graft-mirror service`. `docs/decisions.md` keeps
+its historical wording: those are decision records.
+
+`docs/status.md` listed "GitHub delivery" as `graft-mirror pr-batch`; it now
+names the server request and the service that claims it, with `pr-batch` as the
+retired CLI.
+
+### WI-4388
+
+`RecordExports` admits the mirror service (`repo:*:mirror`) under the authority
+lease it holds, so the mirror can cut a batch and record each commit before
+pushing it without `repo:<name>:admin`. An admin still records with no epoch.
+
+### WI-4404
+
+- Server: a service-side batch cut settles when the mirror numbers the batch past the request id (repos with pre-D41 `pr-batch` history). The server accepts the mirror's own `graft/batch-<n>` and fixes it for the request once recorded (gh#359).
+
+### WI-4405
+
+Display for GitError::BadPaths, Unrepresentable and Fidelity now names the first five offending entries (path, reason, commit) and "and N more".
+
+### WI-4406
+
+- Mirrors: `repo mirror status` no longer reads a sealed credential as a working one. Each row records the stored credential's last use against the forge, shown as `credential:set(auth:never|ok@<ms>|failed@<ms>)` and as `credential_auth` in JSON and MCP. Sealing a new value resets it to never. A batch cut or settle that the forge refuses with 401, or with a git authentication failure, now fails with `auth_failed` instead of `internal` or `forge_refused`, names the repository's stored credential, and marks it failed (gh#357).
+
+### WI-4407
+
+`graft repo batch cut --base` is refused at the API (`mirror-base-unsupported`) before any request row is written (gh#360).
+
+### WI-4413
+
+graft-server: a mirror result the server refuses (`mirror-field`) now fails a cut that has no PR recorded or named, releasing its batch slot instead of pinning the line (WI-4413).
+
+### WI-4458
+
+Mirror batch cuts name their branch by the request (`graft/batch-<request id>`), so a failed request no longer makes the next cut's branch disagree with the server; a taken name falls back to the next free number (WI-4458).
+
+### WI-4463
+
+CI: the test job gets a 90-minute stopgap timeout, a cache saved on failure, and a separate nextest archive step with the OOM retry. A nightly cache-warm workflow on main seeds the cache the PR test job restores (WI-4463).
+
+### WI-4468
+
+- graft-mirror: the service now settles a batch on the server once its PR is
+  merged (any merge method) or closed, freeing the line for the next cut.
+  Before, nothing called `SetBatchState`, so every merged batch held its line
+  until an operator ran `graft repo batch cancel`. (WI-4468)
+
+### WI-4469
+
+CI: the test job and cache-warm compile the test binaries with `nextest run --no-run` under the OOM retry, then run `nextest run`. The nextest archive step is gone: its second copy of every test binary filled the ci-k8s runner disk (WI-4469).
+
+### WI-4504
+
+- graft-git: a mirror whose `start_at` names a commit outside its imported
+  history (for example an older commit than the one it was seeded from) no
+  longer fails every follow with "start commit … is not reachable from the
+  imported refs". The start point is checked only on a fresh import; once the
+  walk meets imported history, that history decides where the mirror starts
+  (WI-4504).
+
+### WI-4711
+
+graft-server: a mirror-kind token mint carrying a `repo:<r>:land:<line>` scope is refused at mint time (test added; WI-4711).
+
+### WI-4735
+
+- graft-attester: `--prefetch` without `--no-network` is now refused at startup instead of silently ignored; the prefetch's trust (it runs the draft's cargo configuration with the network, by design) and its whitespace splitting are documented. (WI-4735)
+
+### WI-4765
+
+- deploy: the post-land checker token no longer gets `repo:graft:write`. The attester's help and tests were right (D42: `Revert` with `land` needs only `read` and a named `land:<line>`); `deploy/up.sh` and `deploy/README.md` were stale. Takes effect when the token is next minted. (WI-4765)
+
+### graft-388-review-queue-sqlite
+
+Fix the `review_queue` SQLite cost test that looked like a CI hang: it landed 10k changesets with a `synchronous=FULL` fsync each, so it now runs on memory-backed storage, and the quarantine is removed (graft-engine tests only; #388).
+
+### release-notes-cap
+
+- Release notes over 100,000 bytes are cut at a section boundary and link to CHANGELOG.md, so `gh release create` stays under GitHub's body limit.
+
+### vogt-backlog-1
+
+deploy: graft-mirror-vogt also follows vogt `main` (line `main`), the base of `backlog-1`, so Vogt lands through graft batch PRs into `main`.
+
+
 ## 0.1.0 — 2026-10-26
 
 ### G1.1
