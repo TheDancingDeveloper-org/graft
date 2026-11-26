@@ -143,6 +143,8 @@
         "behind_more",
         "changed",
         "next",
+        "touching",
+        "touching_more",
         "overlaps",
         "overlaps_truncated",
         "stack_conflict",
@@ -221,6 +223,33 @@
             "string",
             "null"
           ]
+        },
+        "touching": {
+          "description": "Lands since the base that touched your paths, newest first, bounded by the limit.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "subject"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][0-9a-f]{64}$",
+                "description": "A changeset id: a kind letter and 64 lowercase hex digits."
+              },
+              "subject": {
+                "description": "First line of the landed changeset's message.",
+                "type": "string"
+              }
+            }
+          }
+        },
+        "touching_more": {
+          "description": "More touching lands exist than `touching` holds, or your paths were cut.",
+          "type": "boolean"
         },
         "overlaps": {
           "description": "Files you changed that the line changed too, with the predicted line merge (decision D16).",
