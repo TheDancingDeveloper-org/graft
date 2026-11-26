@@ -1,1 +1,0 @@
-- Post-land mode reads the line's `retries` with `GetLineConfig` at start. `--retries` overrides that value. A server that returns unimplemented falls back to the flag, or to 0, and prints one warning. The effective count is logged once.
