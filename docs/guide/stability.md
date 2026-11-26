@@ -36,7 +36,6 @@ The CLI, the node and the server are built and shipped for:
 
 - Linux x86_64, musl (`x86_64-unknown-linux-musl`)
 - Linux aarch64, musl (`aarch64-unknown-linux-musl`)
-- macOS aarch64 (`aarch64-apple-darwin`)
 
 Those are the two archive jobs in [.github/workflows/release.yml](../../.github/workflows/release.yml). macOS binaries are not published for now because hosted macOS runners are unavailable to the org. Windows is not built.
 
