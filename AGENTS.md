@@ -60,7 +60,7 @@ cargo nextest run -p <crate> --all-features   # or: cargo test -p <crate>
 ## Finishing
 
 - Add a changelog fragment `changes/<item>.md`.
-- Land with `g land` on the graft line (`backlog-1`): commit, `g sync`, then
+- Land with `g land` on the graft line (`backlog-2`): commit, `g sync`, then
   `g land`. Once landed, **stop**. Don't open a PR, don't poll CI.
 - Batch PRs are the normal path. Oversight asks the server for one with
   `graft repo batch cut <repo> --line <line>`; the mirror service cuts at the
