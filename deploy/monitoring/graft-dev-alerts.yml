@@ -15,7 +15,7 @@ groups:
           severity: critical
         annotations:
           summary: "graft-dev: graft-server /readyz has failed for 5m"
-          runbook: docs/runbooks/graft-dev-backup-restore.md (graft repo)
+          runbook: docs/internal/runbooks/graft-dev-backup-restore.md (graft repo)
 
       - alert: GraftDevMetricsDown
         expr: up{job="graft-dev"} == 0

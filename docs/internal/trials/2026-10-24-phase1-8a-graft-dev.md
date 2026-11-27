@@ -41,7 +41,7 @@ to GitHub.
 `python3 -m graftbench.phase1 --k 20 --batches 10,50,200,500,501`, release
 build of `main` at `292dbf3` (3dbd296 plus the test-only #136) built on the
 VM, a fresh graft-server in a temp dir. Raw:
-[bench/results/2026-10-24-phase1-8a](../../bench/results/2026-10-24-phase1-8a/).
+[bench/results/2026-10-24-phase1-8a](../../../bench/results/2026-10-24-phase1-8a/).
 Another session's 10k core bench was running on the VM at the same time
 (load average about 2 on 4 vCPUs), so read the latencies as an upper bound.
 

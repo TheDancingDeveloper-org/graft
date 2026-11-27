@@ -1,4 +1,4 @@
-//! `graft-mirror serve` (D41, `docs/notes/mirror-service.md` §3.3–§5): one
+//! `graft-mirror serve` (D41, `docs/internal/notes/mirror-service.md` §3.3–§5): one
 //! mirror service for every repository. Its config names the server, its
 //! token, its data directory, its metrics address and its limits, and no
 //! repositories: those are the server's enabled `repo_mirrors` rows.

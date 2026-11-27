@@ -2,7 +2,7 @@ name: ci
 
 # Required checks for the merge queue: fmt, clippy, test.
 # They run on pull requests and in the merge queue. There is no push trigger
-# for main: the queue has already tested what lands (docs/plan.md, CONTRIBUTING.md).
+# for main: the queue has already tested what lands (docs/internal/plan.md, CONTRIBUTING.md).
 on:
   pull_request:
   merge_group:
@@ -187,7 +187,7 @@ jobs:
             build; status=$?
           fi
           exit "$status"
-      # Quarantine (WI-2314, docs/known-flakes.md): rustc, cargo or the
+      # Quarantine (WI-2314, docs/internal/known-flakes.md): rustc, cargo or the
       # linker is sometimes OOM-killed on a shared runner. Retry once only
       # when the log matches .github/scripts/oom-flake-signature.sh; any
       # other failure fails at once. Runs on pull_request and merge_group

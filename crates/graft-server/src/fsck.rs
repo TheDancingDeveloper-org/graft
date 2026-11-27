@@ -6,7 +6,7 @@
 //! each one fsck decodes the stored content, checks its id and parents, and
 //! walks its snapshot, reading each tree and blob once. Refs must point at
 //! stored changesets. Each workspace's draft path rows must match the paths
-//! its stack (`base..head`) changes (`docs/notes/draft-overlap.md` §3).
+//! its stack (`base..head`) changes (`docs/internal/notes/draft-overlap.md` §3).
 //! This is the one operation that reads a whole
 //! repository; it is an offline admin check, never a request path.
 

@@ -1,5 +1,5 @@
 //! The adversarial harness, part 1: racing lands under injected faults,
-//! checked against a model (`docs/notes/adversarial-harness.md` §3, work
+//! checked against a model (`docs/internal/notes/adversarial-harness.md` §3, work
 //! item WI-2345).
 //!
 //! A seeded [`scenario::Plan`] drives several clients landing on one line

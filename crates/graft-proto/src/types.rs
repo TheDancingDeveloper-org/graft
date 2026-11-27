@@ -1186,7 +1186,7 @@ pub const MAX_OVERLAP_PATHS: usize = 64;
 pub const MAX_OVERLAP_PAGE: u32 = 200;
 
 /// `OverlappingDrafts` request: which other live workspaces on `line` have
-/// open drafts changing paths under `paths` (`docs/notes/draft-overlap.md`
+/// open drafts changing paths under `paths` (`docs/internal/notes/draft-overlap.md`
 /// §4). Needs the `repo:<r>:drafts` scope.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OverlappingDrafts {

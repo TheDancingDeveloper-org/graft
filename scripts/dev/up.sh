@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the graft dev stack (docs/dev-stack.md).
+# Start the graft dev stack (docs/internal/dev-stack.md).
 #
 # usage: scripts/dev/up.sh [--dev] [--mirror] [--rusttorrent] [--obs]
 #   default      graft-server and graft-node from graft-dev:local

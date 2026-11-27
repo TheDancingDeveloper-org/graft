@@ -134,7 +134,7 @@ the build (`compileall`), `pr-batch --exclude` drops it, and a simulated
 rebase-merge lands the batch. It reports authorship per commit, `git bisect`
 and `git blame` on the export, good lands held by the bad one, drop and
 recut time, and land to `main` p50/p90. `graftbench.batchlive` is the live
-counterpart against graft-dev and GitHub (docs/trials/2026-10-24-batch-delivery.md).
+counterpart against graft-dev and GitHub (docs/internal/trials/2026-10-24-batch-delivery.md).
 
 ### Against a running server
 
@@ -176,7 +176,7 @@ git clone plus N-1 `git worktree add`. It reports wall time, per-clone
 latency, and bytes on disk split into files, cache and other state. It gates
 only on the counts: every copy exists and matches the model. Times are
 reported, not gated. graft-node is not started. See
-`docs/notes/many-working-copies.md`.
+`docs/internal/notes/many-working-copies.md`.
 
 ## Live awareness (WI-2311)
 
@@ -240,7 +240,7 @@ merge or cherry-pick command, so it carries work across with `graft diff`,
 `graft cat`, a local three-way merge, `commit` and `land`, in two variants
 (`tracked` remembers the last carried point; `mergebase` asks
 `graft api merge_base`). Tags are `tags/<name>` lines. See
-`docs/trials/2026-10-24-branching-strategies.md`.
+`docs/internal/trials/2026-10-24-branching-strategies.md`.
 
 ## Tests
 
@@ -297,7 +297,7 @@ conflict rule and the merge3 regions behave as the scenarios assume.
 ## Real overlapping PRs (WI-2338)
 
 `graftbench/realprs.py` replays real PR diffs from the estate's repositories
-(the cases in `docs/notes/graft-fit-assessment.md`, gap 4) through graft and
+(the cases in `docs/internal/notes/graft-fit-assessment.md`, gap 4) through graft and
 git. Each PR lands from the fork point it really had: once with `graft land`
 (and `land --sync` when the server's rebase refuses), and once with git
 (`git push`; on a rejection `fetch`, `git merge-tree` to classify, `git rebase`

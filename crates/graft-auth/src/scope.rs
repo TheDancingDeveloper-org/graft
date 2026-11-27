@@ -46,7 +46,7 @@ pub enum Scope {
     },
     /// See other agents' open drafts by path (`OverlappingDrafts`):
     /// `repo:<name>:drafts`. Only `admin` grants it, and it grants nothing
-    /// else (`docs/notes/draft-overlap.md` §2).
+    /// else (`docs/internal/notes/draft-overlap.md` §2).
     Drafts {
         /// Repository.
         repo: String,

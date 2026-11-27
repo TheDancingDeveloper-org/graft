@@ -3,7 +3,7 @@
 - **Status:** adopted by the operator on 2026-10-26
   ([D35](decisions.md#d35-the-roadmap-of-record-and-the-phase-2-trigger)).
 - **Companions:** [design.md](design.md) (how it works),
-  [plan.md](plan.md) (the engineering waves and the backlog),
+  [plan.md](internal/plan.md) (the engineering waves and the backlog),
   [decisions.md](decisions.md) (why), [status.md](status.md) (what is
   delivered).
 
@@ -224,6 +224,6 @@ never grows review state beyond attestations.
 ## Reading this page
 
 Each release lists its exit criteria and the decisions that shape it. The
-engineering breakdown, crate by crate, is in [plan.md](plan.md); the backlog
+engineering breakdown, crate by crate, is in [plan.md](internal/plan.md); the backlog
 is in the operator's tracker and summarised in [status.md](status.md). A
 release ships when its exit criteria are met, not on a date.

@@ -130,7 +130,7 @@ pub(crate) fn transition(
 }
 
 /// Adds `cs`'s changed paths to `ws`'s draft path rows: for a draft that
-/// goes on top of its stack (`docs/notes/draft-overlap.md` §3). Cost follows
+/// goes on top of its stack (`docs/internal/notes/draft-overlap.md` §3). Cost follows
 /// the changes in that draft.
 pub(crate) fn add_draft_paths(ws: &WorkspaceRecord, cs: &Changeset) -> Write {
     Write::AddDraftPaths {

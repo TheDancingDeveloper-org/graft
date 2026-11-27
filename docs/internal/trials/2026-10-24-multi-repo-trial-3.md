@@ -103,4 +103,4 @@ Not graft: WI-2436 (Komodo env edit) and WI-2437 (LiteLLM key routing) were rais
 
 ## See also
 
-- [trial 2](2026-10-24-rusttorrent-trial-2.md), [trial 1](2026-10-rusttorrent-trial-1.md), [fit assessment](../notes/graft-fit-assessment.md), [D21, D22, D26, D27, D28](../decisions.md).
+- [trial 2](2026-10-24-rusttorrent-trial-2.md), [trial 1](2026-10-rusttorrent-trial-1.md), [fit assessment](../notes/graft-fit-assessment.md), [D21, D22, D26, D27, D28](../../decisions.md).

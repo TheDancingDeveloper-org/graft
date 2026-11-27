@@ -697,7 +697,7 @@ enum ConflictReason {
   CONFLICT_REASON_CLASH = 4;
 }
 
-// Draft overlap (WI-2310, docs/notes/draft-overlap.md).
+// Draft overlap (WI-2310, docs/internal/notes/draft-overlap.md).
 message OverlappingDraftsRequest {
   string repo = 1;
   string line = 2;
@@ -857,7 +857,7 @@ message RecordExportsRequest {
   optional uint64 epoch = 3;
 }
 
-// ---- mirror settings (D41, docs/notes/mirror-service.md §3.2) -------------
+// ---- mirror settings (D41, docs/internal/notes/mirror-service.md §3.2) -------------
 //
 // A repository bound to an upstream: one row per (repo, upstream). Branch
 // names and the upstream URL are strings; the server never fetches them.

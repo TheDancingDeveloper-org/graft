@@ -597,7 +597,7 @@ async fn a_checkout_less_agent_reads_commits_and_lands_through_the_pr_bridge() {
                 "message": message,
                 "files": [
                     {"path": "README.md", "content": format!("{README}More.\n")},
-                    {"path": "docs/notes.md", "content": INJECTION},
+                    {"path": "docs/internal/notes.md", "content": INJECTION},
                 ],
             }),
         )
@@ -611,7 +611,7 @@ async fn a_checkout_less_agent_reads_commits_and_lands_through_the_pr_bridge() {
     let notes = agent
         .ok(
             "graft_read",
-            json!({"repo": REPO, "at": draft, "path": "docs/notes.md"}),
+            json!({"repo": REPO, "at": draft, "path": "docs/internal/notes.md"}),
         )
         .await;
     assert_eq!(notes["content"], INJECTION);
@@ -627,7 +627,7 @@ async fn a_checkout_less_agent_reads_commits_and_lands_through_the_pr_bridge() {
         .iter()
         .map(|f| f["path"].as_str().unwrap())
         .collect();
-    assert_eq!(paths, ["README.md", "docs/notes.md"]);
+    assert_eq!(paths, ["README.md", "docs/internal/notes.md"]);
     let held = agent
         .ok(
             "graft_workspace",

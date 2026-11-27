@@ -1,5 +1,5 @@
 //! WI-2310: `OverlappingDrafts` over the draft path index, on both stores
-//! (`docs/notes/draft-overlap.md`, D24).
+//! (`docs/internal/notes/draft-overlap.md`, D24).
 
 mod common;
 

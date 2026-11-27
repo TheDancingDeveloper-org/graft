@@ -1,4 +1,4 @@
-# Local dev stack for graft. Read docs/dev-stack.md first.
+# Local dev stack for graft. Read docs/internal/dev-stack.md first.
 #
 # No service bind-mounts a host path. Configs are baked into the image, and the
 # obs images are built from this repository, so the stack works with a Docker
@@ -72,7 +72,7 @@ services:
     volumes:
       - graft-dev-server-objects:/var/lib/graft/objects
       - graft-dev-server-meta:/var/lib/graft/meta
-    # healthcheck: add once the server serves /healthz (docs/dev-stack.md).
+    # healthcheck: add once the server serves /healthz (docs/internal/dev-stack.md).
 
   graft-node:
     <<: [*build, *retry, *watch-node]

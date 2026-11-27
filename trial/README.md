@@ -10,4 +10,4 @@ integration line and a batch PR (decisions D21, D26, D28).
 | `install-cli.sh` | builds and installs the `graft` CLI from `origin/main` |
 | `mint-agent-tokens.sh` | mints one agent token per trial session on graft-dev (`read`, `write`, `drafts`, `land:<line>`, for `GRAFT_TRIAL_REPO`), so the full pre-land check runs; pass `--session ses_…` (the worker's Vogt session) to bind it, so the server refuses a draft claiming another session |
 
-Results go in `docs/trials/`.
+Results go in `docs/internal/trials/`.

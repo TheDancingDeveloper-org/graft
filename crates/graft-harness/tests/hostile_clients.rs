@@ -1,5 +1,5 @@
 //! Part 4 of the adversarial harness (WI-2348,
-//! docs/notes/adversarial-harness.md §4): hostile API clients.
+//! docs/internal/notes/adversarial-harness.md §4): hostile API clients.
 //!
 //! A client attacks the engine's API and graft-auth's token check to
 //! break AGENTS.md rules 7, 8 and 9 and the auth design (§12). The attacks

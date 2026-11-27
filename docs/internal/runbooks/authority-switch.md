@@ -4,7 +4,7 @@ This runbook hands one line between **git-primary** (mode A: GitHub's branch
 is authoritative and graft follows it) and **graft-primary** (mode B: graft
 lands natively and GitHub is an exported mirror). It covers both directions:
 A → B for a cutover, and B → A for a rollback. The design is
-[docs/design.md §11.3](../design.md#113-the-two-way-mirror-during-migration).
+[docs/design.md §11.3](../../design.md#113-the-two-way-mirror-during-migration).
 
 Each step is a `graft-mirror authority` command:
 
@@ -144,6 +144,6 @@ should refuse, and at the end:
 - a full `graft-mirror export --to` of graft's `main` is sha-identical to
   the upstream branch.
 
-Rehearsals are recorded in [docs/trials/](../trials/). A rehearsal against a
+Rehearsals are recorded in [docs/internal/trials/](../trials/). A rehearsal against a
 real scratch GitHub repository (the ruleset gate) needs the operator to
 create that repository and the App installation.

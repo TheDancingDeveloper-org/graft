@@ -2,7 +2,7 @@
 # Build static musl binaries on the host, copy them into running dev containers
 # and restart them. The fast loop that works with a remote Docker daemon:
 # docker cp goes through the API, so the daemon never needs to see the checkout
-# (docs/dev-stack.md).
+# (docs/internal/dev-stack.md).
 #
 # Binaries are static (x86_64-unknown-linux-musl), so they run in the trixie
 # runtime whatever glibc the host has. Needs the musl target installed.

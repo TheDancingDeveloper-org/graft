@@ -231,7 +231,7 @@ python3 -I bench/postland/report.py --jsonl /var/lib/postland/log.jsonl \
     --blocked /var/lib/postland/blocked.json \
     --checker-actor graft-post-land-graft \
     --prometheus "$PROM" --enabled-at "$ENABLED_AT" \
-    --out docs/trials/<date>-v0-2-exit.md
+    --out docs/internal/trials/<date>-v0-2-exit.md
 ```
 
 `batches.json` lists each batch PR in the window with the

@@ -46,7 +46,7 @@ jobs:
         if: steps.scope.outputs.docs_only != 'true'
         with:
           python-version: "3.12"
-      # Quarantine (WI-2314, docs/known-flakes.md): retry the build once
+      # Quarantine (WI-2314, docs/internal/known-flakes.md): retry the build once
       # only when the log matches the OOM-kill signature. Remove with the
       # host fix.
       - name: build release binaries

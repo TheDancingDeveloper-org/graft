@@ -669,7 +669,7 @@ pub enum Write {
     /// is a no-op.
     DeleteWorkspace(String),
     /// Replaces a workspace's draft path rows on `line` with `paths`: the
-    /// union of the paths its stack changes (`docs/notes/draft-overlap.md`
+    /// union of the paths its stack changes (`docs/internal/notes/draft-overlap.md`
     /// §3). Empty `paths` removes them. Cost follows the rows removed and
     /// added.
     SetDraftPaths {
@@ -712,7 +712,7 @@ pub enum Write {
     },
     /// Records that a new line forks from `parent` at position `pos`: the
     /// line's own rows start at `pos + 1`, and reads below that fall through
-    /// to `parent` (`docs/notes/line-fork-point.md`). Written once, when the
+    /// to `parent` (`docs/internal/notes/line-fork-point.md`). Written once, when the
     /// line is created.
     PutLineFork {
         /// The new line.

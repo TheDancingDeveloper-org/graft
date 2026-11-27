@@ -46,7 +46,7 @@ graft_repo = "graft"
 refs = ["refs/heads/main", "refs/heads/graft/"]
 # graft-post-land-check.yml is the main-pinned reusable workflow that
 # graft-post-land.yml calls on a land's check ref (refs/heads/graft/check/...);
-# its attest job posts the passed post-land checks (docs/runbooks/v02-exit.md).
+# its attest job posts the passed post-land checks (docs/internal/runbooks/v02-exit.md).
 workflows = [
   "TheDancingDeveloper-org/graft/.github/workflows/graft-ci-attest.yml@refs/heads/main",
   "TheDancingDeveloper-org/graft/.github/workflows/graft-post-land-check.yml@refs/heads/main",
@@ -91,7 +91,7 @@ name = "trial-1"
 policy = "direct"
 authority = "graft-primary"
 
-# The v0.2 exit rehearsal line of the repository `graft` (docs/runbooks/v02-exit.md).
+# The v0.2 exit rehearsal line of the repository `graft` (docs/internal/runbooks/v02-exit.md).
 # Lines are global to the server, but only `graft` has one by this name.
 # Landing stays direct: nothing runs in the land path. `checks = "post-land"`
 # only tracks each land as pending until the post-land checker (compose

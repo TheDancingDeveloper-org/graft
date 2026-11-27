@@ -131,4 +131,4 @@ Every finding but one was pinned to a single land by its commit and Graft-Change
 
 ## See also
 
-- [trial 1](2026-10-rusttorrent-trial-1.md), [fit assessment](../notes/graft-fit-assessment.md), [D21, D22, D26, D27, D28](../decisions.md).
+- [trial 1](2026-10-rusttorrent-trial-1.md), [fit assessment](../notes/graft-fit-assessment.md), [D21, D22, D26, D27, D28](../../decisions.md).

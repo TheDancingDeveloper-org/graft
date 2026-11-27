@@ -1,5 +1,5 @@
 //! The adversarial harness, part 2: graft's line merge against
-//! `git merge-file` (`docs/notes/adversarial-harness.md` §4, work item
+//! `git merge-file` (`docs/internal/notes/adversarial-harness.md` §4, work item
 //! WI-2346).
 //!
 //! [`case`] draws one seeded three-way input, shaped to hit a chosen

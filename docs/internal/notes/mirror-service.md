@@ -1,13 +1,13 @@
 # Proposal: mirrors as repository settings, one mirror service
 
-Status: **signed off by the operator, 2026-11-05, as [D41](../decisions.md#d41-mirrors-as-repository-settings-one-mirror-service)** (proposed as "D40"; D40 was already taken). Revision 2. This is the design PR
+Status: **signed off by the operator, 2026-11-05, as [D41](../../decisions.md#d41-mirrors-as-repository-settings-one-mirror-service)** (proposed as "D40"; D40 was already taken). Revision 2. This is the design PR
 for moving mirror definitions out of deploy files and into graft. On
 sign-off it becomes decision D40 and amends `design.md` §11. Nothing here is
 built before that.
 
 Revision 3 (2026-11-19, WI-4387) amends point 2 below: an oversight session
 token may hold `mirror:bind` and `mirror:export`. See
-[decisions.md, note on D41](../decisions.md#note-on-d41-an-oversight-token-may-hold-mirrorbind-wi-4387-2026-11-19)
+[decisions.md, note on D41](../../decisions.md#note-on-d41-an-oversight-token-may-hold-mirrorbind-wi-4387-2026-11-19)
 and §3.1.
 
 Revision 2 folds in the Opus review of f55bc56 (WI-3215) and the operator's
