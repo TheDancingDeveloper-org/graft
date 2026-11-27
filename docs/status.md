@@ -1,78 +1,85 @@
-# graft status: what's delivered (2026-10-24)
+# Project status
 
-- **As of:** `main` at `3fe907b`, through #170 (the 2026-10-23 and
-  2026-10-24 runs, #82 through #170), under operator decision
-  [D22](decisions.md#d22-phase-1-is-a-git-alternative), with D26 to D29.
-- **Review:** Vogt WI-2297. Its children are the backlog below.
-- **Numbers:** bench WI-2294, scale 1,000, local server
-  ([results](../bench/results/2026-10-23-scales-10-1000/summary.md)).
+Last reviewed: 2026-10-24.
 
-graft works end to end as source control today:
-- Import a git repository.
-- Clone it whole or sparse; many working copies per host.
-- Create a line, commit drafts in a leased workspace, then sync and land
-  them, with server-side rebase, line merge (the default) and CAS.
-- Preview conflicts with no side effects; get conflicts back in the files,
-  or resolve them over MCP or the API with no working copy.
-- Read log, diff, blame and show.
-- Merge one line into another with recorded merge points, cherry-pick a
-  changeset onto another line, and tag a changeset.
-- Export to git, or deliver a batch to GitHub as one PR with one commit
-  per land (D26), reviewed and rebase-merged by `land-pr` (D28).
+graft is usable today as source control. It covers the whole loop an agent or
+developer needs: import a git repository, clone it whole or sparse, commit
+drafts in a leased workspace, then sync and land them with server-side rebase,
+line merge and compare-and-swap. History reads, line merges, cherry-picks,
+tags and conflict handling are built, and a repository can be exported back to
+git or delivered to GitHub as a batch pull request with one commit per land.
 
-A live trial landed agent work on rustTorrent this way (WI-2270, batch PR
-rustTorrent #214).
+The current phase positions graft as a git alternative with low friction
+([decisions](decisions.md#d22-phase-1-is-a-git-alternative)). Lands are
+`direct`: nothing runs in the land path. Verification, attestation-based
+policies and post-land checks are built in part but switched off; see
+[Planned / not yet built](#planned--not-yet-built). For direction, see the
+[roadmap](roadmap.md).
 
-## Delivered
+## Capabilities
 
-| Area | What works | Evidence |
-| --- | --- | --- |
-| Model, formats | ids, trees, changesets, frames, tokens, frozen by golden vectors; three-way text merge | G1.1, G1.3, G3.4 (#16) |
-| Storage | filesystem object store, SQLite metadata (schema v7: v6 draft paths, v7 line merges), conformance and crash suites | G1.2, G1.5, G1.6 |
-| History reads | log (with `--path`), diff, blame, show, cat, ls; derived line index; a log page reads each changeset once | G1.4, G1.10 (#17), G1.13 (#21), WI-2303 (#92) |
-| Lines | `graft line create/list`, API and MCP `graft_line_create`; a new line records one fork-point row instead of indexing its history | WI-2301 (#98), WI-2316 (#107) |
-| Line merge (D29) | `graft line merge` (gRPC, CLI, MCP `graft_merge`): merge points between lines (schema v7), bounded and memoized merge-base search, `--sync` writes a conflicted merge into the files, `land --merged-from` stamps the result and export writes a `Graft-Merged-From` trailer | WI-2363 (#152), WI-2368 (#157, #158, #159, #164, #166), WI-2372 (#168) |
-| Pick and tag | `graft pick` and MCP `graft_pick`: server-side cherry-pick; `graft tag create/list` and MCP `graft_tag`: immutable tags | WI-2364 (#156), WI-2365 (#153) |
-| Path merge rule | per-path `merge = line \| none`, so lockfiles conflict instead of line-merging | WI-2339 (#135) |
-| Server | gRPC, JSON facade, `/metrics`, health, admin (repo create, token mint and revoke, fsck, backup, gc), per-line policy config; lines default to `direct` | G1.12 (#23), G2.4 (#33), WI-2288 (#76), WI-2298 (#85) |
-| Auth | signed bearer tokens with repo and line scopes, revocation; `/mcp` applies the owner-or-admin check on workspace operations | G1.9, G2.4, WI-2315 (#101) |
-| Pre-land check (D27) | `graft land` and MCP preview conflicts and draft overlap before landing, with `Rebase` `dry_run` (no writes); no build or test runs | WI-2349 steps 0 and 7 (#125, #132) |
-| Attribution | the CLI records the Vogt session, work item and author on drafts and lands, and keeps them through sync, conflict resolution and land rebase; the author defaults to `GRAFT_AUTHOR_*`, then `$USER`/`$LOGNAME` with no email (so `pr-batch` gives the mirror identity); the engine refuses metadata that does not match a session-bound token and accepts it from an unbound one | WI-2350 (#123), WI-2349 step 6 (#131), WI-2414, WI-2412 |
-| Client and CLI | clone (full and sparse), status (`--upstream` conflict preview), diff, commit and amend, workspace, sync, land (line merge by default; `land --squash` isn't built yet — `stack squash` then `land`), stack ops, revert, `--json` with schemas, exit codes | G1.11 (#20), G2.5 (#34), G3.5 (#58), WI-2296 (#83), WI-2309 (#99) |
-| Workspaces and worktrees | leased workspaces, draft states, holders, GC protection records; many working copies per host, coexisting with git | G2.1 (#27), G3.11 (#59), WI-2313 (#102) |
-| Rebase and land | file-level and line-merge rebase (D16), lock-free CAS land, idempotent retry, contention back-off | G2.7 (#31), G3.1 (#51), G3.7 (#64) |
-| Conflicts | `get_conflicts` and `resolve` in the engine, gRPC and MCP (`graft_conflicts`, `graft_resolve`) | WI-2312 (#86, #88, #90, #93) |
-| Git interop | lossless import with a fidelity check (concurrent blob upload, batched engine writes), git-primary follow, deterministic and full export, graft-primary export with lease pushes, authority switch | G1.8, G1.14 (#22), G2.2 (#28), G3.3 (#52), G3.9 (#63), WI-2308 (#104), WI-2318 (#110) |
-| GitHub delivery | one PR per batch (D21) with one commit per land (D26), cut by a server request (`graft repo batch cut` / `CutBatch`) that the mirror service claims (D41 §3.5); the service cuts at the base line's tip and settles the batch. Drop a land, cut batches by size or age; lands with no author email get the mirror identity; batch PRs get the standard review and are rebase-merged by `land-pr` (D28). A wrong or empty mirror DB reports `Unmapped`. The per-land `bridge` is removed; `graft-mirror pr-batch` is the retired CLI for the same export | WI-2284 (#74), WI-2306 (#105), WI-2302 (#106), WI-2320 (#108), WI-2349 step 5 (#134), WI-2340 (#126), WI-2351 (#129), WI-2361 (#148), WI-2354, WI-2355 (#162), WI-4387 |
-| Tags and odd git input | annotated and signed tag objects are kept through import, follow and export; GitHub tags follow as fixed `tags/<name>` refs; tags naming a tree or blob are skipped and reported; oversize blobs are refused in the pre-check, before any write; git metadata path names (`.git`) are refused; export keeps subtrees under a recorded raw tree | WI-2357 (#160), WI-2370 (#167), WI-2342 (#141), WI-2358 (#165), WI-2360 (#163), WI-2359 (#149), WI-2356 (#150) |
-| MCP | read and write tools at the server's `/mcp`, and `graft mcp` over stdio | G1.15 (#12), G2.8 (#35), WI-2300 (#87) |
-| LSP | hover blame, code lenses, diagnostics, commands, virtual documents | G3.6 (#53) |
-| Node daemon | per-host cache daemon forwarding graft methods | G2.3 (#30) |
-| GC | dry-run report; the sweep in the server (`admin gc`, scheduler, metrics), off by default | G2.9 (#37), G3.2 (#66), WI-2274 (#103) |
-| Dev server | graft-dev VM, compose stack in `deploy/`; pre-flight config check, health gate and rollback; scheduled backups and restore runbook | WI-2251 (#50, #55), WI-2291 (#96), WI-2307 (#97) |
-| Adversarial harnesses | `graft-harness`: racing lands under injected faults checked against a model, planted-bug hooks, line merge against `git merge-file`, hostile git repos through import and export, hostile API clients (scopes, tokens, limits, leaks) | WI-2345 (#133, #136, #161), WI-2346 (#144), WI-2347 (#146), WI-2348 (#154) |
-| Measurement | pilot harness and crash suite (Rust); the bench against git (`bench/`), its live-awareness mode, and a scale-10 correctness smoke in the merge queue | G1.16 (#26), WI-2294 (#81), WI-2311 (#100), WI-2305 (#94) |
-| Bench, 2026-10-24 | real-PR replay (115 estate PRs, graft and git matched on all); branching strategies (trunk, release branches, git flow); batch delivery mode | WI-2338 (#130), WI-2362 (#151), WI-2372 (#168), WI-2352 (#145) |
-| Docs | D22 follow-through; D23 (fork-point index, bridge removal); group-commit note; D25 (phase 2), D26, D27, D28, D29; fit assessment; trial-1 write-up | WI-2295 (#89), WI-2321 (#109), WI-2323 (#111), WI-2349 (#122), WI-2353 (#127), WI-2351 (#129), WI-2363 (#152), WI-2336 (#121), WI-2270 (#128) |
+| Area | What works |
+| --- | --- |
+| Model and formats | Ids, trees, changesets, frames and tokens, frozen by golden vectors; three-way text merge |
+| Storage | Filesystem object store and SQLite metadata (schema v7); conformance and crash suites |
+| History reads | `log` (with `--path`), `diff`, `blame`, `show`, `cat`, `ls`; a derived line index; a log page reads each changeset once |
+| Lines | `graft line create` and `list`, also over the API and MCP (`graft_line_create`); a new line records one fork-point row instead of indexing its history |
+| Line merge | `graft line merge` (gRPC, CLI, MCP `graft_merge`): merge points between lines, bounded and memoized merge-base search, `--sync` writes a conflicted merge into the files, `land --merged-from` stamps the result, and export writes a `Graft-Merged-From` trailer |
+| Pick and tag | `graft pick` and MCP `graft_pick` (server-side cherry-pick); `graft tag create` and `list` and MCP `graft_tag` (immutable tags) |
+| Path merge rule | Per-path `merge = line \| none`, so lockfiles conflict instead of line-merging |
+| Rebase and land | File-level and line-merge rebase, lock-free compare-and-swap land, idempotent retry, contention back-off |
+| Conflicts | Conflicts come back in the files; `get_conflicts` and `resolve` in the engine, gRPC and MCP (`graft_conflicts`, `graft_resolve`) let an agent resolve them with no working copy |
+| Pre-land check | `graft land` and MCP preview conflicts and draft overlap before landing, using a `Rebase` `dry_run` that writes nothing; no build or test runs |
+| Client and CLI | Clone (full and sparse), `status` (`--upstream` conflict preview), `diff`, `commit` and `amend`, workspace, `sync`, `land` (line merge by default), stack operations, `revert`, `--json` with schemas, documented exit codes. `land --squash` is not built; use `stack squash` then `land` |
+| Workspaces | Leased workspaces, draft states, holders and GC protection records; many working copies per host, coexisting with git |
+| Server | gRPC, JSON facade, `/metrics`, health, admin (repo create, token mint and revoke, fsck, backup, gc) and per-line policy config; lines default to `direct` |
+| Auth | Signed bearer tokens with repo and line scopes, and revocation; `/mcp` applies an owner-or-admin check on workspace operations |
+| Attribution | The CLI records the session, work item and author on drafts and lands, and keeps them through sync, conflict resolution and land rebase. The author defaults to `GRAFT_AUTHOR_*`, then `$USER` or `$LOGNAME` with no email. The server refuses metadata that does not match a session-bound token and accepts it from an unbound one |
+| Git interop | Lossless import with a fidelity check, following a git remote, deterministic and full export, graft-primary export with lease pushes, and an authority switch |
+| GitHub delivery | One pull request per batch with one commit per land, cut by a server request (`graft repo batch cut` or `CutBatch`) that the mirror service claims. Lands can be dropped, and batches cut by size or age. Lands with no author email get the mirror identity. A wrong or empty mirror database reports `Unmapped` |
+| Tags and unusual git input | Annotated and signed tag objects are kept through import, follow and export; GitHub tags follow as fixed `tags/<name>` refs; tags naming a tree or blob are skipped and reported; oversize blobs are refused in the pre-check, before any write; git metadata path names (`.git`) are refused; export keeps subtrees under a recorded raw tree |
+| MCP | Read and write tools at the server's `/mcp`, and `graft mcp` over stdio |
+| LSP | Hover blame, code lenses, diagnostics, commands, virtual documents |
+| Node daemon | A per-host cache daemon that forwards graft methods |
+| Garbage collection | Dry-run report; a sweep in the server (`admin gc`, scheduler, metrics), off by default |
+| Dev server | Compose stack in `deploy/`, with a pre-flight config check, health gate and rollback; scheduled backups and a restore runbook |
+| Testing | `graft-harness` adversarial harnesses: racing lands under injected faults checked against a model, planted-bug hooks, line merge against `git merge-file`, hostile git repositories through import and export, and hostile API clients (scopes, tokens, limits, leaks). A pilot harness and crash suite; a scale-10 correctness smoke test in the merge queue |
 
-## Built but switched off (phase 2, D22)
+A live trial landed agent work on a real Rust project through the batch
+pull-request path; see the [trial write-ups](internal/trials/).
 
-- The `attested` and `queued` policies.
-- Attest.
-- The trial attester (WI-2276, WI-2292).
-- The CI token exchange (G3.8, #65, #67, #68, #71).
-- Post-land checks with auto-revert.
-- D25 (post-land checks, bisect and auto-revert on batch lines, design
-  §8.7) and §11.4 steps 1 to 4: designed, not started. Phase 2 starts with
-  the graft-primary authority switch.
+## Planned / not yet built
 
-None of it runs in phase 1, and none of it gets extended until phase 2
-starts. The only open item is WI-2293 (p4).
+These are built in part or designed, and switched off or not started. They are
+the subject of the [roadmap](roadmap.md).
 
-## Measured (bench, scale 1,000)
+- **Attestation-based policies.** The `attested` and `queued` land policies,
+  attestations, and a trial attester are built but switched off.
+- **CI token exchange.** A CI job can trade its identity token for a short
+  attest-scoped graft token. Built, switched off.
+- **Post-land checks with automatic revert.** Post-land checks, bisect and
+  auto-revert on batch lines are designed
+  ([decisions](decisions.md#d25-post-land-checks-on-the-batch-line)) but not
+  started.
+- **Graft-primary repositories.** Switching a repository's authority from its
+  git host to graft is the first step of the next phase.
+- **`land --squash`.** Not built; use `stack squash` then `land`.
+- **Embedded single-binary mode.** Deferred to a later phase.
+- **100k-commit benchmark.** Deferred.
+- **Parity with git on read paths.** Closing the remaining gap to git is a
+  later-phase goal; see [Performance](#performance).
 
-1,001 commits on a synthetic Python project, 8 concurrent writers, local
+## Performance
+
+graft's benchmarks compare it against git on the same workload. The full
+method, results and charts are in [benchmarks](guide/benchmarks.md); the
+latest runs are summarised here.
+
+### Benchmark summary (scale 1,000)
+
+1,001 commits on a synthetic Python project, 8 concurrent writers, a local
 server on a 24-CPU host. Each step is a fresh CLI process for both tools.
+[Full results](../bench/results/2026-10-23-scales-10-1000/summary.md).
 
 | | graft | git | graft ÷ git |
 | --- | ---: | ---: | ---: |
@@ -88,32 +95,35 @@ server on a 24-CPU host. Each step is a fresh CLI process for both tools.
 | 8 concurrent clean lands, p50 (ms) | 110 | 139 | 0.79 |
 | 8 concurrent same-file lands (merge3), p50 (ms) | 225 | 137 | 1.64 |
 | import of the history, graft-mirror end to end (s) | 56 | 1 (fast-import) | |
-| import, engine `ImportChangesets` step only, after #110 (s) | 6.2 (was 18.9) | | |
+| import, engine `ImportChangesets` step only (s) | 6.2 (was 18.9) | | |
 
 Correctness held at both scales (10 and 1,000):
-- The final graft tree, the final git tree and a model replay are equal,
-  byte for byte.
+
+- The final graft tree, the final git tree and a model replay are equal, byte
+  for byte.
 - No land was lost or duplicated.
 - The line never moved backwards.
 - Blame is intact.
 - Every real conflict reached the client.
 
-The merge3 row predates WI-2296 (#83): plain `land` was refused 140 times
-before `land --sync` merged. `land` now line-merges by default; re-measure
-with WI-2304. Import: `graft-mirror import` went 22.5 → 18.5 s with
-concurrent blob upload (#104), and the engine's `ImportChangesets` 18.9 → 6.2
-s per 1k with batched writes (#110). The 6.2 s is the engine step alone,
-so neither it nor the 56 s end-to-end figure is comparable with fast-import's
-1 s, which runs locally with no server. The rest is SQLite commits (WI-2323).
-Creating a line now writes one fork row, not a copy of its history (#107).
+Notes on reading the table:
 
-### Read-path floor (WI-2341, D31)
+- The same-file (merge3) row predates the change that made `land` line-merge
+  by default; before it, plain `land` was refused 140 times before
+  `land --sync` merged. It has not been re-measured.
+- Import figures are not comparable with fast-import. The 6.2 s is the engine
+  step alone, and the 56 s end-to-end figure includes the server, while
+  fast-import runs locally with no server. The remainder is mostly SQLite
+  commits.
+- Creating a line now writes one fork row rather than a copy of its history.
 
-Read-path speed is a no-regression floor, not a phase-1 target (D31,
-2026-10-25). No read path may be slower than the twelve-run medians below
-(p50 ms, graft / git, recorded by WI-2341 on 2026-10-24), and every
-operation stays O(change) (rule 2). 2× faster than git is a later-phase
-target. The same figures are D31's guard 1.
+### Read-path floor
+
+Read-path speed is a no-regression floor, not a current target
+([decisions](decisions.md#d31-phase-1-measures-agent-friction-not-read-latency)).
+No read path may be slower than the twelve-run medians below (p50 ms, graft /
+git, recorded on 2026-10-24), and every operation stays proportional to the
+size of the change. Being 2x faster than git is a later-phase target.
 
 | | 1k | 10k |
 | --- | ---: | ---: |
@@ -121,57 +131,24 @@ target. The same figures are D31's guard 1.
 | status | 4.1 / 3.2 | 13.3 / 6.5 |
 | sync, 5 behind | 54.6 / 23.4 | 70.6 / 29.1 |
 
-Parentheses are not used: these cells are the twelve-run medians, not an
-earlier single-run table with a second figure beside it. `log --path` and
-sparse clone are not part of the floor (they already beat git).
+`log --path` and sparse clone are not part of the floor, since they already
+beat git.
 
-log no longer grows with the slice. It is still slower than git: process
-start plus a gRPC connect and one RPC is the floor for a fresh process. A
-warm node daemon is used when its socket exists. status is a per-file
-lstat floor plus index parsing. sync's floor is two fsynced state files
-(`.graft/index` and `.graft/state`); the single-run 1k figure of 6.3 ms
-in `changes/WI-2341.md` is not the floor.
+- `log` no longer grows with the slice. It is still slower than git: process
+  start plus a gRPC connect and one RPC is the floor for a fresh process. A
+  warm node daemon is used when its socket exists.
+- `status` is bounded by a per-file `lstat` plus index parsing.
+- `sync` is bounded by two fsynced state files (`.graft/index` and
+  `.graft/state`).
+- The remaining gap to git (about 1.7x on `log -50` and about 2.0x on `status`
+  at 10k) is a later-phase goal.
 
-These medians are the floor. Closing the remaining gap to git (about
-1.7× on `log -50`, about 2.0× on `status` at 10k) is a later phase;
-WI-2400 is wont_do. The `.graft/index` fsync stays. The 10k `log` and
-import baseline is WI-2304 (#116); 100k is deferred.
+### Git flow (branching benchmark)
 
-### Git flow (branching bench, seed 2362, after WI-2372)
-
-Source: the WI-2372 hand-off (#168). With merge points and `line merge
---sync`, graft reports the same conflicts as git (18 of 18 blocks) and
-merges `release/1.1 → main` clean. A clean merge takes 1 round trip and
-a conflicted merge 3; git takes 2 per merge. Picks still cost 7 round
-trips through the carry path in the tracked and merge-base variants.
-The committed `bench/results/2026-10-24-branching/summary.md` predates
-#168 and will be regenerated.
-
-## Open (phase 1)
-
-Vogt is the source of truth.
-
-| Item | What |
-| --- | --- |
-| WI-2341 | done: twelve-run medians are the D31 floor |
-| WI-2400 | wont_do: parity with git is a later phase (D31) |
-| WI-2314 | CI `test` job OOM flake: quarantined (#91); lift the quarantine once `oom_kill` stays at 0 for a day after the Node B memory fix |
-| WI-2329 | review leftovers, p4 |
-
-Deferred:
-- WI-2366, embedded single-binary mode, a future phase (p4).
-- The 100k bench.
-
-Parked:
-- WI-2214, phase-4 breadth (p4).
-- WI-2293, attester, phase 2 (p4).
-- D25 and §11.4 steps 1 to 4, phase 2.
-
-Closed as not planned:
-- WI-2213, the rustTorrent cutover (D21, D22).
-- WI-2193, the Komodo deployment, superseded by the VM.
-- WI-2369, export raw-tree cost (not a bug).
-- WI-2240, estate token front for Vogt sessions (D10).
-
-Done since the last baseline: WI-2307 (graft-dev backups and alerts),
-WI-2317 (tailnet SSH narrowed).
+With merge points and `line merge --sync`, graft reports the same conflicts as
+git (18 of 18 blocks) and merges `release/1.1` into `main` cleanly. A clean
+merge takes 1 round trip and a conflicted merge 3; git takes 2 per merge.
+Picks still cost 7 round trips through the carry path in the tracked and
+merge-base variants. The committed
+`bench/results/2026-10-24-branching/summary.md` predates the line-merge work
+and will be regenerated.

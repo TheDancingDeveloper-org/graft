@@ -1,6 +1,10 @@
 # Safety
 
-Each row is a claim and the test or result file that shows it. A claim that is not in this table is not one graft makes.
+The durability and correctness claims graft makes, each paired with the test or result file that shows it.
+
+## Claims and evidence
+
+A claim that is not in this table is not one graft makes.
 
 | Claim | What shows it |
 | --- | --- |
@@ -12,4 +16,12 @@ Each row is a claim and the test or result file that shows it. A claim that is n
 | Every conflict reaches the client. | [crates/graft-harness/tests/probes.rs](../../crates/graft-harness/tests/probes.rs) (`racing_merges_land_cleanly_or_conflict`): a racing land merges cleanly or conflicts, and does not land silently. |
 | Replaying real pull requests, graft and git land the same clean merges and the same conflicts. | [bench/results/2026-10-24-real-prs/summary.md](../../bench/results/2026-10-24-real-prs/summary.md) and the matching [results.json](../../bench/results/2026-10-24-real-prs/results.json). That file records one replay; it is not a proof for every repository. |
 
-The harness checks outcomes after the fault, not timings. See [Stability](stability.md) for the encodings and the protocol rule those checks sit on.
+## What the checks measure
+
+The harness checks outcomes after the fault, not timings.
+
+## See also
+
+- [Stability](stability.md): the frozen encodings and the protocol rule these checks sit on
+- [Benchmarks](benchmarks.md)
+- [SECURITY.md](../../SECURITY.md): threat model and reporting
