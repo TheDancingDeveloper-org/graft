@@ -39,7 +39,7 @@
 //! `graft_mirror_lag_changesets` value of -1 means the upstream fetch or list
 //! failed and the lag is unknown.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -190,6 +190,11 @@ pub struct Follower<'a, A> {
     /// Followed markers known to be set, by line: one marker read per line
     /// per run, not per poll.
     marked: Mutex<HashMap<String, ChangesetId>>,
+    /// Lines this follower has reached a verdict on (caught up, or stopped).
+    /// A stop stored by an earlier follower is held quietly only for a line
+    /// in this set; any other stored stop is evaluated afresh once, so a
+    /// deploy that fixes the cause resumes the line (WI-4924).
+    evaluated: Mutex<HashSet<String>>,
     /// The mirror authority lease epoch every ref move carries (D41 §3.6).
     lease_epoch: Option<u64>,
 }
@@ -224,6 +229,7 @@ where
             seen_tags: HashMap::new(),
             last_tags: TagReport::default(),
             marked: Mutex::new(HashMap::new()),
+            evaluated: Mutex::new(HashSet::new()),
             lease_epoch: None,
         }
     }
@@ -543,8 +549,12 @@ where
             self.set_lag_changesets(&l.line, 0);
             return Ok(LineOutcome::UpToDate);
         }
-        if state.diverged == Some(up) {
-            // Still the same stray upstream commit: stay stopped, quietly.
+        if state.diverged == Some(up) && self.is_evaluated(&l.line) {
+            // Still the same stray upstream commit, and this follower has
+            // already judged it: stay stopped, quietly. A stop an earlier
+            // follower stored is not final, because its cause may be gone
+            // (a fix deployed, a database rebuilt): it is evaluated afresh
+            // once below, and then holds or resumes (WI-4924).
             return Ok(LineOutcome::Diverged {
                 reason: Divergence::Held,
                 upstream: up,
@@ -676,12 +686,25 @@ where
         Ok(())
     }
 
+    /// Whether this follower has reached a verdict on `line`.
+    fn is_evaluated(&self, line: &str) -> bool {
+        self.evaluated.lock().expect("evaluated").contains(line)
+    }
+
+    fn mark_evaluated(&self, line: &str) {
+        self.evaluated
+            .lock()
+            .expect("evaluated")
+            .insert(line.to_owned());
+    }
+
     fn caught_up(
         &self,
         l: &FollowLine,
         state: &mut LineState,
         up: GitSha,
     ) -> Result<(), MirrorError> {
+        self.mark_evaluated(&l.line);
         if state.diverged.is_some() {
             tracing::info!(
                 repo = %self.config.repo, line = %l.line, upstream = %up,
@@ -705,6 +728,7 @@ where
         up: GitSha,
         reason: Divergence,
     ) -> Result<LineOutcome, MirrorError> {
+        self.mark_evaluated(&l.line);
         state.diverged = Some(up);
         self.db.set_line(&l.line, state)?;
         tracing::error!(
