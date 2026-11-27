@@ -52,7 +52,7 @@ run diff "/work/$repo" graft diff
 run blame "/work/$repo" graft blame README.md
 
 if [ "$stub" -eq 1 ]; then
-  echo "smoke: not implemented yet: the graft CLI and graft-server are stubs (docs/plan.md)" >&2
+  echo "smoke: not implemented yet: the graft CLI and graft-server are stubs (docs/internal/plan.md)" >&2
   exit 2
 fi
 exit "$status"

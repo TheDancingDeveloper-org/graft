@@ -1,5 +1,5 @@
 //! `OverlappingDrafts`: which other live workspaces have open drafts on
-//! these paths (`docs/notes/draft-overlap.md` §4, D24).
+//! these paths (`docs/internal/notes/draft-overlap.md` §4, D24).
 //!
 //! The answer comes from the draft path index, which every write that moves
 //! a workspace's stack keeps in the same transaction. A page scans at most

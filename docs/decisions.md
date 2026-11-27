@@ -453,9 +453,9 @@ file level.**
 ## D18. Phase 1 kill criteria
 
 **Decided (operator, 2026-10-22): the exit and kill criteria in
-[plan.md](plan.md#phase-1-exit-and-kill-criteria), unchanged.**
+[plan.md](internal/plan.md#phase-1-exit-and-kill-criteria), unchanged.**
 
-[plan.md](plan.md#phase-1-exit-and-kill-criteria) proposes the thresholds. The
+[plan.md](internal/plan.md#phase-1-exit-and-kill-criteria) proposes the thresholds. The
 operator should confirm them, or tighten them, before the pilot starts, so the
 verdict is not argued after the fact.
 
@@ -488,7 +488,7 @@ them can't be re-exported to its git sha.
 - Phase 2 starts as soon as each item's dependencies are done. It doesn't wait
   for a phase 1 verdict.
 - The phase 1 exit criteria in
-  [plan.md](plan.md#phase-1-exit-and-kill-criteria) become targets: the G1.16
+  [plan.md](internal/plan.md#phase-1-exit-and-kill-criteria) become targets: the G1.16
   harness measures and reports them, but nothing is held on them. The
   follow-lag and agent-adoption criteria need a long-running deployment, so
   they are tracked once the G1.17 stack is deployed rather than scored up
@@ -601,7 +601,7 @@ What follows from it:
 - **Delivery to GitHub.** GitHub `main` stays git-primary (D21). The
   graft-primary cutover of rustTorrent (G3.10) is not planned, and the
   per-land PR bridge (the G2.6 CLI) has been removed (WI-2302, WI-2320).
-- **Plan.** [plan.md](plan.md) keeps the build waves as history. Its phase
+- **Plan.** [plan.md](internal/plan.md) keeps the build waves as history. Its phase
   table and backlog follow this decision.
 
 The options it replaces:
@@ -637,13 +637,13 @@ version 5.**
   chunking the full copy (keeps the O(history) cost and breaks one
   transaction per write).
 
-Details: [notes/line-fork-point.md](notes/line-fork-point.md) (WI-2316).
+Details: [notes/line-fork-point.md](internal/notes/line-fork-point.md) (WI-2316).
 
 ## D24. Draft overlap visibility
 
 **Decided (operator, 2026-10-23): "who else has an open draft on these
 paths" is answered only to holders of a new scope, `repo:<r>:drafts`.**
-The design is [notes/draft-overlap.md](notes/draft-overlap.md) (WI-2310).
+The design is [notes/draft-overlap.md](internal/notes/draft-overlap.md) (WI-2310).
 
 - **Scope.** `repo:<r>:drafts` takes no argument. Only `admin` grants it.
   `read`, `write` and `land` don't, and `drafts` doesn't grant `read`.
@@ -972,7 +972,7 @@ Rejected:
 
 **The `.graft/index` fsync stays.** Dropping it would trade durability for milliseconds, and the gaps against git are 1–40 ms per command. The estate's cost was conflict churn, not latency.
 
-**Why the old bar is withdrawn.** The earlier read-path parity bar, and the 2× kill criterion, were inherited from the read pilot ([D18](#d18-read-pilot-first), [D20](#d20-no-pilot-period)). Phase 1 is the git alternative ([D22](#d22-phase-1-is-a-git-alternative)), and its success is whether concurrent sessions land without churn. Exit and kill criteria are restated in [plan.md](plan.md#phase-1-exit-and-kill-criteria).
+**Why the old bar is withdrawn.** The earlier read-path parity bar, and the 2× kill criterion, were inherited from the read pilot ([D18](#d18-read-pilot-first), [D20](#d20-no-pilot-period)). Phase 1 is the git alternative ([D22](#d22-phase-1-is-a-git-alternative)), and its success is whether concurrent sessions land without churn. Exit and kill criteria are restated in [plan.md](internal/plan.md#phase-1-exit-and-kill-criteria).
 
 **Unchanged.** D22 stands. Phase 2 (CI, D25) still starts only with the graft-primary authority switch. graft runs no build, test, check or checker anywhere in phase 1.
 
@@ -1357,7 +1357,7 @@ Rejected:
 repository, stored in the server and managed through the API, CLI and MCP.
 One `graft-mirror serve` process reconciles every mirror from the server.
 Nothing per repository lives in deployment.** The full design is
-[notes/mirror-service.md](notes/mirror-service.md), revision 2 (proposed as
+[notes/mirror-service.md](internal/notes/mirror-service.md), revision 2 (proposed as
 "D40"; renumbered because D40 was already taken). It amends
 [design.md](design.md) §8 (§8.10) and §11 (§11.7).
 
@@ -1480,7 +1480,7 @@ imports as a parentless root and its ancestors are never walked. D11 still
 applies in full to the start commit's tree and to everything after it. The
 cut is auditable on each affected changeset (`mirror.start-at`,
 `mirror.cut-parents`). Mirrors without `start_at` behave as before. The
-details are in `docs/notes/mirror-service.md` §3.2.
+details are in `docs/internal/notes/mirror-service.md` §3.2.
 
 ## Note on D41: an oversight token may hold mirror:bind (WI-4387, 2026-11-19)
 

@@ -1,5 +1,5 @@
 //! Differential test: graft's line merge against `git merge-file`
-//! (`docs/notes/adversarial-harness.md` §4, WI-2346).
+//! (`docs/internal/notes/adversarial-harness.md` §4, WI-2346).
 //!
 //! git is the test oracle here, run as `git merge-file -p --diff3
 //! --diff-algorithm=histogram`. graft-harness is a test tool, so calling git

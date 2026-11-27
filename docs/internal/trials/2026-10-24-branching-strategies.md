@@ -3,9 +3,9 @@
 Trunk-based development, git flow and "release branches only", each run as
 one scripted history through graft and through git. Measurement only (D22):
 nothing built, tested or checked code. Harness:
-[`bench/graftbench/branching.py`](../../bench/graftbench/branching.py). Raw
+[`bench/graftbench/branching.py`](../../../bench/graftbench/branching.py). Raw
 results:
-[`bench/results/2026-10-24-branching`](../../bench/results/2026-10-24-branching/).
+[`bench/results/2026-10-24-branching`](../../../bench/results/2026-10-24-branching/).
 
 ## git concepts in graft
 

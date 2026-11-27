@@ -1,6 +1,6 @@
 //! `Gc` through the engine: the dry run reports what expiry makes
 //! collectable, and the sweep is refused until the operator turns deletion
-//! on, then does what the dry run said (`docs/plan.md` G2.9, G3.2).
+//! on, then does what the dry run said (`docs/internal/plan.md` G2.9, G3.2).
 
 mod common;
 

@@ -1,30 +1,28 @@
 # Contributing to graft
 
-graft is early: the design is in [docs/design.md](docs/design.md) and the
-work is cut into items in [docs/plan.md](docs/plan.md). Pick an item, or open
-an issue to discuss a change to the design first.
+Thanks for your interest in graft. Bug reports, documentation fixes, tests and
+code are all welcome.
 
-## How changes land
+## Before you start
 
-graft lands through its own mirror, batched. Workers `g land` on graft line
-`backlog-1`. Oversight cuts one batch PR from the line (`graft repo batch cut
-graft --line backlog-1`, no `--base`) and merges it with `land-pr --method
-rebase`, so each land keeps its own commit (D28). The graft-dev mirror service
-claims the request and opens the PR; do not run `graft-mirror pr-batch` or the
-retired per-repository batch container. When a backlog of work is under way,
-all of it goes into a single batch PR. Batch rules: workspace
-`.claude/rules/delivery-process.md` ("Landing").
+- **Bugs and small fixes:** open an issue or go straight to a pull request.
+- **New features or design changes:** open an issue first so we can agree the
+  approach. The current design is in [docs/design.md](docs/design.md) and the
+  reasoning behind past choices is in [docs/decisions.md](docs/decisions.md).
+- **Security problems:** do not open a public issue. Follow
+  [SECURITY.md](SECURITY.md).
 
-- Graft line: `backlog-1`; mirror: the `graft` row in the graft-dev
-  `graft-mirror-service`
-- Required checks: `fmt`, `clippy`, `test` (`.github/workflows/ci.yml`)
-- Review: every batch gets a review from a different model than the author
-  where an agent wrote it. Blockers go back to the author.
-- Every change adds a changelog fragment (see [Rules for every change](#rules-for-every-change)).
-- Hand-made PRs (rare, operator-agreed) still squash through the merge queue.
+## Sending a pull request
 
-**Required checks** (`.github/workflows/ci.yml`, on `pull_request` and
-`merge_group`):
+1. Fork the repository and branch from `main`.
+2. Make a focused change: one concern per pull request.
+3. Run the [local checks](#local-checks) and add tests with your change.
+4. Add a changelog fragment as `changes/<short-name>.md` (one or two lines).
+   Do not edit `CHANGELOG.md` directly.
+5. Open the pull request against `main`. A maintainer reviews it and merges it
+   through the merge queue once the required checks pass.
+
+The required checks run on every pull request and in the merge queue:
 
 | Check | Runs |
 | --- | --- |
@@ -32,32 +30,26 @@ all of it goes into a single batch PR. Batch rules: workspace
 | `clippy` | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
 | `test` | `cargo nextest run --workspace --all-features`, plus doctests |
 
-A pull request or merge-queue group whose diff touches only `docs/**`,
-`changes/**`, `bench/results/**` or `*.md` files skips the Rust steps of
-these jobs (and of `bench-smoke`); the checks still run and report success
-(`.github/scripts/docs-only.sh`).
+A change that only touches documentation (`docs/**`, `changes/**`,
+`bench/results/**` or `*.md`) skips the Rust steps; the checks still report.
+Expensive suites (the crash suite, the pilot harness, fuzzing) run nightly or
+in the merge queue, not on every push. Releases are `v*` tags on `main`, and
+versions are bumped only in the release pull request.
 
-Pushes to `main` don't re-run CI, because the queue already ran it. Expensive
-suites (the crash suite, the pilot harness, fuzzing) run nightly or in the
-merge queue, never as required PR checks.
+Maintainers' own delivery process, which uses graft itself, is described in
+[docs/internal/landing.md](docs/internal/landing.md).
 
-**Releases** are `v*` tags on `main`. Versions are bumped only in the release
-PR, never in feature PRs.
+## Engineering rules
 
-## Rules for every change
-
-- **Stay inside your crates.** Plan items list the crates they own, and
-  parallel work depends on that. A change to another crate's public API is a
-  separate, small interface PR that lands first.
+- **Keep a change within the crates it needs.** A change to another crate's
+  public API is best sent as a separate, small pull request that lands first.
 - **One dependency per line, sorted**, in the root
   `[workspace.dependencies]`. Resolve `Cargo.lock` conflicts by regenerating
   it, never by hand.
-- **Changelog fragments:** add `changes/<item-or-pr>.md` (one or two lines).
-  Don't edit a shared changelog.
-- **Tests come with the change.** Each plan item has a test strategy; durable
-  encodings need golden vectors, and stores must pass the conformance suite.
+- **Tests come with the change.** Durable encodings need golden vectors, and
+  stores must pass the conformance suite.
 - **Design changes** (anything in `docs/design.md`, or a durable format) are
-  their own PR and need the maintainer's sign-off.
+  their own PR and need a maintainer's sign-off.
 - **No secrets** in code, tests, fixtures or logs.
 
 ## Local checks

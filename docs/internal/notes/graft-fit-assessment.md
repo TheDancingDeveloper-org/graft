@@ -3,8 +3,8 @@
 Status: assessment for WI-2336 (2026-10-24). Read-only: no repository or
 server was changed. It compares the git and GitHub flow that six estate
 repositories actually used with what graft phase 1 would have done
-([D21](../decisions.md#d21-batch-pr-export),
-[D22](../decisions.md#d22-phase-1-is-a-git-alternative)). It ends with
+([D21](../../decisions.md#d21-batch-pr-export),
+[D22](../../decisions.md#d22-phase-1-is-a-git-alternative)). It ends with
 graft's fundamental gaps, ranked.
 
 ## 1. Bottom line
@@ -77,7 +77,7 @@ graft's fundamental gaps, ranked.
   everything.
 - **graft side:**
   - docs/design.md, decisions.md (D21–D24), status.md, plan.md;
-  - the bench at 1k and 10k (`docs/trials/2026-10-23-*`);
+  - the bench at 1k and 10k (`docs/internal/trials/2026-10-23-*`);
   - WI-2270 and its comments, and rustTorrent PR #214;
   - the CLI and mirror code, where the docs were silent.
 

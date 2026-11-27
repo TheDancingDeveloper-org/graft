@@ -5,7 +5,7 @@
 //! Two agents change one file on `main`. A lands first; B's land conflicts.
 //! B reads the conflict, resolves it, and lands. The cases are a same-line
 //! edit, delete/modify, and a binary file. The original finding is in
-//! `docs/notes/mcp-conflict-resolution.md`.
+//! `docs/internal/notes/mcp-conflict-resolution.md`.
 
 mod common;
 #[path = "common/mcp_agent.rs"]

@@ -20,7 +20,7 @@ running() {
 # Find the running server container: dev variant when up, else the image one.
 cid="$(running)"
 if [ -z "$cid" ]; then
-  echo "crash: graft-server is not running (stubs exit at start; see docs/dev-stack.md)" >&2
+  echo "crash: graft-server is not running (stubs exit at start; see docs/internal/dev-stack.md)" >&2
   exit 2
 fi
 

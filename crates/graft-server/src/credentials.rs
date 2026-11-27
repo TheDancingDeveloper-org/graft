@@ -1,4 +1,4 @@
-//! Encrypted mirror credentials (D41, `docs/notes/mirror-service.md` §3.4).
+//! Encrypted mirror credentials (D41, `docs/internal/notes/mirror-service.md` §3.4).
 //!
 //! The server holds a ring of credential key-encryption keys (KEKs),
 //! unrelated to the signing key: one active KEK that seals, and retired

@@ -97,4 +97,4 @@ the fixes above removes it.
 - [graft fit assessment](../notes/graft-fit-assessment.md): §1 uses this
   trial as evidence of the batching cost, and §5 (rustTorrent) gives the
   repository's PR and conflict profile.
-- [D21, D22, D26](../decisions.md).
+- [D21, D22, D26](../../decisions.md).

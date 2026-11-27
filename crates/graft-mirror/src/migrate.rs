@@ -1,4 +1,4 @@
-//! `graft-mirror import-config` (D41, `docs/notes/mirror-service.md` §6
+//! `graft-mirror import-config` (D41, `docs/internal/notes/mirror-service.md` §6
 //! step 3): moves today's per-repository `follow` configs onto the server's
 //! mirror rows, so one `graft-mirror serve` runs them all.
 //!

@@ -347,7 +347,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
     ///
     /// A new line forks from the line holding the nearest landed ancestor
     /// of `new` and indexes only the unlanded stretch above it
-    /// (`docs/notes/line-fork-point.md`).
+    /// (`docs/internal/notes/line-fork-point.md`).
     pub(crate) async fn line_rows(
         &self,
         repo: RepoId,

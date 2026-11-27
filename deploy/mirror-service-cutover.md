@@ -1,7 +1,7 @@
 # Mirror service cutover and retirement (D41 §6 steps 2–5)
 
 Moves graft-dev's thirteen per-repository `graft-mirror follow` containers
-onto one `graft-mirror serve`. Design: `docs/notes/mirror-service.md` §6.
+onto one `graft-mirror serve`. Design: `docs/internal/notes/mirror-service.md` §6.
 Run it on the graft-dev VM, from `/opt/graft`, as an operator. Nothing here
 prints a secret: every token and credential goes from its store into a
 `0600` file and is read from that file, never from argv.
@@ -203,7 +203,7 @@ sudo test -s "$B/pre-deploy/meta.db" && sudo test -s "$B/now/meta.db" \
 ```
 
 Copy `$B` off the VM as well (the graft-dev backup runbook,
-`docs/runbooks/graft-dev-backup-restore.md`), and only go on once
+`docs/internal/runbooks/graft-dev-backup-restore.md`), and only go on once
 `backup ok` printed and the copy is made.
 
 **8b. Retire.** This makes the old layout unrecoverable except from `$B`:

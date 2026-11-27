@@ -1,13 +1,13 @@
 # graft build plan
 
-- **Status:** Draft 2 (2026-10-23; backlog updated 2026-10-24, through #170): re-phased by [D22](decisions.md#d22-phase-1-is-a-git-alternative).
-  What is delivered is in [status.md](status.md).
-- **Design:** [design.md](design.md) · **Decisions:** [decisions.md](decisions.md)
+- **Status:** Draft 2 (2026-10-23; backlog updated 2026-10-24, through #170): re-phased by [D22](../decisions.md#d22-phase-1-is-a-git-alternative).
+  What is delivered is in [status.md](../status.md).
+- **Design:** [design.md](../design.md) · **Decisions:** [decisions.md](../decisions.md)
 
 ## Phases
 
-The product roadmap is [roadmap.md](roadmap.md) (operator, 2026-10-26,
-[D35](decisions.md#d35-the-roadmap-of-record-and-the-phase-2-trigger)).
+The product roadmap is [roadmap.md](../roadmap.md) (operator, 2026-10-26,
+[D35](../decisions.md#d35-the-roadmap-of-record-and-the-phase-2-trigger)).
 It supersedes the phase table that used to live here. In short:
 
 | Release | Ships | State |
@@ -219,7 +219,7 @@ item delivered and accepted. Their phase names predate D22.
 
 - A Cargo workspace of 19 crates with frozen public APIs and `todo!()` bodies.
   It passes `CARGO_BUILD_JOBS=4 cargo check --workspace --all-targets`.
-- `docs/design.md`, `docs/plan.md`, `docs/decisions.md`.
+- `docs/design.md`, `docs/internal/plan.md`, `docs/decisions.md`.
 
 **Before phase 1 starts**, the operator answers the phase 1 blockers in
 decisions.md. (All phase 1 decisions are decided: D2, D3, D4, D5, D7,
@@ -507,7 +507,7 @@ through git and GitHub.
 - Test: the rehearsal is recorded in the runbook.
 
 **G1.18 Pilot run and verdict.**
-- Crates: none (`docs/trials/`)
+- Crates: none (`docs/internal/trials/`)
 - Needs: G1.16, G1.17
 - Deliver: rustTorrent imported and followed for 7 days. Agent sessions in
   the rustTorrent lane are told to use `graft clone` and `graft log/diff/blame`
@@ -518,7 +518,7 @@ through git and GitHub.
 
 ### Phase 1 exit and kill criteria
 
-> Restated by [D31](decisions.md#d31-phase-1-measures-agent-friction-not-read-latency)
+> Restated by [D31](../decisions.md#d31-phase-1-measures-agent-friction-not-read-latency)
 > (operator decision, 2026-10-25). The phase-1 target is minimal agent
 > friction and multi-session building without conflict churn. Read-path
 > speed is a no-regression floor (the WI-2341 medians, enforced by bench
@@ -819,7 +819,7 @@ run at once.
 **G3.2 GC: sweep.**
 - Crates: `graft-gc`
 - Needs: G2.9, G3.11 (protection records). Real deletion is not safe without
-  them. Under [D20](decisions.md#d20-no-pilot-period) it starts as soon as
+  them. Under [D20](../decisions.md#d20-no-pilot-period) it starts as soon as
   both are done, with no phase 2 gate. It sits in wave 3.C because G3.11 is
   in 3.B.
 - Deliver: the sweep in design §8.6: lapse, collect (with the successor
@@ -935,7 +935,7 @@ publish decisions (D1, D2).
 | G1.15 | 1.E | graft-mcp |
 | G1.16 | 1.F | graft-testkit, tests/ |
 | G1.17 | 1.F | ops repo |
-| G1.18 | 1.F | docs/trials |
+| G1.18 | 1.F | docs/internal/trials |
 | G2.1 | 2.A | graft-engine |
 | G2.2 | 2.A | graft-git |
 | G2.3 | 2.A | graft-node |

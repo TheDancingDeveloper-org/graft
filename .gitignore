@@ -1,3 +1,6 @@
 /target
 *.tmp
 .graft/
+# Default data and state directories of `graft serve --dev`.
+.graft-serve/
+.graft-serve-state/

@@ -1,5 +1,5 @@
 //! `GetConflicts` and `Resolve`: conflict resolution without a working copy
-//! (WI-2312, design note `docs/notes/mcp-conflict-resolution.md`, option a).
+//! (WI-2312, design note `docs/internal/notes/mcp-conflict-resolution.md`, option a).
 //!
 //! `GetConflicts` plans the workspace's sync onto the target in memory,
 //! exactly as `Sync` would (decision D16 line merge included), and reports

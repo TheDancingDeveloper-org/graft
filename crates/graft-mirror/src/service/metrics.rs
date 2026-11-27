@@ -1,4 +1,4 @@
-//! The service's metrics (D41, `docs/notes/mirror-service.md` §3.3): one
+//! The service's metrics (D41, `docs/internal/notes/mirror-service.md` §3.3): one
 //! `/metrics` endpoint, every mirror series labelled `repo`. A repository's
 //! series exist only while the service has a task for it; the service drops
 //! them all when the task stops, so the label's cardinality follows the
