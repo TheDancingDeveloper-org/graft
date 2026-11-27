@@ -1,7 +1,8 @@
-# ci/: workflow templates for graft-managed repositories
+# CI workflow templates for graft-managed repositories
 
-Templates for repositories whose `main` is managed by graft (design §8.3,
-§11.3, [D6](../docs/decisions.md#d6-landing-gate)). They are not run by this
+Templates for repositories whose `main` is managed by graft (see
+[design](../docs/design.md) sections 8.3 and 11.3, and the
+[landing-gate decision](../docs/decisions.md#d6-landing-gate)). They are not run by this
 repository's own CI, and `.github/workflows/` does not use them.
 
 | File | Purpose |
@@ -69,7 +70,7 @@ a `ci` principal whose subject is not pinned to exactly `req.changeset`
 (pinned to another changeset, or not pinned at all), before it looks the
 changeset up. So a CI token attests the one changeset it was minted for.
 
-### Server configuration (what an operator sets)
+### Server configuration
 
 For each GitHub repository, two bindings:
 
@@ -97,8 +98,8 @@ grants `Attest` and nothing else: no read, no write, no land, no workspaces.
 `write` does not imply it, so a token with only `write` cannot attest. A CI
 token therefore reads the repository and attests the one changeset it is
 pinned to, and cannot open, move, adopt or close drafts or workspaces
-(operator decision, WI-2272; before it, CI attested with a `write` scope on an
-unused prefix, which also admitted those workspace calls).
+(earlier designs had CI attest with a `write` scope on an unused prefix, which
+also admitted those workspace calls).
 
 ### Trust model
 
@@ -131,37 +132,38 @@ unused prefix, which also admitted those workspace calls).
 
 ## What the templates expect from the `graft` CLI
 
-`graft attest <rev> --check NAME --pass|--fail [--url URL]` exists (G3.5).
-The templates call it with `--token-file`, as the global option takes the
-bearer token from a file.
+`graft attest <rev> --check NAME --pass|--fail [--url URL]` posts one
+attestation. The templates call it with `--token-file`, as the global option
+takes the bearer token from a file.
 
-`graft ci exchange` does not exist yet; it belongs to `graft-cli` and
-`graft-server` (WI-2271), and the templates expect this form:
-
-- `graft ci exchange --provider github|woodpecker --changeset <id> --out PATH`:
-  reads the CI JWT on stdin, calls a server RPC that runs
-  `graft_auth::oidc::Exchange::exchange_pinned` (its commit check is the
-  mirror map's "git sha is the export of this changeset"), and writes the
-  graft token to `PATH`, created 0600. It never prints the token.
+`graft ci exchange --provider github|woodpecker [--changeset <id>] --out PATH`
+reads the CI JWT on stdin, calls a server RPC that runs
+`graft_auth::oidc::Exchange::exchange_pinned` (its commit check is the mirror
+map's "git sha is the export of this changeset"), and writes the graft token to
+`PATH`, created with mode `0600`. It never prints the token.
 
 ## Woodpecker
 
 `Provider::Woodpecker` verifies a JWT whose `repo` (`owner/name`), `repo_id`,
 `ref` and `commit` claims name the pipeline's repository, with the same issuer,
 audience, lifetime and binding rules. The claim names are an assumption about
-the job token an estate Woodpecker will issue; check them against a real token
+the job token a Woodpecker server issues; check them against a real token
 before enabling it. A Woodpecker pipeline is the branch's own file, so it
 cannot be pinned to a trusted workflow: a Woodpecker binding can hold `read`
 only, and `exchange_pinned` refuses a Woodpecker `attest` binding. There is no
 Woodpecker template.
 
-## Rehearsal
+## Testing
 
-The plan asks for one live rehearsal of a draft gaining an attestation from a
-real or `act`-run workflow. It is not done: `act` is not installed on the
-build host, and `graft ci exchange` and the server's exchange RPC (WI-2271)
-do not exist yet. Follow-up, once they do: run `graft-pre-land.yml` under `act`
-against a scratch repository whose binding trusts a locally served JWKS, land
-the draft with an `attested` policy before and after, and check `Rejected`
-then `Landed`. `crates/graft-auth/tests/oidc.rs` covers the exchange itself
-against recorded tokens.
+`crates/graft-auth/tests/oidc.rs` covers the exchange itself against recorded
+tokens. A live end-to-end rehearsal of a draft gaining an attestation from a
+real (or `act`-run) workflow is not recorded here. To perform one, run
+`graft-pre-land.yml` under `act` against a scratch repository whose binding
+trusts a locally served JWKS, land the draft with an `attested` policy before
+and after, and check for `Rejected` and then `Landed`.
+
+## See also
+
+- [CI attestation guide](../docs/guide/ci-attest.md)
+- [Server guide](../docs/guide/server.md#ci-ci-ciissuers-and-cibindings)
+- [graft-auth](../crates/graft-auth/README.md)

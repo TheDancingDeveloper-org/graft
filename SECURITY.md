@@ -27,7 +27,8 @@ anyone who holds a token can use it, within its scopes, until it expires or
 is revoked. A repository is the read boundary: a token that can read a
 repository can read every path in it, because there are no per-path read
 restrictions yet. A node verifies tokens locally, with no call back to an
-identity service. Content is verified by hash at every tier, so a corrupted or substituted object is rejected, not served.
+identity service. Content is verified by hash at every tier, so a corrupted
+or substituted object is rejected, not served.
 
 ## Token rules for users
 
@@ -43,10 +44,10 @@ identity service. Content is verified by hash at every tier, so a corrupted or s
   through an argument.
 - Ask for short lifetimes. The server caps every minted token at its
   configured maximum, and a token you mint can't outlive the token you used.
-- If a token leaks, have the server operator revoke it. Revocation is recorded
+- If a token leaks, ask the server's administrator to revoke it. Revocation is recorded
   by token id, so the server never stores the token itself. A revoked token is
   refused for writes at once; reads may still succeed until it expires, so
   keep lifetimes short.
 
-Server operators: see [Tokens and scopes](docs/guide/server.md#tokens-and-scopes)
+Server administrators: see [Tokens and scopes](docs/guide/server.md#tokens-and-scopes)
 for minting, scopes and revocation.

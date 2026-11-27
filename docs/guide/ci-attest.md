@@ -1,11 +1,14 @@
 # Attest a changeset from GitHub Actions
 
+This page explains how a GitHub Actions job attests a graft changeset without a
+stored secret.
+
 A trusted GitHub Actions job can exchange its GitHub OpenID Connect (OIDC)
 identity token for a short-lived graft token and use that token to post an
 `Attest` with `kind = check` for one changeset. The exchange does not require a
 stored GitHub secret.
 
-The server administrator must first configure a GitHub issuer and a repository
+Prerequisites: the server administrator must first configure a GitHub issuer and a repository
 binding. The binding pins the GitHub repository, numeric repository ID, ref,
 and workflow. Its only scope should be `repo:<repository>:attest`. See the
 [server configuration reference](server.md#ci-ciissuers-and-cibindings).
@@ -77,7 +80,7 @@ jobs:
 ```
 
 The `@main` pin is required. Calling the reusable workflow by a relative path
-would make `job_workflow_ref` the branch's own file. To rehearse a batch
+would make `job_workflow_ref` the branch's own file. To try a batch
 branch, run this dispatch workflow on `refs/heads/graft/batch-N` and pass the
 changeset that branch's commit exports. Allow that ref with a prefix rule such
 as `refs/heads/graft/` (a trailing `/` matches every ref under the prefix) and
@@ -99,9 +102,9 @@ pinned at `@main`, and only that call gets `id-token: write`. The called
 workflow has two kinds of job:
 
 - `fmt`, `clippy` and `test` run the same commands as the repository's
-  required checks, on the self-hosted pool. They check out the landed commit
+  required checks, on your CI runners. They check out the landed commit
   with `contents: read`, no `id-token` and no secrets.
-- `attest` runs on the attestation runner after the checks, even when one
+- `attest` runs on a dedicated runner after the checks, even when one
   failed. It checks out no repository code. It exchanges its identity once
   and posts a pass (`ci/fmt`, `ci/clippy`, `ci/test`) for each check job that
   succeeded. A failed, skipped or cancelled check posts nothing; the checker
@@ -111,3 +114,10 @@ Add `graft-post-land-check.yml` at `refs/heads/main` to the binding's
 workflow list. GitHub dispatches only workflows that exist on the default
 branch, so both files must be on main before the first dispatch. Leave the
 workflow off the required checks.
+
+## See also
+
+- [Server guide: CI configuration](server.md#ci-ciissuers-and-cibindings)
+- [Git migration and mirrors](git-migration.md)
+- [CLI reference](cli.md)
+- [Safety](safety.md)

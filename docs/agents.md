@@ -1,5 +1,7 @@
 # Using graft from an agent
 
+This guide is for an AI agent or an automation author who uses graft to read, change and land code through the CLI or MCP.
+
 graft is a server-centric source control system. A **repository** holds history as changesets on a **line** (the usual one is `main`). A **workspace** is one agent's place to work: a lease on the server plus a stack of **drafts**. A draft is a changeset that is not on the line yet. **Land** rebases that stack onto the line tip and moves the line by compare-and-swap. There is no branch per change and no pull request between agents: concurrent work lands on the same line, and a conflict comes back in the files.
 
 Log in to a named server once. `graft clone graft://HOST:PORT/REPO` uses the server whose endpoint matches that URL; the working copy records the server name. A bare repository name still uses the default server. A token never goes in the URL.
@@ -17,9 +19,9 @@ The token is a bearer credential. Never print it, never pass it as an argument, 
 
 ## The loop
 
-1. **Clone.** `graft clone graft://HOST:PORT/REPO DIR` (or `graft clone REPO DIR --line main` when a default server is configured) then `cd DIR`. Always clone into a directory unique to your session (for example under your session's own worktree), never a shared path such as `/tmp/<repo>-<work-item>`: a working copy is leased to the session that made it, and a later session that reuses it is refused with `this working copy is leased by <owner>; clone a fresh working copy` (an admin may still take it over). A working copy is also a workspace. `graft workspace` shows it; `graft workspace renew` extends the lease.
+1. **Clone.** `graft clone graft://HOST:PORT/REPO DIR` (or `graft clone REPO DIR --line main` when a default server is configured) then `cd DIR`. Always clone into a directory unique to your run, never a shared path such as `/tmp/<repo>`: a working copy is leased to the agent session that made it, and a later session that reuses it is refused with `this working copy is leased by <owner>; clone a fresh working copy` (an admin may still take it over). A working copy is also a workspace. `graft workspace` shows it; `graft workspace renew` extends the lease.
 2. **Edit** with ordinary tools. `graft status` lists changes; `graft diff` shows them. `graft status --upstream` asks, without moving anything, how far the line tip is ahead and whether your files would merge or conflict. `graft status --drafts` lists other live workspaces with open drafts on those files (needs the `repo:<r>:drafts` scope).
-3. **Commit** a draft: `graft commit -m "message"`. More edits become another draft, or replace the head with `graft commit --amend`. `graft stack` lists the drafts; `graft stack squash` makes them one. Author defaults to `GRAFT_AUTHOR_NAME` / `GRAFT_AUTHOR_EMAIL`. Kind defaults to `GRAFT_AUTHOR_KIND` when set, else `human`. An agent sets `GRAFT_AUTHOR_KIND=agent`. Session and work-item identity, when the caller has them, come from `GRAFT_SESSION_ID` and `GRAFT_WORK_ITEM` (the older names are still read as a fallback). A commit then stores them as `agent.session` / `agent.work_item` (and, when set, `agent.model` / `agent.coauthors`). Lands export the work item as a `Graft-Work-Item` trailer next to `Graft-Session`.
+3. **Commit** a draft: `graft commit -m "message"`. More edits become another draft, or replace the head with `graft commit --amend`. `graft stack` lists the drafts; `graft stack squash` makes them one. Author defaults to `GRAFT_AUTHOR_NAME` / `GRAFT_AUTHOR_EMAIL`. Kind defaults to `GRAFT_AUTHOR_KIND` when set, else `human`. An agent sets `GRAFT_AUTHOR_KIND=agent`. Session and work-item identity, when the caller has them, come from `GRAFT_SESSION_ID` and `GRAFT_WORK_ITEM` (older names are still read as a fallback). A commit then stores them as `agent.session` / `agent.work_item` (and, when set, `agent.model` / `agent.coauthors`). Lands export the work item as a `Graft-Work-Item` trailer next to `Graft-Session`.
 4. **Sync** to pick up other lands: `graft sync`. Exit 0 means the working copy is on the tip (a stack is rebased). Exit 3 means conflicts; see below.
 5. **Land:** `graft land`. To land a stack as one changeset, run `graft stack squash` and then `graft land`. `land --squash` isn't built yet: it exits 5 with `not built yet` and lands nothing. Before it sends anything, land runs a pre-land check: a dry-run rebase that stops on a real conflict, plus a report of overlapping drafts. `--no-check` skips it. The dry run needs only what a land needs. The overlap part needs `repo:<r>:drafts`; without that scope only that part is skipped (`pre-land: draft overlap not checked` on stderr) and the conflict stop still works. The check builds and tests nothing.
 
@@ -51,24 +53,23 @@ change, and nothing restarts.
   the base line's tip, opens the pull request and settles it. `graft repo
   batch status` shows the open batch. Omit `--base`: the API accepts a
   changeset id there, but the service refuses a chosen base as `unsupported`
-  today. A cut needs `repo:<repo>:admin` or `mirror:export` (which an
-  oversight session holds), not `mirror:bind`. You do not need a
+  today. A cut needs `repo:<repo>:admin` or `mirror:export` (which a
+  supervisor token holds), not `mirror:bind`. You do not need a
   per-repository config file or a container.
 
 **Who may do which.** Binding, removing or purging a mirror needs
 `mirror:bind`, and changing export lines needs `mirror:export`. Those two
-scopes are held by the operator and by an **oversight session** token, which
-the engine mints only for a session a person started to supervise others. A
-worker's or a review session's token is an `Agent` token and cannot hold
-them. Reads still work with `repo:<r>:read`
+scopes are held by administrators and by tokens of kind `oversight`, which are
+minted for a session that supervises other agents. An ordinary `agent` token
+cannot hold them. Reads still work with `repo:<r>:read`
 (`graft_mirror_status`, `graft_mirror_list`), and an existing row's other
 settings can be changed by the repository's admin; but a bind, remove or
 purge returns `permission_denied`, and that is the intended answer, not a
-bug to work around. If you are a worker and a task needs a mirror created or
-changed, report it to oversight rather than asking for the grant.
+bug to work around. If a task needs a mirror created or
+changed, report it to whoever supervises the agent rather than asking for the grant.
 
 The upstream is bounded by the server's `mirror.allowed_hosts`; a host the
-operator has not allowed is refused, and no token can widen that list.
+server's administrator has not allowed is refused, and no token can widen that list.
 
 ## Conflicts (exit 3)
 
@@ -199,9 +200,17 @@ An agent with no working copy talks to the server's `/mcp` endpoint (streamable 
 The repository tools are the same as over stdio: `graft_log`, `graft_show`, `graft_diff`, `graft_blame`, `graft_read`, `graft_ls`, and the writes `graft_workspace`, `graft_commit` (inline file content), `graft_sync`, `graft_land`, `graft_conflicts`, `graft_resolve`. The loop is: `graft_workspace` to open one, `graft_commit` with the files, `graft_sync`, `graft_land`. Working-copy tools (`graft_status`, `graft_commit` with `from_working_copy`) exist only on stdio inside a checkout.
 
 The mirror and batch tools are installed on `/mcp` too, so a checkout-less
-agent with an oversight token can create a repository, bind its mirror and
+agent with an `oversight` token can create a repository, bind its mirror and
 cut its first batch without a working copy. The one exception is
 `graft_mirror_credential`, which the mount refuses because it reads a host
 file.
 
 Results are capped; when a result has `next`, call again with it as `cursor`. Errors carry a `kind`: `conflict` lists the paths to fix with `graft_conflicts` and `graft_resolve`; `stale_base` means call `graft_sync` first; `contended` means call `graft_land` again; `unauthenticated` and `permission_denied` mean stop and report. See the [MCP guide](guide/mcp.md) for every tool's arguments.
+
+## See also
+
+- [Concepts for git users](guide/concepts.md)
+- [CLI reference](guide/cli.md)
+- [MCP guide](guide/mcp.md)
+- [Git migration and mirrors](guide/git-migration.md)
+- [Safety](guide/safety.md)
