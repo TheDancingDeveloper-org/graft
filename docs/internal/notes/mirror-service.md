@@ -119,8 +119,13 @@ changes what is fetched from or pushed to.
 - `GetMirrorCredential` (§3.4);
 - `SetMirrorStatus` (§3.3);
 - `UpdateRef`, only on a line that carries the followed marker
-  `graft.followed/<line>` for that mirror row, and only by CAS;
-- importing objects and changesets into such a line;
+  `graft.followed/<line>` for that mirror row, and only by CAS; and the
+  creation of that marker for a line the enabled row follows that does not
+  exist yet, under the lease (the first import of a repository: the marker
+  first, then the line). The mirror never marks a line that already exists;
+  that is `mark-followed`, by the repository admin;
+- importing objects and changesets into such a line, or into a followed line
+  that does not exist yet;
 - acquiring, renewing and releasing the mirror authority lease (§3.6);
 - claiming, completing and failing batch and rewind requests (§3.5);
 - recording exports (`RecordExports`) under the lease it holds (§3.6): the

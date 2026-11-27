@@ -97,8 +97,17 @@ line main is followed from GitHub; land on an integration line forked from it
 ```
 
 Fork an integration line from the followed line (`graft line create`) and land
-there. The follower sets the marker on its first poll, including for a line it
-already holds.
+there.
+
+The follower marks a line when it first imports it. For a line that does not
+exist yet, such as a repository you just created and bound, it creates the
+marker and then the line, using the `mirror` token alone. It does not mark a
+line that already exists without a marker, for example one an administrator
+landed on: a repository admin does that with `graft repo mirror mark-followed`.
+If an earlier import created and marked the line with a different mirror
+database, the follower re-imports the upstream history, which is deterministic,
+and adopts the line when that reproduces its tip. A tip it does not reproduce
+stops the line as `graft-moved`.
 
 ## Deliver lands as batch pull requests
 

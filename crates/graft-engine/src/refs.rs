@@ -145,11 +145,24 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let kind = current.as_ref().map_or(to_stored(req.kind), |r| r.kind);
         // A followed-line marker decides who may land: only admin sets one.
         // The mirror moves an existing marker (the head it imported), under
-        // its lease, and never creates or removes one (D41).
+        // its lease, and never removes one. It creates one only for a line
+        // that does not exist yet (D41, WI-4913), below.
         let marker = req.name.starts_with(FOLLOWED_REF_PREFIX);
         let followed =
             kind == StoredKind::Line && mirror && self.is_followed(repo, &req.name).await?;
         let mirror_marker = marker && mirror && current.is_some();
+        // The one marker the mirror creates: that of a line its row follows
+        // and that does not exist yet (WI-4913). A marker is what makes the
+        // mirror's later creation of the line a followed-line move, and
+        // with no line there is nothing for it to lock; a line that already
+        // exists is marked by the repository admin.
+        let bootstrap_marker = marker
+            && mirror
+            && current.is_none()
+            && match req.name.strip_prefix(FOLLOWED_REF_PREFIX) {
+                Some(line) => self.is_fresh_followed_line(repo, line).await?,
+                None => false,
+            };
         // A batch cut the mirror service has claimed moves the line it cuts,
         // under the claimer's epoch, and no other (D41 §3.5, WI-3426).
         let cut = if kind == StoredKind::Line && mirror && !followed {
@@ -160,7 +173,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         let need = match kind {
             StoredKind::Line if followed || cut.is_some() => None,
             StoredKind::Line => Some(Need::Admin),
-            StoredKind::Tool if mirror_marker => None,
+            StoredKind::Tool if mirror_marker || bootstrap_marker => None,
             StoredKind::Tool if marker => Some(Need::Admin),
             StoredKind::Tag | StoredKind::Tool => Some(Need::Write(None)),
         };
@@ -191,7 +204,7 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
         self.changeset(repo, req.new).await?;
         // The mirror moves a followed line only under its authority lease,
         // checked in the move's own transaction (D41 §3.6).
-        let lease = if followed || mirror_marker || cut.is_some() {
+        let lease = if followed || mirror_marker || bootstrap_marker || cut.is_some() {
             let Some(epoch) = req.lease_epoch else {
                 return Err(ApiError::LeaseLost { repo: req.repo });
             };

@@ -2468,6 +2468,126 @@ async fn a_minted_mirror_token_follows_a_merged_batch() {
     assert_eq!(marker, Some(tip));
 }
 
+/// Waits for a status naming `sha` as the last import. On a timeout it fails
+/// with the statuses the row saw, so a refusal shows its own error.
+async fn imported(fake: &Arc<Fake>, sha: &str) {
+    for _ in 0..600 {
+        if fake
+            .statuses()
+            .iter()
+            .any(|s| s.last_imported_sha.as_deref() == Some(sha))
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{sha} was never imported; statuses: {:#?}", fake.statuses());
+}
+
+/// A repository that was just created and bound to a mirror has no history,
+/// no line and no followed marker. The mirror token alone (`repo:*:mirror`,
+/// no write or admin scope) must import it: upload the objects, import the
+/// changesets, create the line and then its marker, all under the lease.
+/// Before the fix the first `PutObjects` was refused for want of a marker
+/// that only an import can leave, so a new repository never imported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mirror_token_alone_imports_a_freshly_created_repository() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (bare, work) = upstream(tmp.path());
+    let c1 = commit(&work, "a");
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    bind(&store, REPO, bare.to_str().unwrap()).await;
+    let fake = Arc::new(Fake::with_store(store));
+    fake.set_row(row(REPO, bare.to_str().unwrap(), 0));
+    let data = tmp.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let mut service = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(mirror_only_cx),
+        local_config(&data, "a"),
+    );
+    service.reconcile().await.unwrap();
+    imported(&fake, &c1).await;
+    let last = fake.statuses().last().cloned().expect("status");
+    assert_eq!(
+        last.error_code,
+        MirrorErrorCode::Unspecified as i32,
+        "{last:?}"
+    );
+    let cx = mirror_only_cx(REPO);
+    let tip = current_ref(&*api, &cx, REPO, "main")
+        .await
+        .unwrap()
+        .expect("the mirror created the line");
+    let marker = current_ref(&*api, &cx, REPO, &graft_proto::types::followed_ref("main"))
+        .await
+        .unwrap();
+    assert_eq!(marker, Some(tip), "the mirror marked the line it created");
+}
+
+/// A line created and marked by an import the service did not make (a
+/// one-time admin import with its own database) has no commit-to-changeset
+/// mapping in the service's database. The follower must not read that as a
+/// graft-side move and stop the line: it re-imports the upstream head, which
+/// is deterministic, and adopts the line when that reproduces the tip.
+/// Before the fix the line stopped with `graft-moved` and never followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_follower_adopts_a_line_an_earlier_import_created_and_keeps_following() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (bare, work) = upstream(tmp.path());
+    let c1 = commit(&work, "a");
+    let (api, store) = engine();
+    api.create_repo(&mirror_cx(REPO), REPO.to_owned())
+        .await
+        .unwrap();
+    bind(&store, REPO, bare.to_str().unwrap()).await;
+    let fake = Arc::new(Fake::with_store(store));
+    fake.set_row(row(REPO, bare.to_str().unwrap(), 0));
+
+    // The earlier import: its own data directory, so its own database.
+    let first_data = tmp.path().join("first");
+    std::fs::create_dir(&first_data).unwrap();
+    let mut first = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(mirror_cx),
+        local_config(&first_data, "a"),
+    );
+    first.reconcile().await.unwrap();
+    imported(&fake, &c1).await;
+    drop(first);
+
+    // The service proper: a fresh database, the mirror set only.
+    let data = tmp.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let mut service = Service::new(
+        fake.clone(),
+        FollowSpawner::new(api.clone()).with_cx(mirror_only_cx),
+        local_config(&data, "b"),
+    );
+    fake.lapse(REPO);
+    service.reconcile().await.unwrap();
+    let c2 = commit(&work, "b");
+    imported(&fake, &c2).await;
+    let last = fake.statuses().last().cloned().expect("status");
+    assert_eq!(
+        last.error_code,
+        MirrorErrorCode::Unspecified as i32,
+        "{last:?}"
+    );
+    let cx = mirror_only_cx(REPO);
+    let tip = current_ref(&*api, &cx, REPO, "main")
+        .await
+        .unwrap()
+        .expect("line");
+    let marker = current_ref(&*api, &cx, REPO, &graft_proto::types::followed_ref("main"))
+        .await
+        .unwrap();
+    assert_eq!(marker, Some(tip));
+}
+
 // ---- serve's forges: GitHub or Forgejo by upstream (WI-3492) ---------------
 
 /// A Forgejo PR as the API returns it.
