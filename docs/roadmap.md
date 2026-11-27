@@ -1,11 +1,10 @@
 # graft roadmap
 
-- **Status:** adopted by the operator on 2026-10-26
-  ([D35](decisions.md#d35-the-roadmap-of-record-and-the-phase-2-trigger)).
+- **Status:** adopted 2026-10-26
+  ([decisions](decisions.md#d35-the-roadmap-of-record-and-the-phase-2-trigger)).
 - **Companions:** [design.md](design.md) (how it works),
-  [plan.md](internal/plan.md) (the engineering waves and the backlog),
   [decisions.md](decisions.md) (why), [status.md](status.md) (what is
-  delivered).
+  delivered), [internal/plan.md](internal/plan.md) (the engineering plan).
 
 graft is source control for codebases worked on by many short-lived agent
 sessions at once. This page says where it is going and in what order. It is
@@ -49,8 +48,8 @@ per repository, and can change without graft noticing
 **graft depends on no particular orchestrator or tracker.** Session and work
 item identity are generic fields carried in tokens, metadata and export
 trailers. Any tool that can call an API can consume the journal, post an
-attestation, or render a diff. The estate that develops graft uses its own
-tracker for this; nothing in graft requires it
+attestation, or render a diff. The project's own development uses a tracker
+for this; nothing in graft requires one
 ([D39](decisions.md#d39-independence-from-any-orchestrator)).
 
 **Humans keep their gates, as policy.** Where people want a person in the loop
@@ -76,15 +75,14 @@ Measured as agent friction and conflict churn, not read latency
 ([D31](decisions.md#d31-phase-1-measures-agent-friction-not-read-latency)).
 Lines are `direct`; nothing runs in the land path.
 
-What remains in v0.1.x is polish from the professionalisation review:
-the user docs set, the bench chart, trust and security pages, a user-facing
+What remains in v0.1.x is polish: the user docs set, the bench chart, trust and security pages, a user-facing
 compose file, the demo recording, and the orchestrator-neutral naming of
-session and work-item fields (D39).
+session and work-item fields.
 
 ### v0.2: verification without gates
 
 Everything needed to know whether a landed change is good, with nothing in
-the land path. This is the work that was deliberately kept out of v0.1, and
+the land path. This work was deliberately kept out of v0.1, and
 it is the precondition for any repository leaving its git host.
 The first candidate repository is graft itself
 ([D40](decisions.md#d40-graft-is-the-first-graft-primary-repository));
@@ -224,6 +222,6 @@ never grows review state beyond attestations.
 ## Reading this page
 
 Each release lists its exit criteria and the decisions that shape it. The
-engineering breakdown, crate by crate, is in [plan.md](internal/plan.md); the backlog
-is in the operator's tracker and summarised in [status.md](status.md). A
+engineering breakdown, crate by crate, is in [plan.md](internal/plan.md); current
+state is summarised in [status.md](status.md). A
 release ships when its exit criteria are met, not on a date.

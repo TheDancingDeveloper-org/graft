@@ -1,8 +1,11 @@
 # Server guide
 
-This page covers a Graft server's local-development start, production
-configuration, authentication, repository and line administration, operational
-endpoints, and database upgrades.
+This page explains how to run and administer a graft server: local development,
+production configuration, tokens, repositories and lines, health endpoints,
+upgrades, and backup and restore.
+
+Prerequisites: the `graft` and `graft-server` binaries (or the container
+image), and for the compose sections Docker with the Compose plugin.
 
 ## Quick start
 
@@ -163,16 +166,16 @@ accepted. Each scope is one of:
 | `repo:<name>:write:<prefix>` | Write only the prefix and its descendants, and read the repository. |
 | `repo:<name>:land:<line>` | Land on one line and read the repository. |
 | `repo:<name>:attest` | Post attestations only; it does not grant read. |
-| `repo:<name>:drafts` | Read other sessions' open drafts by path only. |
+| `repo:<name>:drafts` | Read other workspaces' open drafts by path only. |
 | `repo:<name>:admin` | Perform all repository operations, including attestations and draft-overlap reads. |
 | `objects:read` | Read objects for repositories the caller can read. |
 
-Mint an operator token offline with the server administration command, piping
+Mint an administrator token offline with the server administration command, piping
 stdout directly to a mode-`0600` file or secret store:
 
 ```sh
 graft serve --config /etc/graft/server.toml admin token mint \
-  --subject operator --kind human \
+  --subject alice --kind human \
   --scope repo:example:admin --ttl 3600 > token.tmp
 chmod 600 token.tmp
 ```
@@ -298,7 +301,7 @@ graft clone example ./example --line release \
 ```
 
 If the bootstrap token has already been consumed or rotated, mint an
-operator token with the server administration command and redirect its output
+administrator token with the server administration command and redirect its output
 to a mode-0600 file, as shown in [Tokens and scopes](#tokens-and-scopes).
 The token file is the only supported way to pass a bearer token to the CLI.
 
@@ -391,3 +394,12 @@ understands the resulting schema; restore the pre-upgrade metadata and object
 backup instead when the migration is not backward-compatible. Never restore
 only one of the two: the metadata snapshot and immutable object tree are a
 pair.
+
+## See also
+
+- [Concepts for git users](concepts.md)
+- [CLI reference](cli.md)
+- [MCP guide](mcp.md)
+- [CI attestations](ci-attest.md)
+- [Git migration and mirrors](git-migration.md)
+- [Safety](safety.md)

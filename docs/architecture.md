@@ -1,4 +1,4 @@
-# graft architecture (diagrams)
+# Architecture
 
 This is the visual companion to [design.md](design.md). It shows four things:
 
@@ -10,11 +10,11 @@ This is the visual companion to [design.md](design.md). It shows four things:
 The diagrams are Mermaid, which GitHub renders. Where this page and the design
 disagree, the design wins.
 
-> **Phase note ([D22](decisions.md#d22-phase-1-is-a-git-alternative)).** In
-> phase 1, lines are `direct` and nothing runs CI in the land path. The
-> attester and attestation flows in section 4 are phase 2, built but switched
-> off. Topology 3b (graft-primary `main` with GitHub as the mirror) is not
-> planned; GitHub delivery is the batch PR of 3c (D21).
+> **Current phase** ([decisions](decisions.md#d22-phase-1-is-a-git-alternative)).
+> Lines are `direct` and nothing runs CI in the land path. The attester and
+> attestation flows in section 4 are built but switched off. Topology 3b
+> (graft-primary `main` with GitHub as the mirror) is not yet planned for
+> use; GitHub delivery is the batch pull request of 3c.
 
 ---
 
@@ -136,7 +136,7 @@ flowchart LR
     api["gRPC API<br/>+ /v1 JSON (read-only)<br/>+ /mcp"]
     authz["auth: token check,<br/>scopes, jti denylist"]
     eng["graft-engine"]
-    pol["Land policy gate<br/>phase 1: direct<br/>(attested / queued: phase 2, off)"]
+    pol["Land policy gate<br/>currently direct<br/>(attested / queued: built, off)"]
     gcs["GC sweep"]
     meta[("SQLite<br/>metadata, journal,<br/>leases, attestations")]
     objs[("object store<br/>(filesystem frames)")]
@@ -152,7 +152,7 @@ flowchart LR
     bridge["batch PR / PR import"]
   end
 
-  subgraph CI["CI (outside graft; phase 2, off by default)"]
+  subgraph CI["CI (outside graft; off by default)"]
     attester["Attester<br/>runs checks, posts Attest"]
   end
 
@@ -173,10 +173,10 @@ flowchart LR
 
 The server is the only writer to its stores. Everything else is a client:
 people, agents, the mirror and the attester. Each authenticates with its own
-token and scopes. In phase 1 there is no attester: the policy gate passes
+token and scopes. Currently there is no attester: the policy gate passes
 every `direct` land, and nothing outside the server takes part in a land.
 
-### One land, step by step (phase 1: `direct`)
+### One land, step by step (`direct` policy)
 
 ```mermaid
 sequenceDiagram
@@ -196,10 +196,10 @@ sequenceDiagram
   else conflict
     S-->>A: Conflict {paths, tip}, nothing moves; the client syncs and resolves, as with git
   end
-  Note over M: the mirror service claims a batch cut and sends the line to GitHub as a batch PR, one commit per land (D26); land-pr rebase-merges it (D28)
+  Note over M: the mirror service claims a batch cut and sends the line to GitHub as a batch PR, one commit per land; the batch PR is rebase-merged once its required checks pass
 ```
 
-### One land with an attested policy (phase 2, off by default)
+### One land with an attested policy (built, off by default)
 
 ```mermaid
 sequenceDiagram
@@ -228,23 +228,23 @@ sequenceDiagram
 
 ## 3. Deployment topologies
 
-### 3a. Today's dev topology (graft-dev VM, contained trial)
+### 3a. Dev topology (a contained trial)
 
 ```mermaid
 flowchart TB
-  subgraph Prod["vogt-prod (agent host)"]
-    vogt["Vogt oversight"]
-    w1["worker 1<br/>graft CLI"]
-    w2["worker 2<br/>graft CLI"]
-    w3["worker 3<br/>graft CLI"]
-    vogt --> w1 & w2 & w3
+  subgraph Prod["Agent host"]
+    orch["orchestrator"]
+    w1["agent 1<br/>graft CLI"]
+    w2["agent 2<br/>graft CLI"]
+    w3["agent 3<br/>graft CLI"]
+    orch --> w1 & w2 & w3
   end
 
-  subgraph VM["graft-dev VM (trigproxmox, VM 110, 4 vCPU)"]
+  subgraph VM["Dev server host"]
     srv["graft-server :17888"]
-    mir["graft-mirror (follow rustTorrent)"]
-    att["trial attester<br/>(profile: attester,<br/>off: phase 2)"]
-    runner["GitHub runner<br/>label graft-dev"]
+    mir["graft-mirror (follow upstream)"]
+    att["trial attester<br/>(profile: attester,<br/>off)"]
+    runner["GitHub runner"]
     etc[("/etc/graft<br/>keys + tokens, 0600")]
     mir --> srv
     att --> srv
@@ -252,21 +252,20 @@ flowchart TB
   end
 
   ghsrc[("GitHub: graft repo")]
-  ghrt[("GitHub: rustTorrent")]
-  ghci["graft CI<br/>(self-hosted runners on Node B)"]
+  ghrt[("GitHub: upstream repo")]
+  ghci["graft CI<br/>(self-hosted runners)"]
 
-  w1 & w2 & w3 -- "tailnet" --> srv
+  w1 & w2 & w3 -- "private network" --> srv
   ghrt -- "follow (read-only)" --> mir
   ghsrc -- "PR checks / merge queue" --> ghci
-  ghsrc -- "digest bump in ops apps/graft-dev/gen.py (ArgoCD)" --> runner
+  ghsrc -- "image digest bump (GitOps)" --> runner
   runner -- "deploy/up.sh" --> srv
 ```
 
 - GitHub isn't written. `rusttorrent` follows GitHub read-only.
   `rusttorrent-trial` is graft-primary with no export.
-- Under D22 the trial line `trial-1` is `direct`, and the attester profile
-  is off. When it is on (phase 2), it stands in for CI, because the trial
-  runs no GitHub Actions.
+- The trial line `trial-1` is `direct`, and the attester profile is off. When
+  it is on, it stands in for CI, because the trial runs no GitHub Actions.
 
 ### 3b. Target topology: graft-primary with GitHub as the mirror
 
@@ -274,7 +273,7 @@ flowchart TB
 flowchart TB
   subgraph Clients["People and agents"]
     dev["developers"]
-    agents["agents (Vogt workers)"]
+    agents["agents"]
   end
 
   subgraph GraftHost["graft host"]
@@ -298,16 +297,16 @@ flowchart TB
   mir -- "land via graft; PR closes as merged" --> prs
 ```
 
-### 3c. Batch mode: an integration line, one batch PR with one commit per land (D21, D26, D28)
+### 3c. Batch mode: an integration line, one batch PR with one commit per land
 
-The near-term way of working. `main` stays git-primary and graft follows it.
-Agents land on a graft integration line forked from graft's `main`. Oversight
-records a batch request (`graft repo batch cut <repo> --line <line>`, or
-`CutBatch`); the mirror service claims it and sends the line's lands to GitHub
-as one batch PR carrying one commit per land (D26). The service cuts at the
-base line's tip, so no base is chosen. Oversight reviews the PR as a whole and
-`land-pr` rebase-merges it once GitHub's required checks pass (D28). GitHub CI
-runs once per batch.
+The current way of delivering work to GitHub. `main` stays git-primary and
+graft follows it. Agents land on a graft integration line forked from graft's
+`main`. A maintainer or automation records a batch request
+(`graft repo batch cut <repo> --line <line>`, or `CutBatch`); the mirror
+service claims it and sends the line's lands to GitHub as one batch PR
+carrying one commit per land. The service cuts at the base line's tip, so no
+base is chosen. The PR is reviewed as a whole and rebase-merged once GitHub's
+required checks pass. GitHub CI runs once per batch.
 
 ```mermaid
 sequenceDiagram
@@ -315,7 +314,7 @@ sequenceDiagram
   participant S as graft-server
   participant M as graft-mirror service
   participant G as GitHub
-  participant O as oversight (land-pr)
+  participant O as reviewer / merge tool
   A->>S: land on integration (many times)
   M->>G: follow main (ls-remote, fetch, import)
   M->>S: sync: Rebase the line's net change onto main; CAS the line
@@ -328,7 +327,7 @@ sequenceDiagram
 ```
 
 - **Sync.** When `main` moved, the line's net change since the base it last
-  absorbed is rebased onto `main`'s tip (line merge, D16). A merge
+  absorbed is rebased onto `main`'s tip (line merge). A merge
   changeset (first parent the line tip, second `main`'s tip) moves the line
   by compare-and-swap, so the move is a fast-forward. A conflict is
   reported with its paths, and nothing moves.
@@ -344,10 +343,9 @@ sequenceDiagram
 - **Every land is listed.** The PR body lists as many lands as fit under
   GitHub's body limit, and names the commit messages for the rest.
   Listings stop at the newest 5,000 lands.
-- **Review and merge.** Oversight reviews the batch PR as a whole. For a
-  head named `graft/batch-<n>`, `land-pr` waits for the required checks and
-  rebase-merges past the squashing merge queue (`--admin`), keeping the
-  per-land commits. graft never merges, queues or approves the PR.
+- **Review and merge.** The batch PR is reviewed as a whole and
+  rebase-merged once the required checks pass, which keeps the per-land
+  commits. graft never merges, queues or approves the PR.
 - **One batch open per line.** While its PR is open, a run only reports it.
   A PR closed unmerged marks the batch rejected, and its lands stay on the
   line for the next batch.
@@ -437,12 +435,12 @@ flowchart TB
   end
 ```
 
-- **Mode A, git-primary (phases 1–2).** Nothing changes for GitHub users. They
+- **Mode A, git-primary (current).** Nothing changes for GitHub users. They
   raise and merge PRs as usual, with or without Actions. Agents read through
   graft, which is fast and sparse. When an agent lands, graft opens a normal
   GitHub PR, so GitHub's checks and merge rules still decide. graft needs no
   attester here.
-- **Mode B, graft-primary (phase 3).** graft decides what reaches `main`.
+- **Mode B, graft-primary (planned; see the [roadmap](roadmap.md)).** graft decides what reaches `main`.
   GitHub users can still open PRs. The mirror imports each one as a draft,
   and it lands through graft's policy:
   - under `direct`, at once;

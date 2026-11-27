@@ -1,12 +1,18 @@
 # MCP guide
 
-Graft's MCP server exposes bounded source-control reads and writes to agents.
+This page documents graft's MCP server, which exposes bounded source-control
+reads and writes to agents, and lists every tool with its arguments, results and
+errors.
+
+Prerequisites: the `graft` CLI and a token for a graft server (see the
+[server guide](server.md#tokens-and-scopes)).
+
 Every result is capped at 64 KiB. List and patch tools may return less than the
 requested limit to stay under that cap.
 
 ## Register the server
 
-From a Graft working copy, print the registration for your agent client:
+From a graft working copy, print the registration for your agent client:
 
 ```sh
 graft mcp --print-config claude
@@ -317,8 +323,8 @@ Binds a repository to an upstream git URL and its branches.
   commit to import from; absent walks all history).
 - Result: the mirror row. It says whether a credential is set, never the
   credential.
-- Errors: needs `mirror:bind`, held by the operator and an oversight session
-  token; a worker gets `permission_denied`.
+- Errors: needs `mirror:bind`, held by administrators and `oversight`-kind
+  tokens; an ordinary `agent` token gets `permission_denied`.
 
 ### `graft_mirror_credential`
 
@@ -329,7 +335,7 @@ Sets (or, from an empty file, clears) a mirror's upstream credential.
 - Result: the mirror row with `credential_set` and `kek_id`. The file's
   contents never appear in an argument, result or log; an unreadable or
   oversized file is `invalid_argument`, naming the path only.
-- Errors: needs `mirror:bind` (operator or oversight session), else
+- Errors: needs `mirror:bind` (administrator or `oversight` token), else
   `permission_denied`.
 
 ### `graft_mirror_set`
@@ -368,7 +374,7 @@ is set.
 
 - Arguments: required `repo` and `upstream`; optional `clear_followed`.
 - Result: the lines whose markers were cleared.
-- Errors: needs `mirror:bind` (operator or oversight session), else
+- Errors: needs `mirror:bind` (administrator or `oversight` token), else
   `permission_denied`.
 
 ### `graft_mirror_purge`
@@ -378,7 +384,7 @@ repository, its lines and history are untouched.
 
 - Arguments: required `repo` and `upstream`; optional `client_request_id`.
 - Result: the purge request.
-- Errors: needs `mirror:bind` (operator or oversight session), else
+- Errors: needs `mirror:bind` (administrator or `oversight` token), else
   `permission_denied`.
 
 ### `graft_batch_cut`
@@ -393,8 +399,8 @@ Requests a batch PR of a line's lands.
   and reuses it when it retries an unavailable server, so a retry returns
   the request the first attempt recorded. If the server stays unavailable
   the error names the key; pass it back to retry the same request.
-- Errors: needs the repository's admin or `mirror:export` (an oversight
-  session holds the latter); a batch already open on the line is
+- Errors: needs the repository's admin or `mirror:export` (an `oversight`
+  token holds the latter); a batch already open on the line is
   `batch_open`.
 
 ### `graft_batch_status`
@@ -421,12 +427,12 @@ no mirror service will finish, or a batch whose PR was closed by hand.
 - Result: the request, `failed` with error code `cancelled` if it was
   still live, and a cut's batch `settled`. A service still running it is
   refused when it next reports.
-- Errors: needs `mirror:bind` (an oversight session or the operator), else `permission_denied`;
+- Errors: needs `mirror:bind` (an `oversight` token or an administrator), else `permission_denied`;
   a request that holds nothing is refused (`mirror-request-state`).
 
 The mirror and batch tools are unavailable where the launcher provides no
 mirror service: a local repository, or a server started without one. They
-**are** installed on the server's own `/mcp` mount (WI-4387).
+**are** installed on the server's own `/mcp` mount.
 
 One tool differs by mount. `graft_mirror_credential` reads a file from the
 host, so the HTTP mount refuses it before touching the filesystem: there is
@@ -445,3 +451,11 @@ Creates an immutable tag at a changeset.
 - Result: tag name and target changeset.
 - Errors: an existing tag is `already_exists`; invalid names or refs are
   typed. Tags never move.
+
+## See also
+
+- [Agent guide](../agents.md)
+- [Server guide](server.md)
+- [CLI reference](cli.md)
+- [Git migration and mirrors](git-migration.md)
+- [Safety](safety.md)

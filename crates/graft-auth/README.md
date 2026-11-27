@@ -1,6 +1,6 @@
 # graft-auth
 
-Tokens, scopes and path rules for graft (`docs/design.md` §12).
+Tokens, scopes and path rules for graft. The design is in [docs/design.md](../../docs/design.md), section 12; operational use is in the [server guide](../../docs/guide/server.md#tokens-and-scopes).
 
 ## Token format
 
@@ -19,8 +19,8 @@ are left out when absent):
 | --- | --- |
 | `sub` | subject: user, session or service name |
 | `kind` | `human`, `agent`, `ci` or `service` |
-| `session` | session id (set by the caller's orchestrator, if any), optional |
-| `work_item` | work item (set by the caller's orchestrator, if any), optional |
+| `session` | session id, set by the caller's session manager if any; optional |
+| `work_item` | work item, set by the caller's session manager if any; optional |
 | `scopes` | scope strings, design §12.1 text forms |
 | `exp` | expiry, integer seconds since the epoch |
 | `jti` | unique token id, for the denylist |
@@ -28,7 +28,7 @@ are left out when absent):
 Unknown fields are ignored on verify, so a later server can add claims
 without breaking older verifiers.
 
-### Why PASETO v4.public, and why our own ~60 lines of it
+### Why PASETO v4.public, with a small in-tree envelope
 
 - **PASETO, not JWT.** v4.public fixes the algorithm (Ed25519) in the
   version header. There is no `alg` field to downgrade or confuse, and no
@@ -48,7 +48,7 @@ without breaking older verifiers.
   footer as a new, explicit format version.
 
 The encoding is frozen by the golden tokens in `tests/tokens.rs`. Changing it
-is a durable-format change: it needs a migration and an operator decision.
+is a durable-format change: it needs a migration and an explicit maintainer decision.
 
 ## Verification
 
@@ -95,7 +95,7 @@ at), the named `kid`, the signature, `iss`, `aud`, `exp` (no leeway),
 repository, ref and workflow. A valid token for a repository with no binding
 is `PermissionDenied`; an invalid one is `Unauthenticated`. The minted token
 carries exactly the binding's `read`/`attest` scopes and expires at the
-earlier of 15 minutes and the CI token's own `exp`. See `ci/README.md` for the
+earlier of 15 minutes and the CI token's own `exp`. See [ci/README.md](../../ci/README.md) for the
 workflow side and the trust model.
 
 A binding holds `read` and `attest` only (`write`, `land` and `admin` are

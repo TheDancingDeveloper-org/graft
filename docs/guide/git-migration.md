@@ -1,5 +1,13 @@
 # Migrate a Git repository gradually
 
+This page explains how to adopt graft next to an existing Git repository,
+deliver work back to the Git host as batch pull requests, and leave graft
+again if you need to.
+
+Prerequisites: a running graft server ([Server guide](server.md)), the
+`graft-mirror` binary, a bare clone of the Git repository, and a graft token
+file with the scopes each command needs.
+
 Graft can sit beside an existing GitHub repository without changing where the
 repository is authoritative. In the recommended setup for this release, Git
 remains the authority: maintainers continue to protect and merge the default
@@ -35,7 +43,7 @@ the mapping between Git commit SHAs and graft changesets. It performs a
 fidelity check for every commit: exporting an imported commit must reproduce
 the original SHA. A commit with a path that graft cannot represent, such as a
 non-UTF-8 or non-portable path, stops the import and reports the offenders. If
-an operator deliberately accepts a known exception, repeat `--allow-lossy
+you deliberately accept a known exception, repeat `--allow-lossy
 <sha>` for those commits; otherwise do not bypass the fidelity check.
 
 ## Follow the GitHub default branch
@@ -103,7 +111,7 @@ graft repo batch status integration --line integration
 ```
 
 This is a server request: the mirror service claims it, opens the pull request
-on the followed base and settles it (D41 §3.5). Omit `--base`: the service
+on the followed base and settles it. Omit `--base`: the service
 cuts at the base line's tip and refuses a chosen changeset as `unsupported`.
 Each land is exported as one commit in the batch. The service never merges the
 pull request. Review and merge it with your normal process; afterward, follow
@@ -204,7 +212,7 @@ to a forge if you decide to leave graft.
 
 Switching a line from Git-primary to graft-primary is an advanced operation and
 is not recommended in this release. It changes which system may accept writes,
-so schedule it as an operator-controlled migration rather than a routine part
+so plan it as a deliberate migration rather than a routine part
 of onboarding.
 
 Inspect the current state, freeze writes, verify recent history, flip the
@@ -227,3 +235,11 @@ graft-mirror export --config /etc/graft/mirror.toml
 
 Do not skip or reorder the authority steps. If verification finds divergence,
 leave the line frozen and resolve it explicitly before flipping authority.
+
+## See also
+
+- [Server guide](server.md)
+- [MCP guide](mcp.md)
+- [Concepts for git users](concepts.md)
+- [Agent guide](../agents.md)
+- [Design decisions](../decisions.md)
