@@ -22,7 +22,7 @@ use graft_proto::types::followed_ref;
 use graft_proto::{ApiError, CallContext, Principal, PrincipalKind};
 use graft_store::{
     LineSlot, MetaStore, MirrorQuery, MirrorRequestKind, MirrorRequestQuery, MirrorRequestRecord,
-    MirrorRequestState, ObjectStore,
+    MirrorRequestState, ObjectStore, RepoId,
 };
 
 use crate::{Engine, errors};
@@ -245,18 +245,74 @@ impl<M: MetaStore, O: ObjectStore> Engine<M, O> {
                 ) {
                     continue;
                 }
-                if self
+                // A followed line is open to the mirror's uploads once it
+                // carries its marker, or while it does not exist yet: a
+                // repository that was just bound has no history, and the
+                // import that creates the line has to upload first. It
+                // marks the line before it creates it (WI-4913). A line that
+                // exists without a marker is an admin's and stays closed.
+                let marked = self
                     .meta
                     .get_ref(id, &followed_ref(&line.line))
                     .await
                     .map_err(errors::store)?
-                    .is_some()
+                    .is_some();
+                if marked
+                    || self
+                        .meta
+                        .get_ref(id, &line.line)
+                        .await
+                        .map_err(errors::store)?
+                        .is_none()
                 {
                     return Ok(true);
                 }
             }
         }
         Ok(false)
+    }
+
+    /// Whether `repo` is bound to an enabled mirror row that follows `line`
+    /// (direction `follow` or `both`) and `line` does not exist yet: the one
+    /// line whose followed marker the mirror service may create, because
+    /// there is nothing for the marker to lock (WI-4913). A line that exists
+    /// is marked by the repository admin (`mark-followed`), never by the
+    /// mirror.
+    pub(crate) async fn is_fresh_followed_line(
+        &self,
+        repo: RepoId,
+        line: &str,
+    ) -> Result<bool, ApiError> {
+        let mirrors = self
+            .meta
+            .list_mirrors(MirrorQuery {
+                repo: Some(repo),
+                enabled: None,
+                after: None,
+                limit: 16,
+            })
+            .await
+            .map_err(errors::store)?;
+        let follows = mirrors.into_iter().any(|mirror| {
+            mirror.record.enabled
+                && mirror.record.lines.iter().any(|l| {
+                    l.line == line
+                        && matches!(
+                            l.direction,
+                            graft_store::MirrorDirection::Follow
+                                | graft_store::MirrorDirection::Both
+                        )
+                })
+        });
+        if !follows {
+            return Ok(false);
+        }
+        Ok(self
+            .meta
+            .get_ref(repo, line)
+            .await
+            .map_err(errors::store)?
+            .is_none())
     }
 
     /// `checked`, a write check, unless it denied the mirror service running

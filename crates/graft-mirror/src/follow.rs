@@ -45,7 +45,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use graft_git::GitSha;
-use graft_git::import::{ImportConfig, import};
+use graft_git::import::{ImportConfig, ImportReport, import};
 use graft_git::map::{ImportedTag, MirrorMap};
 use graft_model::ChangesetId;
 use graft_proto::api::{AdminApi, ObjectApi, RepoApi};
@@ -510,6 +510,23 @@ where
         cx
     }
 
+    /// Imports `l`'s upstream head into graft and records, in the database,
+    /// the commit each changeset came from. Deterministic, so safe to repeat;
+    /// it moves no ref.
+    async fn import_head(&self, l: &FollowLine) -> Result<ImportReport, MirrorError> {
+        let cx = self.call("import");
+        let import_config = ImportConfig {
+            git_dir: self.mirror.dir().to_owned(),
+            repo: self.config.repo.clone(),
+            lines: vec![(Mirror::upstream_ref(&l.branch), l.line.clone())],
+            tags: false,
+            allow_lossy: self.config.allow_lossy.clone(),
+            batch: self.config.batch,
+            start_at: self.config.start_at,
+        };
+        Ok(import(self.api, &cx, self.db, &import_config).await?)
+    }
+
     async fn poll_line(
         &self,
         l: &FollowLine,
@@ -553,7 +570,20 @@ where
             None => None,
             Some(id) => match self.db.sha_of(id)? {
                 Some(sha) => Some(sha),
-                None => return self.diverge(l, &mut state, up, Divergence::GraftMoved),
+                None => {
+                    // This database never imported the line's tip: an
+                    // earlier import with another database made it (the
+                    // one-time import that onboards a repository), or this
+                    // database was lost. Import the upstream history first.
+                    // It is deterministic, so it records the commit of every
+                    // changeset it reproduces. Only a tip it does not
+                    // reproduce is a move on graft's side (WI-4913).
+                    self.import_head(l).await?;
+                    match self.db.sha_of(id)? {
+                        Some(sha) => Some(sha),
+                        None => return self.diverge(l, &mut state, up, Divergence::GraftMoved),
+                    }
+                }
             },
         };
         if graft_sha == Some(up) {
@@ -572,22 +602,19 @@ where
         let behind = self.mirror.count_between(graft_sha, up).await?;
         self.set_lag_changesets(&l.line, behind);
 
-        let cx = self.call("import");
-        let import_config = ImportConfig {
-            git_dir: self.mirror.dir().to_owned(),
-            repo: repo.clone(),
-            lines: vec![(Mirror::upstream_ref(&l.branch), l.line.clone())],
-            tags: false,
-            allow_lossy: self.config.allow_lossy.clone(),
-            batch: self.config.batch,
-            start_at: self.config.start_at,
-        };
-        let report = import(self.api, &cx, self.db, &import_config).await?;
+        let report = self.import_head(l).await?;
         let to = report
             .lines
             .first()
             .map(|(_, id)| *id)
             .ok_or_else(|| MirrorError::Config("import reported no line".to_owned()))?;
+        if tip.is_none() {
+            // A line that does not exist yet is marked before it is
+            // created: the server lets the mirror create a marker only for
+            // a line that is absent, and the marker is what lets it then
+            // create the line under its lease (WI-4913).
+            self.mark_followed(&l.line, to).await?;
+        }
         let cx = self.call("update-ref");
         match move_ref_fenced(
             self.api,
