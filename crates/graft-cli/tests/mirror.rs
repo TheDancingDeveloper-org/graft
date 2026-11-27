@@ -214,7 +214,7 @@ fn mirror_and_batch_commands_against_a_real_server() {
         printed(&denied)
     );
     assert!(
-        printed(&denied).contains("oversight session or the operator"),
+        printed(&denied).contains("held by the server operator and oversight-kind tokens"),
         "{}",
         printed(&denied)
     );
