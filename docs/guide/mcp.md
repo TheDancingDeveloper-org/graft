@@ -323,7 +323,7 @@ Binds a repository to an upstream git URL and its branches.
   commit to import from; absent walks all history).
 - Result: the mirror row. It says whether a credential is set, never the
   credential.
-- Errors: needs `mirror:bind`, held by administrators and `oversight`-kind
+- Errors: needs `mirror:bind`, held by the server operator and `oversight`-kind
   tokens; an ordinary `agent` token gets `permission_denied`.
 
 ### `graft_mirror_credential`
@@ -335,7 +335,7 @@ Sets (or, from an empty file, clears) a mirror's upstream credential.
 - Result: the mirror row with `credential_set` and `kek_id`. The file's
   contents never appear in an argument, result or log; an unreadable or
   oversized file is `invalid_argument`, naming the path only.
-- Errors: needs `mirror:bind` (administrator or `oversight` token), else
+- Errors: needs `mirror:bind` (the server operator or an `oversight`-kind token), else
   `permission_denied`.
 
 ### `graft_mirror_set`
@@ -374,7 +374,7 @@ is set.
 
 - Arguments: required `repo` and `upstream`; optional `clear_followed`.
 - Result: the lines whose markers were cleared.
-- Errors: needs `mirror:bind` (administrator or `oversight` token), else
+- Errors: needs `mirror:bind` (the server operator or an `oversight`-kind token), else
   `permission_denied`.
 
 ### `graft_mirror_purge`
@@ -384,7 +384,7 @@ repository, its lines and history are untouched.
 
 - Arguments: required `repo` and `upstream`; optional `client_request_id`.
 - Result: the purge request.
-- Errors: needs `mirror:bind` (administrator or `oversight` token), else
+- Errors: needs `mirror:bind` (the server operator or an `oversight`-kind token), else
   `permission_denied`.
 
 ### `graft_batch_cut`
@@ -427,7 +427,7 @@ no mirror service will finish, or a batch whose PR was closed by hand.
 - Result: the request, `failed` with error code `cancelled` if it was
   still live, and a cut's batch `settled`. A service still running it is
   refused when it next reports.
-- Errors: needs `mirror:bind` (an `oversight` token or an administrator), else `permission_denied`;
+- Errors: needs `mirror:bind` (the server operator or an `oversight`-kind token), else `permission_denied`;
   a request that holds nothing is refused (`mirror-request-state`).
 
 The mirror and batch tools are unavailable where the launcher provides no

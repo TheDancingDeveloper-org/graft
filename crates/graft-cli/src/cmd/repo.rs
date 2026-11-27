@@ -5,7 +5,7 @@
 //! `graft repo mirror` and `graft repo batch` drive the server's mirror
 //! settings and batch requests (D41 §3.2, §3.5). Binding, removing and
 //! purging need `mirror:bind`, and export lines `mirror:export`; both are
-//! grants an server operator or an oversight-kind token holds. A credential is read
+//! grants the server operator or an oversight-kind token holds. A credential is read
 //! from a file or standard input,
 //! never an argument, and no output carries it. A request that creates
 //! something gets one `client_request_id` per invocation, reused on retry.

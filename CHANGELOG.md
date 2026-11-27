@@ -240,7 +240,7 @@ legacy `vogt.session` and `vogt.work_item` keys. Reads still accept those
 legacy keys, and the legacy environment names remain a fallback for
 `GRAFT_SESSION_ID` and `GRAFT_WORK_ITEM`.
 
-- `graft-mirror pr-batch` no longer adopts a PR it did not open. A new batch skips every number whose `graft/batch-<n>` branch or PR already exists on GitHub, and a PR is adopted only when it is open at the batch's own head; any other is refused and the batch rejected, so its lands stay pending. Previously a reset mirror DB could settle new lands as merged in an old merged PR. Repair procedure: `docs/runbooks/batch-adoption-repair.md`.
+- `graft-mirror pr-batch` no longer adopts a PR it did not open. A new batch skips every number whose `graft/batch-<n>` branch or PR already exists on GitHub, and a PR is adopted only when it is open at the batch's own head; any other is refused and the batch rejected, so its lands stay pending. Previously a reset mirror DB could settle new lands as merged in an old merged PR. Repair procedure: `docs/internal/runbooks/batch-adoption-repair.md`.
 
 # WI-2586
 
@@ -298,7 +298,7 @@ The rehearsal job reads the server address from the repository variable GRAFT_EN
 
 Call the token-holding attestation steps as a reusable workflow pinned to main, and allow `refs/heads/graft/` so a batch branch can dispatch the rehearsal without trusting its own workflow copy.
 
-graft-dev: the line `exit-rehearsal` of `graft` tracks post-land checks (`ci/fmt`, `ci/clippy`, `ci/test`, one retry), graft-mirror-graft pushes its per-land check refs, and an opt-in `post-land` compose profile runs the GitHub-backed post-land checker; the image is repinned to main 2f6a05f. Runbook: docs/runbooks/v02-exit.md.
+graft-dev: the line `exit-rehearsal` of `graft` tracks post-land checks (`ci/fmt`, `ci/clippy`, `ci/test`, one retry), graft-mirror-graft pushes its per-land check refs, and an opt-in `post-land` compose profile runs the GitHub-backed post-land checker; the image is repinned to main 2f6a05f. Runbook: docs/internal/runbooks/v02-exit.md.
 
 - A webhook saves its starting cursor before the first delivery attempt, so a 5xx and a restart still deliver that journal entry.
 
@@ -748,7 +748,7 @@ graft-proto: the gRPC wire protocol (`graft.v1` services and messages, generated
 - `graft-auth`: PASETO `v4.public` (Ed25519) tokens with `mint`/`verify`, the design §12.1 scope text forms, `authorize` with write path prefixes, and a `jti` `Denylist`. Golden tokens freeze the format; tokens and keys are redacted from `Debug` and logs.
 - `graft-telemetry`: `init` (JSON logs to stderr, a Prometheus registry, OTLP traces behind the `otlp` feature) and every design §13 metric registered with its documented labels.
 
-G1.D: local dev stack. A compose file (`compose.yaml`) and one image (`docker/Dockerfile`) run graft-server, graft-node, graft-mirror and the `graft` CLI on loopback, with a fast host-binary loop (`--profile dev`) and `scripts/dev/` helpers. See docs/dev-stack.md.
+G1.D: local dev stack. A compose file (`compose.yaml`) and one image (`docker/Dockerfile`) run graft-server, graft-node, graft-mirror and the `graft` CLI on loopback, with a fast host-binary loop (`--profile dev`) and `scripts/dev/` helpers. See docs/internal/dev-stack.md.
 
 # G2.1: engine workspaces, draft states, holders
 
@@ -938,7 +938,7 @@ Limits, which the sweep must handle before deleting anything:
 
 # G3.9: authority switch tooling (`graft-mirror authority`) and rehearsal
 
-- `graft-mirror authority <status|freeze|verify|flip|unfreeze> --config <file> --line <l> [--last N]` implements design §11.3's switch in both directions: A → B (git-primary to graft-primary) and B → A (the rollback). `graft-mirror verify --config <file> --line <l> [--last N]` runs the verify check on its own. The runbook is `docs/runbooks/authority-switch.md`.
+- `graft-mirror authority <status|freeze|verify|flip|unfreeze> --config <file> --line <l> [--last N]` implements design §11.3's switch in both directions: A → B (git-primary to graft-primary) and B → A (the rollback). `graft-mirror verify --config <file> --line <l> [--last N]` runs the verify check on its own. The runbook is `docs/internal/runbooks/authority-switch.md`.
 - `graft-mirror::authority`: the `Switcher` steps.
   - **freeze** records the switch (`switches` table) and closes the upstream gate. From git-primary, nobody may push. From graft-primary, only the mirror may push, so export can catch up.
   - **verify** requires upstream and graft to name the same commit through the mirror map, follow not stopped and no open bridge request (from A), and export not diverged (from B). It re-exports the last N first-parent changesets (default 100, at most 10,000): the commit is in the mirror, the fidelity check (same tree changes, same parents) passes, and rebuilding the commit from the mirror record gives the upstream sha. It records the verified tips.
@@ -947,7 +947,7 @@ Limits, which the sweep must handle before deleting anything:
 - Gates: `RulesetGate` puts the repository ruleset `graft-mirror-authority-<branch>` on GitHub (update, deletion and non-fast-forward rules). Frozen means no bypass; mirror-only means the mirror's App bypasses it (D8); open means the ruleset is deleted. `HookGate` is a `pre-receive` hook plus a state file on a local bare repository, the stand-in for the rehearsal and the tests. It admits mirror-only pushes that carry `GRAFT_MIRROR_PUSH=1`, which every mirror push now sets.
 - `export` re-reads the claim on every poll and stops writing a line it no longer holds (follow already did). `HttpForge` gains the ruleset calls and accepts empty (204) answers.
 - Tests: `tests/authority.rs` covers an A → B → A round trip that loses nothing and ends with graft's chain equal to GitHub's; the gate refusing people while frozen and graft-primary; every refusal; an aborted switch; and the ruleset gate against wiremock.
-- Rehearsal: `crates/graft-mirror/scripts/rehearse-authority-switch.sh` runs the real binaries over a scratch copy of rustTorrent and a local "GitHub". It is recorded in `docs/trials/2026-10-23-authority-switch-rehearsal.md`.
+- Rehearsal: `crates/graft-mirror/scripts/rehearse-authority-switch.sh` runs the real binaries over a scratch copy of rustTorrent and a local "GitHub". It is recorded in `docs/internal/trials/2026-10-23-authority-switch-rehearsal.md`.
 - Not in this change: graft-server has no API or config for a line's authority, so the tool cannot set graft's side. The operator does it, and the runbook says when. A rehearsal against a real scratch GitHub repository needs the operator.
 
 - graft-index: Blame's work estimate now counts only the regions the anchor lines actually split the file into (bounded by each side's longest run without an anchor), so anchors clustered at the top of a large repetitive block no longer keep a quadratic diff under budget; it attributes coarsely instead. The reviewer's probe (300 distinct lines over 80k repetitive lines, 6 versions) went from 10.7s to 0.04s in release.
@@ -987,7 +987,7 @@ WI-2234: faster image builds. `docker/Dockerfile` no longer caps `CARGO_BUILD_JO
 
 Diff read path: the engine decodes, verifies and diffs a diff's patches on up to 8 scoped threads. It works in windows of as much input as the remaining response budget could show, and applies the per-file cap and the budget in file order, so the response (errors included) is unchanged. graft-server opens its object store with `verify_reads(false)`: every reader verifies the frames it decodes, so the store no longer inflates and hashes each one first. graft-store-fs refuses a file larger than any valid frame whether or not reads are verified. `graft --json` output is buffered instead of written one line at a time. graft-pilot's diff scenario now runs `git diff` with patches, like for like. rustTorrent main~20..main, graft-pilot p50: diff 22.1 -> 12.9 ms (git 13.2 / 15.1 ms); blame cached 36.7 -> 21.6 ms.
 
-Quiet-host baseline: graft-pilot on rustTorrent, 3 x 20, on the idle graft-dev VM at 7e82d62. Full clone 332.6 ms, sparse 172.0 ms, log --path 4.71 ms, diff 13.1 ms (graft p50), all at or above the Node B figures. Recorded in docs/trials/2026-10-23-quiet-host-baseline.md.
+Quiet-host baseline: graft-pilot on rustTorrent, 3 x 20, on the idle graft-dev VM at 7e82d62. Full clone 332.6 ms, sparse 172.0 ms, log --path 4.71 ms, diff 13.1 ms (graft p50), all at or above the Node B figures. Recorded in docs/internal/trials/2026-10-23-quiet-host-baseline.md.
 
 - Test: the graft-client hostile entry-budget test no longer asserts a 10 s wall-clock bound; it keeps a 120 s hang guard.
 
@@ -1002,7 +1002,7 @@ graft-index: the git comparison tests now run git with every GIT_* variable drop
 
 - graft-mirror: the export crash test no longer depends on timing — in alternate iterations the child acknowledges nothing until its first push, so the kill delay counts from that push and every run proves progress.
 
-- docs: rustTorrent trial-1 write-up (`docs/trials/2026-10-rusttorrent-trial-1.md`): four direct lands, batch PR #214, what worked and what didn't, and the fixes since.
+- docs: rustTorrent trial-1 write-up (`docs/internal/trials/2026-10-rusttorrent-trial-1.md`): four direct lands, batch PR #214, what worked and what didn't, and the fixes since.
 
 # WI-2272: dedicated `attest` scope; Attest enforces the CI changeset pin
 
@@ -1067,7 +1067,7 @@ Docs for D22 that #82 and #85 did not cover: the reasons for D22 and a phase-2 n
 
 - graft-index, graft-engine: a plain `graft log` page reads each changeset once, not twice. `Index::log_changesets` returns the changesets the first-parent walk already decoded, and the engine builds the page from them: a 50-row page drops from ~100 changeset reads to 51, the same read shape as `log --path`. Bench at 1,000 changesets on a heavily loaded host (load 20-190): interleaved A/B p50 8.3 → 6.8 ms against `log --path` 6.8-7.6 ms; summary.md `log, 50` 6.2 → 6.3 ms (before/after runs at different load). The remaining ~4 ms against git's 2.3 ms is fixed per call: process start ~1.5 ms, gRPC connect, and the resolve and log RPCs. Each changeset read is still one serial store hop (~27 µs); one range read per page needs a `MetaStore` line scan by position (follow-up).
 
-- bench: 10,000-commit baseline on the graft-dev VM: pass, merge3 lands with no file-level refusals, `line create` flat at the tip, no history-growth suspects; results in `bench/results/2026-10-23-scale-10000/` and `docs/trials/2026-10-23-bench-10k-graft-dev.md`.
+- bench: 10,000-commit baseline on the graft-dev VM: pass, merge3 lands with no file-level refusals, `line create` flat at the tip, no history-growth suspects; results in `bench/results/2026-10-23-scale-10000/` and `docs/internal/trials/2026-10-23-bench-10k-graft-dev.md`.
 
 # WI-2305: bench correctness smoke in the merge queue
 
@@ -1080,7 +1080,7 @@ Docs for D22 that #82 and #85 did not cover: the reasons for D22 and a phase-2 n
   off-VM rsync), a restore rehearsal script ending in `admin fsck`, Prometheus
   alert rules and scrape config for server down, low disk and mirror lag
   (`deploy/monitoring/`), and the runbook
-  `docs/runbooks/graft-dev-backup-restore.md`.
+  `docs/internal/runbooks/graft-dev-backup-restore.md`.
 
 - graft-git import: queued blobs go to the server in `PutObjects` calls of 32,
   up to 8 in flight, instead of one call at a time. Bench at 1,000 commits:
@@ -1096,9 +1096,9 @@ Docs for D22 that #82 and #85 did not cover: the reasons for D22 and a phase-2 n
 
 - `docs/decisions.md`: D24, draft overlap visibility: the `repo:<r>:drafts` scope (granted only by `admin`), paths and principals but never contents, head ids or tokens, live leased workspaces only, index-order paging with a 4 × limit scan budget, no data migration.
 - `docs/design.md`: `OverlappingDrafts` in §7.2; `attest` and `drafts` scopes in §12.1.
-- `docs/notes/draft-overlap.md`: points at D24; duplicate migration sentence removed.
+- `docs/internal/notes/draft-overlap.md`: points at D24; duplicate migration sentence removed.
 
-- docs: design note for draft overlap (`repo:<r>:drafts` scope, per-workspace draft-path index, `OverlappingDrafts` query, CLI and MCP surfaces) in `docs/notes/draft-overlap.md`.
+- docs: design note for draft overlap (`repo:<r>:drafts` scope, per-workspace draft-path index, `OverlappingDrafts` query, CLI and MCP surfaces) in `docs/internal/notes/draft-overlap.md`.
 
 - Draft overlap, step a (interface): `repo:<r>:drafts` scope (granted only by
   itself and `admin`); `OverlappingDrafts` request/response types, wire
@@ -1167,7 +1167,7 @@ Docs for D22 that #82 and #85 did not cover: the reasons for D22 and a phase-2 n
   unresolved paths). `ApiError::unimplemented` helper; every implementer has a
   stub returning it. No wire or golden changes; the gRPC mapping is step 2b.
 
-- graft-server (tests only): a repro test, `tests/mcp_conflict.rs`, that drives `/mcp` as an agent with no working copy through a conflicted land and pins today's behaviour: the land and sync conflict, a resolution cannot be landed on the conflicting workspace, and the only route that works is to close the workspace and re-commit the merged content on the new tip. Plus a design note, `docs/notes/mcp-conflict-resolution.md`, with two options for resolving in place over MCP. No production code changes.
+- graft-server (tests only): a repro test, `tests/mcp_conflict.rs`, that drives `/mcp` as an agent with no working copy through a conflicted land and pins today's behaviour: the land and sync conflict, a resolution cannot be landed on the conflicting workspace, and the only route that works is to close the workspace and re-commit the merged content on the new tip. Plus a design note, `docs/internal/notes/mcp-conflict-resolution.md`, with two options for resolving in place over MCP. No production code changes.
 
 # WI-2313: many working copies per host
 
@@ -1176,7 +1176,7 @@ Docs for D22 that #82 and #85 did not cover: the reasons for D22 and a phase-2 n
 - Client: a working copy never lists or commits a top-level `.git` (directory or worktree pointer file), `.hg`, `.jj` or `.svn`. `clone` writes `.graft/.gitignore` (`*`), so a surrounding git checkout ignores graft's state.
 - Tests: `crates/graft-client/tests/worktrees.rs` covers two directories on one workspace, `workspace close`, a deleted clone whose drafts lapse at the lease and are then collectable, and a clone inside a git checkout.
 - Bench: `--many-copies 1,8,32` runs N graft clones against git worktrees. The scale-10 result is in `bench/results/2026-10-23-many-copies-10/`.
-- Docs: `docs/notes/many-working-copies.md` covers one clone per agent, teardown with `graft workspace close`, and coexistence with git.
+- Docs: `docs/internal/notes/many-working-copies.md` covers one clone per agent, teardown with `graft workspace close`, and coexistence with git.
 
 # WI-2314: quarantine the CI OOM flake in the `test` job
 
@@ -1185,12 +1185,12 @@ Docs for D22 that #82 and #85 did not cover: the reasons for D22 and a phase-2 n
   and no test failure), on pull_request and merge_group runs alike.
   `.github/scripts/oom-flake-signature.sh` does the matching; sample
   logs and `run.sh` are in `.github/scripts/tests/oom-flake-signature/`.
-  Other failures fail at once. Recorded in `docs/known-flakes.md`. The
+  Other failures fail at once. Recorded in `docs/internal/known-flakes.md`. The
   host-side fix (a memory limit on vogt-prod) is tracked under WI-2314.
 
 - graft-server: `/mcp` applies the gRPC owner-or-admin check (`own_workspace`) to every operation on a named workspace — get, renew, set head, sync, stack, close, commit, conflicts, resolve and revert — before the operation reads anything. Another principal's token could read a workspace (`graft_workspace get`) and land its stack (`graft_land`) over `/mcp`; both are now `permission_denied`. gRPC `CreateChangeset` into a named workspace runs the same check. The stdio `graft mcp` path goes through gRPC and was already covered.
 
-- Creating a line no longer copies the whole first-parent history into the line index. A new line records one fork point (`line_forks`, SQLite schema version 5) on the line holding its nearest landed ancestor, and indexes only the changesets it lands. Line position reads and path scans fall through to the parent line below the fork, one read per hop. Design note: `docs/notes/line-fork-point.md`.
+- Creating a line no longer copies the whole first-parent history into the line index. A new line records one fork point (`line_forks`, SQLite schema version 5) on the line holding its nearest landed ancestor, and indexes only the changesets it lands. Line position reads and path scans fall through to the parent line below the fork, one read per hop. Design note: `docs/internal/notes/line-fork-point.md`.
 
 - graft-engine: `ImportChangesets` derives the new trees of the whole batch first (each changeset on its first parent, stored or earlier in the batch) and writes them all concurrently, synced, before the first changeset commits, in runs of at most `import_prewrite_bytes` (default 64 MiB) of tree frames so memory stays bounded; a changeset's own objects are also put concurrently on every write path. Each changeset still commits in its own transaction with its journal entry, objects stay durable before metadata names them, and no encoding changes. `graft-mirror import` of the 1,000-commit bench history on Node B: 18.9 s before, 6.2 to 6.6 s after (import step alone, two runs each). The remaining time is mostly one serial metadata commit per changeset; collapsing those needs a graft-store-sqlite change (follow-up).
 
@@ -1215,13 +1215,13 @@ Docs for D22 that #82 and #85 did not cover: the reasons for D22 and a phase-2 n
 
 # WI-2336: graft fit assessment
 
-- `docs/notes/graft-fit-assessment.md`: four weeks of PRs and CI in
+- `docs/internal/notes/graft-fit-assessment.md`: four weeks of PRs and CI in
   rustTorrent, rustnzb, fluent2-egui, rdpapp, vogt (and its Rust port) and
   graft, set against phase 1 (D21, D22) and the rustTorrent trial (WI-2270,
   PR #214). Covers where graft would have helped or hindered, and ranks
   eleven fundamental gaps, each with evidence and a fix. Docs only.
 
-- bench: real-PR replay scenario (`python3 -m graftbench.realprs`). Replays the estate's overlapping PRs (rdpapp `main.rs` split and 11-PR stack, fluent2-egui registration lists, the rustTorrent qbit cluster, graft's own merge-back PRs) from their real fork points through `graft land` and git rebase, with `cargo check` as the clean-but-broken oracle. Results in `bench/results/2026-10-24-real-prs/`, trial note in `docs/trials/`.
+- bench: real-PR replay scenario (`python3 -m graftbench.realprs`). Replays the estate's overlapping PRs (rdpapp `main.rs` split and 11-PR stack, fluent2-egui registration lists, the rustTorrent qbit cluster, graft's own merge-back PRs) from their real fork points through `graft land` and git rebase, with `cargo check` as the clean-but-broken oracle. Results in `bench/results/2026-10-24-real-prs/`, trial note in `docs/internal/trials/`.
 
 # WI-2339: no line merge on lockfiles and generated files
 
@@ -1259,7 +1259,7 @@ mirrored. At most 64 tags reach the graft API per poll.
 
 # WI-2345: adversarial harness design note
 
-- `docs/notes/adversarial-harness.md`: the design for an adversarial test
+- `docs/internal/notes/adversarial-harness.md`: the design for an adversarial test
   harness in four parts: racing lands under injected faults,
   merge3 against git, hostile git repositories and
   hostile API clients. It covers a seeded adversary, a history
@@ -1285,7 +1285,7 @@ mirrored. At most 64 tags reach the graft API per poll.
 - docs: record what sync does after a lost land ack (note §3.3, design §8.4). The sync drops the landed draft and empties the stack, and a retry of the old head returns the first `Landed`. This is safe: no land is lost or duplicated.
 
 - graft-harness: a new leaf crate, the adversarial harness part 1
-  (docs/notes/adversarial-harness.md §3). Seeded clients race lands on one
+  (docs/internal/notes/adversarial-harness.md §3). Seeded clients race lands on one
   engine whose stores are wrapped to inject faults: delays, failed reads and
   commits, lost acks, crashes at a commit (the process restarts), lease
   expiry, GC sweeps mid-land and a full disk. A checker holds the history
@@ -1354,7 +1354,7 @@ graft-engine: a token's Vogt session and work item now bind a new changeset's `v
   and on a failed land. Advisory only: the server's land still decides, and
   no build or test runs (D22).
 
-graft-dev runs `3dbd296` (per-land batch commits, CLI identity, pre-land check), and `bench/graftbench/phase1.py` measures them: pre-land check latency, N lands → N commits with export time, and identity binding, with a fake GitHub on loopback so nothing reaches GitHub. Results in `bench/results/2026-10-24-phase1-8a`, note in `docs/trials/2026-10-24-phase1-8a-graft-dev.md`.
+graft-dev runs `3dbd296` (per-land batch commits, CLI identity, pre-land check), and `bench/graftbench/phase1.py` measures them: pre-land check latency, N lands → N commits with export time, and identity binding, with a fake GitHub on loopback so nothing reaches GitHub. Results in `bench/results/2026-10-24-phase1-8a`, note in `docs/internal/trials/2026-10-24-phase1-8a-graft-dev.md`.
 
 WI-2349: design for post-land checks on batch integration lines (D25, revising D22), one commit per land in batch PRs with no review state in graft (D26, revising D21), and a default pre-land conflict and draft-overlap check in `graft land` (D27). Adds design.md §8.7, §8.8 and §11.4. Docs only.
 
@@ -1362,7 +1362,7 @@ WI-2349: design for post-land checks on batch integration lines (D25, revising D
 
 - docs: D28 amends D21 and D26 — batch PRs get oversight's standard review and are merged by `land-pr` once GitHub's required checks pass; graft still never merges (design.md §11.5).
 
-- bench: `--batch` scenario and `graftbench.batchlive` for batch delivery (one commit per land, authorship, bisect and blame, drop and recut, latency); results and trial note in docs/trials/2026-10-24-batch-delivery.md.
+- bench: `--batch` scenario and `graftbench.batchlive` for batch delivery (one commit per land, authorship, bisect and blame, drop and recut, latency); results and trial note in docs/internal/trials/2026-10-24-batch-delivery.md.
 
 - Docs: D25 and design §8.7 re-labelled as the phase-2 design, starting
   with the graft-primary authority switch; D22's phase wording restored;
@@ -1392,7 +1392,7 @@ WI-2349: design for post-land checks on batch integration lines (D25, revising D
   squash merge queue and are rebase-merged by `land-pr` with `--admin`, keeping
   the per-land commits; ordinary PRs still squash through the queue.
 
-- bench: `python3 -m graftbench.branching` runs trunk-based, git flow and release-branch histories through graft and git at a fixed seed and compares trees, conflicts, round trips and merges between lines; results and the concept map in `docs/trials/2026-10-24-branching-strategies.md`.
+- bench: `python3 -m graftbench.branching` runs trunk-based, git flow and release-branch histories through graft and git at a fixed seed and compares trees, conflicts, round trips and merges between lines; results and the concept map in `docs/internal/trials/2026-10-24-branching-strategies.md`.
 
 WI-2363 (design): D29 records a merge point per (source, target) line pair. A merge lands as a one-parent changeset; the land's CAS transaction also writes a `line_merges` row and a `LineMerged` journal entry, and `MergeBase` reads merge points (bounded hops) before falling back to the ancestry walk. Design: `docs/design.md` §8.9 (`LineMerge`, `graft line merge <src> --into <dst>`, MCP `graft_merge`, `land --merged-from`). Docs only; no code.
 
@@ -1472,7 +1472,7 @@ WI-2366: decision D34. Exactly one canonical empty root changeset is valid: no p
 
 - docs: trial 3 note: 20 lands across rustTorrent, fluent2-egui and the vogt Rust port through graft, from 6 Codex sessions on Clawbay.
 
-WI-2434: design for D30. A land that arrives while its batch PR is open and not yet sealed (auto-merge, queued or merging) joins that PR as one more per-land commit, pushed as a fast-forward with a lease, so a review fix-forward no longer costs a close and recut. New `docs/decisions.md` D30, `docs/design.md` §11.6, and the WI-2415 implement item in `docs/plan.md`. Docs only.
+WI-2434: design for D30. A land that arrives while its batch PR is open and not yet sealed (auto-merge, queued or merging) joins that PR as one more per-land commit, pushed as a fast-forward with a lease, so a review fix-forward no longer costs a close and recut. New `docs/decisions.md` D30, `docs/design.md` §11.6, and the WI-2415 implement item in `docs/internal/plan.md`. Docs only.
 
 - `graft show` (and every CLI command taking a revision) resolves the short
   ids the CLI prints. A short id is matched against the working copy's ids,
@@ -1543,7 +1543,7 @@ The cache test reopens the store directly after `stop` and no longer retries
 The ~75s kill-9 e2e failed once on an unrelated merge-queue run (PR #196) and
 passed on retry. It is `#[ignore]`d, so the required nextest run skips it. A
 separate non-required `slow` job (`continue-on-error`) runs it on
-`merge_group` only. Follow-up: WI-2469. See `docs/known-flakes.md`.
+`merge_group` only. Follow-up: WI-2469. See `docs/internal/known-flakes.md`.
 
 Harden release publishing with tag/version and changelog preflight checks,
 Docker-capable Linux runners, fork-safe dry runs, one tag image build, and an
@@ -1619,7 +1619,7 @@ trial: agent guide, install-cli, mint-agent-tokens and import-trial-repo scripts
 # WI-2299: docs follow D22, with a delivered baseline
 
 - `docs/decisions.md`: D22 is recorded. Phase 1 is graft as a git alternative, lines default to `direct`, and CI checks are phase 2, switched off. D6 becomes the phase-2 opt-in for `main`. The D13 row notes the move to the graft-dev VM.
-- `docs/plan.md`: Draft 2. A phase table follows D22, with the phase 1 backlog (Vogt WI-2297). The G1 to G3 waves are kept as history and marked delivered, superseded or not planned.
+- `docs/internal/plan.md`: Draft 2. A phase table follows D22, with the phase 1 backlog (Vogt WI-2297). The G1 to G3 waves are kept as history and marked delivered, superseded or not planned.
 - `docs/status.md` (new): what is delivered on `main` with commit evidence, what is partial or stubbed, what is built but off, the bench numbers at 1,000 commits, and the backlog.
 - `README.md` and `docs/architecture.md`: the status line and a phase note.
 
