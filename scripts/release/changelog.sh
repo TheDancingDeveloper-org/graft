@@ -4,7 +4,8 @@
 # Usage: scripts/release/changelog.sh <version>
 #   version is the release tag without a leading v (for example 0.1.0).
 #
-# Fragments are concatenated under a dated heading, then deleted so the
+# Fragments are concatenated under a dated version heading, with no heading
+# of their own (write each fragment as one or more bullets), then deleted so the
 # release PR can commit CHANGELOG.md and the consumed fragments together.
 # changes/README.md is retained.
 set -eu
@@ -23,6 +24,11 @@ tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 
 {
+  # Keep the title and intro (everything before the first release heading)
+  # on top, then the new release, then the older releases.
+  if [ -f "$out" ]; then
+    awk '/^## /{exit} {print}' "$out"
+  fi
   printf '## %s — %s\n\n' "$version" "$date"
   found=0
   for fragment in "$changes"/*.md; do
@@ -30,7 +36,6 @@ trap 'rm -f "$tmp"' EXIT
     name=$(basename "$fragment")
     [ "$name" = README.md ] && continue
     found=1
-    printf '### %s\n\n' "${name%.md}"
     cat "$fragment"
     printf '\n'
   done
@@ -39,7 +44,7 @@ trap 'rm -f "$tmp"' EXIT
   fi
   if [ -f "$out" ]; then
     printf '\n'
-    cat "$out"
+    awk '/^## /{p=1} p' "$out"
   fi
 } > "$tmp"
 
