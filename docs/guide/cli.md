@@ -929,7 +929,7 @@ Bind, change, credential, remove, purge or show a repository's git mirrors
 Usage: graft repo mirror [OPTIONS] <COMMAND>
 
 Commands:
-  add            Bind a repository to an upstream; needs mirror:bind (an oversight session or the operator), and mirror:export for export lines
+  add            Bind a repository to an upstream; needs mirror:bind (the server operator or an oversight-kind token), and mirror:export for export lines
   set            Enable, disable or change a mirror; needs the repository's admin (mirror:export to change export lines)
   credential     Seal a credential into a mirror; needs mirror:bind and read access. Read from a file or standard input, never an argument
   remove         Remove a mirror; its lines stay closed to lands unless --clear-followed. Needs mirror:bind
@@ -951,7 +951,7 @@ Options:
 ## `graft repo mirror add`
 
 ```text
-Bind a repository to an upstream; needs mirror:bind (an oversight session or the operator), and mirror:export for export lines
+Bind a repository to an upstream; needs mirror:bind (the server operator or an oversight-kind token), and mirror:export for export lines
 
 Usage: graft repo mirror add [OPTIONS] <REPO> <UPSTREAM>
 
@@ -1122,9 +1122,9 @@ Cut, show or list the batch PRs of a line
 Usage: graft repo batch [OPTIONS] <COMMAND>
 
 Commands:
-  cut     Request a batch PR of a line's lands; needs the repository's admin or mirror:export (an oversight session). A retry with the same --request-id returns the same request
+  cut     Request a batch PR of a line's lands; needs the repository's admin or mirror:export (an oversight-kind token). A retry with the same --request-id returns the same request
   status  Show a line's open batch
-  cancel  Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (an oversight session or the operator)
+  cancel  Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (the server operator or an oversight-kind token)
   list    List a repository's batches
   help    Print this message or the help of the given subcommand(s)
 
@@ -1141,7 +1141,7 @@ Options:
 ## `graft repo batch cut`
 
 ```text
-Request a batch PR of a line's lands; needs the repository's admin or mirror:export (an oversight session). A retry with the same --request-id returns the same request
+Request a batch PR of a line's lands; needs the repository's admin or mirror:export (an oversight-kind token). A retry with the same --request-id returns the same request
 
 Usage: graft repo batch cut [OPTIONS] <REPO>
 
@@ -1186,7 +1186,7 @@ Options:
 ## `graft repo batch cancel`
 
 ```text
-Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (an oversight session or the operator)
+Cancel a stuck batch or other mirror request and free its line; needs mirror:bind (the server operator or an oversight-kind token)
 
 Usage: graft repo batch cancel [OPTIONS] <REPO> <ID>
 

@@ -239,7 +239,7 @@ authentication.
 
 ## Upgrade and schema versions
 
-The current SQLite schema version is **7**, stored in SQLite's `user_version`.
+The current SQLite schema version is **14**, stored in SQLite's `user_version`.
 Opening the metadata database applies each missing migration in order, one
 migration per transaction, before the server begins serving. Existing data is
 preserved across supported forward upgrades. Released migrations are append-only
