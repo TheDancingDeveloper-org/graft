@@ -109,6 +109,13 @@ database, the follower re-imports the upstream history, which is deterministic,
 and adopts the line when that reproduces its tip. A tip it does not reproduce
 stops the line as `graft-moved`.
 
+A stopped line is recorded in the mirror database, and while upstream stays
+where it is the follower holds the stop quietly instead of fetching on every
+poll. The follower still re-evaluates a stored stop once each time it starts:
+a stop whose cause has been fixed, for example by a new release or a rebuilt
+database, clears itself and the line resumes, and one that still holds is
+reported again and then held as before.
+
 ## Deliver lands as batch pull requests
 
 Land work on the graft `integration` line. To publish its pending lands, sync

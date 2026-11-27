@@ -1,0 +1,1 @@
+- graft-mirror: a followed line stopped by an earlier follower (for example `graft-moved`) is re-evaluated once each time the follower starts, instead of being held quietly for as long as upstream does not move. A stop whose cause has been fixed by a release or a rebuilt database now clears itself without a purge; a stop that still holds is reported again, then held as before.

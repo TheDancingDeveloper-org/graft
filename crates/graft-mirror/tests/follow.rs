@@ -775,3 +775,101 @@ async fn an_imported_line_is_marked_on_the_first_poll() {
         db.changeset_of(b).unwrap()
     );
 }
+
+/// What an older follower left in the service's database for a line it
+/// stopped as `graft-moved`: the line is stopped at the upstream head.
+fn stored_stop(path: &Path, head: GitSha) -> MirrorDb {
+    let db = MirrorDb::open(path).unwrap();
+    db.set_line(
+        "main",
+        &graft_mirror::db::LineState {
+            upstream: None,
+            behind_since_ms: None,
+            diverged: Some(head),
+        },
+    )
+    .unwrap();
+    db
+}
+
+/// A stop stored by an older follower is not final: a new follower
+/// re-evaluates it once, before it holds the line quietly. Here the line's
+/// tip was made by an earlier import with another database, so the stored
+/// `graft-moved` was a false stop, and the upstream history reproduces the
+/// tip. Before the fix the held check returned first, so the line stayed
+/// stopped for as long as upstream did not move, whatever was deployed.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stored_stop_is_re_evaluated_once_by_a_new_follower_and_resumes() {
+    let w = World::new().await;
+    w.commit();
+    let b = w.commit();
+    w.push();
+    {
+        // The earlier import: its own database.
+        let db = w.open_db();
+        let m = metrics();
+        let mut f = w.follower(&db, &m);
+        assert!(matches!(poll(&mut f).await, LineOutcome::Imported { .. }));
+    }
+    let tip = w.tip().await;
+
+    let db = stored_stop(&w._tmp.path().join("service.sqlite"), b);
+    let m = metrics();
+    let mut f = w.follower(&db, &m);
+    assert_eq!(poll(&mut f).await, LineOutcome::UpToDate);
+    assert_eq!(w.tip().await, tip, "graft's line did not move");
+    assert_eq!(
+        db.line("main").unwrap().diverged,
+        None,
+        "the stop is cleared"
+    );
+    assert_eq!(divergence(&m), 0);
+}
+
+/// The re-evaluation is a verdict, not a way out: when the line's tip is not
+/// upstream history the stored stop stands, says so again (once per
+/// follower), and is then held quietly as before.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stored_stop_stands_when_the_line_tip_is_not_upstream_history() {
+    let w = World::new().await;
+    let a = w.commit();
+    w.commit();
+    w.push();
+    {
+        let db = w.open_db();
+        let m = metrics();
+        let mut f = w.follower(&db, &m);
+        assert!(matches!(poll(&mut f).await, LineOutcome::Imported { .. }));
+    }
+    let tip = w.tip().await;
+
+    // Upstream drops the second commit: graft's tip is no longer upstream
+    // history.
+    git(&w.work, &["reset", "-q", "--hard", &a.to_hex()]);
+    let stray = w.commit();
+    w.force_push();
+
+    let db = stored_stop(&w._tmp.path().join("service.sqlite"), stray);
+    let m = metrics();
+    let mut f = w.follower(&db, &m);
+    assert_eq!(
+        poll(&mut f).await,
+        LineOutcome::Diverged {
+            reason: Divergence::GraftMoved,
+            upstream: stray,
+        }
+    );
+    assert_eq!(w.tip().await, tip, "graft's line did not move");
+    assert_eq!(divergence(&m), 1);
+
+    // Decided once: the next polls hold the stop quietly.
+    advance(30_000);
+    assert_eq!(
+        poll(&mut f).await,
+        LineOutcome::Diverged {
+            reason: Divergence::Held,
+            upstream: stray,
+        }
+    );
+    assert_eq!(w.tip().await, tip);
+}
