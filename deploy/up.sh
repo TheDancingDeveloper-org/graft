@@ -39,7 +39,7 @@
 # github-checker-token (a token of its own): placed from
 # Infisical when this host has the `secret` tool, else the copy already on
 # the host. With neither, the checker stays off and the deploy continues.
-# docs/runbooks/v02-exit.md.
+# docs/internal/runbooks/v02-exit.md.
 #
 # Needs: docker with compose v2, curl, and membership of the docker group.
 # Non-secret host settings (GRAFT_BIND_IP, ports) may go in
@@ -208,7 +208,7 @@ install_kek
 if [ "$post_land" = 1 ]; then
   install_checker_github_token
   if [ "$checker_github_ready" != 1 ]; then
-    log "warning: GRAFT_POST_LAND=1 but the checker's GitHub token is absent (Infisical ${GRAFT_CHECKER_GITHUB_PROJECT:-apps}/${GRAFT_CHECKER_GITHUB_SECRET:-GRAFT_DEV_CHECKER_GITHUB_TOKEN}, or $secrets/github-checker-token): the post-land checker stays disabled; see docs/runbooks/v02-exit.md"
+    log "warning: GRAFT_POST_LAND=1 but the checker's GitHub token is absent (Infisical ${GRAFT_CHECKER_GITHUB_PROJECT:-apps}/${GRAFT_CHECKER_GITHUB_SECRET:-GRAFT_DEV_CHECKER_GITHUB_TOKEN}, or $secrets/github-checker-token): the post-land checker stays disabled; see docs/internal/runbooks/v02-exit.md"
     post_land=0
     keep=()
     for p in "${profiles[@]}"; do [ "$p" = post-land ] || keep+=("$p"); done

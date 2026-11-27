@@ -20,7 +20,7 @@ step() {
     echo "seed: $name failed:" >&2
     echo "$out" >&2
     if grep -q "not implemented yet" <<<"$out"; then
-      echo "seed: graft binaries are still stubs (docs/plan.md); nothing was created" >&2
+      echo "seed: graft binaries are still stubs (docs/internal/plan.md); nothing was created" >&2
     fi
     exit 2
   fi

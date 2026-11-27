@@ -117,7 +117,7 @@ synthetic, and the work item is real.
 | Blockers pinned on one land | yes | the bad land is its own commit (`7ad3aee`), and the drop named it by changeset |
 | Blast radius of one bad land | — | it held 4 good lands, in the same open PR, until the drop. Drop and recut: 8.0 s on GitHub (0.2 to 0.4 s in the bench) |
 | Land to PR open | — | 12.5 s (batch 1); recut 66 s after the last land, almost all of it the operator's 58 s before running the drop |
-| Land to GitHub `main` | below the per-PR baseline | pending #143's review and `land-pr`. Baseline (docs/notes/graft-fit-assessment.md §3): median merge 0.2 h for graft and 3.0 h for rdpapp; rustTorrent batch #214 took 17.3 h |
+| Land to GitHub `main` | below the per-PR baseline | pending #143's review and `land-pr`. Baseline (docs/internal/notes/graft-fit-assessment.md §3): median merge 0.2 h for graft and 3.0 h for rdpapp; rustTorrent batch #214 took 17.3 h |
 
 ## Gaps and follow-ups
 

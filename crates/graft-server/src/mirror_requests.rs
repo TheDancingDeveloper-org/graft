@@ -1,4 +1,4 @@
-//! Mirror requests (D41, `docs/notes/mirror-service.md` §3.5): batch cuts,
+//! Mirror requests (D41, `docs/internal/notes/mirror-service.md` §3.5): batch cuts,
 //! followed-line rewinds and data purges, recorded by the server and
 //! executed by the mirror service.
 //!

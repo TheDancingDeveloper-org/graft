@@ -26,12 +26,12 @@ None of them *chooses* the worst moment:
 - an acknowledgement lost after a commit that succeeded.
 
 Those are the cases a source-control server gets wrong. The fit assessment
-(docs/notes/graft-fit-assessment.md, gap 4) found the claims untested on
+(docs/internal/notes/graft-fit-assessment.md, gap 4) found the claims untested on
 hostile or realistic concurrency.
 
 The harness tests phase-1 properties: storage, history, merge and land
 correctness. It is a test tool, never a gate in the land path
-([D22](../decisions.md#d22-phase-1-is-a-git-alternative)).
+([D22](../../decisions.md#d22-phase-1-is-a-git-alternative)).
 
 ## 2. Shape
 

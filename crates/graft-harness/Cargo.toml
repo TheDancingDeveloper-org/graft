@@ -21,7 +21,7 @@ graft-testkit.workspace = true
 serde_json.workspace = true
 
 # The planted-bugs hooks are enabled here only, never in a normal build
-# (docs/notes/adversarial-harness.md §3.4).
+# (docs/internal/notes/adversarial-harness.md §3.4).
 [dev-dependencies]
 graft-engine = { workspace = true, features = ["planted-bugs"] }
 graft-gc = { workspace = true, features = ["planted-bugs"] }

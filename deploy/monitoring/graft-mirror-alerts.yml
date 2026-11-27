@@ -1,5 +1,5 @@
 # Prometheus alert rules for the graft-mirror service (D41, WI-3211,
-# docs/notes/mirror-service.md §3.3). One service serves every repository on
+# docs/internal/notes/mirror-service.md §3.3). One service serves every repository on
 # one /metrics endpoint, so these rules select one job and carry the `repo`
 # label instead of one rule set per mirror process. Scrape config:
 # deploy/monitoring/prometheus-scrape.yml (job graft-mirror).

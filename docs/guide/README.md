@@ -1,4 +1,4 @@
-# User guide
+# graft user guide
 
 - [CLI](cli.md): every visible command, generated from `graft --help`.
 - [Concepts](concepts.md): glossary and the git-to-graft table.
@@ -15,13 +15,13 @@
 
 The same list is in the repository [README](../../README.md#documentation).
 
-## How it is built
+## Project documents
 
-Engineering record, not part of the user guide:
+Reference material for maintainers and contributors, not part of the user
+guide:
 
+- [Architecture](../architecture.md)
 - [Design](../design.md)
-- [Plan](../plan.md)
 - [Decisions](../decisions.md)
-- [Status](../status.md)
-- [Trials](../trials)
-- [Notes](../notes)
+- [Status](../status.md) and [roadmap](../roadmap.md)
+- [Engineering record](../internal/README.md): plans, design notes, trials and runbooks

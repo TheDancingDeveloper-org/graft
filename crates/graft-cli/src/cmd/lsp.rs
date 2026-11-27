@@ -1,4 +1,4 @@
-//! `graft lsp`: owned by work item G3.6 (see docs/plan.md, wave 3.B note).
+//! `graft lsp`: owned by work item G3.6 (see docs/internal/plan.md, wave 3.B note).
 //!
 //! Runs the LSP server (`graft-lsp`) over standard input and output, for the
 //! working copy around the current directory. Standard output carries the

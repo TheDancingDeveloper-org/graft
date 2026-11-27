@@ -1,7 +1,7 @@
 """Real overlapping PRs from the estate, replayed through graft and git (WI-2338).
 
 The bench's other scenarios use a generated project. This one takes real PR
-diffs from the repositories in docs/notes/graft-fit-assessment.md (gap 4) and
+diffs from the repositories in docs/internal/notes/graft-fit-assessment.md (gap 4) and
 lands each from the fork point it actually had, once with `graft land` and
 once with git (`git merge-tree` to classify, `git rebase` and `git push` to
 land). It reports, per case and per tool: clean lands, conflicts,

@@ -1,5 +1,5 @@
 //! Part 3 of the adversarial harness (WI-2347,
-//! docs/notes/adversarial-harness.md §2): hostile git repositories through
+//! docs/internal/notes/adversarial-harness.md §2): hostile git repositories through
 //! `graft-mirror import` and `graft-git` export.
 //!
 //! Each case is a generator: a function that builds the repository with the

@@ -1,5 +1,5 @@
 //! Test-only planted bugs for the adversarial harness
-//! (docs/notes/adversarial-harness.md §3.4).
+//! (docs/internal/notes/adversarial-harness.md §3.4).
 //!
 //! Compiled only with the `planted-bugs` feature, which nothing but
 //! `graft-harness`'s dev-dependencies enables. Even then each bug is off

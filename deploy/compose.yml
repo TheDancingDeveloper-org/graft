@@ -14,7 +14,7 @@
 #   graft-post-land  (profile `post-land`, off by default) the post-land
 #                 checker of graft's line exit-rehearsal: dispatches GitHub
 #                 runs per land, posts failures and lands reverts (v0.2
-#                 exit, docs/runbooks/v02-exit.md); target `checker` of
+#                 exit, docs/internal/runbooks/v02-exit.md); target `checker` of
 #                 deploy/attester/Dockerfile
 #
 # Image: GRAFT_IMAGE from deploy/image.env, pinned by digest. Run compose with
@@ -214,7 +214,7 @@ services:
       # cargo registry, target dir and HOME, shared by every draft's checks
       - graft-dev-attester-cache:/var/cache/graft-attester
 
-  # The post-land checker for the v0.2 exit (docs/runbooks/v02-exit.md). Off
+  # The post-land checker for the v0.2 exit (docs/internal/runbooks/v02-exit.md). Off
   # unless the `post-land` profile is on (GRAFT_POST_LAND=1 for up.sh). It
   # follows the lands on GRAFT_POST_LAND_LINE of `graft`, dispatches
   # graft-post-land.yml on each land's check ref (pushed by

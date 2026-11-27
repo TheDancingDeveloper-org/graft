@@ -7,7 +7,7 @@ plan in `bench/realprs/cases.json`.
 
 ## Question
 
-The fit assessment (docs/notes/graft-fit-assessment.md, gap 4) says graft's
+The fit assessment (docs/internal/notes/graft-fit-assessment.md, gap 4) says graft's
 core claim, that line merge and server-side rebase remove the estate's churn,
 has only synthetic evidence. Does it hold on the PRs that actually conflicted?
 

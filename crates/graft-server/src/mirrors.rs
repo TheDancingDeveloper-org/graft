@@ -1,4 +1,4 @@
-//! Mirror settings (D41, `docs/notes/mirror-service.md` §3.2): the
+//! Mirror settings (D41, `docs/internal/notes/mirror-service.md` §3.2): the
 //! `repo_mirrors` rows behind `MirrorService.SetMirror`, `GetMirror`,
 //! `ListMirrors`, `RemoveMirror`, `PurgeMirror` and `SetMirrorStatus`.
 //!

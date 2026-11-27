@@ -3,7 +3,7 @@
 - **Status:** Draft 1 (2026-10-22)
 - **Working name:** graft (the operator may rename it; see
   [decisions.md](decisions.md#d1-name))
-- **Companions:** [plan.md](plan.md) (phased build), [decisions.md](decisions.md)
+- **Companions:** [plan.md](internal/plan.md) (phased build), [decisions.md](decisions.md)
   (open questions for the operator)
 
 graft is a server-centric source control system for a workload made mostly of
@@ -76,7 +76,7 @@ raw transfer size. It wins on these:
 3. API answers with no checkout;
 4. an agent-native interface.
 
-Phase 1 has explicit **kill criteria** ([plan.md](plan.md#phase-1-exit-and-kill-criteria)).
+Phase 1 has explicit **kill criteria** ([plan.md](internal/plan.md#phase-1-exit-and-kill-criteria)).
 If the pilot does not beat git on the paths agents use, we stop.
 
 ## 2. Goals and non-goals
@@ -535,7 +535,7 @@ command and an MCP tool, or an explicit, documented exclusion.
 ### 5.3 Crate map
 
 The crate boundaries are drawn so that three workers can build in parallel
-without touching the same files ([plan.md](plan.md#crate-ownership-and-parallelism)).
+without touching the same files ([plan.md](internal/plan.md#crate-ownership-and-parallelism)).
 
 | Crate | Kind | Owns | Depends on |
 | --- | --- | --- | --- |
@@ -1929,7 +1929,7 @@ append:         B ── c1 ── … ── ck ── c(k+1) ── … ──
 ### 11.7 Mirror settings and the mirror service
 
 [D41](decisions.md#d41-mirrors-as-repository-settings-one-mirror-service);
-the full design is [notes/mirror-service.md](notes/mirror-service.md).
+the full design is [notes/mirror-service.md](internal/notes/mirror-service.md).
 
 - **Settings.** A meta table `repo_mirrors` holds one row per
   `(repo, upstream)`: the followed and exported lines, interval, enabled

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: oom-flake-signature.sh LOG
 # Exit 0 when a failed nextest build log matches the known OOM flake
-# (WI-2314); any other log exits 1. See docs/known-flakes.md. Forms:
+# (WI-2314); any other log exits 1. See docs/internal/known-flakes.md. Forms:
 #  (a) rustc killed under sccache: "could not compile" with no diagnostic;
 #  (b) cargo itself killed: the only error is the final
 #      "cargo ... --no-run ... exited" line (with code 101, or no code

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.12
 # One image for the graft binary. Legacy role names are symlinks for the dev
-# stack and one compatibility release; see docs/dev-stack.md.
+# stack and one compatibility release; see docs/internal/dev-stack.md.
 #
 # Stages: builder (rust, sccache) -> runtime (debian trixie-slim, git and
 # ca-certificates, non-root user).

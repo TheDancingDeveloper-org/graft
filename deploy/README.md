@@ -25,7 +25,7 @@ by-hand use only.
 
 Backups are a systemd timer, installed once with
 `sudo deploy/backup/install.sh`; alerts live in the estate Prometheus. See
-[docs/runbooks/graft-dev-backup-restore.md](../docs/runbooks/graft-dev-backup-restore.md).
+[docs/internal/runbooks/graft-dev-backup-restore.md](../docs/internal/runbooks/graft-dev-backup-restore.md).
 
 ## Ports
 
@@ -313,7 +313,7 @@ the second. The token
 needs `read`, `attest` and a named-repository `land` on the line, and no
 `write`: `Revert` with `land` needs only `read` and that scope (D42). The procedure,
 the measurements, rotation and the switch to `backlog-1` are in
-[docs/runbooks/v02-exit.md](../docs/runbooks/v02-exit.md).
+[docs/internal/runbooks/v02-exit.md](../docs/internal/runbooks/v02-exit.md).
 
 ## Deploy safety: pre-flight and rollback (WI-2291)
 

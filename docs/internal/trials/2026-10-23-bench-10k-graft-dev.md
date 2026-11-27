@@ -3,7 +3,7 @@
 WI-2304. `python3 -m graftbench --scales 10000 --keep`, release build of
 `main` at `2c32be2` built on the VM, a fresh local `graft-server` with its own
 data dir (the deployed graft-dev server was not touched). Raw results:
-[bench/results/2026-10-23-scale-10000](../../bench/results/2026-10-23-scale-10000/).
+[bench/results/2026-10-23-scale-10000](../../../bench/results/2026-10-23-scale-10000/).
 
 Host: graft-dev (Proxmox VM, AMD Ryzen 7 7735HS, 4 vCPU, 7.8 GiB). The 10 and
 1,000 run ([core-bench-10-1000](2026-10-23-core-bench-10-1000.md)) ran on

@@ -179,7 +179,7 @@ CREATE INDEX doomed_since ON doomed (repo, since, object);
 
 /// Version 5 (WI-2316): line fork points. A line created on existing
 /// history stores its parent line and fork position here instead of
-/// copying the parent's index rows (`docs/notes/line-fork-point.md`), and
+/// copying the parent's index rows (`docs/internal/notes/line-fork-point.md`), and
 /// `line_pos` gets an index by changeset to find the line to fork from.
 const V5: &str = "
 CREATE TABLE line_forks (
@@ -192,7 +192,7 @@ CREATE TABLE line_forks (
 CREATE INDEX line_pos_changeset ON line_pos (repo, changeset, line);
 ";
 
-/// Version 6 (WI-2310): the draft path index (`docs/notes/draft-overlap.md`
+/// Version 6 (WI-2310): the draft path index (`docs/internal/notes/draft-overlap.md`
 /// §3, D24). One row per path a live workspace's stack changes, keyed for
 /// the overlap range scan, with a reverse index by workspace for removal.
 /// Workspaces get the work item (set by the caller's orchestrator, if any) from the opening token. No back-fill:

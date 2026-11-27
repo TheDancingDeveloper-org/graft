@@ -20,7 +20,7 @@ dbg_macro = "warn"
 todo = "allow"
 
 # One dependency per line, sorted, so parallel PRs don't conflict
-# (docs/plan.md, "Crate ownership and parallelism"). External dependencies are
+# (docs/internal/plan.md, "Crate ownership and parallelism"). External dependencies are
 # added by the work item that first needs them.
 [workspace.dependencies]
 assert_cmd = "2.2"

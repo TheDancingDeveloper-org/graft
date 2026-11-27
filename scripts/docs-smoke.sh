@@ -118,7 +118,8 @@ serve_log=$work/serve.log
 # shellcheck disable=SC2094
 GRAFT_CONFIG=$server_home/config.toml \
   XDG_CONFIG_HOME=$server_home \
-  graft serve --dev >"$serve_log" 2>&1 &
+  graft serve --dev --data "$work/serve-data" --state "$work/serve-state" \
+  >"$serve_log" 2>&1 &
 server_pid=$!
 
 # Wait for the clone command or an exit, not a fixed time: a cold server

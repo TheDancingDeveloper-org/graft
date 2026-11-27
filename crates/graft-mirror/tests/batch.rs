@@ -3659,7 +3659,7 @@ mod request_cut {
             .prepare_batch(&cut(7))
             .await
             .expect("the batch is cut");
-        // The branch is the request's own name (docs/notes/mirror-service.md §3.5).
+        // The branch is the request's own name (docs/internal/notes/mirror-service.md §3.5).
         assert_eq!(
             (new.head.as_str(), new.base.as_str()),
             ("graft/batch-7", "main")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop and remove the graft dev stack (docs/dev-stack.md).
+# Stop and remove the graft dev stack (docs/internal/dev-stack.md).
 #
 # usage: scripts/dev/down.sh [--wipe]
 #   default  remove containers and networks; keep the named volumes

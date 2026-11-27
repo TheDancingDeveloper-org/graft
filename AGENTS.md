@@ -2,7 +2,7 @@
 
 This repository is a new source control system, written in Rust. Read
 [docs/design.md](docs/design.md) before changing behaviour, and
-[docs/plan.md](docs/plan.md) to find your work item. Workspace-wide rules
+[docs/internal/plan.md](docs/internal/plan.md) to find your work item. Workspace-wide rules
 (the delivery process, safe handling, Vogt and Cadastre) still apply.
 
 ## Before you edit

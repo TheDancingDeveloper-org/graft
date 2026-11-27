@@ -1,5 +1,5 @@
 //! The pilot harness (work item G1.16, `docs/design.md` §15, the phase 1
-//! exit criteria in `docs/plan.md`).
+//! exit criteria in `docs/internal/plan.md`).
 //!
 //! [`run_pilot`] takes a git repository (a path or URL, or the synthetic
 //! [`fixture`]) and, against the real `graft-server`, `graft-mirror` and
@@ -1084,7 +1084,7 @@ fn scenarios(
     Ok(())
 }
 
-/// The phase 1 exit criterion 5 budgets (`docs/plan.md`), p50 in ms.
+/// The phase 1 exit criterion 5 budgets (`docs/internal/plan.md`), p50 in ms.
 pub const EXIT_BUDGETS: &[(&str, f64)] = &[
     ("sparse clone", 50.0),
     ("log --path", 10.0),

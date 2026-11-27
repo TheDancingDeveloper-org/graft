@@ -1,7 +1,7 @@
 # Conflict resolution for MCP-only agents
 
 Status: note for WI-2312 (step 1: repro and options). This note doesn't
-change [design.md](../design.md) or [decisions.md](../decisions.md). The
+change [design.md](../../design.md) or [decisions.md](../../decisions.md). The
 recommendation below needs an operator decision and its own design PR.
 
 ## Question
